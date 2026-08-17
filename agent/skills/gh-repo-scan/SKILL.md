@@ -51,9 +51,11 @@ Check first with `which`; if missing and *needed for this stack*, install to `$W
 
 | Tool | Install (official) | Use for |
 |---|---|---|
-| trivy | `curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \| sh -s -- -b "$WORK/bin"` | dependency CVEs, config, licenses |
-| gitleaks | `curl -sSfL https://raw.githubusercontent.com/gitleaks/gitleaks/v8.18.4/install.sh \| sh -s -- -b "$WORK/bin"` | secrets incl. git history |
-| semgrep | `curl -sSf https://semgrep.dev/install \| FILE_INSTALL_TOKEN= sh` (or `pipx install semgrep` / `pip install semgrep` in an isolated venv) | dangerous patterns, framework rules |
+| trivy | `curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/v0.74.0/contrib/install.sh \| sh -s -- -b "$WORK/bin"` | dependency CVEs, config, licenses |
+| gitleaks | `curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \| tar -xz -C "$WORK/bin"` | secrets incl. git history |
+| semgrep | `pipx install semgrep` (preferred) or `curl -sSf https://semgrep.dev/install \| FILE_INSTALL_TOKEN= sh` | dangerous patterns, framework rules |
+
+Prefer package-managed installs (`pipx`, distro packages) over `curl | sh` whenever available; never install from unpinned (e.g. `main` branch) URLs.
 
 Run (bounded, no network except scanner rule downloads):
 
