@@ -1,0 +1,10 @@
+# pi agent state — never in git
+agent/sessions/
+agent/auth.json
+agent/models-store.json
+agent/bin/
+agent/dictation/recording.wav
+agent/dictation/venv/
+
+# IDE
+.idea/
