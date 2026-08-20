@@ -1,0 +1,27 @@
+# secret-guard global ignores — secrets must never reach git
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.key
+id_rsa
+id_ed25519
+id_dsa
+id_ecdsa
+.netrc
+.pypirc
+.npmrc
+.git-credentials
+credentials.json
+credentials.yaml
+credentials.yml
+secrets.json
+secrets.yaml
+secrets.yml
+kubeconfig
+vault.yml
+application_default_credentials.json

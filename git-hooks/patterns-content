@@ -1,0 +1,11 @@
+PEM private key	-----BEGIN [A-Z ]*PRIVATE KEY-----
+AWS access key	AKIA[0-9A-Z]{16}
+API key	sk-[A-Za-z0-9_-]{20,}
+GitHub token	ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}
+Slack token	xox[baprs]-[A-Za-z0-9-]{10,}
+Google API key	AIza[0-9A-Za-z_-]{35}
+Stripe key	(sk|rk)_live_[0-9a-zA-Z]{20,}
+JWT	eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}
+Database URI with credentials	(mongodb(\+srv)?|postgres(ql)?|mysql|redis)://[^[:space:]/@:]+:[^[:space:]/@]+@
+Hardcoded secret (quoted)	(password|passwd|secret|api[_-]?key|api[_-]?secret|access[_-]?token|secret[_-]?key|client[_-]?secret|auth[_-]?token|aws[_-]?(access[_-]?key|secret[_-]?access[_-]?key)|db[_-]?password)[=:]["'"'][^"'"']{6,}["'"']
+Hardcoded secret (unquoted)	(password|secret|api[_-]?key|access[_-]?token|secret[_-]?key|client[_-]?secret|auth[_-]?token|aws[_-]?(access[_-]?key|secret[_-]?access[_-]?key)|db[_-]?password)[=:][A-Za-z0-9_./+-]{16,}

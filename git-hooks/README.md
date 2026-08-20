@@ -1,0 +1,48 @@
+# Secret Guard — global git hooks
+
+Mechanical protection so secrets never end up in git, in any repo you commit to.
+
+## What it does
+
+- `pre-commit`: scans **staged** files (names and content) for secrets and blocks the commit (max 10 findings reported, as `pattern name` + `file:line` — never the value).
+- `commit-msg`: scans commit messages for secret values.
+- `pre-push`: scans every **pushed commit** (file contents, filenames, commit messages) — the last gate before secrets leave your machine. Catches `--no-verify`/`-f` commits, merges, cherry-picks.
+- `pre-push` also **chains to the repo's own hook**, which runs the `git-vuln-scan` agent vulnerability scan (GitHub pushes) from the git template.
+- Every other hook name is a thin wrapper that **chains to your repo's own `.git/hooks/<name>`**, so existing hooks (husky, pre-commit framework, …) keep working.
+- `~/.pi/gitignore_global` (via `core.excludesFile`) keeps `.env`, `*.pem`, `*.key`, credentials, etc. from being staged with `git add .`.
+
+## One-command installer (new PC, or if you forgot the hooks)
+
+```bash
+# clone your ~/.pi repo to the new machine, then:
+<clone>/install.sh
+```
+
+Installs everything: agent skills/extensions/settings, global hooks, global gitignore, `git-vuln-scan`, and the git templates. Idempotent — re-run any time.
+
+## Install / undo
+
+```bash
+~/.pi/git-hooks/install-hooks.sh     # generate wrappers + set core.hooksPath
+```
+
+```bash
+# undo:
+git config --global --unset core.hooksPath
+git config --global --unset core.excludesFile
+git config --global --unset init.templateDir
+rm -rf ~/.pi/git-hooks ~/.pi/gitignore_global ~/.git-templates ~/.local/bin/git-vuln-scan
+```
+
+## Overrides (use sparingly — you are the last line of defense)
+
+- `SKIP_SECRET_SCAN=1 git commit ...` — skip the scan for one commit
+- `git commit --no-verify` — skip all hooks
+- `git add -f .env` — force-stage a file that is gitignored (the pre-commit hook still blocks it)
+
+## Notes
+
+- Repos that set their own `core.hooksPath` (e.g. husky) bypass the global wrappers.
+- `git-vuln-scan` runs on GitHub pushes only (agent-based CVE/vuln review); secret scans run on every push.
+- If a secret was ever committed and pushed, **rotation is required** — history is permanent.
+- The pre-commit hook scans only staged content. Secrets in untracked files are covered by the global gitignore.

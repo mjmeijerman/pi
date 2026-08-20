@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# git-vuln-scan — pre-push vulnerability scan using the pi agent.
+# Usage (as a pre-push hook):  git-vuln-scan <remote-url>
+# Env: SKIP_VULN_SCAN=1 to bypass, SCAN_TIMEOUT (default 600s).
+set -u
+
+REPO_DIR="$(pwd)"
+REMOTE_URL="${1:-}"
+BASENAME="$(basename "$REPO_DIR" 2>/dev/null)"
+
+# --- skip conditions -------------------------------------------------------
+if [ -n "${SKIP_VULN_SCAN:-}" ]; then
+  echo "git-vuln-scan: SKIP_VULN_SCAN set — skipping scan." >&2
+  exit 0
+fi
+
+case "$REMOTE_URL" in
+  *github.com*|gh:*|git@github.com*)
+    ;;
+  *)
+    echo "git-vuln-scan: remote '$REMOTE_URL' is not GitHub — skipping scan." >&2
+    exit 0
+    ;;
+esac
+
+command -v pi >/dev/null 2>&1 || export PATH="$HOME/.local/share/pnpm/bin:$PATH"
+if ! command -v pi >/dev/null 2>&1; then
+  echo "git-vuln-scan: 'pi' not found on PATH — skipping scan." >&2
+  exit 0
+fi
+
+REPORT_DIR="$HOME/.git-scan-reports"
+mkdir -p "$REPORT_DIR"
+REPORT="$REPORT_DIR/${BASENAME}-$(date +%Y%m%d-%H%M%S).md"
+
+# Drain the pre-push stdin feed (local ref/sha, remote ref/sha lines).
+# Bounded: git keeps this pipe open while the hook runs, so a plain `cat` would
+# hang forever. Refs arrive in one burst; 2s is more than enough.
+PUSHED_REFS=""
+DEADLINE=$((SECONDS + 2))
+while [ "$SECONDS" -lt "$DEADLINE" ]; do
+  IFS= read -rt 1 -r line || break
+  PUSHED_REFS+="$line"$'\n'
+done
+
+SCAN_TIMEOUT="${SCAN_TIMEOUT:-600}"
+
+# --- agent scan (read-only) -------------------------------------------------
+PROMPT="You are a pre-push security scanner for the repository in the current working directory ($REPO_DIR). Do a fast, READ-ONLY security review. NEVER modify, create, delete, commit, or push any file in the repo, and never run the repo's own code or install scripts (postinstall etc. are an attack vector).
+
+Steps:
+1. If tools are ALREADY installed (check with 'which'), use them (time-box each): gitleaks detect on this repo (~120s, scan git history too), trivy fs (~180s, reads lockfiles without installing deps), semgrep scan --config auto (~180s). If a tool is missing, do NOT install it — do a manual review instead.
+2. Always also do manual review (priority order): leaked secrets (API keys, tokens, .env files, DB passwords); missing auth/authz checks or IDOR; user input flowing to eval/exec/SQL string concat/shell/file paths; dangerous supply chain (postinstall/preinstall scripts in package.json, curl|sh, unpinned deps, CI steps from unknown URLs); insecure crypto & config (MD5/SHA1 for passwords, verify=False, open CORS with credentials, debug flags, Dockerfiles running as root).
+3. Prioritize recently changed files (start with 'git log --oneline -15' and 'git diff --name-only HEAD~5'), but get broad coverage.
+
+Every finding MUST have: file:line (or dep@version), an evidence snippet, impact, a concrete fix, and severity (Critical/High/Medium/Low/Info). No finding without evidence.
+
+Write the full report (Markdown, with a Summary count table and a Coverage section) to exactly this file: $REPORT
+
+Then print to stdout ONLY:
+(a) one line:   CRITICAL: n | HIGH: n | MEDIUM: n | LOW: n | INFO: n
+(b) the top 5 findings, one line each, format: [SEV] title — file:line — one-line reason"
+
+echo "git-vuln-scan: scanning $REPO_DIR (timeout ${SCAN_TIMEOUT}s)..." >&2
+START=$(date +%s)
+timeout "$SCAN_TIMEOUT" pi -p --no-session --thinking low "$PROMPT"
+RC=$?
+ELAPSED=$(( $(date +%s) - START ))
+echo >&2 ""
+
+if [ "$RC" -eq 124 ]; then
+  echo "git-vuln-scan: scan timed out after ${SCAN_TIMEOUT}s — proceeding with push." >&2
+  exit 0
+elif [ "$RC" -ne 0 ]; then
+  echo "git-vuln-scan: agent scan failed (exit $RC after ${ELAPSED}s) — proceeding with push." >&2
+  exit 0
+fi
+
+# --- decision prompt ---------------------------------------------------------
+echo ""
+echo "git-vuln-scan: scan finished in ${ELAPSED}s."
+[ -f "$REPORT" ] && echo "Full report: $REPORT"
+echo ""
+printf 'What do you want to do?  [c]ontinue push / [f]ix issues first / [a]bort push: '
+if [ -e /dev/tty ] && [ -r /dev/tty ]; then
+  # Real push: stdin is git's own (already drained) — read the choice from the
+  # user's terminal.
+  CHOICE=$( { read -r c && printf '%s' "$c"; } < /dev/tty 2>/dev/null ) || CHOICE=""
+else
+  read -r CHOICE || CHOICE=""
+fi
+[ -z "$CHOICE" ] && CHOICE="a"
+case "$CHOICE" in
+  [cC]*)
+    echo "git-vuln-scan: continuing push." >&2
+    exit 0
+    ;;
+  [fF]*)
+    echo "git-vuln-scan: opening interactive pi session to fix the findings."
+    echo "git-vuln-scan: NOTE: the push is aborted. Make your fixes (commit them), then run 'git push' again." >&2
+    pi "Fix the following pre-push security findings in the current repository. Full report: $REPORT — read it first. Address each finding that can be fixed safely; if a finding requires judgment, explain your choice. Do not commit or push unless I ask."
+    exit 1
+    ;;
+  [aA]*)
+    echo "git-vuln-scan: push aborted by user." >&2
+    exit 1
+    ;;
+  *)
+    echo "git-vuln-scan: no valid choice ('$CHOICE') — aborting push for safety (enter 'c' to push)." >&2
+    exit 1
+    ;;
+esac
