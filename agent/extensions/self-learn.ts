@@ -153,14 +153,19 @@ export interface Launcher {
  * user can watch or close it. Fall back to a detached sandboxed `pi -p` so the
  * feature still works without Herdr (and in a plain ssh session).
  */
-export function pickLauncher(has: (cmd: string) => boolean, slug: string, specPath: string): Launcher {
+export function pickLauncher(
+	has: (cmd: string) => boolean,
+	slug: string,
+	specPath: string,
+	exists: (path: string) => boolean = existsSync,
+): Launcher {
 	const paneScript = join(REPO, "scripts", "agent-pane.sh");
-	if (has("hc") && existsSync(paneScript)) {
+	if (has("hc") && exists(paneScript)) {
 		return { argv: [paneScript, "spawn", slug, specPath], kind: "pane" };
 	}
 	const pisandbox = join(REPO, "scripts", "pisandbox");
 	const prompt = `Read and execute ${specPath}`;
-	if (existsSync(pisandbox)) {
+	if (exists(pisandbox)) {
 		return { argv: [pisandbox, "--", "pi", "-p", prompt], kind: "headless" };
 	}
 	return { argv: ["pi", "-p", prompt], kind: "headless" };

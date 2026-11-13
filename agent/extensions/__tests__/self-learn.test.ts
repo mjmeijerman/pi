@@ -114,16 +114,23 @@ describe("pickLauncher", () => {
 	const queue = "/tmp/queue.md";
 
 	test("herdr pane when herdr is running", () => {
-		const launcher = pickLauncher(() => true, slug, queue);
+		// Injected probes: CI has no ~/.pi, and the choice must not depend on it.
+		const launcher = pickLauncher(() => true, slug, queue, () => true);
 		assert.equal(launcher.kind, "pane");
 		assert.match(launcher.argv[0], /agent-pane\.sh$/);
 	});
 
 	test("otherwise a headless sandboxed run", () => {
-		const launcher = pickLauncher(() => false, slug, queue);
+		const launcher = pickLauncher(() => false, slug, queue, (path) => path.endsWith("pisandbox"));
 		assert.equal(launcher.kind, "headless");
 		assert.match(launcher.argv[0], /pisandbox$/);
 		assert.deepEqual(launcher.argv.slice(1, 3), ["--", "pi"]);
+	});
+
+	test("no launcher script at all: plain pi, still headless", () => {
+		const launcher = pickLauncher(() => false, slug, queue, () => false);
+		assert.equal(launcher.kind, "headless");
+		assert.deepEqual(launcher.argv, ["pi", "-p", `Read and execute ${queue}`]);
 	});
 });
 
