@@ -256,3 +256,66 @@ describe("big-boss-pi-guard: the delegation directories", () => {
 		});
 	});
 });
+
+/**
+ * Bug A: the word `install` armed the write scan wherever it appeared, so a read-only
+ * command that merely mentioned it (`echo install /path`) was blocked as a write.
+ * Bug B: the `>` in a JavaScript arrow function matched the redirect detector, so a
+ * `node -e` with an arrow was blocked as a redirect into the session cwd.
+ */
+describe("big-boss-pi-guard: false positives (bug A: verb in argument position, bug B: arrow as redirect)", () => {
+	const cwd = "/home/mark/big-boss-pi";
+
+	test("bug A: install as an argument does not arm the path scan", () => {
+		assert.equal(shellWriteReason("echo install /home/mark/big-boss-pi/bin/jev", cwd), null);
+		assert.equal(shellWriteReason("rg 'install' /home/mark/big-boss-pi/bin", cwd), null);
+		assert.equal(shellWriteReason("grep -rn install /home/mark/big-boss-pi/bin", cwd), null);
+		assert.equal(shellWriteReason("ls /home/mark/pi-master/bin | grep install", cwd), null);
+		assert.equal(shellWriteReason("echo rm cp mv /home/mark/big-boss-pi/state", cwd), null);
+	});
+
+	test("bug A: a write verb in command position still arms the path scan", () => {
+		const cases: [string, RegExp][] = [
+			["install -m 644 /tmp/x /home/mark/big-boss-pi/bin/y", /install/],
+			["sudo -E rm -rf /home/mark/big-boss-pi/state", /rm/],
+			["env FOO=1 mkdir /home/mark/big-boss-pi/state/new", /mkdir/],
+			["nohup mv a.md /home/mark/big-boss-pi/state/b.md", /mv/],
+			["time cp a.md /home/mark/big-boss-pi/state/c.md", /cp/],
+			["command tee /home/mark/big-boss-pi/state/x", /tee/],
+			["xargs rm -f /home/mark/pi-master/state/x", /rm/],
+			["bash -c 'rm -rf /home/mark/big-boss-pi/state'", /rm/],
+			["sed -i 's/a/b/' /home/mark/big-boss-pi/state/x", /sed/],
+		];
+		for (const [command, expected] of cases) {
+			assert.match(shellWriteReason(command, cwd) ?? "", expected, command);
+		}
+	});
+
+	test("bug B: an arrow function is not a shell redirect", () => {
+		assert.equal(shellWriteReason("node -e 'const f = (x) => x; console.log(f(1))'", cwd), null);
+		assert.equal(shellWriteReason("node -e 'console.log([1,2].map((n) => n * 2))'", cwd), null);
+		assert.equal(shellWriteReason("perl -e '$x->{a} = 1'", cwd), null);
+	});
+
+	test("bug B: a real redirect is still blocked, even next to an arrow", () => {
+		assert.match(shellWriteReason("echo hi > state/x.json", cwd) ?? "", /redirect/);
+		assert.match(shellWriteReason("node app.js >> /home/mark/pi-master/state/log", cwd) ?? "", /redirect/);
+		assert.match(shellWriteReason("node -e 'const f = (x) => x' > state/y", cwd) ?? "", /redirect/);
+		assert.match(shellWriteReason("echo 'a => b' > state/z", cwd) ?? "", /redirect/);
+	});
+
+	test("bug A and B: the boss session runs both commands, no block, no notice", async () => {
+		await asBoss(async () => {
+			const { emit, ctx, notices } = setup(cwd);
+			const commands = [
+				"echo install /home/mark/big-boss-pi/bin/jev",
+				"node -e 'const f = (x) => x; console.log(f(1))'",
+			];
+			for (const command of commands) {
+				const [result] = await emit("tool_call", { toolName: "bash", input: { command } }, ctx);
+				assert.equal(result, undefined, `${command} should not be blocked`);
+			}
+			assert.deepEqual(notices, []);
+		});
+	});
+});
