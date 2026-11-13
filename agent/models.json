@@ -3,16 +3,24 @@
     "deepseek": {
       "baseUrl": "https://api.deepseek.com/v1",
       "api": "openai-completions",
-      "apiKey": "$DEEPSEEK_API_KEY",
+      "apiKey": "!cat /home/mark/.pi/agent/deepseek.key",
       "models": [
         {
           "id": "deepseek-v4-flash",
           "name": "DeepSeek V4 Flash",
           "reasoning": true,
-          "input": ["text", "image"],
+          "input": [
+            "text",
+            "image"
+          ],
           "contextWindow": 1000000,
           "maxTokens": 384000,
-          "cost": { "input": 0.22, "output": 0.66, "cacheRead": 0.007, "cacheWrite": 0.22 }
+          "cost": {
+            "input": 0.22,
+            "output": 0.66,
+            "cacheRead": 0.007,
+            "cacheWrite": 0.22
+          }
         }
       ]
     },
@@ -21,7 +29,11 @@
       "api": "openai-completions",
       "apiKey": "ollama",
       "models": [
-        { "id": "qwen3.8:27b", "contextWindow": 131072, "maxTokens": 16384 }
+        {
+          "id": "qwen3.8:27b",
+          "contextWindow": 131072,
+          "maxTokens": 16384
+        }
       ]
     }
   }
