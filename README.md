@@ -7,7 +7,7 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 | Path | What |
 |---|---|
 | `agent/skills/` | pi skills: `cost-optimizer`, `secret-guard`, `ethical-hacker`, `gh-repo-scan`, `questionnaire`, `ui-ux` |
-| `agent/extensions/` | always-on extensions: `cost-optimizer`, `secret-guard`, `om-autostart`, `dictation`, `usage-footer` |
+| `agent/extensions/` | always-on extensions: `cost-optimizer`, `secret-guard`, `merge-guard`, `om-autostart`, `dictation`, `usage-footer` |
 | `git-hooks/` | global secret-scan hooks (`pre-commit`, `commit-msg`, `pre-push`) + installer |
 | `git-vuln-scan` | pre-push agent vulnerability scan (GitHub pushes) |
 | `git-templates/` | `git init` template that installs the vuln-scan hook into new repos |
