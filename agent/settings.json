@@ -10,10 +10,12 @@
   "packages": [
     "https://github.com/ayghri/i-have-adhd",
     "npm:pi-web-access",
-    "git:https://github.com/michielpapenhove/pi-observational-memory.git"
+    "git:https://github.com/michielpapenhove/pi-observational-memory.git",
+    "git:github.com/michielpapenhove/pi-prompt-snippets"
   ],
   "extensionChangelogVersions": {
-    "{\"source\":\"npm:pi-web-access\",\"scope\":\"user\"}": "0.47.0"
+    "{\"source\":\"npm:pi-web-access\",\"scope\":\"user\"}": "0.47.0",
+    "{\"source\":\"git:github.com/michielpapenhove/pi-prompt-snippets\",\"scope\":\"user\"}": "0.1.0"
   },
   "hideThinkingBlock": true,
   "observational-memory": {
