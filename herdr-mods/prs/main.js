@@ -148,7 +148,8 @@ function task(kind, pr, quote, folder) {
 	const n = pr.number;
 	const clone = folder ?? `${home()}/code/${repo.split("/")[1]}`;
 	const missing = folder ? "" : ` That clone does not exist yet: \`gh repo clone ${repo} ${clone}\` first.`;
-	const common = `\n\nYou start in ${AGENT_FOLDER}, so this is a job for a worker: hand it over with \`delegate spawn --cwd ${clone}\`, the clone the work happens in.${missing} Never merge, never push to the trunk branch, and leave a one-line summary when you stop.`;
+	// The AGENTS.md in AGENT_FOLDER forbids the boss agent from doing this itself.
+	const common = `\n\nYou start in ${AGENT_FOLDER}, and that workspace's AGENTS.md is binding: do NOT do this work yourself — do not check the branch out, do not edit files, do not commit or push. Ask Jev which route it is (\`jev route "<the job in one line>"\`) when that is not obvious, then hand the whole job to a worker: \`delegate spawn --cwd ${clone}\`, so a worker agent runs it in another Herdr space with the clone as its cwd.${missing} Then wait for that worker and relay its report — what changed, what is still open, what the worker could not do — instead of reporting on work you did. Never merge, never push to the trunk branch, and do not stop before the worker has reported.`;
 	if (kind === "review")
 		return `${head}\n\nReview it. Read \`gh pr view ${n} -R ${repo}\` and \`gh pr diff ${n} -R ${repo}\`, and read the code around the change before judging it. Then post one review: \`gh pr review ${n} -R ${repo} --comment --body-file -\` (use --request-changes if something must change before it lands), naming the files and lines you are unsure about. Do not touch the code.${common}`;
 	if (kind === "checks")
