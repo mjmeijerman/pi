@@ -1,0 +1,96 @@
+# The review tier in the PR body, enforced instead of trusted.
+#
+# Radar basis: #17 risk-tiered human oversight (Trial), #42 human-in-the-loop
+# theater (Caution), #3 path-to-production mapping (Adopt).
+#
+# `agent/AGENTS.md` defines High/Medium/Low and says the tier goes in the PR
+# body, which was a rule nobody checked: a PR could say nothing and still land.
+# This job fails the PR unless the body states a tier, and fails a tier below
+# High when the diff touches harness paths. The measurement is the check itself:
+# red on a body without a tier, red on a harness diff claiming Medium.
+#
+# Everything from the PR body arrives through `env` and is only ever matched in
+# bash, never interpolated into a command line (injection, blip 38).
+name: pr-tier
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-tier-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tier:
+    name: review tier
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the path mapping diffs against the base branch.
+          fetch-depth: 0
+
+      - name: tier stated in the PR body, and high enough for the diff
+        env:
+          # Untrusted input: quoted, never expanded into a command.
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          shopt -s nocasematch
+
+          # 1) The tier. `Review tier: High`, `**Review tier:** high`, `Review tier : LOW`.
+          tier=""
+          if [[ $PR_BODY =~ review[[:space:]]+tier[[:space:]]*:[[:space:]]*\*{0,2}[[:space:]]*(high|medium|low) ]]; then
+            tier="${BASH_REMATCH[1],,}"
+          fi
+          if [[ -z $tier ]]; then
+            echo "::error::the PR body states no review tier (blips 17, 42). Add one of: Review tier: High / Medium / Low"
+            {
+              echo "## Review tier: missing"
+              echo ""
+              echo "No \`Review tier: High|Medium|Low\` line in the PR body."
+              echo "Tiers are defined in \`agent/AGENTS.md\`."
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "tier: $tier"
+
+          # 2) The diff. Merge-base diff, so unrelated trunk commits do not count.
+          git fetch --no-tags origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          mapfile -t changed < <(git diff --name-only "origin/${BASE_REF}...HEAD")
+          echo "changed files: ${#changed[@]}"
+
+          # 3) Harness paths. Touching any of them is High, whatever the body says.
+          harness=()
+          for path in "${changed[@]}"; do
+            case "$path" in
+              agent/extensions/*|git-hooks/*|sandbox/*|.github/*|agent/AGENTS.md)
+                harness+=("$path")
+                ;;
+            esac
+          done
+
+          {
+            echo "## Review tier: ${tier}"
+            echo ""
+            echo "Changed files: ${#changed[@]}"
+            if (( ${#harness[@]} > 0 )); then
+              echo ""
+              echo "Harness paths in the diff (tier must be High):"
+              echo ""
+              printf -- '- `%s`\n' "${harness[@]}"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          if (( ${#harness[@]} > 0 )) && [[ $tier != high ]]; then
+            printf '::error::harness paths changed; tier must be High (blips 17, 42) — offending paths: %s\n' "${harness[*]}"
+            exit 1
+          fi
+
+          echo "tier check passed: $tier"
