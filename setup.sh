@@ -67,6 +67,17 @@ run() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Major version of the npm on PATH, or 0 when there is no npm at all.
+npm_major() {
+	local v
+	v=$(npm --version 2>/dev/null || true)
+	printf '%s\n' "${v%%.*}" | grep -E '^[0-9]+$' >/dev/null 2>&1 || {
+		echo 0
+		return 0
+	}
+	printf '%s\n' "${v%%.*}"
+}
+
 ask() {
 	local prompt=$1 reply
 	if [ "$ASSUME_YES" = 1 ]; then
@@ -284,12 +295,30 @@ fi
 # Blip 99 (Safe Chain): a malicious npm version is normally installable for
 # hours. This is the one-line mitigation, so it belongs in the config step and
 # not in a paragraph telling the user to remember it.
-if have npm; then
+# It takes two: npm only honours min-release-age from 11.10 on, and an older npm
+# still echoes the value back from .npmrc, so setting it on npm 10 looks done and
+# does nothing. So install a user-owned npm >= 11 first, under ~/.local — the
+# prefix this script already uses, ahead of /usr/bin on PATH.
+# Never sudo, never a distro npm under /usr: a failed install warns and leaves
+# the existing npm alone.
+if ! have npm; then
+	warn "npm not found — min-release-age not set (blip 99); install node+npm, then re-run"
+elif [ "$(npm_major)" -lt 11 ]; then
+	note "npm $(npm --version) ignores min-release-age (needs npm >= 11) — installing npm@11 into $HOME/.local"
+	if run npm install -g --prefix "$HOME/.local" npm@11; then
+		hash -r 2>/dev/null || true # PATH lookup still points at the old npm
+	else
+		warn "npm@11 install failed — nothing changed under /usr; install one by hand: npm i -g --prefix ~/.local npm@11"
+	fi
+fi
+if have npm && [ "$(npm_major)" -ge 11 ]; then
 	# npm reads this in days, so 2 is the 48-hour window.
-	run npm config set min-release-age 2
-	note "npm min-release-age: $(npm config get min-release-age 2>/dev/null || echo unset)"
-else
-	warn "npm not found — min-release-age not set (blip 99)"
+	# A read-only or root-owned ~/.npmrc must not abort the whole installer.
+	run npm config set min-release-age 2 ||
+		warn "could not write ~/.npmrc — set it once by hand: npm config set min-release-age 2"
+	note "npm min-release-age: $(npm config get min-release-age 2>/dev/null || echo unset) (npm $(npm --version))"
+elif have npm; then
+	warn "still npm $(npm --version) — min-release-age not set and would be ignored (blip 99)"
 fi
 
 # --------------------------------------------------------------- 2. secrets --
