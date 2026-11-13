@@ -13,6 +13,11 @@
 - When the harness itself gets in the way, run `/suggest <what went wrong>`. `/retro` aggregates the log into `~/.pi/agent/retro/`.
 - Sandboxed runs: `~/.pi/sandbox/pi-sandbox.sh -- pi ...` (hides SSH keys, cloud creds and auth files).
 
+## Herdr
+
+- Spawn delegated agents interactive, never `-p`: `hc run --name <slug> --cwd <dir> --no-notify --bg pi -a`, then `hc send <slug> "Read /tmp/specs/<file>.md and do it"`. Print mode renders nothing until exit, so clicking the pane shows an empty terminal.
+- `--no-notify` stops hc typing exit notes into this pane. `hc read <slug>` shows the live screen; `hc ls` lists state.
+
 ## Machine / screens
 
 - X11, DISPLAY `:1`, root window 9840x3840 (multi-monitor, scaled). Do not grab the whole root — it is mostly empty.
