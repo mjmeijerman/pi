@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
 # selftest.sh — prove the pi-sandbox policy actually holds.
 #
+# Radar Vol. 35: blip 1 (agent sandboxing, Adopt), blip 29 (harness quality
+# evaluation — the policy is only as good as the check that it still holds).
+#
 # Runs non-interactive commands inside the sandbox (never an interactive pi
 # session) and prints one PASS/FAIL line per assertion. Exits non-zero when
 # anything fails.
+#
+# cwd-independent: the launcher's policy changes with the current directory, so
+# this creates its own work directory under $HOME and runs every assertion from
+# there. It prints the directory it chose.
 set -uo pipefail
 
 here=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 launcher=$here/pi-sandbox.sh
 timeout_s=60
+: "${HOME:?HOME is not set}"
 
 failures=0
 ok() {
@@ -31,6 +39,22 @@ inside() {
 	printf 'FAIL  launcher not executable: %s\n' "$launcher"
 	exit 1
 }
+
+# Pick a work directory inside $HOME/.pi: it sits in the sandbox's read-write
+# bind, so the result does not depend on where the operator was standing when
+# they ran this, and it is not a broad parent the launcher is right to refuse.
+rundir=$(mktemp -d "$HOME/.pi/.sandbox-selftest.XXXXXX") || {
+	printf 'FAIL  cannot create a work directory under %s/.pi\n' "$HOME"
+	exit 1
+}
+cleanup() {
+	rm -rf "$rundir"
+	rm -f "$HOME/.pi/.sandbox-write-test" "$HOME/.sandbox-write-test"
+}
+# shellcheck disable=SC2329 # invoked through the EXIT trap below
+trap cleanup EXIT
+printf 'work directory: %s\n\n' "$rundir"
+cd "$rundir" || exit 1
 
 # 1. pi is on PATH inside the sandbox.
 out=$(inside --exec -- sh -c 'command -v pi')
@@ -93,14 +117,14 @@ else
 	ok "dotenv files are masked (no populated sample on this host, skipped)"
 fi
 
-# 7. write allowed inside the sandbox work dir.
-out=$(inside --exec -- sh -c 'echo ok > /home/mark/.pi/sandbox/.write-test && echo wrote')
+# 7. write allowed inside the sandbox work dir ($HOME/.pi is always read-write,
+#    whether or not this script lives there).
+out=$(inside --exec -- sh -c 'echo ok > "$HOME/.pi/.sandbox-write-test" && echo wrote')
 rc=$?
-rm -f "$here/.write-test"
 if [ "$rc" -eq 0 ]; then
-	ok "writing to /home/mark/.pi/sandbox/ succeeds"
+	ok "writing to $HOME/.pi/ succeeds"
 else
-	bad "writing to /home/mark/.pi/sandbox/ succeeds" "$out"
+	bad "writing to $HOME/.pi/ succeeds" "$out"
 fi
 
 # 8. write refused outside the writable set.
@@ -138,6 +162,51 @@ if [ -z "$unexpected" ]; then
 	ok "only the allow-listed home entries are visible"
 else
 	bad "only the allow-listed home entries are visible" "$(printf '%s' "$unexpected" | tr '\n' ' ')"
+fi
+
+# 12. started in $HOME itself, the sandbox comes up and says so on stderr.
+out=$(cd "$HOME" && timeout "$timeout_s" "$launcher" --exec -- true 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	ok "the sandbox starts from \$HOME"
+else
+	bad "the sandbox starts from \$HOME" "rc=$rc out=$out"
+fi
+case $out in
+*'$HOME is read-only inside the sandbox'*) ok "the \$HOME case prints the read-only notice" ;;
+*) bad "the \$HOME case prints the read-only notice" "$out" ;;
+esac
+
+# 13. ... with $HOME unwritable and $HOME/.pi still writable.
+out=$(cd "$HOME" && timeout "$timeout_s" "$launcher" --exec -- sh -c '
+	echo x > "$HOME/.sandbox-write-test" 2>/dev/null && echo home-wrote
+	echo y > "$HOME/.pi/.sandbox-write-test" 2>/dev/null && echo pi-wrote
+' 2>/dev/null)
+case $out in
+*home-wrote*) bad "writing to \$HOME is refused when started in \$HOME" "the file was created" ;;
+*) ok "writing to \$HOME is refused when started in \$HOME" ;;
+esac
+case $out in
+*pi-wrote*) ok "\$HOME/.pi stays writable when started in \$HOME" ;;
+*) bad "\$HOME/.pi stays writable when started in \$HOME" "out=$out" ;;
+esac
+
+# 14. broad parents are still refused, with the documented message.
+refused=()
+for d in / /home /tmp; do
+	out=$(cd "$d" 2>/dev/null && timeout "$timeout_s" "$launcher" --exec -- true 2>&1)
+	rc=$?
+	case $out in
+	*'cannot be mounted read-write'*)
+		[ "$rc" -ne 0 ] || refused+=("$d: exited 0")
+		;;
+	*) refused+=("$d: ${out:-no output}") ;;
+	esac
+done
+if [ "${#refused[@]}" -eq 0 ]; then
+	ok "broad parents (/, /home, /tmp) are refused with the documented message"
+else
+	bad "broad parents (/, /home, /tmp) are refused with the documented message" "$(printf '%s' "${refused[*]}")"
 fi
 
 printf '\n'
