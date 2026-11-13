@@ -6,6 +6,10 @@
  * editing files directly it has quietly become a second, unsupervised project session.
  * The rule in /home/mark/pi-master/AGENTS.md says delegate; this makes the rule real.
  *
+ * Radar basis: #21 subagents (Trial) — the hub delegates instead of doing the work;
+ * #17 risk-tiered human oversight (Trial) — delegation-only is only worth having when the
+ * delegation is not optional.
+ *
  * Covered: the write and edit tools, and shell commands that write into the workspace
  * (redirects, tee, rm/mv/cp/chmod/sed -i and friends). Not covered: a program that writes
  * there through its own logic, or a syscall. This is a rule, not a sandbox — the honest
