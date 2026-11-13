@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# agent-pane.sh — spawn a pi worker in a real herdr pane.
+# agent-pane.sh — spawn a pi worker without moving the person's view.
 #
-# Why not `hc run`: terminals created by herdr-core without a pane cannot be
-# tiled, so clicking one in the Herdr window only previews it (a modal). A pane
-# created through herdr-app is a normal tile and can be closed when the work is
-# done.
+# Why hidden: herdr shows every new pane and tab immediately, so spawning a
+# worker used to pull the person off the tab they were reading. `hc run --bg`
+# with no herdr.* labels keeps the worker's terminal out of the window: the
+# window does not change at all, not even focus. Look at a worker on purpose
+# with `show` (borrows the current pane in place), put the screen back with
+# `hide`.
 #
-#   agent-pane.sh spawn <slug> <spec.md> [--direction right|down] [--cwd DIR]
-#   agent-pane.sh close <slug|pane-id>
+#   agent-pane.sh spawn <slug> <spec.md> [--cwd DIR]
+#   agent-pane.sh show <slug|terminal>
+#   agent-pane.sh hide <slug|terminal>
+#   agent-pane.sh close <slug|terminal> [--pane]
 #   agent-pane.sh list
 #
-# State (slug → pane, terminal) lives in ~/.pi/scripts/.agent-panes.json.
+# State (slug → terminal, borrowed pane) lives in ~/.pi/scripts/.agent-panes.json.
 set -euo pipefail
 
 PI_BIN=${PI_BIN:-/home/mark/.local/share/pnpm/bin/pi}
@@ -25,75 +29,48 @@ state_write() { printf '%s\n' "$1" >"$STATE"; }
 
 json_get() { node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8"));const v=process.argv[1].split(".").reduce((a,k)=>a?.[k],j);console.log(v??"")' "$1"; }
 
-
-# Resolve the pane and tab the caller lives in, so a worker always lands next to
-# the agent that spawned it rather than next to whatever the person is looking at.
-caller_context() {
-	if [ -n "${HC_TERMINAL_ID:-}" ]; then
-		herdr-app ls 2>/dev/null | node -e '
-			let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-				const want=process.argv[1];
-				const j=JSON.parse(d);
-				for (const s of j.spaces) for (const t of s.tabs) for (const tm of t.terminals)
-					if (tm.terminal===want) { console.log([tm.pane,t.id,t.terminals.length].join(" ")); return; }
-			})' "$HC_TERMINAL_ID"
+# Slug or terminal ID → "terminal borrowed" from state. A bare terminal ID
+# (t7-style) is passed through with no state lookup.
+resolve() {
+	local want=$1
+	if printf '%s' "$want" | grep -qx 't[0-9a-z]\+'; then
+		printf '%s ' "$want"
+		return 0
 	fi
+	node -e '
+		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+		const e=j[process.argv[2]];
+		if(!e){console.error("unknown slug: "+process.argv[2]);process.exit(1);}
+		process.stdout.write((e.terminal||"")+" "+(e.borrowed||""));' "$STATE" "$want"
 }
 
 cmd_spawn() {
 	mkdir -p "$(dirname "$STATE")"
 	local slug=${1:?usage: spawn <slug> <spec.md>}; local spec=${2:?usage: spawn <slug> <spec.md>}
-	local direction="" workdir=""
+	local workdir=""
 	shift 2
 	while [ "$#" -gt 0 ]; do
 		case $1 in
-		--direction) direction=${2:?}; shift 2 ;;
 		--cwd) workdir=${2:?}; shift 2 ;;
 		*) die "unknown option $1" ;;
 		esac
 	done
 	[ -f "$spec" ] || die "spec not found: $spec"
-	need herdr-app; need hc
-	local spawn_dir=${workdir:-$(cd "$(dirname "$spec")" && pwd)}
-	# Remember what the person is looking at; spawning must not move them.
-	local before
-	before=$(herdr-app status 2>/dev/null || true)
-	local person_tab person_pane
-	person_tab=$(printf '%s' "$before" | json_get tab)
-	person_pane=$(printf '%s' "$before" | json_get focused_pane)
-	local argv
-	argv=$(node -e 'process.stdout.write(JSON.stringify(["sh","-lc",process.argv[1]]))' \
-		"cd $(printf '%q' "$spawn_dir") && exec $(printf '%q' "$PI_BIN") -a")
+	need hc
+	local spawn_dir
+	spawn_dir=${workdir:-$(cd "$(dirname "$spec")" && pwd)}
+	# hc names are 1-32 of a-z 0-9 - _ ; keep the slug usable as both.
+	local name
+	name=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-' | cut -c1-32)
 
-	# Place the worker next to this agent: split the caller's own pane. Past four
-	# panes in the tab a split is unreadable, so open a named tab instead.
-	local caller pane terminal out
-	caller=$(caller_context || true)
-	local caller_pane=${caller%% *}
-	local rest=${caller#* }
-	local caller_tab=${rest%% *}
-	local pane_count=${rest##* }
-
-	if [ -n "$caller_pane" ] && { [ -z "$pane_count" ] || [ "$pane_count" -lt 4 ]; }; then
-		if [ -z "$direction" ]; then
-			# First sibling goes right, later ones stack under the caller.
-			if [ "${pane_count:-1}" -eq 1 ]; then direction=right; else direction=down; fi
-		fi
-		out=$(herdr-app do pane.split --pane "$caller_pane" --direction "$direction" --argv "$argv" 2>&1) \
-			|| die "pane.split failed: $out"
-	else
-		[ -n "$caller_tab" ] || die "cannot find the calling pane (HC_TERMINAL_ID=${HC_TERMINAL_ID:-unset})"
-		out=$(herdr-app do tab.new --name "$slug" --folder "$spawn_dir" --argv "$argv" \
-			--task "Read $spec and do it" 2>&1) || die "tab.new failed: $out"
-	fi
-
-	pane=$(printf '%s' "$out" | json_get result.pane)
-	[ -n "$pane" ] || pane=$(printf '%s' "$out" | json_get pane)
-	[ -n "$pane" ] || pane=$(printf '%s' "$out" | json_get result.root_pane)
-	terminal=$(printf '%s' "$out" | json_get result.terminal)
-	[ -n "$terminal" ] || terminal=$(printf '%s' "$out" | json_get terminal)
-	[ -n "$terminal" ] || terminal=$(printf '%s' "$out" | json_get result.root_terminal)
-	[ -n "$pane" ] && [ -n "$terminal" ] || die "could not read pane/terminal from: $out"
+	# Hidden on purpose: no herdr.space / herdr.tab label, so the window shows
+	# nothing and focus cannot move. --outlive-parent keeps the worker alive
+	# when this agent's turn ends.
+	local out terminal
+	out=$(hc run --bg --json --name "$name" --cwd "$spawn_dir" --no-notify --outlive-parent -- "$PI_BIN" -a 2>&1) \
+		|| die "hc run failed: $out"
+	terminal=$(printf '%s' "$out" | json_get address)
+	[ -n "$terminal" ] || die "could not read terminal from: $out"
 
 	# Wait for pi's banner before sending; a send to a booting agent can be dropped.
 	local i ready=0
@@ -104,64 +81,105 @@ cmd_spawn() {
 	[ "$ready" = 1 ] || printf '%s: warning: banner not seen after 40s, sending anyway\n' "$PROG" >&2
 	hc send "$terminal" "Read $spec and do it" >/dev/null || die "send failed for $terminal"
 
-	# A worker belongs beside the agent that spawned it, never beside whatever
-	# tab the person happens to have focused.
-	if [ -n "$caller_tab" ]; then
-		local placed
-		placed=$(herdr-app ls 2>/dev/null | node -e '
-			let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-				const want=process.argv[1];const j=JSON.parse(d);
-				for (const s of j.spaces) for (const t of s.tabs) for (const tm of t.terminals)
-					if (tm.terminal===want) { console.log(t.id+" "+tm.pane); return; }
-			})' "$terminal" || true)
-		if [ "${placed%% *}" != "$caller_tab" ]; then
-			herdr-app do pane.close --pane "$pane" >/dev/null 2>&1 || true
-			hc kill "$terminal" >/dev/null 2>&1 || true
-			die "worker landed in the wrong tab (${placed%% *}); closed it instead of moving your view"
-		fi
-	fi
-	# Put the person back where they were.
-	[ -n "$person_tab" ] && herdr-app do tab.select --id "$person_tab" >/dev/null 2>&1 || true
-	[ -n "$person_pane" ] && herdr-app do pane.focus --pane "$person_pane" >/dev/null 2>&1 || true
-
 	state_write "$(node -e '
 		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
-		j[process.argv[2]]={pane:process.argv[3],terminal:process.argv[4],spec:process.argv[5],ts:new Date().toISOString()};
-		process.stdout.write(JSON.stringify(j,null,2));' "$STATE" "$slug" "$pane" "$terminal" "$spec")"
+		j[process.argv[2]]={terminal:process.argv[3],spec:process.argv[4],ts:new Date().toISOString()};
+		process.stdout.write(JSON.stringify(j,null,2));' "$STATE" "$slug" "$terminal" "$spec")"
 
-	printf '{"slug":"%s","pane":"%s","terminal":"%s","spec":"%s"}\n' "$slug" "$pane" "$terminal" "$spec"
+	printf '{"slug":"%s","terminal":"%s","spec":"%s","hidden":true}\n' "$slug" "$terminal" "$spec"
+}
+
+# Borrow the focused pane for a look: the pane's own terminal stays alive and
+# comes back with `hide`. Focus itself does not move.
+cmd_show() {
+	local target=${1:?usage: show <slug|terminal>}
+	local resolved terminal borrowed
+	resolved=$(resolve "$target") || exit 1
+	terminal=${resolved%% *}; borrowed=${resolved#* }
+	[ -n "$terminal" ] || die "no terminal for $target"
+	need herdr-app
+	local focused
+	focused=$(herdr-app status 2>/dev/null | json_get focused_pane)
+	[ -n "$focused" ] || die "no focused pane (is the Herdr window open?)"
+	herdr-app do terminal.show --terminal "$terminal" --pane "$focused" >/dev/null 2>&1 \
+		|| die "terminal.show failed for $terminal"
+	state_write "$(node -e '
+		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+		const e=j[process.argv[2]]||{terminal:process.argv[3]};
+		e.borrowed=process.argv[4];
+		j[process.argv[2]]=e;
+		process.stdout.write(JSON.stringify(j,null,2));' "$STATE" "$target" "$terminal" "$focused")"
+	printf '{"shown":"%s","terminal":"%s","pane":"%s"}\n' "$target" "$terminal" "$focused"
+}
+
+cmd_hide() {
+	local target=${1:?usage: hide <slug|terminal>}
+	local resolved borrowed
+	resolved=$(resolve "$target") || exit 1
+	borrowed=${resolved#* }
+	[ -n "$borrowed" ] || die "nothing borrowed for $target (its pane was never swapped)"
+	need herdr-app
+	herdr-app do terminal.show --pane "$borrowed" >/dev/null 2>&1 || die "terminal.show --pane failed for $borrowed"
+	state_write "$(node -e '
+		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+		if(j[process.argv[2]])delete j[process.argv[2]].borrowed;
+		process.stdout.write(JSON.stringify(j,null,2));' "$STATE" "$target")"
+	printf '{"hidden":"%s","pane":"%s"}\n' "$target" "$borrowed"
 }
 
 cmd_close() {
-	local target=${1:?usage: close <slug|pane-id>}
-	local pane=$target terminal=""
-	local known
-	known=$(node -e '
-		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
-		const e=j[process.argv[2]];process.stdout.write(e?e.pane+" "+e.terminal:"");' "$STATE" "$target" 2>/dev/null || true)
-	if [ -n "$known" ]; then pane=${known%% *}; terminal=${known##* }; fi
+	local target=${1:?usage: close <slug|terminal> [--pane]}
+	local want_pane=0
+	shift
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--pane) want_pane=1; shift ;;
+		*) die "unknown option $1" ;;
+		esac
+	done
+	local resolved terminal pane=""
+	resolved=$(resolve "$target" 2>/dev/null || true)
+	terminal=${resolved%% *}
+	if [ -z "$terminal" ]; then terminal=$target; fi
 
-	herdr-app do pane.close --pane "$pane" >/dev/null 2>&1 || printf '%s: warning: pane.close failed for %s\n' "$PROG" "$pane" >&2
+	# Legacy entries from the pane-based spawns carry a pane; close it if asked
+	# or if it is still around.
+	pane=$(node -e '
+		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+		const e=j[process.argv[2]]||{};process.stdout.write(e.pane||"");' "$STATE" "$target" 2>/dev/null || true)
+
+	# If the worker is on screen in a borrowed pane, put the pane back first.
+	local borrowed
+	borrowed=${resolved#* }
+	if [ -n "$borrowed" ]; then herdr-app do terminal.show --pane "$borrowed" >/dev/null 2>&1 || true; fi
+	if [ "$want_pane" = 1 ] && [ -n "$pane" ]; then herdr-app do pane.close --pane "$pane" >/dev/null 2>&1 || true; fi
 	[ -n "$terminal" ] && hc kill "$terminal" >/dev/null 2>&1 || true
 	[ -n "$terminal" ] && hc rm "$terminal" >/dev/null 2>&1 || true
 	state_write "$(node -e '
 		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
 		delete j[process.argv[2]];process.stdout.write(JSON.stringify(j,null,2));' "$STATE" "$target")"
-	printf '{"closed":"%s","pane":"%s"}\n' "$target" "$pane"
+	printf '{"closed":"%s","terminal":"%s"}\n' "$target" "$terminal"
 }
 
 cmd_list() {
-	herdr-app ls 2>/dev/null | node -e '
-		let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
-			const j=JSON.parse(d);
-			for (const s of j.spaces) for (const t of s.tabs) for (const tm of t.terminals)
-				console.log((tm.pane||"").slice(0,8), (tm.terminal||"").padEnd(5), (tm.app||"-").padEnd(6), tm.status||"-", t.name);
-		})'
+	node -e '
+		const {execFileSync}=require("child_process");
+		const fs=require("fs");
+		let st={};try{st=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+		const byTerm={};for(const [slug,e] of Object.entries(st))if(e.terminal)byTerm[e.terminal]=slug;
+		let j={};
+		try{j=JSON.parse(execFileSync("hc",["ls","--json"],{encoding:"utf8"}))}catch{}
+		for(const t of j.terminals||[]){
+			const slug=byTerm[t.address];
+			console.log((slug?slug:"-").padEnd(18), (t.address||"").padEnd(5), (t.status||"-").padEnd(8), slug?(st[slug].borrowed?"on screen":"hidden"):t.where||"");
+		}' "$STATE"
 }
 
 case ${1:-} in
 spawn) shift; cmd_spawn "$@" ;;
+show) shift; cmd_show "$@" ;;
+hide) shift; cmd_hide "$@" ;;
 close) shift; cmd_close "$@" ;;
 list|ls) cmd_list ;;
-*) die "usage: $PROG spawn|close|list ..." ;;
+*) die "usage: $PROG spawn|show|hide|close|list ..." ;;
 esac

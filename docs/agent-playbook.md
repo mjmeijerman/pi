@@ -79,19 +79,25 @@ Pi has no subagents by design. The equivalent is parallel sessions with Herdr, e
 its own working copy:
 
 ```bash
-~/.pi/scripts/agent-pane.sh spawn fix-parser fix-parser.md    # new pane running pi
-~/.pi/scripts/agent-pane.sh list                              # pane state
+~/.pi/scripts/agent-pane.sh spawn fix-parser fix-parser.md    # hidden pi worker, screen untouched
+~/.pi/scripts/agent-pane.sh show fix-parser                   # borrow the current pane to watch it
+~/.pi/scripts/agent-pane.sh hide fix-parser                   # put the pane back
+~/.pi/scripts/agent-pane.sh list                              # worker state
 ~/.pi/scripts/agent-pane.sh close fix-parser                 # when the work is in
 ```
 
+Workers start hidden: herdr shows every new pane and tab immediately, so a visible pane
+would move you off the tab you are reading. `show` swaps the worker into the pane you are
+in (focus does not move) and `hide` puts it back.
+
 Rules that keep this from turning into a tangle:
 
-1. **Two to four panes maximum.** Blip 21's guidance; beyond that your review capacity, not
+1. **Two to four workers at a time.** Blip 21's guidance; beyond that your review capacity, not
    the machine, is the bottleneck.
-2. **One repo per pane, ideally one worktree per pane.** Two agents editing the same working
+2. **One repo per worker, ideally one worktree per worker.** Two agents editing the same working
    tree produce a merge conflict you have to untangle by hand.
-3. **Never let two panes work on the same file set.** If they must, they are one task.
-4. **Close the pane when the PR is open.** A pane waiting for review is a pane burning
+3. **Never let two workers work on the same file set.** If they must, they are one task.
+4. **Close the worker when the PR is open.** A worker waiting for review is a worker burning
    attention.
 5. **Write the spec to a file** (`fix-parser.md`) and pass the path. A pane that receives a
    sentence has to reconstruct intent; a pane that receives a spec does not.
@@ -227,7 +233,8 @@ lint rule) → then an instruction. Instructions are the weakest enforcement you
 # sessions
 pi                                    # interactive, in this directory
 pisandbox -- pi                        # same, sandboxed
-~/.pi/scripts/agent-pane.sh spawn s spec.md && ~/.pi/scripts/agent-pane.sh list
+~/.pi/scripts/agent-pane.sh spawn s spec.md && ~/.pi/scripts/agent-pane.sh list   # hidden workers
+~/.pi/scripts/agent-pane.sh show s        # borrow this pane to watch it; hide s puts it back
 /grill                                 # interview the plan before coding (blip 13)
 
 # git / GitHub
