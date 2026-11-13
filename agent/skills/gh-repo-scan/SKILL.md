@@ -51,7 +51,7 @@ Check first with `which`; if missing and *needed for this stack*, install to `$W
 
 | Tool | Install (official) | Use for |
 |---|---|---|
-| trivy | `curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/v0.74.0/contrib/install.sh \| sh -s -- -b "$WORK/bin"` | dependency CVEs, config, licenses |
+| trivy | `curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/v0.76.2/contrib/install.sh \| sh -s -- -b "$WORK/bin"` | dependency CVEs, config, licenses |
 | gitleaks | `curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \| tar -xz -C "$WORK/bin"` | secrets incl. git history |
 | semgrep | `pipx install semgrep` (preferred) or `curl -sSf https://semgrep.dev/install \| FILE_INSTALL_TOKEN= sh` | dangerous patterns, framework rules |
 
