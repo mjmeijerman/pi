@@ -1,5 +1,5 @@
 /**
- * sandbox-badge: ⛨ in the title when the session is contained, ⚠ when it is not.
+ * sandbox-badge: "sandbox" in the title when contained, "bare" when it is not.
  *
  * The decision is pure (`readContainment`, `badgeTitle`), so the env matrix
  * needs no fake pi. The wiring proves the two things that matter: the title is
@@ -13,14 +13,14 @@ const mod = await import("../sandbox-badge.ts");
 const sandboxBadge = mod.default;
 const {
 	readContainment,
-	badgeGlyph,
+	badgeTag,
 	badgeTitle,
 	baseTitle,
 	badgeStatus,
 	MODE_ENV,
 	NET_ENV,
-	SANDBOXED_GLYPH,
-	BARE_GLYPH,
+	SANDBOXED_TAG,
+	BARE_TAG,
 } = mod;
 
 function setup(options: { mode?: string; env?: Record<string, string | undefined> } = {}) {
@@ -60,25 +60,34 @@ describe("readContainment", () => {
 });
 
 describe("badgeTitle", () => {
-	test("sandboxed: shield first, base title untouched", () => {
-		assert.equal(badgeTitle("π - repo", { mode: "bwrap", net: "on" }), `${SANDBOXED_GLYPH} π - repo`);
+	test("sandboxed: word first, base title untouched", () => {
+		assert.equal(badgeTitle("π - repo", { mode: "bwrap", net: "on" }), `${SANDBOXED_TAG} π - repo`);
 	});
 
-	test("bare: warn glyph, no decoration", () => {
-		assert.equal(badgeTitle("π - repo", { mode: null, net: null }), `${BARE_GLYPH} π - repo`);
+	test("bare: the word says it, no decoration", () => {
+		assert.equal(badgeTitle("π - repo", { mode: null, net: null }), `${BARE_TAG} π - repo`);
 	});
 
 	test("no network is said out loud", () => {
-		assert.equal(badgeTitle("π - repo", { mode: "bwrap", net: "off" }), `${SANDBOXED_GLYPH} π - repo · no net`);
+		assert.equal(badgeTitle("π - repo", { mode: "bwrap", net: "off" }), `${SANDBOXED_TAG} no-net π - repo`);
 	});
 
 	test("net=off without a sandbox is not a thing and is not advertised", () => {
-		assert.equal(badgeTitle("π - repo", { mode: null, net: "off" }), `${BARE_GLYPH} π - repo`);
+		assert.equal(badgeTitle("π - repo", { mode: null, net: "off" }), `${BARE_TAG} π - repo`);
 	});
 
-	test("glyph is a single character on both paths", () => {
-		assert.equal(badgeGlyph({ mode: "bwrap", net: "on" }).length, 1);
-		assert.equal(badgeGlyph({ mode: null, net: null }).length, 1);
+	test("the tag is letters: Herdr strips leading punctuation and symbol fonts fail", () => {
+		for (const containment of [
+			{ mode: "bwrap", net: "on" },
+			{ mode: "bwrap", net: "off" },
+			{ mode: null, net: null },
+		]) {
+			const title = badgeTitle("π - repo", containment);
+			// Herdr's agents mod deletes leading non-alphanumerics from a title
+			// (`clean()`), so the tag must start with a letter to survive.
+			assert.match(title, /^[a-z]/, "a leading letter survives clean()");
+			assert.match(badgeTag(containment), /^[a-z]+$/, "ASCII letters only: no glyph the terminal font may lack");
+		}
 	});
 
 	test("base title keeps the session name pi would have used", () => {
@@ -101,21 +110,21 @@ describe("wiring", () => {
 		await emit("session_start", { reason: "new" }, ctx);
 		await new Promise((resolve) => setTimeout(resolve, 5));
 		assert.equal(titles.length, 1);
-		assert.match(titles[0], /^⛨ π - worker - /);
+		assert.match(titles[0], /^sandbox π - worker - /);
 	});
 
 	test("the footer status is set per session, not per tab", async () => {
 		const { emit, ctx, statuses } = setup();
 		await emit("session_start", {}, ctx);
 		await new Promise((resolve) => setTimeout(resolve, 5));
-		assert.equal(statuses.get("sandbox"), "⛨ sandboxed (bwrap)");
+		assert.equal(statuses.get("sandbox"), "sandboxed (bwrap)");
 	});
 
 	test("a bare session says so in the footer", async () => {
 		const { emit, ctx, statuses } = setup({ env: {} });
 		await emit("session_start", {}, ctx);
 		await new Promise((resolve) => setTimeout(resolve, 5));
-		assert.equal(statuses.get("sandbox"), "⚠ bare: real home and credentials");
+		assert.equal(statuses.get("sandbox"), "bare: real home and credentials");
 	});
 
 	test("print and JSON modes never touch the title", async () => {
