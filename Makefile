@@ -1,10 +1,16 @@
 # pi agent setup — one-command install for a new machine.
 # Usage:  make setup   (or just: make)
 
-.PHONY: setup verify hooks update uninstall
+.PHONY: setup bootstrap verify hooks update uninstall
 
+# Full provisioning on a new machine: config, hooks, system packages, API key,
+# pi packages, optional local model / dictation venv, then verification.
 setup:
-	@$(CURDIR)/install.sh --install-pi
+	@$(CURDIR)/setup.sh
+
+# Config and hooks only — no secrets, no system packages, no optional extras.
+bootstrap:
+	@$(CURDIR)/setup.sh --no-apt --no-verify
 
 verify:
 	@echo "== pi:            $$(command -v pi || echo MISSING)"

@@ -7,7 +7,9 @@
 #   <clone-dir>/install.sh      # after cloning your ~/.pi repo to a new PC
 #
 # Installs:
-#   - pi agent skills, extensions, settings.json, AGENTS.md, models.json
+#   - pi agent skills, extensions, settings.json, AGENTS.md, models.json,
+#     i-have-adhd.json, keybindings.json, package.json
+#   - ~/.pi/sandbox and ~/.pi/scripts (referenced by AGENTS.md as absolute paths)
 #   - global git hooks: secret scans on pre-commit, commit-msg, and pre-push
 #   - global gitignore for secret files
 #
@@ -48,14 +50,38 @@ for sub in skills extensions; do
 		cp -R "$src/." "$dst/"
 	fi
 done
-for f in settings.json AGENTS.md models.json; do
+for f in settings.json AGENTS.md models.json i-have-adhd.json keybindings.json package.json; do
 	src="$SOURCE_DIR/agent/$f"
 	dst="$AGENT_DIR/$f"
 	if [ -f "$src" ] && [ "$src" != "$dst" ]; then
 		cp "$src" "$dst"
 	fi
 done
+# The dictation extension needs its script, lock file and wrapper; the venv
+# (machine-specific, ~2.5 GB) and recorded audio stay out.
+DICT_SRC="$SOURCE_DIR/agent/dictation"
+DICT_DST="$AGENT_DIR/dictation"
+if [ -d "$DICT_SRC" ] && [ "$DICT_SRC" != "$DICT_DST" ]; then
+	mkdir -p "$DICT_DST/bin"
+	cp "$DICT_SRC/transcribe.py" "$DICT_SRC/requirements.lock" "$DICT_DST/" 2>/dev/null || true
+	cp "$DICT_SRC/bin/whisper-py" "$DICT_DST/bin/" 2>/dev/null || true
+fi
 echo "== copied skills/extensions/settings -> $AGENT_DIR"
+
+# --- 1b. things AGENTS.md and the skills reference by absolute path --------
+# ~/.pi/sandbox/pi-sandbox.sh and ~/.pi/scripts/agent-pane.sh are referenced
+# from agent/AGENTS.md, so they have to sit next to the agent dir, not in the
+# clone. Runtime state (pane map, session archive) is never copied.
+for sub in sandbox scripts; do
+	src="$SOURCE_DIR/$sub"
+	dst="$HOME/.pi/$sub"
+	if [ -d "$src" ] && [ "$src" != "$dst" ]; then
+		mkdir -p "$dst"
+		cp -R "$src/." "$dst/"
+		rm -f "$dst/.agent-panes.json"
+		echo "== copied $sub -> $dst"
+	fi
+done
 
 # --- 2. git hooks ------------------------------------------------------------
 if [ -d "$SOURCE_DIR/git-hooks" ] && [ "$SOURCE_DIR/git-hooks" != "$GIT_HOOKS_DIR" ]; then

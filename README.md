@@ -12,20 +12,64 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 | `git-vuln-scan` | pre-push agent vulnerability scan (GitHub pushes) |
 | `git-templates/` | `git init` template that installs the vuln-scan hook into new repos |
 | `gitignore_global` | global gitignore for secret files |
-| `install.sh` | one-command installer (what `make setup` runs) |
-| `Makefile` | `setup` / `verify` / `hooks` / `update` / `uninstall` |
+| `sandbox/` | bubblewrap launcher + policy selftest (`pi-sandbox.sh`) |
+| `scripts/` | session report / prune helpers + Herdr pane launcher |
+| `docs/` | Radar conformance audit and the agent working playbook |
+| `install.sh` | config + hooks only, non-interactive |
+| `setup.sh` | full provisioning on a new machine: packages, API key, pi packages, optional model/venv, verification |
+| `Makefile` | `setup` / `bootstrap` / `verify` / `hooks` / `update` / `uninstall` |
 
-## One-step install on a new PC
+## Rebuild this exact machine on another PC
 
 ```bash
-git clone git@github.com:mjmeijerman/pi.git ~/pi-setup
-cd ~/pi-setup
-make setup          # or: ./install.sh --install-pi
+# clone to ~/.pi so the absolute paths in AGENTS.md resolve
+# (a clone elsewhere works too; setup.sh copies sandbox/ and scripts/ into ~/.pi)
+git clone git@github.com:mjmeijerman/pi.git ~/.pi
+cd ~/.pi
+./setup.sh
+pi
 ```
 
-`make setup` installs pi itself if missing (`npm install -g --ignore-scripts @earendil-works/pi-coding-agent`), copies skills/extensions/settings into `~/.pi/agent`, installs the global git hooks, global gitignore, `git-vuln-scan`, and the git templates. It is **idempotent** — safe to re-run any time (also the fix if you ever suspect the hooks are gone).
+`setup.sh` is the whole story: it asks for the API key, installs the system
+packages it can, puts config and hooks on disk, reconciles the pi packages named
+in `settings.json`, and then verifies the result (sandbox selftest, 215 extension
+tests, hook paths, key present). Read it before running it — 300 lines, no
+network calls except apt, `pi update` and the optional model pull.
 
-It does **not** copy machine-specific or secret files: `auth.json`, sessions, `bin/`, `models-store.json`, or your `~/.gitconfig` identity. Set `git config --global user.name/email` once on the new machine.
+| Flag | Effect |
+| --- | --- |
+| `-y`, `--yes` | Accept every prompt (the API key is still typed by you) |
+| `--dry-run` | Print the plan, change nothing |
+| `--no-apt` | Never call `sudo apt-get`, only report missing packages |
+| `--with-ollama` | Pull `qwen3.8:27b` (~17 GB) for the `local_llm` tool |
+| `--with-dictation` | Build the faster-whisper venv (~2.5 GB of wheels) |
+| `--force-key` | Replace an existing `deepseek.key` |
+| `--no-verify` | Skip the verification block |
+
+What it does **not** do, because it is a per-machine identity rather than
+config: `git config --global user.name/email`, `gh auth login`, and `pi auth`
+for any provider other than DeepSeek. It prints a reminder when any of them is
+missing.
+
+`make setup` runs `./setup.sh`. `make bootstrap` runs the subset that touches no
+secrets and no system packages (`--no-apt --no-verify`).
+
+### What is not in git, and why
+
+| Not tracked | Why | How it comes back |
+| --- | --- | --- |
+| `agent/deepseek.key` | Secret | Prompted by `setup.sh`, written mode 600 |
+| `agent/auth.json`, `models-store.json` | Provider tokens | `pi auth` |
+| `agent/sessions/` | Conversation history | Not restored; starts empty |
+| `agent/bin/` | `fd`/`rg` extracted by pi | Re-extracted on first run |
+| `agent/dictation/venv/` | 2.5 GB of wheels | `--with-dictation` |
+| `agent/npm/`, `agent/git/` | Installed packages | `pi update --extensions` |
+| `agent/suggestions.jsonl`, `agent/retro/` | Local feedback log | Starts empty |
+| Ollama model weights | 17 GB | `--with-ollama` |
+| `werken-met-ai.pdf` | 15 MB third party | Radar site |
+
+`install.sh` alone (config + hooks, no interactivity) still works: `./install.sh --install-pi`.
+It is idempotent — re-run it any time, including when you suspect the hooks are gone.
 
 ## Following the Technology Radar
 
@@ -39,7 +83,7 @@ Where this repo came from, in Radar terms:
 | #29 harness quality evaluation | Assess | `agent/extensions/__tests__/` |
 | #30 local coding models | Assess | `local_llm` tool on the local qwen model |
 | #11 feedback flywheel, #25 agent suggestion box | Trial / Assess | `/suggest`, `/retro` |
-| #26 context profiling | Assess | `tools/session-report.mjs` |
+| #26 context profiling | Assess | `scripts/session-report.mjs` |
 | #36 agent instruction bloat | Caution | lean `AGENTS.md`, rules replaced by hooks where possible |
 
 The edition PDF is not committed (15 MB, third-party, read once) — read it from the Radar site instead.
