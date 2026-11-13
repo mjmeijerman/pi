@@ -7,7 +7,9 @@
 #   <clone-dir>/install.sh      # after cloning your ~/.pi repo to a new PC
 #
 # Installs:
-#   - pi agent skills, extensions, settings.json, AGENTS.md, models.json
+#   - pi agent skills, extensions, settings.json, AGENTS.md, models.json,
+#     i-have-adhd.json, keybindings.json, package.json
+#   - ~/.pi/sandbox and ~/.pi/scripts (referenced by AGENTS.md as absolute paths)
 #   - global git hooks: secret scans on pre-commit, commit-msg, and pre-push
 #   - global gitignore for secret files
 #
@@ -40,22 +42,67 @@ fi
 
 # --- 1. agent config ---------------------------------------------------------
 mkdir -p "$AGENT_DIR"
-for sub in skills extensions; do
-	src="$SOURCE_DIR/agent/$sub"
-	dst="$AGENT_DIR/$sub"
-	if [ -d "$src" ] && [ "$src" != "$dst" ]; then
-		mkdir -p "$dst"
-		cp -R "$src/." "$dst/"
+
+# Skills and extensions can be filtered by setup.sh through PI_SKILLS /
+# PI_EXTENSIONS (space-separated names). Unset means "everything", which keeps
+# plain `./install.sh` behaviour unchanged.
+if [ -d "$SOURCE_DIR/agent/skills" ] && [ "$SOURCE_DIR/agent/skills" != "$AGENT_DIR/skills" ]; then
+	mkdir -p "$AGENT_DIR/skills"
+	if [ -n "${PI_SKILLS:-}" ]; then
+		for s in $PI_SKILLS; do
+			[ -d "$SOURCE_DIR/agent/skills/$s" ] && cp -R "$SOURCE_DIR/agent/skills/$s" "$AGENT_DIR/skills/"
+		done
+	else
+		cp -R "$SOURCE_DIR/agent/skills/." "$AGENT_DIR/skills/"
 	fi
-done
-for f in settings.json AGENTS.md models.json; do
+fi
+
+if [ -d "$SOURCE_DIR/agent/extensions" ] && [ "$SOURCE_DIR/agent/extensions" != "$AGENT_DIR/extensions" ]; then
+	mkdir -p "$AGENT_DIR/extensions"
+	# lib/ and __tests__/ always come along: extensions import lib, and the test
+	# suite is how setup.sh verifies the install afterwards.
+	cp -R "$SOURCE_DIR/agent/extensions/lib" "$AGENT_DIR/extensions/" 2>/dev/null || true
+	cp -R "$SOURCE_DIR/agent/extensions/__tests__" "$AGENT_DIR/extensions/" 2>/dev/null || true
+	if [ -n "${PI_EXTENSIONS:-}" ]; then
+		for e in $PI_EXTENSIONS; do
+			[ -f "$SOURCE_DIR/agent/extensions/$e" ] && cp "$SOURCE_DIR/agent/extensions/$e" "$AGENT_DIR/extensions/"
+		done
+	else
+		cp "$SOURCE_DIR/agent/extensions"/*.ts "$AGENT_DIR/extensions/"
+	fi
+fi
+for f in settings.json AGENTS.md models.json i-have-adhd.json keybindings.json package.json; do
 	src="$SOURCE_DIR/agent/$f"
 	dst="$AGENT_DIR/$f"
 	if [ -f "$src" ] && [ "$src" != "$dst" ]; then
 		cp "$src" "$dst"
 	fi
 done
+# The dictation extension needs its script, lock file and wrapper; the venv
+# (machine-specific, ~2.5 GB) and recorded audio stay out.
+DICT_SRC="$SOURCE_DIR/agent/dictation"
+DICT_DST="$AGENT_DIR/dictation"
+if [ -d "$DICT_SRC" ] && [ "$DICT_SRC" != "$DICT_DST" ]; then
+	mkdir -p "$DICT_DST/bin"
+	cp "$DICT_SRC/transcribe.py" "$DICT_SRC/requirements.lock" "$DICT_DST/" 2>/dev/null || true
+	cp "$DICT_SRC/bin/whisper-py" "$DICT_DST/bin/" 2>/dev/null || true
+fi
 echo "== copied skills/extensions/settings -> $AGENT_DIR"
+
+# --- 1b. things AGENTS.md and the skills reference by absolute path --------
+# ~/.pi/sandbox/pi-sandbox.sh and ~/.pi/scripts/agent-pane.sh are referenced
+# from agent/AGENTS.md, so they have to sit next to the agent dir, not in the
+# clone. Runtime state (pane map, session archive) is never copied.
+for sub in sandbox scripts; do
+	src="$SOURCE_DIR/$sub"
+	dst="$HOME/.pi/$sub"
+	if [ -d "$src" ] && [ "$src" != "$dst" ]; then
+		mkdir -p "$dst"
+		cp -R "$src/." "$dst/"
+		rm -f "$dst/.agent-panes.json"
+		echo "== copied $sub -> $dst"
+	fi
+done
 
 # --- 2. git hooks ------------------------------------------------------------
 if [ -d "$SOURCE_DIR/git-hooks" ] && [ "$SOURCE_DIR/git-hooks" != "$GIT_HOOKS_DIR" ]; then

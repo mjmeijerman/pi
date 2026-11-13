@@ -1,3 +1,14 @@
+/**
+ * Dictation — press F8 to dictate instead of typing: records the microphone,
+ * transcribes it locally with faster-whisper and inserts the text into the
+ * editor. No audio or text leaves the machine.
+ *
+ * Needs the venv built by `./setup.sh --with-dictation`; without it the
+ * extension reports itself unavailable and the shortcut does nothing.
+ *
+ * Radar basis: #30 local coding models / #19 small language models — speech to
+ * text is a narrow, high-frequency job that runs fine on local hardware.
+ */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
