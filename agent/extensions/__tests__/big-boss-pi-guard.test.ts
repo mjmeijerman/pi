@@ -106,19 +106,23 @@ describe("big-boss-pi-guard: worker sessions", () => {
 
 describe("big-boss-pi-guard: the handler", () => {
 	test("write and edit are blocked inside the workspace", async () => {
-		const { emit, ctx, notices } = setup("/home/mark/big-boss-pi");
-		for (const toolName of ["write", "edit"]) {
-			const [result] = await emit("tool_call", { toolName, input: { path: "x.md" } }, ctx);
-			assert.equal(result?.block, true, `${toolName} should be blocked`);
-		}
-		assert.match(notices[0].message, /delegation/);
+		await asBoss(async () => {
+			const { emit, ctx, notices } = setup("/home/mark/big-boss-pi");
+			for (const toolName of ["write", "edit"]) {
+				const [result] = await emit("tool_call", { toolName, input: { path: "x.md" } }, ctx);
+				assert.equal(result?.block, true, `${toolName} should be blocked`);
+			}
+			assert.match(notices[0].message, /delegation/);
+		});
 	});
 
 	test("a shell write into the rollback copy is blocked too", async () => {
-		const { emit, ctx } = setup("/home/mark/big-boss-pi");
-		const [result] = await emit("tool_call", { toolName: "bash", input: { command: "rm -rf /home/mark/pi-master/state" } }, ctx);
-		assert.equal(result?.block, true);
-		assert.match(result.reason, /pi-master/);
+		await asBoss(async () => {
+			const { emit, ctx } = setup("/home/mark/big-boss-pi");
+			const [result] = await emit("tool_call", { toolName: "bash", input: { command: "rm -rf /home/mark/pi-master/state" } }, ctx);
+			assert.equal(result?.block, true);
+			assert.match(result.reason, /pi-master/);
+		});
 	});
 
 	test("nothing is blocked when the cwd is outside the workspace", async () => {
