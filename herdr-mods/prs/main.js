@@ -9,7 +9,9 @@
  * Right, below the diff: a note field with Approve / Request changes / Comment,
  * and four buttons that open a new space with a pi agent already told what to
  * do — review the PR, fix the pipeline, fix the merge conflicts, fix the review
- * comments.
+ * comments. That agent starts in the big-boss-pi workspace, which is where
+ * delegation works: it hands the job to a worker whose cwd is the PR's clone,
+ * instead of doing the work itself inside the clone.
  *
  * Keys: ↑/↓ move · a/x/c review · m merge (twice) · o browser · r refresh ·
  * esc cancel · 1..4 the four agent actions.
@@ -54,6 +56,14 @@ const REVIEW_ROWS = 4;
 /** Alpha suffixes on the theme's green and red: readable, not faded. */
 const ADD_TINT = "52";
 const DEL_TINT = "52";
+
+/**
+ * Where every agent space starts: the big-boss-pi workspace, never the PR's own
+ * clone. That workspace's AGENTS.md makes its agent pass the work to a worker
+ * with the clone as the worker's cwd. An agent started inside the clone skips
+ * the delegation and does the work itself.
+ */
+const AGENT_FOLDER = "/home/mark/big-boss-pi";
 
 /** Finds a local clone by name, in the home directory, a dotted one, or one folder down. */
 const FIND_CLONE = `
@@ -131,12 +141,14 @@ function parseDiff(text) {
 	return rows.map((row, at) => ({ ...row, at }));
 }
 
-/** What each of the four agent actions is asked to do. */
-function task(kind, pr, quote) {
+/** What each of the four agent actions is asked to do, and which clone to point a worker at. */
+function task(kind, pr, quote, folder) {
 	const head = `Pull request ${pr.repo}#${pr.number} — ${pr.title}`;
 	const repo = pr.repo;
 	const n = pr.number;
-	const common = `\n\nWork in this folder. Never merge, never push to the trunk branch, and leave a one-line summary when you stop.`;
+	const clone = folder ?? `${home()}/code/${repo.split("/")[1]}`;
+	const missing = folder ? "" : ` That clone does not exist yet: \`gh repo clone ${repo} ${clone}\` first.`;
+	const common = `\n\nYou start in ${AGENT_FOLDER}, so this is a job for a worker: hand it over with \`delegate spawn --cwd ${clone}\`, the clone the work happens in.${missing} Never merge, never push to the trunk branch, and leave a one-line summary when you stop.`;
 	if (kind === "review")
 		return `${head}\n\nReview it. Read \`gh pr view ${n} -R ${repo}\` and \`gh pr diff ${n} -R ${repo}\`, and read the code around the change before judging it. Then post one review: \`gh pr review ${n} -R ${repo} --comment --body-file -\` (use --request-changes if something must change before it lands), naming the files and lines you are unsure about. Do not touch the code.${common}`;
 	if (kind === "checks")
@@ -591,16 +603,17 @@ export default class PullRequests extends View {
 	spawnAgent(kind, pr, quote, cx) {
 		this.error = "";
 		cx.spawn(async (cx) => {
+			// The clone is located only to be named: the agent runs in AGENT_FOLDER and
+			// must hand the work to a worker whose cwd is that clone.
 			const folder = await this.folderFor(pr.repo);
 			const argv = [await this.piPath()];
 			const name = `${pr.repo.split("/")[1]}#${pr.number} ${kind === "line" ? "note" : kind}`;
-			const where = folder ?? home();
-			const text = task(kind, pr, quote) + (folder ? "" : `\n\nThere is no local clone of ${pr.repo} yet: \`gh repo clone ${pr.repo} ${home()}/code/${pr.repo.split("/")[1]}\`, then work there.`);
+			const text = task(kind, pr, quote, folder);
 			try {
-				run("space.new", { name, folder: where, argv, task: text });
-				this.notice = `${this.notice ? this.notice + " · " : ""}started ${name} in a new space${folder ? ` (${folder})` : ""}`;
+				run("space.new", { name, folder: AGENT_FOLDER, argv, task: text });
+				this.notice = `${this.notice ? this.notice + " · " : ""}started ${name} in ${AGENT_FOLDER}${folder ? `, to delegate into ${folder}` : `, to clone ${pr.repo} first`}`;
 			} catch (e) {
-				this.error = `could not start the agent: ${e}`;
+				this.error = `could not start ${name} in ${AGENT_FOLDER}: ${e}`;
 			}
 			cx.notify();
 		});
