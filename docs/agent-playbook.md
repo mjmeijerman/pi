@@ -1,5 +1,9 @@
 # Working with coding agents — playbook
 
+Owner: Mark Meijerman (`mjmeijerman`)
+Review: 2027-02-13 — quarterly, alongside the Radar audit (`docs/radar-conformance.md` §6).
+Delete a rule that no longer earns its place (blips 36, 39).
+
 For one developer running several Pi sessions on one machine. Every rule here maps to a
 Radar Vol. 35 blip (see `radar-conformance.md`), and to a command that exists in this repo.
 When a rule and reality part ways, delete the rule — instruction bloat is blip 36.
@@ -26,15 +30,15 @@ the only step that makes the next session better than this one.
 | Directory | Start in the repo you are changing, not `~` | Project config comes from `<cwd>/.pi`; starting in `~` loads nothing project-specific and used to trigger the stale `tools/` warning |
 | Model | Default `deepseek-flash`; `qwen3.8:27b` for chores via `local_llm` | Blip 40: frontier by default is the mistake being avoided |
 | Thinking level | `medium` for edits, `high` only for design and debugging | Thinking tokens bill as output |
-| Trust | Unfamiliar repo or fresh clone → `~/.pi/sandbox/pi-sandbox.sh -- pi` | Blip 1: sandboxing is Adopt, and it is opt-in here |
+| Trust | Unfamiliar repo or fresh clone → `pisandbox -- pi` (alias, `sandbox/README.md`) | Blip 1: sandboxing is Adopt, and it is opt-in here |
 | Task size | One PR per session | A session that produced two PRs produced one PR nobody reviewed properly |
 
 Sandbox choices:
 
 ```bash
-~/.pi/sandbox/pi-sandbox.sh -- pi                     # no SSH keys, no cloud creds, network on
-~/.pi/sandbox/pi-sandbox.sh --no-net -- pi            # also no network
-~/.pi/sandbox/pi-sandbox.sh --rw ~/scratch -- pi      # one extra writable dir
+pisandbox -- pi                         # no SSH keys, no cloud creds, network on
+pisandbox --no-net -- pi                # also no network
+pisandbox --rw ~/scratch -- pi          # one extra writable dir
 ```
 
 ## 2. Grill before you build
@@ -42,9 +46,9 @@ Sandbox choices:
 Blip 13: the agent interviews you about the plan before acting. Guessing is the default
 failure mode, and it is expensive — a wrong plan survives implementation, review and merge.
 
-Ask for it explicitly:
-
-> Grill me on this: ask one question at a time until nothing is ambiguous, then write the plan.
+Ask for it explicitly: `/grill` (`agent/prompts/grill.md`). It asks one question at a
+time until nothing is ambiguous, then writes the plan. Say "grill me on this" if you prefer
+the words — it runs the same prompt.
 
 Good questions you should be able to answer before code:
 
@@ -195,9 +199,10 @@ lint rule) → then an instruction. Instructions are the weakest enforcement you
    anything that was pasted (blips 1, 20).
 2. **Sandbox unfamiliar code.** A fresh clone with a `package.json` postinstall script is
    equivalent to running a stranger's code with your SSH keys.
-3. **Set a package release age.** `npm config set minimum-release-age 2880` blocks versions
+3. **Set a package release age.** `npm config set min-release-age 2880` blocks versions
    published in the last 48 hours (blip 99). Cheap, and it defuses the fastest supply-chain
-   attacks.
+   attacks. The key is `min-release-age`: npm 11.20 rejects `minimum-release-age` as an
+   unknown option. Check it with `npm config get min-release-age` → `2880`.
 4. **Approve actions, not vibes.** If you cannot evaluate what you are approving, escalate
    the review tier or reject the action.
 5. **Read what you forward.** Passing agent output to a colleague unread makes you a meat
@@ -220,8 +225,9 @@ lint rule) → then an instruction. Instructions are the weakest enforcement you
 ```bash
 # sessions
 pi                                    # interactive, in this directory
-~/.pi/sandbox/pi-sandbox.sh -- pi      # same, sandboxed
+pisandbox -- pi                        # same, sandboxed
 ~/.pi/scripts/agent-pane.sh spawn s spec.md && ~/.pi/scripts/agent-pane.sh list
+/grill                                 # interview the plan before coding (blip 13)
 
 # git / GitHub
 git switch -c feat/short-name
@@ -231,6 +237,8 @@ gh pr checks <n>
 # harness maintenance
 /suggest <what got in the way>
 /retro
+scripts/harness-check.sh               # skill/AGENTS.md budget check (automation PR)
+make mutate                            # mutation tests, incremental (blip 2)
 /secretguard status        # session secret-guard state
 /mergeguard allow          # one merge, only after an explicit yes
 

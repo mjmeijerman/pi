@@ -6,8 +6,9 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 
 | Path | What |
 |---|---|
-| `agent/skills/` | pi skills: `cost-optimizer`, `secret-guard`, `ethical-hacker`, `gh-repo-scan`, `questionnaire`, `ui-ux` |
-| `agent/extensions/` | always-on extensions: `cost-optimizer`, `secret-guard`, `merge-guard`, `om-autostart`, `dictation`, `usage-footer` |
+| `agent/skills/` | 8 pi skills: `achterhoek-agenda`, `cost-optimizer`, `ethical-hacker`, `gh-repo-scan`, `github-workflow`, `questionnaire`, `secret-guard`, `ui-ux` |
+| `agent/extensions/` | 10 always-on extensions: `cost-optimizer`, `desktop-notify`, `dictation`, `feedback-flywheel`, `herdr-agent-state` (installed by herdr), `local-llm`, `merge-guard`, `om-autostart`, `secret-guard`, `usage-footer` |
+| `agent/prompts/` | prompt templates: `/grill` (interview the plan before coding, blip 13) |
 | `git-hooks/` | global secret-scan hooks (`pre-commit`, `commit-msg`, `pre-push`) + installer |
 | `git-vuln-scan` | pre-push agent vulnerability scan (GitHub pushes) |
 | `git-templates/` | `git init` template that installs the vuln-scan hook into new repos |
@@ -18,7 +19,7 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 | `docs/` | Radar conformance audit and the agent working playbook |
 | `install.sh` | config + hooks only, non-interactive |
 | `setup.sh` | full provisioning on a new machine: packages, API key, pi packages, optional model/venv, verification |
-| `Makefile` | `setup` / `bootstrap` / `verify` / `hooks` / `update` / `uninstall` |
+| `Makefile` | `setup` / `bootstrap` / `verify` / `hooks` / `update` / `uninstall`, plus `mutate` / `mutate-full` for mutation testing (blip 2) |
 
 ## Rebuild this exact machine on another PC
 
@@ -33,7 +34,7 @@ pi
 
 `setup.sh` is the whole story: it asks for the API key, installs the system
 packages it can, puts config and hooks on disk, reconciles the pi packages named
-in `settings.json`, and then verifies the result (sandbox selftest, 215 extension
+in `settings.json`, and then verifies the result (sandbox selftest, 224 extension
 tests, hook paths, key present). Read it before running it — 300 lines, no
 network calls except apt, `pi update` and the optional model pull.
 
@@ -154,7 +155,7 @@ It is idempotent — re-run it any time, including when you suspect the hooks ar
 
 ## Following the Technology Radar
 
-The harness is deliberately shaped by the [Thoughtworks Technology Radar](https://www.thoughtworks.com/radar) — currently **Volume 35, November 2026**. The rules in `agent/AGENTS.md` cite blip numbers, and each change here should trace back to one.
+The harness is deliberately shaped by the [Thoughtworks Technology Radar](https://www.thoughtworks.com/radar) — currently **Volume 35, November 2026**. `agent/AGENTS.md` names the Radar as the source of every harness rule, and each change here should trace back to the blips in the table below; the per-blip audit is `docs/radar-conformance.md`.
 
 Where this repo came from, in Radar terms:
 
