@@ -9,10 +9,29 @@
   "defaultModel": "deepseek-flash",
   "packages": [
     "https://github.com/ayghri/i-have-adhd",
-    "npm:pi-web-access"
+    "npm:pi-web-access",
+    "git:https://github.com/michielpapenhove/pi-observational-memory.git"
   ],
   "extensionChangelogVersions": {
     "{\"source\":\"npm:pi-web-access\",\"scope\":\"user\"}": "0.47.0"
   },
-  "hideThinkingBlock": true
+  "hideThinkingBlock": true,
+  "observational-memory": {
+    "compactAtContextTokens": 120000,
+    "tailTokens": 20000,
+    "maxTailTokens": 40000,
+    "debugLog": false,
+    "models": {
+      "observer": {
+        "provider": "deepseek",
+        "id": "deepseek-flash",
+        "thinking": "medium"
+      },
+      "consolidator": {
+        "provider": "deepseek",
+        "id": "deepseek-flash",
+        "thinking": "high"
+      }
+    }
+  }
 }
