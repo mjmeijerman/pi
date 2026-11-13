@@ -64,10 +64,25 @@ secrets and no system packages (`--no-apt --no-verify`).
 
 ### Herdr window
 
-`herdr-mods/prs` is a mod for the Herdr app: one pane listing every open PR you
-authored, newest activity first, with checks and conflicts on the row. Enter
-merges (squash, delete branch) after a second press; `o` opens it; `r`
-refreshes every two minutes on its own.
+`herdr-mods/prs` is a mod for the Herdr app: one pane listing the pull
+requests waiting for your review, then your own, newest activity first, with
+checks and conflicts on the row.
+
+| key | does |
+| --- | --- |
+| `↑` `↓` / `j` `k` | move |
+| `enter` | open the diff |
+| `m` | merge (squash, delete branch) — press twice |
+| `a` | approve — press twice, note optional |
+| `x` | request changes — needs a note |
+| `c` | comment — needs a note |
+| `o` | open the PR in the browser |
+| `r` | refresh (it also repolls every two minutes) |
+| `esc` | back from the diff, cancel |
+
+Review actions need a note for `x` and `c`; typing it in and pressing Enter
+sends it. GitHub refuses reviews on your own pull requests, so a row you
+authored says so instead of failing.
 
 It lives in the `Apps` space, `Pull requests` tab. Rebuild on a new machine:
 `install.sh` copies the folder into `$HOME/.config/herdr-app/mods/` when the app
@@ -77,6 +92,8 @@ edited the mod in place). Then:
 ```bash
 herdr-app do space.new --name Apps --folder "$HOME"
 herdr-app do tab.new --space <space-id> --name "Pull requests" --mod prs
+# a pane that opens straight on one diff:
+herdr-app do tab.new --space <space-id> --name "PR diff" --mod prs --props '{"open":"owner/repo#12"}'
 ```
 
 ### What is not in git, and why
