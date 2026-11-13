@@ -167,6 +167,39 @@ for d in "$home/.local/share/pipx" "$home/.local/share/uv"; do
 	fi
 done
 
+# A symlink in ~/.local/bin can point outside every tree bound so far: jev and
+# local-run are symlinks into ~/big-boss-pi/bin, so inside the sandbox the link
+# dangled and a worker's mandatory `jev route` check died with "command not
+# found". Bind the resolved target's directory read-only: jev.mjs imports its
+# sibling jev-model.mjs, so binding the single file is not enough, and the
+# surrounding repo stays unmounted — nothing under ~/big-boss-pi is writable
+# and no tree is handed out beyond the directory the binary actually lives in.
+link_dirs=()
+covered_link_dir() {
+	local d=$1 x
+	for x in "$home/.local/bin" "$home/.local/share/pipx" "$home/.local/share/uv" "$home/.pi"; do
+		case $d in "$x" | "$x"/*) return 0 ;; esac
+	done
+	for x in "$node_prefix" "$pi_prefix"; do
+		case $d in "$x" | "$x"/*) return 0 ;; esac
+	done
+	return 1
+}
+for link in "$home/.local/bin"/*; do
+	[ -L "$link" ] || continue
+	resolved=$(readlink -f -- "$link" 2>/dev/null) || continue
+	[ -e "$resolved" ] || continue
+	dir=$(dirname -- "$resolved")
+	too_broad "$dir" && continue
+	path_covered_ro "$dir" && continue
+	covered_link_dir "$dir" && continue
+	link_dirs+=("$dir")
+done
+if [ "${#link_dirs[@]}" -gt 0 ]; then
+	while IFS= read -r d; do args+=(--ro-bind "$d" "$d"); done \
+		< <(printf '%s\n' "${link_dirs[@]}" | sort -u)
+fi
+
 args+=(--tmpfs /tmp --dev /dev --proc /proc)
 
 # Read-write: pi's own config/state directory, git identity, project trees.

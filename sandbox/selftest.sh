@@ -154,9 +154,10 @@ else
 	bad "network allowed by default" "curl exited $rc"
 fi
 
-# 11. the rest of the home directory simply is not there.
+# 11. the rest of the home directory simply is not there. big-boss-pi appears as a
+#     mountpoint for its bin directory (see 17); only that subdirectory is real.
 out=$(inside --exec -- sh -c 'ls /home/mark' 2>&1)
-allowed='^(achterhoek-uitagenda|pi-projects|projects|git-templates|gitconfig|pi)$'
+allowed='^(achterhoek-uitagenda|pi-projects|projects|git-templates|gitconfig|pi|big-boss-pi)$'
 unexpected=$(printf '%s\n' "$out" | sed 's/^\.//' | grep -v -E "$allowed" || true)
 if [ -z "$unexpected" ]; then
 	ok "only the allow-listed home entries are visible"
@@ -230,6 +231,26 @@ case $out in
 	;;
 *) bad "gh inside the sandbox has no stored credentials" "${out:-no output}" ;;
 esac
+
+# 17. jev answers the route check inside. It is a symlink into ~/big-boss-pi/bin,
+#     outside every other read-only bind, so a dangling link here is a harness
+#     defect: the routing check is mandatory before a worker starts.
+out=$(inside --exec -- sh -c "jev route 'summarise this log entry' 2>&1")
+rc=$?
+case $out in
+*'jev: local'* | *'jev: remote'*) ok "jev answers the route check inside the sandbox ($out)" ;;
+*) bad "jev answers the route check inside the sandbox" "rc=$rc ${out:-no output}" ;;
+esac
+
+# 18. ... and the rest of that repo stays hidden: binding the bin directory must
+#     not become binding ~/big-boss-pi.
+out=$(inside --exec -- sh -c 'ls -A /home/mark/big-boss-pi 2>&1' 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] && [ "$out" = bin ]; then
+	ok "only ~/big-boss-pi/bin is mounted, not the repo"
+else
+	bad "only ~/big-boss-pi/bin is mounted, not the repo" "rc=$rc ${out:-no output}"
+fi
 
 printf '\n'
 if [ "$failures" -eq 0 ]; then
