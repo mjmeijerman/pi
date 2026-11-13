@@ -12,7 +12,7 @@
  */
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, nextCommand, theme } from "herdr";
+import { exec, home, nextCommand, theme } from "herdr";
 
 const QUERY = `query($n: Int!) {
   viewer {
@@ -35,6 +35,27 @@ const QUERY = `query($n: Int!) {
 }`;
 
 const CONFIRM_MS = 8000;
+
+/**
+ * Run gh, retrying once with the usual install location. The app is started by
+ * a desktop session, whose PATH is not always the shell's.
+ */
+async function gh(args, timeout) {
+	const first = await exec("gh", args, { timeout });
+	if (first.code !== 127 && !/ENOENT|no such file/i.test(first.stderr)) return first;
+	return exec(`${home()}/.local/bin/gh`, args, { timeout });
+}
+
+/** "3m", "5h", "2d" — a PR list needs recency, not an ISO timestamp. */
+function ago(iso) {
+	const seconds = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+	if (seconds < 90) return "just now";
+	const minutes = Math.round(seconds / 60);
+	if (minutes < 60) return `${minutes}m ago`;
+	const hours = Math.round(minutes / 60);
+	if (hours < 24) return `${hours}h ago`;
+	return `${Math.round(hours / 24)}d ago`;
+}
 
 export default class PullRequests extends View {
   init(_props, cx) {
@@ -60,9 +81,7 @@ export default class PullRequests extends View {
 
   refresh(cx) {
     cx.spawn(async (cx) => {
-      const result = await exec("gh", ["api", "graphql", "-f", `query=${QUERY}`, "-F", "n=40"], {
-        timeout: 60000,
-      });
+      const result = await gh(["api", "graphql", "-f", `query=${QUERY}`, "-F", "n=40"], 60000);
       if (result.code !== 0) {
         this.error = (result.stderr || "gh api graphql failed").trim().split("\n")[0];
       } else {
@@ -78,7 +97,7 @@ export default class PullRequests extends View {
             review: n.reviewDecision,
             mergeable: n.mergeable,
             checks: n.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? "",
-            updated: n.updatedAt,
+            updated: ago(n.updatedAt),
           }));
           this.error = "";
         } catch (e) {
@@ -88,6 +107,17 @@ export default class PullRequests extends View {
       this.loading = false;
       if (this.selected >= this.rows.length) this.selected = Math.max(0, this.rows.length - 1);
       cx.notify();
+    });
+  }
+
+  arm(row, cx) {
+    this.pending = row.key;
+    cx.notify();
+    cx.timer.after(CONFIRM_MS, (cx) => {
+      if (this.pending === row.key) {
+        this.pending = "";
+        cx.notify();
+      }
     });
   }
 
@@ -114,14 +144,7 @@ export default class PullRequests extends View {
         return;
       }
       if (this.pending !== row.key) {
-        this.pending = row.key;
-        cx.notify();
-        cx.timer.after(CONFIRM_MS, (cx) => {
-          if (this.pending === row.key) {
-            this.pending = "";
-            cx.notify();
-          }
-        });
+        this.arm(row, cx);
         return;
       }
       this.pending = "";
@@ -137,10 +160,9 @@ export default class PullRequests extends View {
     this.busy = row.key;
     cx.notify();
     cx.spawn(async (cx) => {
-      const result = await exec(
-        "gh",
+      const result = await gh(
         ["pr", "merge", String(row.number), "-R", row.repo, "--squash", "--delete-branch"],
-        { timeout: 120000 },
+        120000,
       );
       this.busy = "";
       if (result.code !== 0) {
@@ -182,6 +204,7 @@ export default class PullRequests extends View {
       .gap(10)
       .px(8)
       .py(4)
+      .items_center()
       .rounded(6)
       .when(selected, (el) => el.bg(t.selection))
       .when(!selected, (el) => el.hover((s) => s.bg(t.hover)))
@@ -192,19 +215,51 @@ export default class PullRequests extends View {
       })
       .child(div().w(190).flex_shrink_0().text_color(t.muted).truncate().child(`${r.repo}#${r.number}`))
       .child(
-        div()
+        v_flex()
           .flex_1()
           .min_w(0)
-          .truncate()
-          .text_color(r.draft ? t.dim : t.foreground)
-          .child(r.draft ? `draft · ${r.title}` : r.title),
+          .justify_start()
+          .child(
+            div()
+              .truncate()
+              .text_color(r.draft ? t.dim : t.foreground)
+              .child(r.draft ? `draft · ${r.title}` : r.title),
+          )
+          .child(div().text_size(11).text_color(t.dim).child(r.updated)),
       )
       .child(this.badge(checkText, checkColor, t))
       .when(r.review === "APPROVED", (el) => el.child(this.badge("approved", t.done, t)))
       .when(r.review === "CHANGES_REQUESTED", (el) => el.child(this.badge("changes asked", t.blocked, t)))
       .when(r.mergeable === "CONFLICTING", (el) => el.child(this.badge("conflict", mergeColor, t)))
       .when(merging, (el) => el.child(this.badge("merging…", t.working, t)))
-      .when(pending, (el) => el.child(this.badge("enter again to merge", t.working, t)));
+      .when(
+        !merging,
+        (el) =>
+          el.child(
+            div()
+              .id(`merge-${r.key}`)
+              .px(8)
+              .py(2)
+              .rounded(4)
+              .text_size(11)
+              .bg(pending ? t.working : t.raised)
+              .text_color(pending ? t.background : t.muted)
+              .hover((s) => s.bg(pending ? t.working : t.hover))
+              .on_click((_e, cx) => {
+                this.selected = index;
+                if (this.pending === r.key) {
+                  this.pending = "";
+                  this.merge(r, cx);
+                } else {
+                  this.pending = r.key;
+                  this.arm(r, cx);
+                }
+                cx.stop_propagation();
+                cx.notify();
+              })
+              .child(pending ? "confirm merge" : "merge"),
+          ),
+      );
   }
 
   render(cx) {
