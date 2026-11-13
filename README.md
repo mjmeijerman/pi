@@ -98,7 +98,7 @@ trunk.
 | `[` `]` | move the line cursor without the mouse |
 | `post comment` in that box | posts the text as a review comment on that line and starts an agent that fixes it; the line stays picked |
 | `a` `x` `c` | approve · request changes · comment (note required for the last two; `x` and `c` also start an agent on the comments) |
-| `m` | merge, squash — press twice. Afterwards the local clone's trunk is fast-forwarded and the merged branch is deleted there |
+| `m` | merge, squash — press twice. The row leaves the list the moment GitHub confirms it, then the local clone's trunk is fast-forwarded and the merged branch is deleted there |
 | `1` `2` `3` `4` | the four agent actions |
 | `o` | open the PR in the browser |
 | `r` | refresh (it also repolls every two minutes) |
