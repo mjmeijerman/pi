@@ -12,9 +12,14 @@
 #   - ~/.pi/sandbox and ~/.pi/scripts (referenced by AGENTS.md as absolute paths)
 #   - global git hooks: secret scans on pre-commit, commit-msg, and pre-push
 #   - global gitignore for secret files
+#   - herdr-app, the Herdr desktop app (prebuilt binary, vendor installer)
+#   - the big-boss-pi delegation workspace: the private repo clone, the bin
+#     symlinks (jev, delegate, local-run) and its systemd user unit (the guard)
 #
 # Idempotent. Never touches auth.json, sessions, bin, models-store.json.
 # Override target with PI_AGENT_DIR=/path/to/agent.
+# Overrides: PI_SKIP_SYSTEMD=1 (copy the guard unit, do not enable it),
+#            PI_BOSS_DIR=/path/to/workspace (default ~/big-boss-pi).
 # ============================================================================
 set -euo pipefail
 
@@ -290,6 +295,97 @@ if [ -f "$HOME/.git-templates/hooks/pre-push" ]; then
 	echo "== git template hooks: $(git config --global --get init.templateDir)"
 fi
 
+# --- 5. herdr-app ------------------------------------------------------------
+# herdr-app is a prebuilt binary with no source tree on this machine, so the
+# vendor installer is the only supported way to get it. Everything else in the
+# Herdr menu assumes the ~/.local/bin/herdr-app symlink exists.
+HEDR_APP_INSTALLER="https://releases.herdr.dev/app/install.sh"
+HEDR_APP_BIN="$HOME/.local/share/herdr-app/herdr-app"
+if [ -x "$HEDR_APP_BIN" ]; then
+	echo "== herdr-app already installed -> $HEDR_APP_BIN"
+else
+	if ! command -v curl >/dev/null 2>&1; then
+		echo "!! curl not found — cannot install herdr-app, skipping"
+	else
+		echo "== installing herdr-app from $HEDR_APP_INSTALLER"
+		if curl -fsSL "$HEDR_APP_INSTALLER" | sh; then
+			echo "== herdr-app installed -> $HEDR_APP_BIN"
+		else
+			echo "!! herdr-app installer failed — install it by hand from $HEDR_APP_INSTALLER"
+		fi
+	fi
+fi
+if [ -x "$HEDR_APP_BIN" ]; then
+	mkdir -p "$PI_BIN_DIR"
+	ln -sf "$HEDR_APP_BIN" "$PI_BIN_DIR/herdr-app"
+	echo "== herdr-app -> $PI_BIN_DIR/herdr-app"
+else
+	echo "!! $HEDR_APP_BIN missing — skipped the herdr-app symlink"
+fi
+
+# --- 5b. big-boss-pi delegation workspace ------------------------------------
+# A private repo, cloned once and never created from here: making the remote is
+# a decision for the person, not something an installer should do on a typo.
+BOSS_REPO="${BOSS_REPO:-mjmeijerman/big-boss-pi}"
+BOSS_DIR="${PI_BOSS_DIR:-$HOME/big-boss-pi}"
+if [ -d "$BOSS_DIR" ]; then
+	echo "== big-boss-pi workspace already present -> $BOSS_DIR"
+elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+	echo "== cloning $BOSS_REPO via gh -> $BOSS_DIR"
+	if ! gh repo clone "$BOSS_REPO" "$BOSS_DIR"; then
+		echo "!! gh clone failed — clone it by hand: gh repo clone $BOSS_REPO $BOSS_DIR"
+	fi
+else
+	echo "== cloning $BOSS_REPO over SSH -> $BOSS_DIR"
+	if ! git clone "git@github.com:$BOSS_REPO.git" "$BOSS_DIR"; then
+		echo "!! clone failed — check your SSH key, or: gh repo clone $BOSS_REPO $BOSS_DIR"
+	fi
+fi
+
+# --- 5c. big-boss-pi binaries ------------------------------------------------
+# The workspace's own bin/ scripts, on PATH under their bare names: AGENTS.md
+# and every spec call them as `jev`, `delegate` and `local-run`.
+if [ -d "$BOSS_DIR/bin" ]; then
+	for b in jev delegate local-run; do
+		if [ -x "$BOSS_DIR/bin/$b" ]; then
+			mkdir -p "$PI_BIN_DIR"
+			ln -sf "$BOSS_DIR/bin/$b" "$PI_BIN_DIR/$b"
+			echo "== $b -> $PI_BIN_DIR/$b"
+		else
+			echo "!! $BOSS_DIR/bin/$b missing — skipped its symlink"
+		fi
+	done
+else
+	echo "!! $BOSS_DIR/bin missing — skipped the jev/delegate/local-run symlinks"
+fi
+
+# --- 5d. big-boss-pi guard unit ----------------------------------------------
+# The unit in the repo is the source of truth and uses %h; systemd expands that
+# itself, but the installed copy is also what people read and diff, so write the
+# real home directory into it.
+BOSS_UNIT_SRC="$BOSS_DIR/systemd/big-boss-pi-guard.service"
+SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+BOSS_UNIT_DST="$SYSTEMD_USER_DIR/big-boss-pi-guard.service"
+if [ -f "$BOSS_UNIT_SRC" ]; then
+	mkdir -p "$SYSTEMD_USER_DIR"
+	sed "s|%h|$HOME|g" "$BOSS_UNIT_SRC" >"$BOSS_UNIT_DST"
+	echo "== big-boss-pi guard unit -> $BOSS_UNIT_DST"
+	if [ "${PI_SKIP_SYSTEMD:-}" = 1 ]; then
+		echo "== PI_SKIP_SYSTEMD=1 — not enabling big-boss-pi-guard.service"
+	elif command -v systemctl >/dev/null 2>&1 && [ -d "/run/user/$(id -u)" ]; then
+		systemctl --user daemon-reload || echo "!! systemctl --user daemon-reload failed"
+		if systemctl --user enable --now big-boss-pi-guard.service; then
+			echo "== big-boss-pi guard enabled and running (big-boss-pi-guard.service)"
+		else
+			echo "!! could not enable big-boss-pi-guard.service — run: systemctl --user enable --now big-boss-pi-guard.service"
+		fi
+	else
+		echo "!! no systemd user session — unit copied, enable it after login: systemctl --user enable --now big-boss-pi-guard.service"
+	fi
+else
+	echo "!! $BOSS_UNIT_SRC not found — skipped the big-boss-pi guard unit"
+fi
+
 echo
 echo "Done. Restart pi (or run /reload) to load the extensions."
 echo
@@ -301,6 +397,12 @@ echo "   git config --global --get init.templateDir          # pre-push vuln sca
 echo "   git-vuln-scan                                       # should print usage help"
 echo "   pisandbox --help                                    # sandbox one-liner"
 echo "   pi-bare --version                                   # unsandboxed, for the Herdr menu"
+echo "   herdr-app --version                                 # Herdr desktop app"
+echo "   jev count \"split this task\"                          # delegation workspace on PATH"
+echo "   systemctl --user status big-boss-pi-guard.service    # workspace guard running"
 echo "   bash scripts/harness-check.sh                        # harness budgets as checks"
 echo
 echo "Reminder if you ever forget the hooks: just run this script again."
+echo
+echo "To turn the workspace guard off:"
+echo "   systemctl --user disable --now big-boss-pi-guard.service"
