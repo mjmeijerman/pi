@@ -21,7 +21,7 @@
  * acts on it is visible in its own space instead of behind a button.
  */
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, Input, InputState, ScrollHandle, Scrollbar } from "gpui-base";
+import { v_flex, h_flex, ScrollHandle, Scrollbar, Textarea, TextareaState } from "gpui-base";
 import { appHome, exec, home, nextCommand, props, run, settings, theme, writeTextFile } from "herdr";
 
 const FRAGMENT = `fragment PR on PullRequest {
@@ -48,6 +48,9 @@ const CONFIRM_MS = 8000;
 const MAX_DIFF_LINES = 4000;
 // Rendered without virtualization: rows need their own click handler.
 const SHOWN_LINES = 2000;
+// Both note boxes stop growing at four rows and scroll inside instead.
+const LINE_ROWS = 4;
+const REVIEW_ROWS = 4;
 /** Alpha suffixes on the theme's green and red: readable, not faded. */
 const ADD_TINT = "52";
 const DEL_TINT = "52";
@@ -173,9 +176,15 @@ export default class PullRequests extends View {
 		this.collapsed = new Set();
 		this.tmp = `${appHome()}/review-note.json`;
 		this.tmpLast = null;
-		this.note = InputState.new({ placeholder: "Note — Enter sends it with the review" });
-		this.note.on("change", () => cx.notify());
-		this.note.on("submit", (_e, cx) => this.sendReview(cx));
+		// Enter is a newline in both boxes: posting is only ever a button.
+		this.note = TextareaState.new({ placeholder: "Review note — Enter starts a new line", rows: 1 });
+		this.note.set_auto_grow(1, REVIEW_ROWS);
+		this.note.set_soft_wrap(true);
+
+		this.lineNote = TextareaState.new({ placeholder: "Comment on this line — Enter starts a new line", rows: 1 });
+		this.lineNote.set_auto_grow(1, LINE_ROWS);
+		this.lineNote.set_soft_wrap(true);
+
 		this.refresh(cx);
 		const start = props()?.open;
 		if (start) cx.timer.after(1200, (cx) => this.select(start, cx));
@@ -386,30 +395,45 @@ export default class PullRequests extends View {
 		// so "was anything of mine still only here" = where it pointed upstream.
 		const remoteTip = (await git("rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`)).stdout.trim();
 		const localTip = (await git("rev-parse", "--verify", "--quiet", `refs/heads/${branch}`)).stdout.trim();
-		const dirty = (await git("status", "--porcelain")).stdout.trim();
-		const current = (await git("rev-parse", "--abbrev-ref", "HEAD")).stdout.trim();
+		// Untracked files do not block a checkout, so they must not count as dirty here.
+		const dirty = (await git("status", "--porcelain", "--untracked-files=no")).stdout.trim();
+		let current = (await git("rev-parse", "--abbrev-ref", "HEAD")).stdout.trim();
 		await git("fetch", "--prune", "origin");
-		let onBase = current === base;
-		if (current === branch && !dirty) onBase = (await git("checkout", base)).code === 0;
-		if (onBase) {
-			const pulled = await git("merge", "--ff-only", `origin/${base}`);
-			said.push(pulled.code === 0 ? `${base} updated` : `${base} not fast-forwarded`);
-		} else if (current !== branch) {
-			const behind = await git("merge-base", "--is-ancestor", base, `origin/${base}`);
-			if (behind.code !== 0) said.push(`${base} not a fast-forward, left alone`);
-			else if ((await git("branch", "-f", base, `origin/${base}`)).code === 0) said.push(`${base} updated (not checked out)`);
-			else said.push(`${base} could not be moved`);
-		} else said.push(`${base} not updated (still on ${branch})`);
-		if (!branch) return said.join(" · ");
-		if (branch === base) {
-			said.push(`${branch} is the trunk branch, nothing to delete`);
-			return said.join(" · ");
+
+		/** Bring the trunk branch up to date, checked out or not, and say what happened. */
+		const updateBase = async () => {
+			current = (await git("rev-parse", "--abbrev-ref", "HEAD")).stdout.trim();
+			if (current === base) {
+				const pulled = await git("merge", "--ff-only", `origin/${base}`);
+				return pulled.code === 0 ? `${base} updated` : `${base} not fast-forwarded, left alone`;
+			}
+			const exists = (await git("rev-parse", "--verify", "--quiet", `refs/heads/${base}`)).code === 0;
+			if (!exists) {
+				const made = await git("branch", base, `origin/${base}`);
+				return made.code === 0 ? `${base} created from origin` : `${base} missing and could not be created`;
+			}
+			const ancestor = await git("merge-base", "--is-ancestor", base, `origin/${base}`);
+			if (ancestor.code !== 0) return `${base} has local commits, left alone`;
+			const moved = await git("branch", "-f", base, `origin/${base}`);
+			return moved.code === 0 ? `${base} updated (not checked out)` : `${base} could not be moved`;
+		};
+
+		const onBranch = current === branch;
+		if (onBranch && !dirty) {
+			const switched = await git("checkout", base);
+			if (switched.code === 0) current = base;
+			else said.push(`could not switch to ${base}: ${(switched.stderr || "").trim().split("\n")[0]}`);
+		} else if (onBranch && dirty) {
+			said.push(`${branch} has uncommitted changes, staying on it`);
 		}
+		said.push(await updateBase());
+
+		if (!branch || branch === base) return said.join(" · ");
 		if (!localTip) {
 			said.push(`${branch} was not in the clone`);
 			return said.join(" · ");
 		}
-		if (current === branch && !onBase) {
+		if (current === branch) {
 			said.push(`${branch} still checked out, kept`);
 			return said.join(" · ");
 		}
@@ -445,7 +469,7 @@ export default class PullRequests extends View {
 		if (!pr || !kind) return;
 		const body = this.note.value().trim();
 		if (!body && kind !== "approve") {
-			this.error = "this review needs a note — type one, then Enter";
+			this.error = "this review needs a note — type one in the box below";
 			cx.notify();
 			return;
 		}
@@ -480,10 +504,10 @@ export default class PullRequests extends View {
 	postLineNote(cx) {
 		const pr = this.current;
 		const row = this.line;
-		const body = this.note.value().trim();
+		const body = this.lineNote.value().trim();
 		if (!pr || !row) return;
 		if (!body) {
-			this.error = "type the note first, and press Enter";
+			this.error = "type the comment first";
 			cx.notify();
 			return;
 		}
@@ -508,10 +532,10 @@ export default class PullRequests extends View {
 				return;
 			}
 			const quote = { path: row.path, number: row.number, body };
-			this.note.set_value("");
-			this.notice = `note on ${row.path}:${row.number} posted`;
+			this.lineNote.set_value("");
+			this.notice = `comment posted on ${row.path}:${row.number} — the line stays picked`;
 			this.spawnAgent("line", pr, quote, cx);
-			this.handle.focus();
+			cx.timer.after(30, (cx) => this.lineNote.focus());
 		});
 	}
 
@@ -563,7 +587,11 @@ export default class PullRequests extends View {
 		this.line = row;
 		this.error = "";
 		cx.notify();
-		this.note.focus();
+		// The box only exists after this render, so focus arrives a tick later.
+		cx.timer.after(30, (cx) => {
+			this.lineNote.focus();
+			cx.notify();
+		});
 	}
 
 	moveLine(delta, cx) {
@@ -591,8 +619,6 @@ export default class PullRequests extends View {
 			cx.notify();
 		} else if (k === "]") this.moveLine(1, cx);
 		else if (k === "[") this.moveLine(-1, cx);
-		else if (k === "enter" && this.line) this.postLineNote(cx);
-		else if (k === "enter" && this.reviewAction) this.sendReview(cx);
 		else if (k === "a") this.startReview("approve", cx);
 		else if (k === "x") this.startReview("changes", cx);
 		else if (k === "c") this.startReview("comment", cx);
@@ -700,6 +726,51 @@ export default class PullRequests extends View {
 			)
 			.child(div().w(38).flex_none().text_right().pr(6).text_color(t.dim).child(number === undefined ? "" : String(number)))
 			.child(div().pl(8).flex_1().min_w(0).truncate().child(text));
+	}
+
+	/** Under the picked line: a four-row box that keeps Enter for itself, and a post button. */
+	lineEditor(row, t, cx) {
+		return v_flex()
+			.id("prs-line-editor")
+			.w_full()
+			.gap(6)
+			.px(10)
+			.py(8)
+			.flex_none()
+			.bg(t.raised)
+			.border_t_1()
+			.border_b_1()
+			.border_color(t.border)
+			.child(
+				div()
+					.text_size(10.5)
+					.text_color(t.dim)
+					.child(`comment on ${row.path}:${row.number} — Enter starts a new line, the button posts it`),
+			)
+			.child(
+				div()
+					.w(760)
+					.max_w_full()
+					.max_h(LINE_ROWS * 20 + 12)
+					.overflow_y_scrollbar()
+					.rounded(6)
+					.border_1()
+					.border_color(t.input)
+					.bg(t.background)
+					.child(Textarea.new(this.lineNote).id("prs-line-note-input").w_full()),
+			)
+			.child(
+				h_flex()
+					.gap(6)
+					.items_center()
+					.child(this.textButton("prs-line-post", "post comment", (_e, cx) => this.postLineNote(cx), true, t))
+					.child(this.textButton("prs-line-cancel", "cancel", (_e, cx) => {
+						this.line = null;
+						this.handle.focus();
+						cx.notify();
+					}, false, t))
+					.child(div().text_size(10.5).text_color(t.dim).child("the line stays picked after posting")),
+			);
 	}
 
 	groupHeader(group, t, cx) {
@@ -840,7 +911,13 @@ export default class PullRequests extends View {
 													.absolute()
 													.inset_0()
 													.overflow_y_scroll()
-													.children(this.diff.rows.slice(0, SHOWN_LINES).map((row) => this.diffRow(row, t))),
+													.children(
+														this.diff.rows.slice(0, SHOWN_LINES).flatMap((row) => {
+															const out = [this.diffRow(row, t)];
+															if (this.line && this.line.at === row.at) out.push(this.lineEditor(row, t, cx));
+															return out;
+														}),
+													),
 											),
 									),
 					)
@@ -853,44 +930,25 @@ export default class PullRequests extends View {
 					.py(8)
 					.border_t_1()
 					.border_color(t.border)
-					.when(Boolean(this.line), (el) =>
-						el.child(
-							h_flex()
-								.gap(8)
-								.items_center()
-								.text_size(11)
-								.child(div().text_color(t.solid).font_semibold().child(`note on ${this.line.path}:${this.line.number}`))
-								.child(div().text_color(t.dim).child("Enter posts it as a review comment and starts an agent to fix it"))
-								.child(this.textButton("prs-line-clear", "cancel", (_e, cx) => {
-									this.line = null;
-									this.handle.focus();
-									cx.notify();
-								}, false, t)),
-						),
+					.child(div().text_size(10.5).text_color(t.dim).child("review note for the whole PR — Enter starts a new line, the buttons post it"))
+					.child(
+						div()
+							.w_full()
+							.max_h(REVIEW_ROWS * 20 + 12)
+							.overflow_y_scrollbar()
+							.rounded(6)
+							.border_1()
+							.border_color(t.input)
+							.bg(t.background)
+							.child(Textarea.new(this.note).id("prs-review-note-input").w_full()),
 					)
 					.child(
 						h_flex()
 							.gap(6)
 							.items_center()
-							.child(
-								Input.new(this.note)
-									.h(28)
-									.px(8)
-									.rounded(6)
-									.border_1()
-									.border_color(t.input)
-									.bg(t.background)
-									.text_size(12)
-									.text_color(t.foreground),
-							)
-							.when(Boolean(this.line), (el) =>
-								el.child(this.textButton("prs-line-note", "note + agent", (_e, cx) => this.postLineNote(cx), true, t)),
-							)
-							.when(!this.line, (el) =>
-								el.child(this.textButton("prs-approve", "approve", (_e, cx) => this.startReview("approve", cx), false, t)),
-							)
+							.child(this.textButton("prs-approve", "approve", (_e, cx) => this.startReview("approve", cx), false, t))
 							.child(this.textButton("prs-changes", "request changes", (_e, cx) => this.startReview("changes", cx), false, t))
-							.child(this.textButton("prs-comment", "comment", (_e, cx) => this.startReview("comment", cx), false, t)),
+							.child(this.textButton("prs-comment", "post comment", (_e, cx) => this.startReview("comment", cx), true, t)),
 					)
 					.child(
 						h_flex()
