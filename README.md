@@ -68,11 +68,12 @@ secrets and no system packages (`--no-apt --no-verify`).
 the diff on the right, and what you do about it underneath.
 
 Left: **every open pull request you can see** — your own repositories, your
-organisations and anything you are involved in — grouped by repository, review
-requests first, with author, age, a green check, `!` for failing checks and `≠`
-for conflicts. Click one and the right side shows its diff: file headers with
-`+n −n` counts, hunk headers, line numbers, a filled green/red sign gutter,
-tinted added and removed lines, horizontal scroll.
+organisations and anything you are involved in — grouped by repository with the
+number of open PRs next to the name; click the repository to fold it away,
+review requests come first, with author, age, a green check, `!` for failing
+checks and `≠` for conflicts. Click one and the right side shows its diff: file
+headers with `+n −n` counts, hunk headers, line numbers, a filled green/red sign
+gutter, tinted added and removed lines, horizontal scroll.
 
 Right, below the diff: a note field with `approve`, `request changes` and
 `comment`, then four buttons that open **a new space** with a pi agent already
@@ -93,12 +94,21 @@ trunk.
 | key | does |
 | --- | --- |
 | `↑` `↓` / `j` `k` | move |
-| `a` `x` `c` | approve · request changes · comment (note required for the last two) |
+| click a changed line | pick it: its number turns into `#` and the note field gets a `note on <file>:<line>` chip |
+| `[` `]` | move the line cursor without the mouse |
+| `enter` | with a line picked: post the note as a review comment on that line and start an agent that fixes it. Otherwise it sends the pending review |
+| `a` `x` `c` | approve · request changes · comment (note required for the last two; `x` and `c` also start an agent on the comments) |
 | `m` | merge, squash — press twice. Afterwards the local clone's trunk is fast-forwarded and the merged branch is deleted there |
 | `1` `2` `3` `4` | the four agent actions |
 | `o` | open the PR in the browser |
 | `r` | refresh (it also repolls every two minutes) |
-| `esc` | cancel |
+| `esc` | drop the picked line, then the pending review |
+
+A line note goes out as a one-comment review (`POST /pulls/<n>/reviews` with
+`event: COMMENT`), so added and context lines use `side: RIGHT` with the new
+line number and removed lines `LEFT` with the old one. Then a new space gets an
+agent told which file and line the note is on, what it says, and to reply to the
+comment once it is fixed.
 
 It lives in the `Apps` space, `Pull requests` tab. Rebuild on a new machine:
 `install.sh` copies the folder into `$HOME/.config/herdr-app/mods/` when the app

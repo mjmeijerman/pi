@@ -21,8 +21,8 @@
  * acts on it is visible in its own space instead of behind a button.
  */
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, Input, InputState, ScrollHandle, Scrollbar, v_virtual_list } from "gpui-base";
-import { exec, home, nextCommand, props, run, settings, theme } from "herdr";
+import { v_flex, h_flex, Input, InputState, ScrollHandle, Scrollbar } from "gpui-base";
+import { appHome, exec, home, nextCommand, props, run, settings, theme, writeTextFile } from "herdr";
 
 const FRAGMENT = `fragment PR on PullRequest {
   number title url isDraft reviewDecision mergeable updatedAt headRefName
@@ -46,6 +46,8 @@ ${FRAGMENT}`;
 
 const CONFIRM_MS = 8000;
 const MAX_DIFF_LINES = 4000;
+// Rendered without virtualization: rows need their own click handler.
+const SHOWN_LINES = 2000;
 /** Alpha suffixes on the theme's green and red: readable, not faded. */
 const ADD_TINT = "52";
 const DEL_TINT = "52";
@@ -102,31 +104,32 @@ function parseDiff(text) {
 		if (hunk) {
 			oldLine = +hunk[1];
 			newLine = +hunk[2];
-			file.rows.push({ kind: "@", text: line });
+			file.rows.push({ kind: "@", path: file.path, text: line });
 			continue;
 		}
 		const kind = line[0];
 		if (kind === "+") {
 			file.add++;
-			file.rows.push({ kind, number: newLine++, text: untab(line.slice(1)) || " " });
+			file.rows.push({ kind, path: file.path, side: "RIGHT", number: newLine++, text: untab(line.slice(1)) || " " });
 		} else if (kind === "-") {
 			file.del++;
-			file.rows.push({ kind, number: oldLine++, text: untab(line.slice(1)) || " " });
+			file.rows.push({ kind, path: file.path, side: "LEFT", number: oldLine++, text: untab(line.slice(1)) || " " });
 		} else if (kind === " ") {
 			oldLine++;
-			file.rows.push({ kind, number: newLine++, text: untab(line.slice(1)) || " " });
-		} else file.rows.push({ kind: "", text: line });
+			file.rows.push({ kind, path: file.path, side: "RIGHT", number: newLine++, text: untab(line.slice(1)) || " " });
+		} else file.rows.push({ kind: "", path: file.path, text: line });
 	}
 	const rows = [];
 	for (const entry of files) {
-		rows.push({ kind: "file", text: entry.path, add: entry.add, del: entry.del });
+		rows.push({ kind: "file", path: entry.path, text: entry.path, add: entry.add, del: entry.del });
 		rows.push(...entry.rows);
 	}
-	return rows;
+	// The index is the row's identity while the diff is on screen, not a line number.
+	return rows.map((row, at) => ({ ...row, at }));
 }
 
 /** What each of the four agent actions is asked to do. */
-function task(kind, pr) {
+function task(kind, pr, quote) {
 	const head = `Pull request ${pr.repo}#${pr.number} — ${pr.title}`;
 	const repo = pr.repo;
 	const n = pr.number;
@@ -137,6 +140,10 @@ function task(kind, pr) {
 		return `${head}\n\nIts checks are failing. List them with \`gh pr checks ${n} -R ${repo}\`, read the failing job with \`gh run view <run-id> --log-failed\`, then \`gh pr checkout ${n} -R ${repo}\` and reproduce it here. Fix the cause, not the assertion, unless the test is wrong — say which in the commit message. Run what CI runs, then push to the PR branch.${common}`;
 	if (kind === "conflicts")
 		return `${head}\n\nIt conflicts with its base branch. \`gh pr view ${n} -R ${repo} --json baseRefName,headRefName\`, then \`gh pr checkout ${n} -R ${repo}\` and merge the base branch in. Resolve each conflict by keeping both intents — the PR's and the base branch's — not by picking a side. Run the tests, then push to the PR branch.${common}`;
+	if (kind === "line")
+		return `${head}\n\nSomeone left this review note on \`${quote.path}\` at line ${quote.number}:\n\n> ${quote.body.replace(/\n/g, "\n> ")}\n\n\`gh pr checkout ${n} -R ${repo}\`, make that line right, then push to the PR branch and reply to the note with \`gh api repos/${repo}/pulls/comments/{id}/replies -f body=-\` (the id is in \`gh api repos/${repo}/pulls/${n}/comments\`) once it is done. If you think the note is wrong, do not change the code — reply with the reason instead.${common}`;
+	if (quote)
+		return `${head}\n\nThe review asked for changes:\n\n> ${quote.replace(/\n/g, "\n> ")}\n\nRead the comments with \`gh pr view ${n} -R ${repo} --comments\` and \`gh api repos/${repo}/pulls/${n}/comments\`, \`gh pr checkout ${n} -R ${repo}\`, fix them, and push to the PR branch. Reply to each note you address, and say why where you disagree.${common}`;
 	return `${head}\n\nIt has review comments to address. Read them with \`gh pr view ${n} -R ${repo} --comments\` and \`gh api repos/${repo}/pulls/${n}/comments --jq '.[] | {path, line, body}'\`. \`gh pr checkout ${n} -R ${repo}\`, then fix each comment in code. Where you disagree, reply with the reason instead of silently skipping it. Push to the PR branch.${common}`;
 }
 
@@ -162,6 +169,10 @@ export default class PullRequests extends View {
 		this.reviewAction = "";
 		this.busy = "";
 		this.folders = {};
+		this.line = null;
+		this.collapsed = new Set();
+		this.tmp = `${appHome()}/review-note.json`;
+		this.tmpLast = null;
 		this.note = InputState.new({ placeholder: "Note — Enter sends it with the review" });
 		this.note.on("change", () => cx.notify());
 		this.note.on("submit", (_e, cx) => this.sendReview(cx));
@@ -285,17 +296,21 @@ export default class PullRequests extends View {
 		});
 	}
 
-	/** The row's position in the flat list, counting repository headers. */
-	flatIndex(key) {
-		let index = 0;
+	/** The rows of the left column: a header per repository, then its pull requests. */
+	get listRows() {
+		const rows = [];
 		for (const group of this.groups) {
-			index++;
-			for (const pr of group.list) {
-				if (pr.key === key) return index;
-				index++;
-			}
+			rows.push({ type: "group", repo: group.repo, count: group.list.length, asked: group.asked });
+			if (this.collapsed.has(group.repo)) continue;
+			for (const pr of group.list) rows.push({ type: "pr", pr });
 		}
-		return 0;
+		return rows;
+	}
+
+	/** The row's position in the flat list, counting the repository headers. */
+	flatIndex(key) {
+		const index = this.listRows.findIndex((row) => row.type === "pr" && row.pr.key === key);
+		return index < 0 ? 0 : index;
 	}
 
 	select(key, cx) {
@@ -304,6 +319,7 @@ export default class PullRequests extends View {
 		this.selected = index;
 		this.pending = "";
 		this.reviewAction = "";
+		this.line = null;
 		this.listScroll?.scroll_to_item(this.flatIndex(key));
 		this.loadDiff(this.prs[index], cx);
 	}
@@ -315,6 +331,7 @@ export default class PullRequests extends View {
 		this.selected = next;
 		this.pending = "";
 		this.reviewAction = "";
+		this.line = null;
 		this.listScroll?.scroll_to_item(this.flatIndex(this.current.key));
 		this.loadDiff(this.current, cx);
 	}
@@ -450,9 +467,51 @@ export default class PullRequests extends View {
 			const verb = kind === "approve" ? "approved" : kind === "changes" ? "requested changes on" : "commented on";
 			this.notice = `${verb} ${pr.key}`;
 			this.reviewAction = "";
+			const body2 = body;
 			this.note.set_value("");
 			this.handle.focus();
+			// A review that asks for work is a request to do the work: an agent gets it.
+			if (kind === "changes" || kind === "comment") this.spawnAgent("comments", pr, body2, cx);
 			this.refresh(cx);
+		});
+	}
+
+	/** A note on one changed line, as a GitHub review comment, then an agent that fixes it. */
+	postLineNote(cx) {
+		const pr = this.current;
+		const row = this.line;
+		const body = this.note.value().trim();
+		if (!pr || !row) return;
+		if (!body) {
+			this.error = "type the note first, and press Enter";
+			cx.notify();
+			return;
+		}
+		const payload = {
+			event: "COMMENT",
+			body: "",
+			comments: [{ path: row.path, line: row.number, side: row.side, body }],
+		};
+		this.busy = pr.key;
+		this.error = "";
+		this.notice = "";
+		cx.notify();
+		cx.spawn(async (cx) => {
+			const text = JSON.stringify(payload);
+			await writeTextFile(this.tmp, text, this.tmpLast).catch(() => null);
+			this.tmpLast = text;
+			const result = await gh(["api", "repos/" + pr.repo + "/pulls/" + pr.number + "/reviews", "--input", this.tmp], 60000);
+			this.busy = "";
+			if (result.code !== 0) {
+				this.error = `note not posted: ${(result.stderr || result.stdout || "").trim().split("\n")[0]}`;
+				cx.notify();
+				return;
+			}
+			const quote = { path: row.path, number: row.number, body };
+			this.note.set_value("");
+			this.notice = `note on ${row.path}:${row.number} posted`;
+			this.spawnAgent("line", pr, quote, cx);
+			this.handle.focus();
 		});
 	}
 
@@ -477,23 +536,46 @@ export default class PullRequests extends View {
 	startAgent(kind, cx) {
 		const pr = this.current;
 		if (!pr) return;
+		this.spawnAgent(kind, pr, null, cx);
+	}
+
+	spawnAgent(kind, pr, quote, cx) {
 		this.error = "";
-		this.notice = "";
-		cx.notify();
 		cx.spawn(async (cx) => {
 			const folder = await this.folderFor(pr.repo);
 			const argv = [await this.piPath()];
-			const name = `${pr.repo.split("/")[1]}#${pr.number} ${kind}`;
+			const name = `${pr.repo.split("/")[1]}#${pr.number} ${kind === "line" ? "note" : kind}`;
 			const where = folder ?? home();
-			const text = task(kind, pr) + (folder ? "" : `\n\nThere is no local clone of ${pr.repo} yet: \`gh repo clone ${pr.repo} ${home()}/code/${pr.repo.split("/")[1]}\`, then work there.`);
+			const text = task(kind, pr, quote) + (folder ? "" : `\n\nThere is no local clone of ${pr.repo} yet: \`gh repo clone ${pr.repo} ${home()}/code/${pr.repo.split("/")[1]}\`, then work there.`);
 			try {
 				run("space.new", { name, folder: where, argv, task: text });
-				this.notice = `started ${name} in a new space${folder ? ` (${folder})` : ""}`;
+				this.notice = `${this.notice ? this.notice + " · " : ""}started ${name} in a new space${folder ? ` (${folder})` : ""}`;
 			} catch (e) {
 				this.error = `could not start the agent: ${e}`;
 			}
 			cx.notify();
 		});
+	}
+
+	/** The changed line under the cursor, if any — only real lines take a note. */
+	pickLine(row, cx) {
+		if (!row || !row.path || row.number === undefined) return;
+		this.line = row;
+		this.error = "";
+		cx.notify();
+		this.note.focus();
+	}
+
+	moveLine(delta, cx) {
+		const rows = this.diff.rows;
+		const usable = (row) => Boolean(row.path) && row.number !== undefined;
+		if (!rows.length) return;
+		const from = this.line ? rows.findIndex((row) => row.at === this.line.at) : -1;
+		let index = from;
+		if (from < 0) index = delta > 0 ? rows.findIndex(usable) : rows.length - 1 - [...rows].reverse().findIndex(usable);
+		else for (index = from + delta; index >= 0 && index < rows.length && !usable(rows[index]); index += delta);
+		if (index < 0 || index >= rows.length || !usable(rows[index])) return;
+		this.pickLine(rows[index], cx);
 	}
 
 	key(event, cx) {
@@ -504,9 +586,13 @@ export default class PullRequests extends View {
 		else if (k === "escape") {
 			this.pending = "";
 			this.reviewAction = "";
+			this.line = null;
 			this.handle.focus();
 			cx.notify();
-		} else if (k === "enter" && this.reviewAction) this.sendReview(cx);
+		} else if (k === "]") this.moveLine(1, cx);
+		else if (k === "[") this.moveLine(-1, cx);
+		else if (k === "enter" && this.line) this.postLineNote(cx);
+		else if (k === "enter" && this.reviewAction) this.sendReview(cx);
 		else if (k === "a") this.startReview("approve", cx);
 		else if (k === "x") this.startReview("changes", cx);
 		else if (k === "c") this.startReview("comment", cx);
@@ -578,7 +664,7 @@ export default class PullRequests extends View {
 			.when(pr.mergeable === "CONFLICTING", (el) => el.child(div().text_size(10).text_color(t.blocked).child("≠")));
 	}
 
-	diffRow({ kind, number, text, add, del }, t) {
+	diffRow({ kind, number, text, add, del, at, path }, t, cx) {
 		if (kind === "file")
 			return h_flex()
 				.w_full()
@@ -592,27 +678,52 @@ export default class PullRequests extends View {
 				.when(add > 0, (e) => e.child(div().text_size(10).text_color(t.ansi2).child(`+${add}`)))
 				.when(del > 0, (e) => e.child(div().text_size(10).text_color(t.ansi1).child(`−${del}`)));
 		if (kind === "@") return div().w_full().px(12).h(20).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
+		const mine = this.line && this.line.at === at && Boolean(path) && number !== undefined;
 		return h_flex()
 			.w_full()
 			.h(20)
 			.flex_none()
 			.when(kind === "+", (e) => e.bg(t.ansi2 + ADD_TINT))
 			.when(kind === "-", (e) => e.bg(t.ansi1 + DEL_TINT))
+			.when(mine, (e) => e.bg(t.selection))
+			.when(Boolean(path) && number !== undefined, (e) => e.id(`prs-diff-row-${at}`).cursor_pointer().on_mouse_down("left", (_ev, cx) => this.pickLine({ kind, number, path, at }, cx)))
 			.child(
 				h_flex()
 					.w(16)
 					.flex_none()
 					.items_center()
 					.justify_center()
-					.when(kind === "+", (e) => e.bg(t.ansi2).child(div().text_color(t.background).child("+")))
-					.when(kind === "-", (e) => e.bg(t.ansi1).child(div().text_color(t.background).child("−")))
-					.when(kind !== "+" && kind !== "-", (e) => e.child(div().text_color(t.dim).child(" "))),
+					.when(mine, (e) => e.bg(t.solid).child(div().text_color(t.solid_foreground).child("#")))
+					.when(!mine && kind === "+", (e) => e.bg(t.ansi2).child(div().text_color(t.background).child("+")))
+					.when(!mine && kind === "-", (e) => e.bg(t.ansi1).child(div().text_color(t.background).child("−")))
+					.when(!mine && kind !== "+" && kind !== "-", (e) => e.child(div().text_color(t.dim).child(" "))),
 			)
 			.child(div().w(38).flex_none().text_right().pr(6).text_color(t.dim).child(number === undefined ? "" : String(number)))
 			.child(div().pl(8).flex_1().min_w(0).truncate().child(text));
 	}
 
-	list(t) {
+	groupHeader(group, t, cx) {
+		const collapsed = this.collapsed.has(group.repo);
+		return h_flex()
+			.id(`repo-${group.repo}`)
+			.px(8)
+			.pt(8)
+			.pb(3)
+			.gap(6)
+			.items_center()
+			.rounded(6)
+			.hover((s) => s.bg(t.hover))
+			.on_click((_e, cx) => {
+				if (collapsed) this.collapsed.delete(group.repo);
+				else this.collapsed.add(group.repo);
+				cx.notify();
+			})
+			.child(div().w(10).flex_none().text_size(9).text_color(t.dim).child(collapsed ? "▸" : "▾"))
+			.child(div().flex_1().min_w(0).truncate().text_size(10.5).text_color(group.asked ? t.accent : t.dim).child(group.repo))
+			.child(div().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.muted).child(String(group.count)));
+	}
+
+	list(t, cx) {
 		return v_flex()
 			.id("prs-list")
 			.w(360)
@@ -645,10 +756,9 @@ export default class PullRequests extends View {
 					.overflow_y_scrollbar()
 					.track_scroll(this.listScroll)
 					.children(
-						this.groups.flatMap((group) => [
-							div().px(8).pt(8).pb(2).text_size(10.5).text_color(t.dim).child(group.repo),
-							...group.list.map((pr) => this.listRow(pr, t, undefined)),
-						]),
+						this.listRows.map((row) =>
+							row.type === "group" ? this.groupHeader(row, t, cx) : this.listRow(row.pr, t, cx),
+						),
 					),
 			);
 	}
@@ -716,7 +826,7 @@ export default class PullRequests extends View {
 						this.diff.loading || !this.diff.rows.length
 							? v_flex().p(12).child(div().text_color(t.muted).child(this.diff.loading ? "loading diff…" : "no diff"))
 							: div()
-									.id("prs-diff-x")
+									.id("prs-diff-x2")
 									.size_full()
 									.overflow_x_scrollbar()
 									.child(
@@ -725,13 +835,16 @@ export default class PullRequests extends View {
 											.min_w(this.diff.width)
 											.h_full()
 											.child(
-												v_virtual_list("prs-diff", this.diff.rows.length, 20, (i) => String(i), (range) =>
-													this.diff.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t)),
-												).size_full(),
+												v_flex()
+													.id("prs-diff-y")
+													.absolute()
+													.inset_0()
+													.overflow_y_scroll()
+													.children(this.diff.rows.slice(0, SHOWN_LINES).map((row) => this.diffRow(row, t))),
 											),
 									),
 					)
-					.child(Scrollbar.vertical("prs-diff").viewport_from_layout().absolute().inset_0()),
+					.child(Scrollbar.vertical("prs-diff-y").viewport_from_layout().absolute().inset_0()),
 			)
 			.child(
 				v_flex()
@@ -740,6 +853,21 @@ export default class PullRequests extends View {
 					.py(8)
 					.border_t_1()
 					.border_color(t.border)
+					.when(Boolean(this.line), (el) =>
+						el.child(
+							h_flex()
+								.gap(8)
+								.items_center()
+								.text_size(11)
+								.child(div().text_color(t.solid).font_semibold().child(`note on ${this.line.path}:${this.line.number}`))
+								.child(div().text_color(t.dim).child("Enter posts it as a review comment and starts an agent to fix it"))
+								.child(this.textButton("prs-line-clear", "cancel", (_e, cx) => {
+									this.line = null;
+									this.handle.focus();
+									cx.notify();
+								}, false, t)),
+						),
+					)
 					.child(
 						h_flex()
 							.gap(6)
@@ -755,7 +883,12 @@ export default class PullRequests extends View {
 									.text_size(12)
 									.text_color(t.foreground),
 							)
-							.child(this.textButton("prs-approve", "approve", (_e, cx) => this.startReview("approve", cx), false, t))
+							.when(Boolean(this.line), (el) =>
+								el.child(this.textButton("prs-line-note", "note + agent", (_e, cx) => this.postLineNote(cx), true, t)),
+							)
+							.when(!this.line, (el) =>
+								el.child(this.textButton("prs-approve", "approve", (_e, cx) => this.startReview("approve", cx), false, t)),
+							)
 							.child(this.textButton("prs-changes", "request changes", (_e, cx) => this.startReview("changes", cx), false, t))
 							.child(this.textButton("prs-comment", "comment", (_e, cx) => this.startReview("comment", cx), false, t)),
 					)
@@ -794,6 +927,6 @@ export default class PullRequests extends View {
 						.child(this.error || this.notice),
 				),
 			)
-			.child(h_flex().flex_1().min_h(0).items_stretch().child(this.list(t)).child(this.detail(t, cx)));
+			.child(h_flex().flex_1().min_h(0).items_stretch().child(this.list(t, cx)).child(this.detail(t, cx)));
 	}
 }
