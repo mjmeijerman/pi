@@ -12,7 +12,7 @@ plain `pi` already runs inside the sandbox. Nothing to remember:
 ```
 pi                      # same as `pisandbox -- pi`
 PI_BARE=1 pi            # escape hatch: the raw binary, no sandbox
-pisandbox --no-net -- pi  # extra isolation: no network at all
+pisandbox --no-net --exec -- make test  # no network at all (an agent cannot reach the model here)
 ```
 
 The block sits between `# >>> pi sandbox >>>` and `# <<< pi sandbox <<<`.
@@ -130,6 +130,9 @@ Also: `--unshare-pid --unshare-ipc --unshare-uts --die-with-parent --new-session
 fresh `/tmp`, and `/proc` and `/dev` of its own.
 
 Network stays shared unless you pass `--no-net`, which unshares it completely
+(a sealed syscall sandbox, no DNS): the session can then reach only loopback, so
+an agent has no model to talk to. `--no-net` is for `--exec` runs — build and
+test untrusted code without giving it a way out.
 (loopback-only namespace). The environment is inherited, so provider API keys and
 `PI_*` variables still reach pi; `HOME`, `PATH`, `USER` and `TMPDIR` are set to
 the sandbox layout.

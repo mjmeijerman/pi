@@ -6,7 +6,7 @@
 
 ## Sandbox
 
-- `pi` runs sandboxed by default (`install.sh` wraps it); `PI_BARE=1 pi` bypasses, `pisandbox --no-net -- pi` adds network isolation for unfamiliar repos (blip 1).
+- `pi` runs sandboxed by default (`install.sh` wraps it); `pi-bare` quits it; `pisandbox --no-net` is for running repo scripts, not agents — no net means no model (blip 1).
 
 ## Landing changes
 
