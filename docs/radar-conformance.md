@@ -2,10 +2,10 @@
 
 Owner: Mark Meijerman (`mjmeijerman`)
 Review: 2027-02-15 — quarterly, see §6 below.
-Re-measured 2026-11-13: 279 extension tests (40 suites), 8 skills, `agent/AGENTS.md`
-3007 bytes, 62 entries in `~/.pi/agent/suggestions.jsonl`.
+Re-measured 2026-11-14: 342 extension tests in 49 suites, 9 skills, `agent/AGENTS.md`
+3041 bytes against the 3072-byte budget, 140 entries in `~/.pi/agent/suggestions.jsonl`.
 
-Audit date: 2026-11-13. Source: `werken-met-ai.pdf` (Radar Vol. 35, November 2026).
+Audit date: 2026-11-13; threat-model pass 2026-11-14. Source: `werken-met-ai.pdf` (Radar Vol. 35, November 2026).
 Scope: the 63 rows below, out of the 117 in `docs/radar-blips.tsv` — every Technique
 (1–45), the two Platforms that touch a coding harness (57, 58), the Tools a one-person
 harness could use (68–103), and Promptfoo (110). The other 54 rows are Kubernetes, model
@@ -27,8 +27,8 @@ Status values:
 | 2. Mutation testing | done | `agent/stryker.conf.json`, `.github/workflows/test.yml` (weekly `npx stryker run`), `make mutate-full` → **74.47%** (551 killed, 193 survived, 12 timeout, 0 uncovered; merge-guard 81.35%, secret-guard 69.77%) on 2026-11-13 | Below the 80% target: the survivors are `ConditionalExpression` and `EqualityOperator` mutants, i.e. tests that assert the string but not the branch. |
 | 3. Path-to-production mapping | partial | `.github/workflows/{test,secret-scan}.yml`, PR-per-change | The path exists in CI config, not as a reviewed map. Review capacity per day is unmeasured. |
 | 4. Post-quantum cryptography | n/a | — | Nothing here holds a long-lived key: model traffic terminates at the provider's TLS, and the only secrets in scope are API tokens rotated by the providers. Revisit if the harness ever stores keys it must keep for years. |
-| 5. Progressive context disclosure | done | 8 skills load on demand; `agent/AGENTS.md` is 3040 bytes under the 3072-byte budget in `scripts/harness-check.sh` | — |
-| 6. Threat modeling | missing | — | Blip 1 says the sandbox scope is informed by threat modeling, and `agent/AGENTS.md` says prefer Adopt, yet no threat model exists anywhere in the repo. Ranked first in §5. |
+| 5. Progressive context disclosure | done | 9 skills load on demand; `agent/AGENTS.md` is 3041 bytes under the 3072-byte budget in `scripts/harness-check.sh` | — |
+| 6. Threat modeling | done | `docs/threat-model.md` — assets (with `~/.ssh`, `~/.config/gh`, `~/.pi/agent/auth.json`, `~/.pi`, git remotes), attacker paths (fetched pages and PDFs, package installs, model-issued shell commands, malicious skills), the real binds and masks quoted from `sandbox/pi-sandbox.sh`, and an explicit "does not cover" list whose first item is bare mode and the bare big-boss-pi boss | The doc is a snapshot: nothing fails when `pi-sandbox.sh` and the mask list drift apart. Review date 2027-05-15 is the only trigger. |
 
 ## 2. Trial ring
 
@@ -53,7 +53,7 @@ Status values:
 | 71. Act | missing | — | CI only runs on GitHub: `pr-tier.yml` and `test.yml` cannot be executed before a push, so a failing gate costs a round trip. |
 | 73. ast-grep | missing | — | Structural search is `rg` and regex; conventions that are syntactic (import order, hook shape) are checked by hand. |
 | 74. Beads | missing | — | Task state lives in `/tmp` spec files and PR bodies; nothing survives the session as a queryable backlog. |
-| 84. Pi | done | This repository: pi 1.5.2, 13 extensions, 279 tests over 40 suites, `/home/mark/.pi` | Pinned to 1.5.2; the extension API is exercised but an upgrade is untested until it happens. |
+| 84. Pi | done | This repository: pi 1.5.2, 13 extensions, 342 tests in 49 suites, `/home/mark/.pi` | Pinned to 1.5.2; the extension API is exercised but an upgrade is untested until it happens. |
 | 23. Unattended overnight agentic builds | missing | — | Blocked by the same three prerequisites the blip names: default sandboxing, spec-up-front, sensors that validate without line-by-line review. |
 | 110. Promptfoo | missing | — | No eval or red-team gate on prompts, skills or hooks: the deterministic half is tested, the half that shapes every turn is not. Ranked in §5. |
 
@@ -63,17 +63,18 @@ Status values:
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
 | 24. Agent pipeline responsibility | partial | `agent/extensions/merge-guard.ts` forces an explicit human yes per landing | Owner, reviewer and approver are the same person; nothing records who accepted an agent-built change beyond that yes. |
-| 25. Agent suggestion box | done | `/suggest` → `agent/suggestions.jsonl` (51 entries), `/retro` dedupes | Nothing reviews the box on a schedule. |
+| 25. Agent suggestion box | done | `/suggest` → `agent/suggestions.jsonl` (140 entries), `/retro` dedupes | Nothing reviews the box on a schedule. |
 | 26. Context profiling | done | `scripts/session-report.mjs` (cost, cache hit, context fill per project) | Profiling is after-the-fact; no per-turn attribution. |
 | 27. Enterprise harness | n/a | — | One user; the "harness" is this repo. |
 | 28. Foundation models for structured data | n/a | — | No tabular or warehouse workload; `local_llm` `extract` pulls fields out of prose, which is not the modelling this blip describes. |
-| 29. Harness quality evaluation | partial | 279 tests in 40 suites (`cd agent && node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh` | Zero evaluation of skills, `AGENTS.md` and hooks — the nondeterministic half. |
+| 29. Harness quality evaluation | partial | 342 tests in 49 suites (`cd agent && node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh` | Zero evaluation of skills, `AGENTS.md` and hooks — the nondeterministic half. |
 | 30. Local coding models | done | `agent/extensions/local-llm.ts`, `/local` health check | Route is manual, chosen by the model's own judgement. |
-| 31. MITRE ATLAS | missing | — | No AI-threat taxonomy in use; threat modelling of the harness never done. |
+| 31. MITRE ATLAS | done | `docs/threat-model.md` §2 groups attacker paths by ATLAS tactic (prompt injection, Execution, Persistence, Defense Evasion, Exfiltration) and names `AML.T0051` for the fetched-page path | Tactic names only, no per-technique ID mapping and no ATLAS-driven detection: the taxonomy shapes the document, not a test. |
 | 32. Production-aware coding agents | n/a | — | Nothing in production; project work is local. |
 | 33. Programmatic tool calling | done | `codemode` available in every session (default `+codemode`) | — |
 | 34. Semantic review of AI-edited prose | missing | — | Plans, ADRs and `AGENTS.md` diffs are reviewed as text diffs. |
 | 35. Tests as data over tests as code | missing | — | Tests are TypeScript only. |
+| 62. Decision models | done | `/home/mark/big-boss-pi/bin/jev` (local `qwen3.8:27b`, 0 = yes, 1 = no, 3 = unsure) and `agent/skills/jev/SKILL.md`, which says when to ask it: route, worker count, sandbox mode, permission requests | A decision model answering as prose is still a guess with a quote around it: no record of what it decided, and no scoring of its answers against the human's. |
 | 57. Agent Client Protocol | n/a | — | No IDE integration wanted. |
 | 58. Agent Plugins | n/a | — | Repo *is* the plugin set; distribution not a problem yet. |
 | 72. Agent Package Manager | missing | Skills are copy-pasted by nature of being local | Acceptable at one user; note it fails the supply-chain audit trail (lock file, provenance, hidden-Unicode scan). |
@@ -92,8 +93,8 @@ Status values:
 
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
-| 36. Agent instruction bloat | respected | `AGENTS.md` 3040 bytes under the 3072-byte budget in `scripts/harness-check.sh`; 670 lines across 8 skills; `/retro` deletes rules | Watch: `cost-optimizer` and `secret-guard` inject always-on prompt text from extensions, the accumulation path this blip describes. |
-| 37. Agent skill cognitive surrender | respected | All 8 skills in `agent/skills/` are hand-written here | `i-have-adhd` and `pi-web-access` come from packages — the only two not authored locally. |
+| 36. Agent instruction bloat | respected | `AGENTS.md` 3041 bytes under the 3072-byte budget in `scripts/harness-check.sh`; 9 skills, each under the 150-line limit; `/retro` deletes rules | Watch: `cost-optimizer` and `secret-guard` inject always-on prompt text from extensions, the accumulation path this blip describes. |
+| 37. Agent skill cognitive surrender | respected | All 9 skills in `agent/skills/` are hand-written here | `i-have-adhd` and `pi-web-access` come from packages — the only two not authored locally. |
 | 38. AI-accelerated shadow IT | respected | Every change lands through CI and a PR (`.github/workflows/`, `merge-guard.ts`) | — |
 | 39. AI-driven documentation sprawl | partial | `scripts/harness-check.sh` fails any `docs/*.md` without `Owner:` and `Review:` | No prune step: nothing deletes a doc whose review date passed. |
 | 40. Blanket frontier model usage | respected | `agent/settings.json` default `deepseek-flash`; local model for chores | — |
@@ -105,29 +106,30 @@ Status values:
 
 ## 5. Gaps ranked by cost of leaving them open
 
-1. **No threat model** (blip 6, Adopt, missing). The sandbox claims a scope informed by
-   threat modeling, but nothing names what the harness must protect or what the sandbox
-   does not cover. Fix: one page — assets (`~/.ssh`, cloud creds, `~/.pi` itself), attacker
-   paths (fetched pages, package installs, the model's own commands), covered vs uncovered.
-   Cost: 45 minutes. It re-scopes gap 2, so it goes first.
-2. **Mutation survivors in `secret-guard.ts`** (blip 2, Adopt, done at 74.47%). The score
+1. **Mutation survivors in `secret-guard.ts`** (blip 2, Adopt, done at 74.47%). The score
    exists now; the 193 survivors are concentrated in one file (69.77%), mostly branch
    conditions the tests do not distinguish. Fix: read `agent/reports/stryker/mutation.html`,
    kill the survivors that map to a real branch. Cost: 2 hours.
-3. **Skills and `AGENTS.md` are unevaluated** (blip 29, partial). The deterministic half is
-   tested (279); the half that shapes every turn is not. Fix: 10 fixed prompts, one monthly
+2. **Skills and `AGENTS.md` are unevaluated** (blip 29, partial). The deterministic half is
+   tested (342); the half that shapes every turn is not. Fix: 10 fixed prompts, one monthly
    run, judge against last month's answers. Cost: 2 hours to set up.
-4. **Actions pinned but not linted** (blip 103, partial). SHAs replace tags and
+3. **Actions pinned but not linted** (blip 103, partial). SHAs replace tags and
    `persist-credentials: false` is set, but zizmor runs only when someone remembers it.
    Fix: `uvx zizmor --pedantic .github/workflows` as a CI job. Cost: 30 minutes.
-5. **Promptfoo absent at Trial** (blip 110, missing). No eval or red-team gate on prompts,
+4. **Promptfoo absent at Trial** (blip 110, missing). No eval or red-team gate on prompts,
    skills or hooks, and it is the natural home for gap 4's 10 prompts. Cost: 3 hours for one
    suite.
 
-Closed since the previous audit: grilling (blip 13, `agent/prompts/grill.md` plus the
-`session-nudge` grill rule), risk tiers (blips 17/42, `agent/AGENTS.md:14` plus the `pr-tier`
-CI job), sandbox enforcement (blip 1, the `install.sh` shell wrapper) and the mutation score
-(blip 2, 74.47% from a reproducible `make mutate-full`).
+Closed since the previous audit: the threat model (blips 6 and 31,
+`docs/threat-model.md` — assets, attacker paths by ATLAS tactic, the real binds and masks,
+and the explicit "does not cover bare mode, including the bare big-boss-pi boss"), decision
+models (blip 62, `/home/mark/big-boss-pi/bin/jev` plus `agent/skills/jev`), grilling (blip 13,
+`agent/prompts/grill.md` plus the `session-nudge` grill rule), risk tiers (blips 17/42,
+`agent/AGENTS.md:14` plus the `pr-tier` CI job), sandbox enforcement (blip 1, the `install.sh`
+shell wrapper) and the mutation score (blip 2, 74.47% from a reproducible `make mutate-full`).
+
+The threat model re-scoped the gaps that remain: gap 3 inherits the fetched-page and
+malicious-skill paths, and gap 4 inherits the supply-chain path.
 
 Enforced by `scripts/harness-check.sh` on every commit and in CI: a cited blip must exist in
 `docs/radar-blips.tsv` (no invented blip numbers), a stale `Review:` date fails the check
