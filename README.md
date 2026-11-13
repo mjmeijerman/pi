@@ -13,6 +13,7 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 | `git-templates/` | `git init` template that installs the vuln-scan hook into new repos |
 | `gitignore_global` | global gitignore for secret files |
 | `sandbox/` | bubblewrap launcher + policy selftest (`pi-sandbox.sh`) |
+| `herdr-mods/` | Herdr window mods: `prs` shows open pull requests with merge |
 | `scripts/` | session report / prune helpers + Herdr pane launcher |
 | `docs/` | Radar conformance audit and the agent working playbook |
 | `install.sh` | config + hooks only, non-interactive |
@@ -60,6 +61,71 @@ missing.
 
 `make setup` runs `./setup.sh`. `make bootstrap` runs the subset that touches no
 secrets and no system packages (`--no-apt --no-verify`).
+
+### Herdr window
+
+`herdr-mods/prs` is a mod for the Herdr app: open pull requests on the left,
+the diff on the right, and what you do about it underneath.
+
+Left: **every open pull request you can see** — your own repositories, your
+organisations and anything you are involved in — grouped by repository with the
+number of open PRs next to the name; click the repository to fold it away,
+review requests come first, with author, age, a green check, `!` for failing
+checks and `≠` for conflicts. Click one and the right side shows its diff: file
+headers with `+n −n` counts, hunk headers, line numbers, a filled green/red sign
+gutter, tinted added and removed lines, horizontal scroll.
+
+Right, below the diff: a note field with `approve`, `request changes` and
+`comment`, then four buttons that open **a new space** with a pi agent already
+told what to do:
+
+| button | the agent is asked to |
+| --- | --- |
+| `1 review the PR` | read the diff and its surroundings, post one review, touch no code |
+| `2 fix pipeline` | read the failing job, reproduce it, fix the cause, push to the branch |
+| `3 fix merge conflicts` | merge the base branch in, keep both intents, run the tests, push |
+| `4 fix review comments` | address each comment, reply where it disagrees, push |
+
+The space starts in the repository's local clone when one can be found (a few
+usual roots are probed for a matching `origin`), otherwise in `$HOME` with an
+instruction to clone it first. Every task says: never merge, never push to
+trunk.
+
+| key | does |
+| --- | --- |
+| `↑` `↓` / `j` `k` | move |
+| click a changed line | pick it: its number turns into `#` and the note field gets a `note on <file>:<line>` chip |
+| `[` `]` | move the line cursor without the mouse |
+| `enter` | with a line picked: post the note as a review comment on that line and start an agent that fixes it. Otherwise it sends the pending review |
+| `a` `x` `c` | approve · request changes · comment (note required for the last two; `x` and `c` also start an agent on the comments) |
+| `m` | merge, squash — press twice. Afterwards the local clone's trunk is fast-forwarded and the merged branch is deleted there |
+| `1` `2` `3` `4` | the four agent actions |
+| `o` | open the PR in the browser |
+| `r` | refresh (it also repolls every two minutes) |
+| `esc` | drop the picked line, then the pending review |
+
+A line note goes out as a one-comment review (`POST /pulls/<n>/reviews` with
+`event: COMMENT`), so added and context lines use `side: RIGHT` with the new
+line number and removed lines `LEFT` with the old one. Then a new space gets an
+agent told which file and line the note is on, what it says, and to reply to the
+comment once it is fixed.
+
+It lives in the `Apps` space, `Pull requests` tab. Rebuild on a new machine:
+`install.sh` copies the folder into `$HOME/.config/herdr-app/mods/` when the app
+is installed, and never overwrites a folder that already exists (you may have
+edited the mod in place). Then:
+```bash
+herdr-app do space.new --name Apps --folder "$HOME"
+herdr-app do tab.new --space <space-id> --name "Pull requests" --mod prs
+```
+
+What the merge does locally, in the repository's clone (found by name in `$HOME`,
+`$HOME/code`, … and matched on its `origin` URL): `git fetch --prune`, checkout
+the default branch if the merged branch was checked out, `merge --ff-only
+origin/<default>`, then delete the merged branch — forced only when it pointed
+at exactly what was pushed. A dirty tree, local commits on the branch, or a
+trunk that is not a fast-forward is reported in the sentence at the top instead
+of being forced.
 
 ### What is not in git, and why
 

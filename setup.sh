@@ -442,6 +442,7 @@ if have herdr; then
 		fi
 	fi
 	note "agent panes: $PI_HOME/scripts/agent-pane.sh list"
+	note "prs mod: $HOME/.config/herdr-app/mods/prs — put it in a space with: herdr-app do tab.new --mod prs"
 else
 	note "herdr is not installed — scripts/agent-pane.sh and the herdr extension stay idle"
 	note "install it with herdr's own installer; the harness only needs it on PATH"
