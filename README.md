@@ -27,6 +27,23 @@ make setup          # or: ./install.sh --install-pi
 
 It does **not** copy machine-specific or secret files: `auth.json`, sessions, `bin/`, `models-store.json`, or your `~/.gitconfig` identity. Set `git config --global user.name/email` once on the new machine.
 
+## Following the Technology Radar
+
+The harness is deliberately shaped by the [Thoughtworks Technology Radar](https://www.thoughtworks.com/radar) — currently **Volume 35, November 2026**. The rules in `agent/AGENTS.md` cite blip numbers, and each change here should trace back to one.
+
+Where this repo came from, in Radar terms:
+
+| Blip | Ring | What it produced here |
+|---|---|---|
+| #1 agent sandboxing | Adopt | `sandbox/` bubblewrap launcher |
+| #29 harness quality evaluation | Assess | `agent/extensions/__tests__/` |
+| #30 local coding models | Assess | `local_llm` tool on the local qwen model |
+| #11 feedback flywheel, #25 agent suggestion box | Trial / Assess | `/suggest`, `/retro` |
+| #26 context profiling | Assess | `tools/session-report.mjs` |
+| #36 agent instruction bloat | Caution | lean `AGENTS.md`, rules replaced by hooks where possible |
+
+The edition PDF is not committed (15 MB, third-party, read once) — read it from the Radar site instead.
+
 ## Protection layers
 
 1. **Secret-guard extension** — secrets never reach the model: user-input redaction, tool-call blocking (`.env`, keys, credentials), tool-output redaction, always-on system-prompt rules, audit log at `~/.pi/agent/secret-guard.log` (pattern names only, never values).
