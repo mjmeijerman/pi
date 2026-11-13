@@ -1,30 +1,38 @@
 /**
  * prs — pull requests on the left, the diff on the right, and the actions you
- * take on one: review it, or hand it to an agent in a new space.
+ * take on one: review it, or hand the work to the big-boss-pi agent.
  *
  * Left: open pull requests grouped by repository, review requests first. Click
  * one and the right side shows its diff — file headers with +/− counts, hunk
  * headers, line numbers, a green/red sign gutter.
  *
  * Right, below the diff: a note field with Approve / Request changes / Comment,
- * and four buttons that open a new space with a pi agent already told what to
- * do — review the PR, fix the pipeline, fix the merge conflicts, fix the review
- * comments. That agent starts in the big-boss-pi workspace, which is where
- * delegation works: it hands the job to a worker whose cwd is the PR's clone,
- * instead of doing the work itself inside the clone.
+ * and four buttons that hand the job to the big-boss-pi agent that is already
+ * running — review the PR, fix the pipeline, fix the merge conflicts, fix the
+ * review comments. That agent does not do the work either: it hands it to a
+ * worker whose cwd is the PR's clone. The buttons never start a second agent in
+ * the big-boss-pi workspace; a second one there is a competing boss.
+ *
+ * The handover asks the core the app is already connected to: `hc ls --all --json`
+ * names the live agent whose cwd is AGENT_FOLDER and that no worker spawn made
+ * (workers carry a terminal name), and `hc send` puts the request in its pane.
+ * The app's own command set has no agent.list or agent.prompt, so the mod does
+ * not ask the app for them. With no boss running, the mod makes the space with
+ * plain pi and sends the same text to the agent that appears.
  *
  * Keys: ↑/↓ move · a/x/c review · m merge (twice) · o browser · r refresh ·
- * esc cancel · 1..4 the four agent actions.
+ * esc cancel · 1..4 hand one of the four jobs to the boss agent.
  *
  * Props: `{ "open": "owner/repo#12" }` starts on that pull request.
  *
  * Radar basis: #17 risk-tiered human oversight and #42 human-in-the-loop
- * theater — the human reads the change and presses the key, and the agent that
- * acts on it is visible in its own space instead of behind a button.
+ * theater — the human reads the change and presses the key, and the one agent
+ * that acts on it is the boss they already watch, never a second one the button
+ * quietly started.
  */
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle, Scrollbar, Textarea, TextareaState } from "gpui-base";
-import { appHome, exec, home, nextCommand, props, run, settings, theme, writeTextFile } from "herdr";
+import { appHome, exec, hc, home, nextCommand, props, run, settings, theme, writeTextFile } from "herdr";
 
 const FRAGMENT = `fragment PR on PullRequest {
   number title url isDraft reviewDecision mergeable updatedAt headRefName
@@ -58,10 +66,11 @@ const ADD_TINT = "52";
 const DEL_TINT = "52";
 
 /**
- * Where every agent space starts: the big-boss-pi workspace, never the PR's own
- * clone. That workspace's AGENTS.md makes its agent pass the work to a worker
- * with the clone as the worker's cwd. An agent started inside the clone skips
- * the delegation and does the work itself.
+ * The one big-boss-pi workspace: where the agent that receives every button's
+ * job lives, never the PR's own clone. That workspace's AGENTS.md makes its agent
+ * pass the work to a worker with the clone as the worker's cwd. The mod only ever
+ * prompts the agent already running there — starting another one in this folder
+ * made a second boss that delegated to a third, competing agent.
  */
 const AGENT_FOLDER = "/home/mark/big-boss-pi";
 
@@ -141,15 +150,20 @@ function parseDiff(text) {
 	return rows.map((row, at) => ({ ...row, at }));
 }
 
-/** What each of the four agent actions is asked to do, and which clone to point a worker at. */
+/**
+ * The request a button sends to the boss agent: the job a worker must do, and the
+ * clone that worker starts in. It reads as a request to that agent, so it never
+ * says where the reader "starts" — the boss hands the job on.
+ */
 function task(kind, pr, quote, folder) {
-	const head = `Pull request ${pr.repo}#${pr.number} — ${pr.title}`;
+	const label = kind === "line" ? "a comment on one changed line" : (ACTIONS.find((a) => a.key === kind)?.label ?? kind);
+	const head = `The user pressed "${label}" in the Herdr prs mod, on pull request ${pr.repo}#${pr.number} — ${pr.title}.`;
 	const repo = pr.repo;
 	const n = pr.number;
 	const clone = folder ?? `${home()}/code/${repo.split("/")[1]}`;
 	const missing = folder ? "" : ` That clone does not exist yet: \`gh repo clone ${repo} ${clone}\` first.`;
-	// The AGENTS.md in AGENT_FOLDER forbids the boss agent from doing this itself.
-	const common = `\n\nYou start in ${AGENT_FOLDER}, and that workspace's AGENTS.md is binding: do NOT do this work yourself — do not check the branch out, do not edit files, do not commit or push. Ask Jev which route it is (\`jev route "<the job in one line>"\`) when that is not obvious, then hand the whole job to a worker: \`delegate spawn --cwd ${clone}\`, so a worker agent runs it in another Herdr space with the clone as its cwd.${missing} Then wait for that worker and relay its report — what changed, what is still open, what the worker could not do — instead of reporting on work you did. Never merge, never push to the trunk branch, and do not stop before the worker has reported.`;
+	// The AGENTS.md in AGENT_FOLDER makes handing work to a worker that agent's job.
+	const common = `\n\nDelegate it to a worker: the AGENTS.md in ${AGENT_FOLDER} is binding, so do NOT do this work yourself — do not check the branch out, do not edit files, do not commit or push. Ask Jev which route it is (\`jev route "<the job in one line>"\`) when that is not obvious, then hand the whole job to a worker: \`delegate spawn --cwd ${clone}\`, so a worker agent runs it in another Herdr space with the clone as its cwd.${missing} Then wait for that worker and relay its report — what changed, what is still open, what the worker could not do — instead of reporting on work you did. Never merge, never push to the trunk branch, and do not stop before the worker has reported.`;
 	if (kind === "review")
 		return `${head}\n\nReview it. Read \`gh pr view ${n} -R ${repo}\` and \`gh pr diff ${n} -R ${repo}\`, and read the code around the change before judging it. Then post one review: \`gh pr review ${n} -R ${repo} --comment --body-file -\` (use --request-changes if something must change before it lands), naming the files and lines you are unsure about. Do not touch the code.${common}`;
 	if (kind === "checks")
@@ -533,7 +547,7 @@ export default class PullRequests extends View {
 			this.note.set_value("");
 			this.handle.focus();
 			// A review that asks for work is a request to do the work: an agent gets it.
-			if (kind === "changes" || kind === "comment") this.spawnAgent("comments", pr, body2, cx);
+			if (kind === "changes" || kind === "comment") this.handToBoss("comments", pr, body2, cx);
 			this.refresh(cx);
 		});
 	}
@@ -572,7 +586,7 @@ export default class PullRequests extends View {
 			const quote = { path: row.path, number: row.number, body };
 			this.lineNote.set_value("");
 			this.notice = `comment posted on ${row.path}:${row.number} — the line stays picked`;
-			this.spawnAgent("line", pr, quote, cx);
+			this.handToBoss("line", pr, quote, cx);
 			cx.timer.after(30, (cx) => this.lineNote.focus());
 		});
 	}
@@ -598,26 +612,114 @@ export default class PullRequests extends View {
 	startAgent(kind, cx) {
 		const pr = this.current;
 		if (!pr) return;
-		this.spawnAgent(kind, pr, null, cx);
+		this.handToBoss(kind, pr, null, cx);
 	}
 
-	spawnAgent(kind, pr, quote, cx) {
+	/**
+	 * Hands one button's job to the big-boss-pi agent that is already running.
+	 * Nothing here starts a second agent while the boss is there: a second one in
+	 * that folder delegates on its own and competes with the first.
+	 */
+	handToBoss(kind, pr, quote, cx) {
 		this.error = "";
+		const name = `${pr.repo.split("/")[1]}#${pr.number} ${kind === "line" ? "note" : kind}`;
 		cx.spawn(async (cx) => {
-			// The clone is located only to be named: the agent runs in AGENT_FOLDER and
-			// must hand the work to a worker whose cwd is that clone.
+			// The clone is located only to be named: the boss hands the job to a worker
+			// whose cwd is that clone.
 			const folder = await this.folderFor(pr.repo);
-			const argv = [await this.piPath()];
-			const name = `${pr.repo.split("/")[1]}#${pr.number} ${kind === "line" ? "note" : kind}`;
 			const text = task(kind, pr, quote, folder);
+			let boss;
 			try {
-				run("space.new", { name, folder: AGENT_FOLDER, argv, task: text });
-				this.notice = `${this.notice ? this.notice + " · " : ""}started ${name} in ${AGENT_FOLDER}${folder ? `, to delegate into ${folder}` : `, to clone ${pr.repo} first`}`;
+				boss = await this.bossAgent();
 			} catch (e) {
-				this.error = `could not start ${name} in ${AGENT_FOLDER}: ${e}`;
+				this.error = `could not list the running agents: ${e?.message ?? e}`;
+				cx.notify();
+				return;
 			}
+			if (!boss) {
+				try {
+					boss = await this.startBoss(cx);
+				} catch (e) {
+					this.error = `no big-boss-pi agent is running and one could not be started in ${AGENT_FOLDER}: ${e?.message ?? e}`;
+					cx.notify();
+					return;
+				}
+			}
+			if (!boss) {
+				this.error = `no big-boss-pi agent is running and none appeared in ${AGENT_FOLDER}`;
+				cx.notify();
+				return;
+			}
+			let sent;
+			try {
+				sent = await hc(["send", boss.address, text]);
+			} catch (e) {
+				sent = { code: 1, stderr: String(e?.message ?? e) };
+			}
+			if (sent.code !== 0) {
+				this.error = `could not hand ${name} to the boss (${boss.address}): ${(sent.stderr || sent.stdout || "hc send failed").trim().split("\n")[0]}`;
+				cx.notify();
+				return;
+			}
+			this.notice = `${this.notice ? this.notice + " · " : ""}handed ${name} to the big-boss-pi agent (${boss.address}) to delegate${folder ? ` into ${folder}` : `, which clones ${pr.repo} first`}`;
 			cx.notify();
 		});
+	}
+
+	/**
+	 * Live terminals in AGENT_FOLDER that are agents, from the core the app is talking to.
+	 * `--all` matters: without it hc leaves out every field that tells the boss apart from a
+	 * worker (its `--name` and when it started).
+	 */
+	async liveAgents() {
+		const result = await hc(["ls", "--all", "--json"]);
+		if (result.code !== 0) throw new Error((result.stderr || result.stdout || "hc ls failed").trim().split("\n")[0]);
+		let terminals;
+		try {
+			terminals = JSON.parse(result.stdout).terminals ?? [];
+		} catch (e) {
+			throw new Error(`could not read hc ls output: ${e}`);
+		}
+		const isAgent = (t) => t.agent === "pi" || (t.foreground?.argv ?? []).some((a) => /(^|\/)pi$/.test(a));
+		return terminals.filter((t) => t.state === "live" && !t.rm && isAgent(t) && t.cwd === AGENT_FOLDER);
+	}
+
+	/**
+	 * The boss: the agent in AGENT_FOLDER that was not started as a worker. A worker
+	 * comes from `hc run --name` and carries that name; a sub-agent has a parent. The
+	 * oldest of the rest is the one this workspace belongs to, so a leftover agent in
+	 * the same folder is never picked ahead of it.
+	 */
+	async bossAgent() {
+		const found = (await this.liveAgents()).filter((t) => !t.name && !t.parent);
+		return found.sort((a, b) => (a.created_ms ?? 0) - (b.created_ms ?? 0))[0] ?? null;
+	}
+
+	/**
+	 * No boss running: make the big-boss-pi space with plain pi and no baked-in task,
+	 * then wait until that agent's banner is up — a send to a booting pi is dropped.
+	 */
+	async startBoss(cx) {
+		const before = new Set((await this.liveAgents()).map((t) => t.address));
+		run("space.new", { name: "big-boss-pi", folder: AGENT_FOLDER, argv: [await this.piPath()] });
+		const sleep = (ms) => new Promise((resolve) => cx.timer.after(ms, () => resolve()));
+		for (let i = 0; i < 60; i++) {
+			await sleep(500);
+			let fresh;
+			try {
+				fresh = (await this.liveAgents()).find((t) => !before.has(t.address));
+			} catch {
+				continue;
+			}
+			if (!fresh) continue;
+			for (let j = 0; j < 60; j++) {
+				const screen = await hc(["read", fresh.address]).catch(() => null);
+				if (screen?.code === 0 && /escape interrupt|\/commands/i.test(screen.stdout)) return fresh;
+				await sleep(500);
+			}
+			return fresh;
+		}
+		return null;
 	}
 
 	/** The changed line under the cursor, if any — only real lines take a note. */
@@ -993,7 +1095,7 @@ export default class PullRequests extends View {
 						h_flex()
 							.gap(6)
 							.items_center()
-							.child(div().text_size(10.5).text_color(t.dim).w(74).child("new space:"))
+							.child(div().text_size(10.5).text_color(t.dim).w(74).child("hand to the boss:"))
 							.children(
 								ACTIONS.map((action, i) =>
 									this.textButton(`prs-agent-${action.key}`, `${i + 1} ${action.label}`, (_e, cx) => this.startAgent(action.key, cx), false, t),
