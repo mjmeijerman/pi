@@ -55,7 +55,7 @@ Status values:
 | 74. Beads | missing | — | Task state lives in `/tmp` spec files and PR bodies; nothing survives the session as a queryable backlog. |
 | 84. Pi | done | This repository: pi 1.5.2, 13 extensions, 342 tests in 49 suites, `/home/mark/.pi` | Pinned to 1.5.2; the extension API is exercised but an upgrade is untested until it happens. |
 | 23. Unattended overnight agentic builds | missing | — | Blocked by the same three prerequisites the blip names: default sandboxing, spec-up-front, sensors that validate without line-by-line review. |
-| 110. Promptfoo | missing | — | No eval or red-team gate on prompts, skills or hooks: the deterministic half is tested, the half that shapes every turn is not. Ranked in §5. |
+| 110. Promptfoo | partial | `agent/evals/` — 11 behaviour cases over `agent/AGENTS.md` and the skills, `make evals` (promptfoo 0.125.1, local `qwen3.8:27b`, ~2 min, zero cost) | Trial ring, manual monthly run only: no red-team or adversarial cases, no scheduled run, and the grader is a 27B local model whose verdicts vary run to run. |
 
 
 ## 3. Assess ring
@@ -67,7 +67,7 @@ Status values:
 | 26. Context profiling | done | `scripts/session-report.mjs` (cost, cache hit, context fill per project) | Profiling is after-the-fact; no per-turn attribution. |
 | 27. Enterprise harness | n/a | — | One user; the "harness" is this repo. |
 | 28. Foundation models for structured data | n/a | — | No tabular or warehouse workload; `local_llm` `extract` pulls fields out of prose, which is not the modelling this blip describes. |
-| 29. Harness quality evaluation | partial | 342 tests in 49 suites (`cd agent && node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh` | Zero evaluation of skills, `AGENTS.md` and hooks — the nondeterministic half. |
+| 29. Harness quality evaluation | partial | 342 tests in 49 suites (`cd agent && node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh`, 11 prompt evals in `agent/evals/` (`make evals`, measured 10/11) | The instruction half is now sampled, not proven: evals are manual, model-dependent, and cover behaviour on 11 fixed prompts only; hooks still have no nondeterministic evaluation. |
 | 30. Local coding models | done | `agent/extensions/local-llm.ts`, `/local` health check | Route is manual, chosen by the model's own judgement. |
 | 31. MITRE ATLAS | done | `docs/threat-model.md` §2 groups attacker paths by ATLAS tactic (prompt injection, Execution, Persistence, Defense Evasion, Exfiltration) and names `AML.T0051` for the fetched-page path | Tactic names only, no per-technique ID mapping and no ATLAS-driven detection: the taxonomy shapes the document, not a test. |
 | 32. Production-aware coding agents | n/a | — | Nothing in production; project work is local. |
@@ -87,7 +87,7 @@ Status values:
 | 94. Habit Hooks | done (equivalent) | `git-hooks/pre-commit` runs the budget, skill-length and secret checks; `scripts/harness-check.sh` is the same ruleset on demand | Hooks fire on commit only, so an edit-and-never-commit session is unchecked. |
 | 99. Safe Chain | done | `npm config get min-release-age` → `2880` (48 h quarantine, measured on the host) | The key is `min-release-age`; `minimum-release-age` is rejected by npm 11.20. Inside the sandbox the config is masked, so `harness-check` reports it as unverifiable there instead of failing. |
 | 102. Varlock | missing | — | `agent/settings.json`, `keys.json` and the rc blocks are unvalidated: a typo is found when a feature silently stops working. |
-| 103. zizmor | partial | `uvx zizmor .github/workflows` → 0 high, 0 medium, 1 low (2026-11-13); every action pinned by SHA with `persist-credentials: false` | zizmor is a manual run, not a CI gate: the pins can drift back to tags unnoticed. |
+| 103. zizmor | done | `.github/workflows/zizmor.yml` runs `uvx --from zizmor==1.32.0 zizmor --pedantic .` on PRs, trunk pushes and weekly → 0 findings (1 justified ignore, 2026-11-13: 4 low cleared); every action pinned by full SHA with `persist-credentials: false` | The gate fails the job on any finding, so a pin cannot drift back to a tag unnoticed. |
 
 ## 4. Caution ring — are the warnings being respected?
 
@@ -110,15 +110,11 @@ Status values:
    exists now; the 193 survivors are concentrated in one file (69.77%), mostly branch
    conditions the tests do not distinguish. Fix: read `agent/reports/stryker/mutation.html`,
    kill the survivors that map to a real branch. Cost: 2 hours.
-2. **Skills and `AGENTS.md` are unevaluated** (blip 29, partial). The deterministic half is
-   tested (342); the half that shapes every turn is not. Fix: 10 fixed prompts, one monthly
-   run, judge against last month's answers. Cost: 2 hours to set up.
-3. **Actions pinned but not linted** (blip 103, partial). SHAs replace tags and
-   `persist-credentials: false` is set, but zizmor runs only when someone remembers it.
-   Fix: `uvx zizmor --pedantic .github/workflows` as a CI job. Cost: 30 minutes.
-4. **Promptfoo absent at Trial** (blip 110, missing). No eval or red-team gate on prompts,
-   skills or hooks, and it is the natural home for gap 4's 10 prompts. Cost: 3 hours for one
-   suite.
+2. **The eval suite is thin and manual** (blips 29 and 110, both partial). `make evals`
+   exists (11 prompts, local grader) but runs only when someone remembers it, fails one case
+   ("first line is the action"), and has no red-team, adversarial or hook cases. Fix: schedule
+   it, then add an adversarial set and the failing-case fix. Cost: 1 hour to schedule and fix
+   the case, 3 hours for the adversarial set.
 
 Closed since the previous audit: the threat model (blips 6 and 31,
 `docs/threat-model.md` — assets, attacker paths by ATLAS tactic, the real binds and masks,
@@ -126,7 +122,9 @@ and the explicit "does not cover bare mode, including the bare big-boss-pi boss"
 models (blip 62, `/home/mark/big-boss-pi/bin/jev` plus `agent/skills/jev`), grilling (blip 13,
 `agent/prompts/grill.md` plus the `session-nudge` grill rule), risk tiers (blips 17/42,
 `agent/AGENTS.md:14` plus the `pr-tier` CI job), sandbox enforcement (blip 1, the `install.sh`
-shell wrapper) and the mutation score (blip 2, 74.47% from a reproducible `make mutate-full`).
+shell wrapper), the mutation score (blip 2, 74.47% from a reproducible `make mutate-full`),
+prompt evals (blip 110, `agent/evals/` plus `make evals`) and workflow linting (blip 103,
+`.github/workflows/zizmor.yml`, 0 findings).
 
 The threat model re-scoped the gaps that remain: gap 3 inherits the fetched-page and
 malicious-skill paths, and gap 4 inherits the supply-chain path.
