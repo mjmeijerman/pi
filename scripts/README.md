@@ -142,7 +142,7 @@ Exit 0 when nothing `FAIL`s, 1 on any `FAIL`. What it checks:
 | `doc-metadata` | every `docs/*.md` has `Owner:` and `Review:` (blip 39). |
 | `review-freshness` | no doc or skill past its own `Review:` date. |
 | `extension-radar-basis` | every `agent/extensions/*.ts` header cites its Radar blips. |
-| `npm-min-release-age` | npm refuses versions younger than 1440 min (blip 99). |
+| `npm-min-release-age` | npm refuses versions younger than 2 days — the value is in days, not minutes (blip 99). |
 | `git-hooks-path` | global `core.hooksPath` is `~/.pi/git-hooks`. |
 | `git-hooks-templates` | `~/.git-templates/hooks` is populated (the `git init` layer). |
 

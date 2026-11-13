@@ -285,7 +285,8 @@ fi
 # hours. This is the one-line mitigation, so it belongs in the config step and
 # not in a paragraph telling the user to remember it.
 if have npm; then
-	run npm config set min-release-age 2880
+	# npm reads this in days, so 2 is the 48-hour window.
+	run npm config set min-release-age 2
 	note "npm min-release-age: $(npm config get min-release-age 2>/dev/null || echo unset)"
 else
 	warn "npm not found — min-release-age not set (blip 99)"

@@ -43,7 +43,11 @@ BASELINE_HITS=""
 
 AGENTS_MD_LIMIT=3072
 SKILL_LINES_LIMIT=150
-MIN_RELEASE_AGE=1440
+# npm 11 reads a bare min-release-age as DAYS, not minutes: @npmcli/config sets
+# `before = new Date(Date.now() - 86400000 * value)` and documents the hint as
+# `<days>`. 2 days = the playbook's 48-hour quarantine. 1440 here would mean
+# four years (blip 99).
+MIN_RELEASE_AGE=2
 
 usage() { sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() {
@@ -161,8 +165,10 @@ check_skill_lines() {
 # ------------------------------------------------------------------- config --
 
 # min-release-age only exists from npm 11. An older npm still echoes the key back
-# from .npmrc, so "the config says 2880" proves nothing there: the npm version is
+# from .npmrc, so "the config says 2" proves nothing there: the npm version is
 # half of the check, and the effective setting is the other half (blip 99, blip 42).
+# The unit is days — measured, not assumed: --min-release-age=2 refused a package
+# published today and accepted one published two days ago (blip 99).
 check_release_age() {
 	local version value
 	if ! command -v npm >/dev/null 2>&1; then
@@ -191,20 +197,20 @@ check_release_age() {
 	value=$(npm config get min-release-age 2>/dev/null | tr -d '[:space:]')
 	case "$value" in
 	'' | undefined | null)
-		verdict npm-min-release-age - 0 "npm $version cannot read min-release-age${PI_SANDBOX_MODE:+ (masked by the sandbox — run this bare)} — verify with: bash scripts/harness-check.sh --verify-release-age ; set with: npm config set min-release-age 2880"
+		verdict npm-min-release-age - 0 "npm $version cannot read min-release-age${PI_SANDBOX_MODE:+ (masked by the sandbox — run this bare)} — verify with: bash scripts/harness-check.sh --verify-release-age ; set with: npm config set min-release-age $MIN_RELEASE_AGE"
 		return
 		;;
 	esac
 	case "$value" in
 	*[!0-9]*)
-		verdict npm-min-release-age - 0 "not a number: $value"
+		verdict npm-min-release-age - 0 "not a number of days: $value"
 		return
 		;;
 	esac
 	if [ "$value" -ge "$MIN_RELEASE_AGE" ]; then
-		verdict npm-min-release-age - 1 "npm $version, effective min-release-age=$value ≥ $MIN_RELEASE_AGE"
+		verdict npm-min-release-age - 1 "npm $version, effective min-release-age=$value days ≥ $MIN_RELEASE_AGE days"
 	else
-		verdict npm-min-release-age - 0 "npm $version, effective min-release-age=$value < $MIN_RELEASE_AGE — run: npm config set min-release-age 2880"
+		verdict npm-min-release-age - 0 "npm $version, effective min-release-age=$value days < $MIN_RELEASE_AGE days — run: npm config set min-release-age $MIN_RELEASE_AGE"
 	fi
 }
 

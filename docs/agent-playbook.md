@@ -206,10 +206,11 @@ lint rule) → then an instruction. Instructions are the weakest enforcement you
    anything that was pasted (blips 1, 20).
 2. **Sandbox unfamiliar code.** A fresh clone with a `package.json` postinstall script is
    equivalent to running a stranger's code with your SSH keys.
-3. **Set a package release age.** `npm config set min-release-age 2880` blocks versions
+3. **Set a package release age.** `npm config set min-release-age 2` blocks versions
    published in the last 48 hours (blip 99). Cheap, and it defuses the fastest supply-chain
    attacks. The key is `min-release-age`: npm 11.20 rejects `minimum-release-age` as an
-   unknown option. Check it with `npm config get min-release-age` → `2880`.
+   unknown option, and the number is in **days**, not minutes — 1440 would mean four years.
+   Check it with `npm config get min-release-age` → `2`.
 4. **Approve actions, not vibes.** If you cannot evaluate what you are approving, escalate
    the review tier or reject the action.
 5. **Read what you forward.** Passing agent output to a colleague unread makes you a meat

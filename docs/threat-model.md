@@ -64,7 +64,7 @@ session, and — with networking on — post whatever it read to an attacker hos
 `npm`/`pnpm` installs, `uvx`/`uv tool run` of an arbitrary package, MCP servers and pi
 packages declared in `agent/settings.json` (`packages`, blip 7). A package's
 `postinstall` runs as the user, inside the same namespace, with the same binds. Two
-mitigations apply: npm's 48-hour release quarantine (`min-release-age=2880`, blip 99)
+mitigations apply: npm's 48-hour release quarantine (`min-release-age=2` days, blip 99)
 and the fact that `~/.npm` and `~/.cache` are not mounted, so installs generally fail
 inside the sandbox rather than succeed at machine scope. Neither is a provenance
 check: nothing verifies who published what, and the deferred install still happens the
