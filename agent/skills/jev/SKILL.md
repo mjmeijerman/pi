@@ -1,6 +1,6 @@
 ---
 name: jev
-description: Local decision model for harness questions that should not be guesses — how many workers a task needs, which sandbox mode to run a worker in, yes-no-unsure calls, and sandbox permission requests. Runs on the local qwen3.8:27b via ollama: no API cost, no network. Use before spawning workers, before choosing a sandbox mode, when a sandboxed worker asks for a permission, and anytime the safe answer is not obvious.
+description: "Local decision model for harness questions that should not be guesses — how many workers a task needs, which sandbox mode to run a worker in, yes-no-unsure calls, and sandbox permission requests. Runs on the local qwen3.8:27b via ollama, with no API cost and no network. Use before spawning workers, before choosing a sandbox mode, when a sandboxed worker asks for a permission, and anytime the safe answer is not obvious."
 ---
 
 # jev
