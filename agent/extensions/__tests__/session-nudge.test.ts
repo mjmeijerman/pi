@@ -11,7 +11,7 @@ import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
 
 const mod = await import("../session-nudge.ts");
 const sessionNudge = mod.default;
-const { decideNudge, isNonProjectDir } = mod;
+const { decideNudge, decideGrillNudge, isNonProjectDir, editedPathOf, GRILL_FILE_THRESHOLD } = mod;
 
 const HOME = process.env.HOME ?? "/home/mark";
 const REPO = `${HOME}/worktrees/pi-automation`;
@@ -84,6 +84,59 @@ describe("session-nudge: pure decision", () => {
 	test("missing usage data is not a nudge", () => {
 		assert.equal(decideNudge({ ...base, reason: "resume", contextTokens: null, compactAtContextTokens: NEAR }), null);
 		assert.equal(decideNudge({ ...base, reason: "resume", contextTokens: 118_000, compactAtContextTokens: null }), null);
+	});
+});
+
+describe("session-nudge: grill nudge (blip 13)", () => {
+	/** One successful write/edit tool result for `path`. */
+	async function write(fake: ReturnType<typeof setup>, ctx: any, path: string) {
+		return fake.emit("tool_result", { toolName: "write", input: { path }, isError: false, content: [] }, ctx);
+	}
+
+	test("the threshold is four distinct files", () => {
+		assert.equal(GRILL_FILE_THRESHOLD, 4);
+		assert.equal(decideGrillNudge({ editedFiles: ["a", "b", "c"], grillUsed: false }), null);
+		assert.equal(decideGrillNudge({ editedFiles: ["a", "b", "c", "d"], grillUsed: false })?.kind, "grill");
+	});
+
+	test("only write and edit count, and repeats count once", () => {
+		assert.equal(editedPathOf({ toolName: "read", input: { path: "a" } }), null);
+		assert.equal(editedPathOf({ toolName: "write", input: { path: "a" } }), "a");
+		assert.equal(editedPathOf({ toolName: "edit", input: { path: "b" } }), "b");
+		assert.equal(editedPathOf({ toolName: "write", input: { path: "a" }, isError: true }), null);
+		assert.equal(decideGrillNudge({ editedFiles: ["a", "a", "a", "a"], grillUsed: false }), null);
+	});
+
+	test("three files, no grill: silent", async () => {
+		const fake = setup();
+		await write(fake, fake.ctx, "/repo/a.ts");
+		await write(fake, fake.ctx, "/repo/b.ts");
+		await write(fake, fake.ctx, "/repo/c.ts");
+		assert.equal(fake.notices.length, 0);
+	});
+
+	test("four files, no grill: one nudge, never twice", async () => {
+		const fake = setup();
+		for (const name of ["a", "b", "c", "d"]) await write(fake, fake.ctx, `/repo/${name}.ts`);
+		assert.equal(fake.notices.length, 1);
+		assert.match(fake.notices[0].message, /\/grill/);
+
+		await write(fake, fake.ctx, "/repo/e.ts");
+		await write(fake, fake.ctx, "/repo/f.ts");
+		assert.equal(fake.notices.length, 1, "the nudge is once per session");
+	});
+
+	test("four files after /grill in the transcript: silent", async () => {
+		const fake = setup();
+		await fake.emit("input", { text: "/grill rewrite the guardrails", source: "interactive" }, fake.ctx);
+		for (const name of ["a", "b", "c", "d"]) await write(fake, fake.ctx, `/repo/${name}.ts`);
+		assert.equal(fake.notices.length, 0);
+	});
+
+	test("no UI, no grill line", async () => {
+		const fake = setup({ hasUI: false });
+		for (const name of ["a", "b", "c", "d"]) await write(fake, fake.ctx, `/repo/${name}.ts`);
+		assert.equal(fake.notices.length, 0);
 	});
 });
 
