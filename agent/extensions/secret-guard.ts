@@ -42,13 +42,13 @@ const PATTERNS: { name: string; re: RegExp }[] = [
 	{ name: "secret-assignment", re: /(?:password|secret|api[_-]?key|access[_-]?token|secret[_-]?key|client[_-]?secret|auth[_-]?token|aws[_-]?(?:access[_-]?key|secret[_-]?access[_-]?key)|db[_-]?password)\s*[=:]\s*[A-Za-z0-9_\-./+]{16,}\b/gi },
 ];
 
-/** High-confidence value patterns used for blocking writes (skip placeholder-style assignments). */
-const BLOCK_WRITE_PATTERNS = PATTERNS.filter((p) => p.name !== "secret-assignment");
-
 const SECRET_FILE_RE =
 	/(^|[\/\\'"\s])(\.env(\.[a-zA-Z0-9_-]+)?|\.git-credentials|\.netrc|\.pypirc|\.npmrc|id_rsa|id_ed25519|id_dsa|id_ecdsa|credentials\.(json|ya?ml|toml)|secrets\.(json|ya?ml|toml)|kubeconfig|auth\.json)([\/\\'"\s]|$)|(^|[\/\\'"\s])[^\/\\'"\s]*\.(pem|p12|pfx|jks|keystore|key)([\/\\'"\s]|$)|(^|[\/\\'"\s])(\.aws|\.ssh|\.gnupg|\.kube)([\/\\]|$)|\.config[\/\\]gcloud/gi;
 
 const SAFE_RE = /example|sample|template|fixture|mock|dummy|placeholder|changeme/i;
+
+/** Assignment values that point at the environment instead of embedding a secret. */
+const ENV_REF_RE = /^(?:process\.env|os\.environ|import\.meta\.env|Deno\.env|env\.|getenv\()/;
 
 /** Tools that print or transfer file content (i.e. that would leak content to the model or network). */
 const READER_RE =
@@ -118,6 +118,15 @@ function leaksSecretFile(command: string): boolean {
 	return false;
 }
 
+/**
+ * The candidate value of an assignment match: the text after `=` / `:`, unquoted.
+ * Keeps a placeholder key name (`mock_api_key`) from whitelisting a real value.
+ */
+function assignmentValue(match: string): string {
+	const m = /^\s*[^=:]*[=:]\s*["']?([\s\S]*?)["']?\s*$/.exec(match);
+	return m?.[1] ?? match;
+}
+
 function findSecretValue(input: string, patterns = PATTERNS): string | null {
 	for (const p of patterns) {
 		p.re.lastIndex = 0;
@@ -128,8 +137,10 @@ function findSecretValue(input: string, patterns = PATTERNS): string | null {
 				continue;
 			}
 			// Judge the match itself, never the surrounding text: a key sent to
-			// evil.test must not pass because the command mentions "example".
-			if (!hasMatch(SAFE_RE, m[0])) {
+			// evil.test must not pass because the command mentions "example", and a
+			// placeholder *value* keeps its assignment writable.
+			const candidate = p.name === "secret-assignment" ? assignmentValue(m[0]) : m[0];
+			if (!hasMatch(SAFE_RE, candidate) && !hasMatch(ENV_REF_RE, candidate)) {
 				p.re.lastIndex = 0;
 				return p.name;
 			}
@@ -219,7 +230,7 @@ export default function secretGuard(pi: ExtensionAPI) {
 			const texts: string[] = [];
 			if (isToolCallEventType("write", event)) texts.push(event.input.content ?? "");
 			else if (isToolCallEventType("edit", event)) for (const e of event.input.edits ?? []) texts.push(e.oldText ?? "", e.newText ?? "");
-			const value = texts.map((t) => findSecretValue(t, BLOCK_WRITE_PATTERNS)).find((v) => v !== null);
+			const value = texts.map((t) => findSecretValue(t)).find((v) => v !== null);
 			if (value) {
 				await log(`tool_call ${event.toolName}: blocked writing ${value} into file`);
 				return { block: true, reason: `secret-guard: blocked — the file content contains a likely ${value}. Use env vars or placeholders instead. Use /secretguard allow if intentional.` };

@@ -51,6 +51,7 @@ const S = {
 	dbUri: ["postgres://appuser", ":s3cretpw", "@db.internal:5432/app"].join(""),
 	assignmentQuoted: 'password = "' + "hunter2xyz" + '"',
 	assignmentBare: "api_key: " + "0123456789abcdef0123456789abcdef",
+	assignmentClientSecret: "client_secret=" + "a1b2c3d4e5f6g7h8i9j0",
 };
 
 describe("pattern table", () => {
@@ -192,15 +193,88 @@ describe("write/edit tool calls", () => {
 	});
 
 	/**
-	 * Documents a deliberate limitation: BLOCK_WRITE_PATTERNS excludes
-	 * `secret-assignment`, so a bare password assignment in a write is not
-	 * blocked (only high-confidence *value* patterns are).
+	 * Assignment-style secrets are blocked on writes too. Placeholders stay
+	 * writable because the candidate *value* is checked against SAFE_RE.
 	 */
-	test("does NOT block a bare password assignment in a write (documented gap)", async () => {
+	test("blocks a quoted password assignment in a write", async () => {
 		const { emit, ctx } = setup();
 		const [result] = await emit(
 			"tool_call",
 			{ toolName: "write", input: { path: "src/config.ts", content: S.assignmentQuoted } },
+			ctx,
+		);
+		assert.equal(result?.block, true);
+		assert.match(result.reason, /contains a likely secret-assignment/);
+	});
+
+	test("blocks a bare api_key assignment in a write", async () => {
+		const { emit, ctx } = setup();
+		const [result] = await emit(
+			"tool_call",
+			{ toolName: "write", input: { path: "config/app.yml", content: S.assignmentBare } },
+			ctx,
+		);
+		assert.equal(result?.block, true);
+	});
+
+	test("blocks a client_secret= assignment in a write", async () => {
+		const { emit, ctx } = setup();
+		const [result] = await emit(
+			"tool_call",
+			{ toolName: "write", input: { path: ".env.local.bak/settings", content: S.assignmentClientSecret } },
+			ctx,
+		);
+		assert.equal(result?.block, true);
+	});
+
+	test("blocks an edit that introduces a password assignment", async () => {
+		const { emit, ctx } = setup();
+		const [result] = await emit(
+			"tool_call",
+			{
+				toolName: "edit",
+				input: { path: "src/db.ts", edits: [{ oldText: "PASSWORD=", newText: S.assignmentQuoted }] },
+			},
+			ctx,
+		);
+		assert.equal(result?.block, true);
+		assert.match(result.reason, /secret-assignment/);
+	});
+
+	test("blocks a file holding a placeholder AND a real assignment", async () => {
+		const { emit, ctx } = setup();
+		const content = [
+			'password = "' + "changeme" + '"',
+			"# real one below",
+			S.assignmentClientSecret,
+		].join("\n");
+		const [result] = await emit("tool_call", { toolName: "write", input: { path: "src/env.ts", content } }, ctx);
+		assert.equal(result?.block, true);
+	});
+
+	test("allows placeholder assignments and redaction tokens", async () => {
+		const placeholders = [
+			'password = "' + "changeme" + '"',
+			'password: "' + "example" + '"',
+			'client_secret: "' + "placeholder" + '"',
+			"[REDACTED:secret-assignment]",
+			"password = process.env.DB_PASSWORD;",
+		];
+		for (const content of placeholders) {
+			const { emit, ctx } = setup();
+			const [result] = await emit("tool_call", { toolName: "write", input: { path: "docs/setup.ts", content } }, ctx);
+			assert.equal(result, undefined, `expected \`${content}\` to be writable`);
+		}
+	});
+
+	test("allows prose that mentions a password field without a value", async () => {
+		const { emit, ctx } = setup();
+		const [result] = await emit(
+			"tool_call",
+			{
+				toolName: "write",
+				input: { path: "docs/auth.md", content: "If login fails, check that the password field is required." },
+			},
 			ctx,
 		);
 		assert.equal(result, undefined);
@@ -233,6 +307,27 @@ describe("bash tool calls", () => {
 			assert.equal(result, undefined);
 		});
 	}
+
+	test("a real assignment in a command is blocked", async () => {
+		const { emit, ctx } = setup();
+		const [result] = await emit(
+			"tool_call",
+			{ toolName: "bash", input: { command: `echo ${S.assignmentQuoted} >> src/config.ts` } },
+			ctx,
+		);
+		assert.equal(result?.block, true);
+	});
+
+	test("a placeholder assignment in a command stays allowed", async () => {
+		const { emit, ctx } = setup();
+		const placeholder = 'password: "' + "example" + '"';
+		const [result] = await emit(
+			"tool_call",
+			{ toolName: "bash", input: { command: `grep -n '${placeholder}' README.md` } },
+			ctx,
+		);
+		assert.equal(result, undefined);
+	});
 });
 
 describe("tool_result redaction", () => {
