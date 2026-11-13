@@ -15,8 +15,9 @@
 
 ## Herdr
 
-- Spawn delegated agents interactive, never `-p`: `hc run --name <slug> --cwd <dir> --no-notify --bg pi -a`, then `hc send <slug> "Read /tmp/specs/<file>.md and do it"`. Print mode renders nothing until exit, so clicking the pane shows an empty terminal.
-- `--no-notify` stops hc typing exit notes into this pane. `hc read <slug>` shows the live screen; `hc ls` lists state.
+- Spawn delegated agents with `~/.pi/tools/agent-pane.sh spawn <slug> <spec.md>`: it creates a real herdr pane running interactive pi and sends the spec path. Never `hc run --bg` — a terminal without a pane cannot be tiled, so clicking it in the window only opens a preview modal.
+- Close when done: `agent-pane.sh close <slug>` (also kills/removes the terminal). `agent-pane.sh list` shows panes.
+- `herdr-app shot /tmp/x.png` captures the window; use it to check layout instead of guessing.
 
 ## Machine / screens
 
