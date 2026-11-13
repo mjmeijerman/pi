@@ -22,7 +22,13 @@ const { mergeReason, trunkCommitReason, currentBranch } = mod;
 function repoOn(branch: string): string {
 	const dir = mkdtempSync(join(tmpdir(), `pi-merge-guard-${branch.replace(/[^a-z0-9]+/gi, "-")}-`));
 	execFileSync("git", ["init", "-q", "-b", branch, dir]);
-	execFileSync("git", ["-C", dir, "commit", "-q", "--allow-empty", "-m", "init"]);
+	// A CI runner has no global git identity, so supply one for this commit only.
+	execFileSync("git", [
+		"-C", dir,
+		"-c", "user.name=merge-guard-test",
+		"-c", "user.email=merge-guard@example.invalid",
+		"commit", "-q", "--allow-empty", "-m", "init",
+	]);
 	return dir;
 }
 
