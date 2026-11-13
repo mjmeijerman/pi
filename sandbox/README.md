@@ -20,6 +20,46 @@ install.sh replaces it on every run (never duplicates it) and keeps the
 pre-wrapper file as `~/.bashrc.bak-pi` / `~/.zshrc.bak-pi`. Delete the block to
 go back to the bare binary; the raw `pi` stays on PATH either way.
 
+### Starting a session without the sandbox
+
+`scripts/pi-bare` is the named way out — the same binary, started without the
+wrapper. `install.sh` symlinks it into `~/.local/bin`, so it is a program:
+
+```
+pi-bare            # unsandboxed; the session shows ⚠ in its title
+```
+
+Herdr's new-agent menu (`+`, top right) lists agents from
+`~/.config/herdr-app/programs.json`. `sandbox/herdr-programs.json` is the entry
+that puts "Pi (bare)" next to "Pi" in that menu; `install.sh` copies it when the
+file is absent and leaves an existing one alone. Menu and terminal are the same
+choice: `Pi` → sandboxed, `Pi (bare)` → not, and both sessions say which one
+they are.
+
+The hatch exists because a default with no sanctioned exit gets bypassed in a
+worse way — a pasted absolute path, or `PI_BARE=1` exported once and inherited
+by every later shell.
+
+### Seeing which session is contained
+
+A sandbox you cannot see becomes a sandbox you stop trusting: once the wrapper
+exists, the contained session and the `PI_BARE=1` escape look identical. Every
+session therefore carries its own state:
+
+- the terminal title starts with `⛨` when the launcher ran and `⚠` when it did
+  not, with `· no net` appended for `--no-net` runs. Herdr shows that title as
+  the agent's name in its Agents list — per tab, not per pane: rows take the
+  title of the tab's lead agent, so two agents sharing a tab share one badge;
+- the `sandbox` status line says `⛨ sandboxed (bwrap)` or `⚠ bare: real home
+  and credentials` in that session's own footer, which is per session;
+- `sandbox/pi-sandbox.sh` exports `PI_SANDBOX_MODE=bwrap` and
+  `PI_SANDBOX_NET=on|off` inside the sandbox. An unset marker means "not
+  sandboxed" — absence is the signal, not an unknown.
+
+The badge lives in `agent/extensions/sandbox-badge.ts` and reads the marker
+instead of probing: a probe reports what the session can see, the marker reports
+what the launcher decided.
+
 Two guards keep this from turning into a broken `pi`:
 
 - `pisandbox` or `bwrap` missing → one line on stderr, then the plain binary.

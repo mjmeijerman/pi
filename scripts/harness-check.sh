@@ -407,6 +407,36 @@ check_model_route() {
 	fi
 }
 
+# ----------------------------------------------------------- sandbox marker --
+# A sandbox nobody can see becomes a sandbox nobody checks: once `install.sh`
+# wraps `pi`, the contained session and the one launched with PI_BARE=1 look
+# identical in Herdr. The marker the launcher exports is the only honest source,
+# so this check keeps the launcher and the display from drifting apart.
+check_sandbox_marker() {
+	local launcher="sandbox/pi-sandbox.sh" badge="agent/extensions/sandbox-badge.ts"
+	if [ ! -f "$ROOT/$launcher" ]; then
+		record WARN sandbox-marker "$launcher" "missing — no launcher to read the marker from"
+		return
+	fi
+	if ! grep -q 'setenv PI_SANDBOX_MODE' "$ROOT/$launcher"; then
+		verdict sandbox-marker "$launcher" 0 \
+			"does not export PI_SANDBOX_MODE — the badge would call every session bare"
+		return
+	fi
+	if ! grep -q 'setenv PI_SANDBOX_NET' "$ROOT/$launcher"; then
+		verdict sandbox-marker "$launcher" 0 \
+			"does not export PI_SANDBOX_NET — --no-net runs would be indistinguishable"
+		return
+	fi
+	if [ ! -f "$ROOT/$badge" ]; then
+		verdict sandbox-marker "$badge" 0 \
+			"missing — the marker is exported but nothing displays it (blip 1, blip 42)"
+		return
+	fi
+	verdict sandbox-marker "$launcher" 1 \
+		"exports PI_SANDBOX_MODE and PI_SANDBOX_NET, displayed by $badge"
+}
+
 # --------------------------------------------------------------------- run ---
 
 while [ $# -gt 0 ]; do
@@ -439,6 +469,7 @@ if [ "$QUICK" = 0 ]; then
 	check_release_age
 	check_git_hooks
 	check_model_route
+	check_sandbox_marker
 
 	section "metadata — ownership and provenance"
 	check_doc_metadata

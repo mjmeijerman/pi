@@ -1,0 +1,10 @@
+{
+  "programs": {
+    "pi-bare": {
+      "name": "Pi (bare)",
+      "icon": "icons/pi.svg",
+      "tile": "#8d6e63",
+      "run": ["pi-bare"]
+    }
+  }
+}

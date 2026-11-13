@@ -2,8 +2,8 @@
 
 Owner: Mark Meijerman (`mjmeijerman`)
 Review: 2027-02-15 — quarterly, see §6 below.
-Re-measured 2026-11-13: 238 extension tests (30 suites), 8 skills, `agent/AGENTS.md`
-3040 bytes, 51 entries in `~/.pi/agent/suggestions.jsonl`.
+Re-measured 2026-11-13: 260 extension tests (35 suites), 8 skills, `agent/AGENTS.md`
+3012 bytes, 51 entries in `~/.pi/agent/suggestions.jsonl`.
 
 Audit date: 2026-11-13. Source: `werken-met-ai.pdf` (Radar Vol. 35, November 2026).
 Scope: the 56 rows below, out of the 117 in `docs/radar-blips.tsv` — every Technique
@@ -23,7 +23,7 @@ Status values:
 
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
-| 1. Agent sandboxing | done | `install.sh` §4b installs a managed `pi()` shell function into `~/.bashrc` and `~/.zshrc` → `scripts/pisandbox` → `sandbox/pi-sandbox.sh` (bubblewrap); `PI_BARE=1 pi` bypasses, `pisandbox --no-net -- pi` adds isolation | The wrapper is a shell function, so a launcher that skips the rc file (`env -i`, an IDE, cron) still gets the bare binary. Fallback prints one stderr line when `bwrap` is absent. |
+| 1. Agent sandboxing | done | `install.sh` §4b installs a managed `pi()` shell function into `~/.bashrc` and `~/.zshrc` → `scripts/pisandbox` → `sandbox/pi-sandbox.sh` (bubblewrap); `PI_BARE=1 pi` bypasses, `pisandbox --no-net -- pi` adds isolation. `scripts/pi-bare` (symlinked into `~/.local/bin`, listed as "Pi (bare)" in Herdr's new-agent menu via `sandbox/herdr-programs.json`) is the sanctioned exit, so the choice is made before the session starts. The launcher's `PI_SANDBOX_MODE`/`PI_SANDBOX_NET` markers show as `⛨`/`⚠` in the title (`agent/extensions/sandbox-badge.ts`) and in the footer status, so a contained session and a bare one are told apart at a glance (blip 42) | The wrapper is a shell function, so a launcher that skips the rc file (`env -i`, an IDE, cron) still gets the bare binary. Fallback prints one stderr line when `bwrap` is absent. |
 | 2. Mutation testing | partial | `agent/stryker.conf.json`, `.github/workflows/test.yml` (weekly `npx stryker run`), `make mutate` | Score never recorded — run `make mutate`, paste the score here. `agent/node_modules/@stryker-mutator` is not installed; `cd agent && npm install` first. |
 | 3. Path-to-production mapping | partial | `.github/workflows/{test,secret-scan}.yml`, PR-per-change | The path exists in CI config, not as a reviewed map. Review capacity per day is unmeasured. |
 | 4. Post-quantum cryptography | n/a | — | Nothing here holds a long-lived key: model traffic terminates at the provider's TLS, and the only secrets in scope are API tokens rotated by the providers. Revisit if the harness ever stores keys it must keep for years. |
