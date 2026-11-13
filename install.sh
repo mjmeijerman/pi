@@ -182,6 +182,28 @@ else
 	echo "!! scripts/pisandbox not found — skipping"
 fi
 
+# pi-bare: the sanctioned way out, as a program a menu can launch. A default
+# with no exit gets bypassed silently; one row in Herdr's new-agent menu keeps
+# the choice visible, and the session starts with ⚠ in its title (blip 1).
+if [ -f "$HOME/.pi/scripts/pi-bare" ]; then
+	chmod +x "$HOME/.pi/scripts/pi-bare"
+	ln -sf "$HOME/.pi/scripts/pi-bare" "$PI_BIN_DIR/pi-bare"
+	echo "== pi-bare -> $PI_BIN_DIR/pi-bare"
+else
+	echo "!! scripts/pi-bare not found — skipping"
+fi
+
+# The menu row itself is app config, not harness config: install the file when
+# Herdr has none, and never overwrite a programs.json someone edited.
+if [ -f "$SOURCE_DIR/sandbox/herdr-programs.json" ] && [ -d "$HOME/.config/herdr-app" ]; then
+	if [ -f "$HOME/.config/herdr-app/programs.json" ]; then
+		echo "== herdr programs.json exists — add the pi-bare entry from sandbox/herdr-programs.json by hand"
+	else
+		cp "$SOURCE_DIR/sandbox/herdr-programs.json" "$HOME/.config/herdr-app/programs.json"
+		echo "== herdr menu: \"Pi (bare)\" entry installed -> ~/.config/herdr-app/programs.json"
+	fi
+fi
+
 # --- 4b. sandbox by default for interactive pi (Radar blip 1, Adopt) -------
 # AGENTS.md called sandboxing "the default, not opt-in" while `pi` on PATH stayed
 # the raw binary: a wrapper you have to remember to type is willpower, not a
@@ -278,6 +300,7 @@ echo "   git config --global --get core.excludesFile         # global gitignore"
 echo "   git config --global --get init.templateDir          # pre-push vuln scan"
 echo "   git-vuln-scan                                       # should print usage help"
 echo "   pisandbox --help                                    # sandbox one-liner"
+echo "   pi-bare --version                                   # unsandboxed, for the Herdr menu"
 echo "   bash scripts/harness-check.sh                        # harness budgets as checks"
 echo
 echo "Reminder if you ever forget the hooks: just run this script again."

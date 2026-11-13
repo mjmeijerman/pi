@@ -20,6 +20,26 @@ install.sh replaces it on every run (never duplicates it) and keeps the
 pre-wrapper file as `~/.bashrc.bak-pi` / `~/.zshrc.bak-pi`. Delete the block to
 go back to the bare binary; the raw `pi` stays on PATH either way.
 
+### Starting a session without the sandbox
+
+`scripts/pi-bare` is the named way out — the same binary, started without the
+wrapper. `install.sh` symlinks it into `~/.local/bin`, so it is a program:
+
+```
+pi-bare            # unsandboxed; the session shows ⚠ in its title
+```
+
+Herdr's new-agent menu (`+`, top right) lists agents from
+`~/.config/herdr-app/programs.json`. `sandbox/herdr-programs.json` is the entry
+that puts "Pi (bare)" next to "Pi" in that menu; `install.sh` copies it when the
+file is absent and leaves an existing one alone. Menu and terminal are the same
+choice: `Pi` → sandboxed, `Pi (bare)` → not, and both sessions say which one
+they are.
+
+The hatch exists because a default with no sanctioned exit gets bypassed in a
+worse way — a pasted absolute path, or `PI_BARE=1` exported once and inherited
+by every later shell.
+
 ### Seeing which session is contained
 
 A sandbox you cannot see becomes a sandbox you stop trusting: once the wrapper

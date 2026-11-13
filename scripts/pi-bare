@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# pi-bare: start pi outside the sandbox, on purpose and visibly.
+#
+# Radar basis: #1 agent sandboxing (Adopt).
+#
+# A default with no sanctioned exit gets bypassed in a worse way: someone pastes
+# the raw path or exports PI_BARE=1 in a shell and the next session inherits it.
+# So the escape hatch is a named program: Herdr's new-agent menu gets a second
+# row that runs this, the choice is made before the session starts, and the
+# session shows ⚠ in its title (agent/extensions/sandbox-badge.ts) for as long
+# as it runs.
+#
+# Nothing here weakens the sandbox: it is the same binary, started without the
+# wrapper. `install.sh` symlinks this into ~/.local/bin so the menu finds it.
+set -uo pipefail
+
+exec env PI_BARE=1 pi "$@"
