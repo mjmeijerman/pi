@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+    branches: [trunk]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  extension-tests:
+    name: extension tests (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["24", "26"]
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # The stubs delegate to the real pi-ai / pi-tui so cost and width math is
+      # pi's own. Optional: when the registry is unavailable the fidelity tests
+      # skip instead of failing the build.
+      - name: install pi packages (optional)
+        continue-on-error: true
+        run: npm install --no-save --no-package-lock @earendil-works/pi-ai@1.5.2 @earendil-works/pi-tui@1.5.2
+
+      - name: test
+        env:
+          PI_REAL_PACKAGES_DIR: ${{ github.workspace }}/agent/node_modules/@earendil-works
+        run: npm test
+
+  shell:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: syntax
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files '*.sh')
+          printf '%s\n' "${files[@]}"
+          for f in "${files[@]}"; do bash -n "$f"; done
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files '*.sh')
+          shellcheck --severity=error "${files[@]}"
