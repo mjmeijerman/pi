@@ -2,7 +2,7 @@
 # prune-sessions.sh — archive old pi sessions. Dry-run by default.
 #
 # Moves (never deletes) session JSONL files older than --older-than into
-# /home/mark/.pi/tools/archive/<project-slug>/, preserving the project layout
+# /home/mark/.pi/scripts/archive/<project-slug>/, preserving the project layout
 # so a file can be moved back by hand.
 #
 # Usage:
@@ -15,7 +15,7 @@
 #                       Age = file modification time (last write to the log).
 #   --apply             Actually move the files. Without it nothing changes.
 #   --sessions <dir>    Override the session store (default ~/.pi/agent/sessions).
-#   --archive <dir>     Override the archive (default ~/.pi/tools/archive).
+#   --archive <dir>     Override the archive (default ~/.pi/scripts/archive).
 #   -h, --help          This help.
 #
 # Safety: refuses to run if --older-than is under 7d unless --apply is absent,

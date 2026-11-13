@@ -110,7 +110,7 @@ Options: `--older-than <30d|12h|8w|6mo|1y>`, `--apply`, `--sessions <dir>`,
 Restore one session:
 
 ```bash
-mv ~/.pi/tools/archive/--home-mark-projects-ACE--/<name>.jsonl \
+mv ~/.pi/scripts/archive/--home-mark-projects-ACE--/<name>.jsonl \
    ~/.pi/agent/sessions/--home-mark-projects-ACE--/
 ```
 

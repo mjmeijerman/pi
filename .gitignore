@@ -19,6 +19,6 @@ agent/secret-guard.log
 agent/deepseek.key
 agent/suggestions.jsonl
 agent/retro/
-tools/.agent-panes.json
+scripts/.agent-panes.json
 *.bak
 werken-met-ai.pdf

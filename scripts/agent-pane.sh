@@ -10,11 +10,11 @@
 #   agent-pane.sh close <slug|pane-id>
 #   agent-pane.sh list
 #
-# State (slug → pane, terminal) lives in ~/.pi/tools/.agent-panes.json.
+# State (slug → pane, terminal) lives in ~/.pi/scripts/.agent-panes.json.
 set -euo pipefail
 
 PI_BIN=${PI_BIN:-/home/mark/.local/share/pnpm/bin/pi}
-STATE=${STATE:-$HOME/.pi/tools/.agent-panes.json}
+STATE=${STATE:-$HOME/.pi/scripts/.agent-panes.json}
 PROG=${0##*/}
 
 die() { printf '%s: error: %s\n' "$PROG" "$*" >&2; exit 1; }
