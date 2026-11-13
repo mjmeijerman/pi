@@ -36,9 +36,16 @@ in `settings.json`, and then verifies the result (sandbox selftest, 215 extensio
 tests, hook paths, key present). Read it before running it — 300 lines, no
 network calls except apt, `pi update` and the optional model pull.
 
+Every skill, extension and pi package is offered one at a time — name,
+one-line description taken from the file's own header, then `install? [Y/n]`.
+Enter keeps it, `n` skips it. Declining a package runs `pi remove`, so it leaves
+`settings.json` instead of coming back on the next update. Nothing already on
+disk is deleted; a skipped component that was installed earlier just stays, and
+the script says so.
+
 | Flag | Effect |
 | --- | --- |
-| `-y`, `--yes` | Accept every prompt (the API key is still typed by you) |
+| `-y`, `--yes` | Accept every prompt: installs the full set (the API key is still typed by you) |
 | `--dry-run` | Print the plan, change nothing |
 | `--no-apt` | Never call `sudo apt-get`, only report missing packages |
 | `--with-ollama` | Pull `qwen3.8:27b` (~17 GB) for the `local_llm` tool |

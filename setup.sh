@@ -82,6 +82,64 @@ ask() {
 	esac
 }
 
+# Default is yes: pressing Enter keeps the component. -y or a piped stdin also
+# counts as yes, so an unattended run installs the full set.
+ask_default_yes() {
+	local prompt=$1 reply
+	if [ "$ASSUME_YES" = 1 ]; then
+		return 0
+	fi
+	if [ ! -t 0 ]; then
+		printf '   %s -> yes (no tty)\n' "$(printf '%s' "$prompt" | head -1)"
+		return 0
+	fi
+	read -rp "   install? [Y/n] " reply
+	case "$reply" in
+	[nN] | [nN][oO]) return 1 ;;
+	*) return 0 ;;
+	esac
+}
+
+# One-line description for a skill, read from its SKILL.md frontmatter.
+skill_desc() {
+	awk '/^description:/{sub(/^description:[[:space:]]*/, ""); print; exit}' "$1/SKILL.md" 2>/dev/null | cut -c1-108
+}
+
+# One-line description for an extension, read from its header comments.
+ext_desc() {
+	local f=$1 d=""
+	# Only a file-header comment counts. A comment deeper in the file describes
+	# one detail, not the extension (dictation.ts was the offender).
+	if [ "$(head -1 "$f")" = "/**" ]; then
+		# Join the block-comment lines: many headers wrap over three lines, and
+		# taking only line one cut the sentence in half (local-llm.ts).
+		d=$(awk 'NR > 1 && NR <= 20 {
+			if (/^ \* /) { sub(/^ \* /, ""); buf = (buf == "" ? $0 : buf " " $0); next }
+			if (buf != "") exit
+		} END { print buf }' "$f")
+	fi
+	if [ -z "$d" ]; then
+		d=$(awk 'NR <= 3 && /^\/\/ [A-Za-z0-9]/ {sub(/^\/\/ /, ""); print; exit}' "$f")
+	fi
+	printf '%s' "$d"
+}
+
+# Skill descriptions are YAML: strip the surrounding quotes and cut on a word
+# boundary so the prompt stays one readable line.
+trim_desc() {
+	local d=""
+	d=$(printf '%s' "$1" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+	# Prefer the first sentence when it is long enough to be informative.
+	local first
+	first=$(printf '%s' "$d" | sed -n 's/^\([^.]\{25,\}\)\..*/\1/p' | head -1)
+	[ -n "$first" ] && d="$first"
+	if [ ${#d} -gt 96 ]; then
+		d="${d:0:96}"
+		d="${d% *}…"
+	fi
+	printf '%s' "$d"
+}
+
 usage() {
 	sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
@@ -161,7 +219,59 @@ else
 	fi
 fi
 
-# ------------------------------------------------- 1. config + hooks (git) ---
+# ------------------------------------------------- 1. choose components ----
+
+step "skills"
+SKILLS_PICKED=""
+if [ -d "$SOURCE_DIR/agent/skills" ]; then
+	TOTAL=$(find "$SOURCE_DIR/agent/skills" -maxdepth 1 -mindepth 1 -type d | wc -l)
+	IDX=0
+	for dir in "$SOURCE_DIR/agent/skills"/*/; do
+		name=$(basename "$dir")
+		IDX=$((IDX + 1))
+		desc=$(trim_desc "$(skill_desc "$dir")")
+		[ -z "$desc" ] && desc="(no description in SKILL.md)"
+		printf '   [%d/%d] %s\n         %s\n' "$IDX" "$TOTAL" "$name" "$desc"
+		if ask_default_yes "$name"; then
+			SKILLS_PICKED="$SKILLS_PICKED $name"
+		else
+			note "skipped: $name"
+		fi
+	done
+fi
+PI_SKILLS="${SKILLS_PICKED# }"
+export PI_SKILLS
+note "skills selected: ${PI_SKILLS:+${PI_SKILLS// /, }}"
+[ -z "$PI_SKILLS" ] && note "skills selected: none"
+
+step "extensions"
+EXTS_PICKED=""
+if [ -d "$SOURCE_DIR/agent/extensions" ]; then
+	TOTAL=$(find "$SOURCE_DIR/agent/extensions" -maxdepth 1 -name '*.ts' | wc -l)
+	IDX=0
+	for file in "$SOURCE_DIR/agent/extensions"/*.ts; do
+		[ -f "$file" ] || continue
+		base=$(basename "$file")
+		IDX=$((IDX + 1))
+		desc=$(trim_desc "$(ext_desc "$file")")
+		[ -z "$desc" ] && desc="(no header comment in the file)"
+		printf '   [%d/%d] %s\n         %s\n' "$IDX" "$TOTAL" "${base%.ts}" "$desc"
+		if ask_default_yes "$base"; then
+			EXTS_PICKED="$EXTS_PICKED $base"
+		else
+			note "skipped: $base"
+		fi
+	done
+fi
+PI_EXTENSIONS="${EXTS_PICKED# }"
+export PI_EXTENSIONS
+note "extensions selected: ${PI_EXTENSIONS:+${PI_EXTENSIONS// /, }}"
+[ -z "$PI_EXTENSIONS" ] && note "extensions selected: none"
+if [ "$DRY_RUN" = 0 ]; then
+	note "anything skipped but already present stays on disk; remove it by hand if you want it gone"
+fi
+
+# ------------------------------------------------- 2. config + hooks (git) ---
 
 step "config from git"
 if have pi; then
@@ -217,12 +327,32 @@ fi
 
 # ------------------------------------------------------------ 3. pi packages --
 
-step "pi packages (from settings.json)"
+step "pi packages (declared in settings.json)"
 if have pi; then
-	note "declared: $(node -e '
+	PKG_LIST=$(node -e '
 		const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-		console.log((s.packages || []).join(", ") || "(none)");
-	' "$AGENT_DIR/settings.json" 2>/dev/null || echo "(settings.json unreadable)")"
+		for (const p of s.packages || []) console.log(p);
+	' "$AGENT_DIR/settings.json" 2>/dev/null || true)
+	if [ -z "$PKG_LIST" ]; then
+		note "none declared"
+	else
+		SKIPPED_PKGS=""
+		while IFS= read -r pkg; do
+			[ -z "$pkg" ] && continue
+			printf '         %s\n' "$pkg"
+			if ! ask_default_yes "$pkg"; then
+				SKIPPED_PKGS="$SKIPPED_PKGS $pkg"
+				note "skipped: $pkg"
+			fi
+		done <<<"$PKG_LIST"
+		# Declining a package removes it from settings.json, otherwise
+		# `pi update --extensions` would just install it again.
+		if [ -n "$SKIPPED_PKGS" ]; then
+			for pkg in $SKIPPED_PKGS; do
+				run pi remove "$pkg" >/dev/null 2>&1 || warn "could not remove $pkg"
+			done
+		fi
+	fi
 	# Reconciles npm and git packages into ~/.pi/agent/{npm,git}. Fails loudly on
 	# network trouble; the failure is not fatal because pi retries at startup.
 	if ! run pi update --extensions; then

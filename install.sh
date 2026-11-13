@@ -42,14 +42,35 @@ fi
 
 # --- 1. agent config ---------------------------------------------------------
 mkdir -p "$AGENT_DIR"
-for sub in skills extensions; do
-	src="$SOURCE_DIR/agent/$sub"
-	dst="$AGENT_DIR/$sub"
-	if [ -d "$src" ] && [ "$src" != "$dst" ]; then
-		mkdir -p "$dst"
-		cp -R "$src/." "$dst/"
+
+# Skills and extensions can be filtered by setup.sh through PI_SKILLS /
+# PI_EXTENSIONS (space-separated names). Unset means "everything", which keeps
+# plain `./install.sh` behaviour unchanged.
+if [ -d "$SOURCE_DIR/agent/skills" ] && [ "$SOURCE_DIR/agent/skills" != "$AGENT_DIR/skills" ]; then
+	mkdir -p "$AGENT_DIR/skills"
+	if [ -n "${PI_SKILLS:-}" ]; then
+		for s in $PI_SKILLS; do
+			[ -d "$SOURCE_DIR/agent/skills/$s" ] && cp -R "$SOURCE_DIR/agent/skills/$s" "$AGENT_DIR/skills/"
+		done
+	else
+		cp -R "$SOURCE_DIR/agent/skills/." "$AGENT_DIR/skills/"
 	fi
-done
+fi
+
+if [ -d "$SOURCE_DIR/agent/extensions" ] && [ "$SOURCE_DIR/agent/extensions" != "$AGENT_DIR/extensions" ]; then
+	mkdir -p "$AGENT_DIR/extensions"
+	# lib/ and __tests__/ always come along: extensions import lib, and the test
+	# suite is how setup.sh verifies the install afterwards.
+	cp -R "$SOURCE_DIR/agent/extensions/lib" "$AGENT_DIR/extensions/" 2>/dev/null || true
+	cp -R "$SOURCE_DIR/agent/extensions/__tests__" "$AGENT_DIR/extensions/" 2>/dev/null || true
+	if [ -n "${PI_EXTENSIONS:-}" ]; then
+		for e in $PI_EXTENSIONS; do
+			[ -f "$SOURCE_DIR/agent/extensions/$e" ] && cp "$SOURCE_DIR/agent/extensions/$e" "$AGENT_DIR/extensions/"
+		done
+	else
+		cp "$SOURCE_DIR/agent/extensions"/*.ts "$AGENT_DIR/extensions/"
+	fi
+fi
 for f in settings.json AGENTS.md models.json i-have-adhd.json keybindings.json package.json; do
 	src="$SOURCE_DIR/agent/$f"
 	dst="$AGENT_DIR/$f"
