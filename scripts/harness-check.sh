@@ -4,7 +4,12 @@
 #
 # Radar basis: #1 agent sandboxing (Adopt), #11 feedback flywheel, #25 agent
 # suggestion box, #29 harness quality evaluation, #36 agent instruction bloat,
-# #39 documentation sprawl, #99 Safe Chain.
+# #39 documentation sprawl, #99 Safe Chain. Added by the 2026-11 audit:
+# #16 open-weight models, #19 small language models, #30 local coding models,
+# #40 blanket frontier model usage (a cheap default route is the point).
+#
+# radar-blip-valid holds this file to its own rule: a cited blip must exist in
+# docs/radar-blips.tsv, so a fabricated number fails instead of reading well.
 #
 # The rule this file enforces on itself: anything a script can check must not
 # be a paragraph in AGENTS.md. Read-only — no writes, no network.
@@ -246,25 +251,159 @@ check_radar_basis() {
 	done
 }
 
+# A Review: line can carry prose after the date ("2027-02-13 — quarterly"),
+# so take the leading date token instead of the whole line. Parsing the line
+# whole made every comparison fail silently and the check passed on nothing.
 check_review_freshness() {
-	local files=() file rel review then today seen=0
+	local files=() file rel review due then today soon seen=0
 	shopt -s nullglob
-	files=("$ROOT"/docs/*.md "$ROOT"/agent/skills/*/SKILL.md)
+	files=("$ROOT"/docs/*.md)
 	shopt -u nullglob
+	if [ "${#files[@]}" -eq 0 ]; then
+		verdict review-freshness docs 0 "no docs/*.md to date"
+		return
+	fi
 	today=$(date +%s)
+	soon=$((today + 14 * 86400))
 	for file in "${files[@]}"; do
-		review=$(sed -n 's/^[[:space:]]*[Rr]eview:[[:space:]]*//p' "$file" | head -1)
-		review=${review//[[:space:]\"]/}
-		review=${review//\'/}
-		[ -n "$review" ] || continue
-		then=$(date -d "$review" +%s 2>/dev/null) || continue
-		seen=$((seen + 1))
 		rel="${file#"$ROOT"/}"
-		verdict review-freshness "$rel" "$([ "$then" -ge "$today" ] && echo 1 || echo 0)" \
-			"reviewed $review$([ "$then" -ge "$today" ] || echo ' — overdue, re-read or delete')"
+		review=$(sed -n 's/^[[:space:]]*[Rr]eview:[[:space:]]*//p' "$file" | head -1)
+		if [ -z "$review" ]; then
+			verdict review-freshness "$rel" 0 "no Review: line — add 'Review: YYYY-MM-DD' or delete the doc"
+			continue
+		fi
+		due=$(printf '%s' "$review" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
+		if [ -z "$due" ]; then
+			verdict review-freshness "$rel" 0 "Review: carries no YYYY-MM-DD date ($review)"
+			continue
+		fi
+		then=$(date -d "$due" +%s 2>/dev/null) || {
+			verdict review-freshness "$rel" 0 "Review: date $due is not a real date"
+			continue
+		}
+		seen=$((seen + 1))
+		if [ "$then" -lt "$today" ]; then
+			verdict review-freshness "$rel" 0 \
+				"review overdue since $due — rerun the audit or delete the doc (blips 36 and 39)"
+		elif [ "$then" -le "$soon" ]; then
+			record WARN review-freshness "$rel" "review due $due, inside 14 days — schedule the rerun"
+		else
+			verdict review-freshness "$rel" 1 "review due $due"
+		fi
 	done
 	if [ "$seen" -eq 0 ]; then
-		verdict review-freshness - 1 "no Review: dates to compare (doc-metadata enforces the field)"
+		record WARN review-freshness docs "no Review: date could be parsed — the check compared nothing"
+	fi
+}
+
+# --- blip allowlist -------------------------------------------------------
+# "Cite the blip number" is unverifiable while the number is free text: any
+# integer reads as authoritative. The allowlist is docs/radar-blips.tsv, so a
+# citation either resolves to a Vol. 35 blip or it fails.
+RADAR_TSV_REL="docs/radar-blips.tsv"
+declare -A RADAR_RING=()
+
+load_radar_blips() { # fills RADAR_RING from the TSV, 1 when it is unusable
+	local blip ring
+	RADAR_RING=()
+	[ -f "$ROOT/$RADAR_TSV_REL" ] || return 1
+	while IFS=$'\t' read -r blip ring _; do
+		case "$blip" in '' | blip) continue ;; esac
+		[ -n "$ring" ] || continue
+		RADAR_RING["$blip"]=$ring
+	done <"$ROOT/$RADAR_TSV_REL"
+	[ "${#RADAR_RING[@]}" -gt 0 ]
+}
+
+cite_numbers() { # file -> one blip number per line, deduped
+	grep -oE '#[0-9]+|blip[[:space:]]+#?[0-9]+' "$1" 2>/dev/null |
+		grep -oE '[0-9]+' | sort -un
+}
+
+check_radar_blips() {
+	local files=() file rel n ring resolved=0 unknown=0 caution
+	if ! load_radar_blips; then
+		verdict radar-blip-valid "$RADAR_TSV_REL" 0 \
+			"missing or empty — without the allowlist no citation can be checked"
+		return
+	fi
+	shopt -s nullglob
+	files=("$ROOT"/agent/extensions/*.ts "$ROOT"/scripts/*.sh \
+		"$ROOT"/git-hooks/*.sh "$ROOT"/sandbox/*.sh)
+	shopt -u nullglob
+	[ -f "$ROOT/agent/AGENTS.md" ] && files+=("$ROOT/agent/AGENTS.md")
+	for file in "${files[@]}"; do
+		rel="${file#"$ROOT"/}"
+		caution=""
+		while IFS= read -r n; do
+			[ -n "$n" ] || continue
+			ring="${RADAR_RING[$n]:-}"
+			if [ -z "$ring" ]; then
+				unknown=$((unknown + 1))
+				verdict radar-blip-valid "$rel" 0 \
+					"cites blip #$n, which is not in docs/radar-blips.tsv — cite a real blip or drop the claim"
+				continue
+			fi
+			resolved=$((resolved + 1))
+			[ "$ring" = Caution ] && caution="${caution}${caution:+, }$n"
+		done < <(cite_numbers "$file")
+		if [ -n "$caution" ]; then
+			verdict radar-blip-valid "$rel" 1 \
+				"Caution-ring blips cited: $caution — deliberate, the file names the harm it avoids"
+		fi
+	done
+	if [ "${#files[@]}" -eq 0 ]; then
+		record FAIL radar-blip-valid - "no files scanned"
+	elif [ "$unknown" -gt 0 ]; then
+		record FAIL radar-blip-valid "$RADAR_TSV_REL" \
+			"$resolved citation(s) resolved, $unknown unknown across ${#files[@]} files"
+	elif [ "$resolved" -eq 0 ]; then
+		verdict radar-blip-valid - 0 "no blip citations found in ${#files[@]} files"
+	else
+		verdict radar-blip-valid "$RADAR_TSV_REL" 1 \
+			"$resolved citation(s) across ${#files[@]} files resolved against ${#RADAR_RING[@]} blips"
+	fi
+}
+
+# -------------------------------------------------------------- model route --
+# A flagship default for everyday edits is the blanket-frontier failure mode:
+# it is read-only, it never picks a cheap route, and nothing notices.
+FRONTIER_RE='gpt-5|gpt-4\.1|claude-opus|gemini-2\.5-pro|(^|[^a-z0-9])o[34]([^a-z0-9]|$)'
+
+settings_field() { # file key -> value, node if present else a grep fallback
+	local file=$1 key=$2
+	if command -v node >/dev/null 2>&1; then
+		node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const k=process.argv[1];try{const v=JSON.parse(s)[k];process.stdout.write(v==null?"":String(v))}catch(e){}})' \
+			"$key" <"$file" 2>/dev/null
+		return
+	fi
+	sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -1
+}
+
+check_model_route() {
+	local file="$ROOT/agent/settings.json" model provider detail
+	if [ ! -f "$file" ]; then
+		record WARN model-route agent/settings.json \
+			"missing — no default route to inspect, add one or the provider default wins"
+		return
+	fi
+	if ! command -v node >/dev/null 2>&1; then
+		record WARN model-route agent/settings.json \
+			"node absent — falling back to a grep parse of defaultModel (jq is not assumed)"
+	fi
+	model=$(settings_field "$file" defaultModel | tr -d '[:space:]')
+	provider=$(settings_field "$file" defaultProvider | tr -d '[:space:]')
+	if [ -z "$model" ]; then
+		record WARN model-route agent/settings.json \
+			"defaultModel unset — the harness falls back to whatever the provider defaults to"
+		return
+	fi
+	detail="${provider:+$provider/}$model"
+	if printf '%s' "$model" | grep -qiE "$FRONTIER_RE"; then
+		verdict model-route agent/settings.json 0 \
+			"defaultModel $detail is a frontier flagship — route by task, not by default (blip 40)"
+	else
+		verdict model-route agent/settings.json 1 "defaultModel $detail — not a flagship, deliberate route"
 	fi
 }
 
@@ -299,10 +438,12 @@ if [ "$QUICK" = 0 ]; then
 	section "config — things an install step sets"
 	check_release_age
 	check_git_hooks
+	check_model_route
 
 	section "metadata — ownership and provenance"
 	check_doc_metadata
 	check_radar_basis
+	check_radar_blips
 	check_review_freshness
 	# --quick runs budgets only, so it would call every other entry stale.
 	check_stale_baseline

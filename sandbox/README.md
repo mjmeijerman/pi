@@ -4,6 +4,49 @@ Runs the pi coding agent inside a bubblewrap sandbox, so prompt-injected command
 cannot reach SSH keys, cloud credentials or dotenv files, and can only write to
 the directories you name.
 
+## Default: `pi` is sandboxed
+
+`~/.pi/install.sh` puts a `pi()` shell function in `~/.bashrc` and `~/.zshrc`, so
+plain `pi` already runs inside the sandbox. Nothing to remember:
+
+```
+pi                      # same as `pisandbox -- pi`
+PI_BARE=1 pi            # escape hatch: the raw binary, no sandbox
+pisandbox --no-net -- pi  # extra isolation: no network at all
+```
+
+The block sits between `# >>> pi sandbox >>>` and `# <<< pi sandbox <<<`.
+install.sh replaces it on every run (never duplicates it) and keeps the
+pre-wrapper file as `~/.bashrc.bak-pi` / `~/.zshrc.bak-pi`. Delete the block to
+go back to the bare binary; the raw `pi` stays on PATH either way.
+
+Two guards keep this from turning into a broken `pi`:
+
+- `pisandbox` or `bwrap` missing → one line on stderr, then the plain binary.
+- `PI_BARE=1` in the environment → the plain binary, silently.
+
+## What it does not protect against
+
+The wrapper only changes *which* command `pi` runs. Every gap below is still
+there, and the sandbox is a bubblewrap namespace, not a virtual machine:
+
+- **`PI_BARE=1` disables all of it.** A command that needs no sandbox is one
+  environment variable away, by design — that is the escape hatch, not a bug.
+- **Network exfiltration** with networking on (the default): anything readable
+  can be posted out. Only `--no-net` stops that.
+- **Provider credentials and env vars** still reach `pi` (`auth.json` is
+  rewritten in flight, but the permitted keys stay readable by generated code).
+- **Read-only is not hidden** when you start in `$HOME`: the home tree is
+  mounted read-only, so `.bash_history`, browser profiles and `.config` stay
+  readable. Start in the project directory to make them absent.
+- **Same uid**: files written under the read-write binds are yours for good.
+- Shell functions do not apply to scripts and non-interactive shells. A wrapper
+  is only a default for the human at the keyboard; `pi` invoked from a script,
+  a `systemd` unit or an agent still needs `pisandbox -- pi` explicitly.
+
+Everything else is under [What it protects](#what-it-protects) and
+[Known gaps](#known-gaps).
+
 ## Launch
 
 ```
@@ -13,11 +56,8 @@ the directories you name.
 ```
 
 Every argument after `--` goes to pi. Always use `--`, otherwise the launcher
-refuses the argument as unknown. Add the alias:
-
-```
-alias pisandbox='/home/mark/.pi/sandbox/pi-sandbox.sh'
-```
+refuses the argument as unknown. `install.sh` symlinks `pisandbox` into
+`~/.local/bin`; if it is missing, add `alias pisandbox='/home/mark/.pi/sandbox/pi-sandbox.sh'`.
 
 New shell, then `pisandbox -- --version`. Run `selftest.sh` to re-check the policy.
 It is cwd-independent: it creates a temp work directory under `$HOME/.pi`, prints

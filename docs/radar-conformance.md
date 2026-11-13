@@ -1,14 +1,16 @@
 # Harness conformance against the Thoughtworks Radar, Volume 35
 
 Owner: Mark Meijerman (`mjmeijerman`)
-Review: 2027-02-13 — quarterly, see §6 below.
-Re-measured 2026-11-13: 224 extension tests (28 suites), 8 skills, `agent/AGENTS.md`
-2870 bytes, 38 entries in `~/.pi/agent/suggestions.jsonl`.
+Review: 2027-02-15 — quarterly, see §6 below.
+Re-measured 2026-11-13: 238 extension tests (30 suites), 8 skills, `agent/AGENTS.md`
+3040 bytes, 51 entries in `~/.pi/agent/suggestions.jsonl`.
 
 Audit date: 2026-11-13. Source: `werken-met-ai.pdf` (Radar Vol. 35, November 2026).
-Scope: the 47 blips that concern coding-agent harnesses (Techniques 1–45, Tools 57–103,
-Languages and Frameworks 110). Infrastructure blips (Kubernetes, storage, networking,
-data contracts, Bayesian optimization) are out of scope for a single-developer harness.
+Scope: the 56 rows below, out of the 117 in `docs/radar-blips.tsv` — every Technique
+(1–45), the two Platforms that touch a coding harness (57, 58), the Tools a one-person
+harness could use (68–103), and Promptfoo (110). The other 61 rows are Kubernetes, model
+serving, storage, networking, data contracts, Bayesian optimization and other
+infrastructure, out of scope for a single-developer harness.
 
 Status values:
 
@@ -21,36 +23,48 @@ Status values:
 
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
-| 1. Agent sandboxing | partial | `sandbox/pi-sandbox.sh` (bubblewrap, optional `--no-net`) | Not the default. Interactive sessions run with full `$HOME`, SSH keys and cloud creds visible. |
-| 2. Mutation testing | partial | `make mutate` / `mutate-full` (Stryker, PR #16 — open, not on trunk) | Tests assert behaviour (224 passing) but on trunk nothing proves the assertions bite. |
+| 1. Agent sandboxing | done | `install.sh` §4b installs a managed `pi()` shell function into `~/.bashrc` and `~/.zshrc` → `scripts/pisandbox` → `sandbox/pi-sandbox.sh` (bubblewrap); `PI_BARE=1 pi` bypasses, `pisandbox --no-net -- pi` adds isolation | The wrapper is a shell function, so a launcher that skips the rc file (`env -i`, an IDE, cron) still gets the bare binary. Fallback prints one stderr line when `bwrap` is absent. |
+| 2. Mutation testing | partial | `agent/stryker.conf.json`, `.github/workflows/test.yml` (weekly `npx stryker run`), `make mutate` | Score never recorded — run `make mutate`, paste the score here. `agent/node_modules/@stryker-mutator` is not installed; `cd agent && npm install` first. |
 | 3. Path-to-production mapping | partial | `.github/workflows/{test,secret-scan}.yml`, PR-per-change | The path exists in CI config, not as a reviewed map. Review capacity per day is unmeasured. |
-| 5. Progressive context disclosure | done | 8 skills load on demand; `agent/AGENTS.md` is 2.9 KB | Enforced only by size discipline, not by a budget check. |
+| 4. Post-quantum cryptography | n/a | — | Nothing here holds a long-lived key: model traffic terminates at the provider's TLS, and the only secrets in scope are API tokens rotated by the providers. Revisit if the harness ever stores keys it must keep for years. |
+| 5. Progressive context disclosure | done | 8 skills load on demand; `agent/AGENTS.md` is 3040 bytes under the 3072-byte budget in `scripts/harness-check.sh` | — |
+| 6. Threat modeling | missing | — | Blip 1 says the sandbox scope is informed by threat modeling, and `agent/AGENTS.md` says prefer Adopt, yet no threat model exists anywhere in the repo. Ranked first in §5. |
 
 ## 2. Trial ring
 
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
+| 7. Agent plugin marketplace | partial | `agent/settings.json` → `packages` (git, npm and GitHub sources) | Distribution works, provenance does not: no curation and no record of what an upstream package may touch. |
+| 8. Agent-maintained knowledge bases | partial | `agent/extensions/om-autostart.ts` + `pi-observational-memory` | Memory is per-session transcript compaction; nothing survives as a curated, cross-project base the agent maintains. |
+| 9. Anchoring coding agents to a reference application | n/a | — | No reference application exists — the harness is the only codebase, and its conventions live in `AGENTS.md` and the skills. |
+| 10. Coding harness for general-purpose agents | partial | `agent/skills/achterhoek-agenda/` runs research, not code | No non-coding workflow: research and writing inherit branch/PR/test rules that do not apply to them. |
 | 11. Feedback flywheel | done | `agent/extensions/feedback-flywheel.ts`, `/suggest`, `/retro` | The remove half is manual: nothing flags rules that stopped earning their place. |
-| 13. Grilling | done | `/grill` → `agent/prompts/grill.md` (PR #14 — open, not on trunk) | Ambiguous requests were resolved by guessing; the prompt now asks first. |
+| 12. Graph-grounded codebase reasoning | missing | — | Navigation is `rg` and whole-file reads; no code graph or AST index. |
+| 13. Grilling | done | `/grill` → `agent/prompts/grill.md`; `agent/extensions/session-nudge.ts` nudges once per session after 4 distinct edited files with no `/grill` | The nudge is advice, not a gate: a session that ignores it still edits. |
 | 14. Interactive visual plans with agents | n/a | — | Single-user, small changes; text plans suffice. |
 | 15. Managed agents runtime | n/a | — | Local workstation is the runtime; nothing long-running. |
 | 16. Open-weight models | partial | DeepSeek V4 Flash API, `qwen3.8:27b` local | No GLM-class open-weight model in the default route. |
-| 17. Risk-tiered human oversight | partial | `merge-guard.ts` forces an explicit human yes before landing | Tiers are flat: a README typo and an extension rewrite need the same approval. |
+| 17. Risk-tiered human oversight | done | `agent/AGENTS.md:14` (High/Medium/Low table), `agent/extensions/merge-guard.ts`, `.github/workflows/pr-tier.yml` | The check proves a tier is *stated* and that harness paths claim High. It cannot prove the human read the diff — that stays gap-ranked in §5. |
 | 18. Self-improving harness | partial | `/retro` aggregates evidence; the agent proposes edits | The agent never runs the loop unattended; bounded experiments absent. |
-| 19. Small language models | done | `local_llm` tool → Ollama `qwen3.8:27b` | Nothing measures whether the local route is actually cheaper per finished task. |
-| 20. Stateful guardrails | partial | `secret-guard.ts` holds session state (`allow`/`block`) | Guards single actions, not conversation-level policy over turns. |
+| 19. Small language models | done | `local_llm` tool → Ollama `qwen3.8:27b` | Nothing measures whether the local route is cheaper per finished task. |
+| 20. Stateful guardrails | partial | `agent/extensions/secret-guard.ts` holds session state (`allow`/`block`) | Guards single actions, not conversation-level policy over turns. |
 | 21. Subagents for better context management | missing | Parallel *sessions* instead (`scripts/agent-pane.sh` + Herdr) | Pi deliberately ships no subagents; exploration still lands in the main context. |
+| 22. Toxic flow analysis for AI | partial | `agent/extensions/secret-guard.ts` (cites blip 22) | Guards a single value leaving a tool call, not multi-step flows where each step is harmless alone. |
 | 23. Unattended overnight agentic builds | missing | — | Blocked by the same three prerequisites the blip names: default sandboxing, spec-up-front, sensors that validate without line-by-line review. |
+| 110. Promptfoo | missing | — | No eval or red-team gate on prompts, skills or hooks: the deterministic half is tested, the half that shapes every turn is not. Ranked in §5. |
+
 
 ## 3. Assess ring
 
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
-| 25. Agent suggestion box | done | `/suggest` → `agent/suggestions.jsonl` (38 entries), `/retro` dedupes | Nothing reviews the box on a schedule. |
+| 24. Agent pipeline responsibility | partial | `agent/extensions/merge-guard.ts` forces an explicit human yes per landing | Owner, reviewer and approver are the same person; nothing records who accepted an agent-built change beyond that yes. |
+| 25. Agent suggestion box | done | `/suggest` → `agent/suggestions.jsonl` (51 entries), `/retro` dedupes | Nothing reviews the box on a schedule. |
 | 26. Context profiling | done | `scripts/session-report.mjs` (cost, cache hit, context fill per project) | Profiling is after-the-fact; no per-turn attribution. |
 | 27. Enterprise harness | n/a | — | One user; the "harness" is this repo. |
-| 29. Harness quality evaluation | partial | 224 tests for extensions (`npm test`, 28 suites), CI shell checks | Zero evaluation of skills, `AGENTS.md` and hooks — the nondeterministic half. |
-| 30. Local coding models | done | `local-llm.ts`, `/local` health check | Route is manual, chosen by the model's own judgement. |
+| 28. Foundation models for structured data | n/a | — | No tabular or warehouse workload; `local_llm` `extract` pulls fields out of prose, which is not the modelling this blip describes. |
+| 29. Harness quality evaluation | partial | 244 tests in 31 suites (`cd agent && node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh` | Zero evaluation of skills, `AGENTS.md` and hooks — the nondeterministic half. |
+| 30. Local coding models | done | `agent/extensions/local-llm.ts`, `/local` health check | Route is manual, chosen by the model's own judgement. |
 | 31. MITRE ATLAS | missing | — | No AI-threat taxonomy in use; threat modelling of the harness never done. |
 | 32. Production-aware coding agents | n/a | — | Nothing in production; project work is local. |
 | 33. Programmatic tool calling | done | `codemode` available in every session (default `+codemode`) | — |
@@ -59,61 +73,64 @@ Status values:
 | 57. Agent Client Protocol | n/a | — | No IDE integration wanted. |
 | 58. Agent Plugins | n/a | — | Repo *is* the plugin set; distribution not a problem yet. |
 | 72. Agent Package Manager | missing | Skills are copy-pasted by nature of being local | Acceptable at one user; note it fails the supply-chain audit trail (lock file, provenance, hidden-Unicode scan). |
-| 87. AgentsView | done (equivalent) | `scripts/session-report.mjs` | Local-first, reads pi session JSONL. Missing: search/browse of past sessions. |
+| 87. AgentsView | done (equivalent) | `scripts/session-report.mjs` reads pi session JSONL | Local-first, but no search or browse of past sessions. |
 | 90. DeepSeek Harness | n/a | — | — |
 | 93. GLM | missing | — | Reasoning-effort tuning per complexity is unaddressed; `thinking` level is manual. |
-| 95. Herdr | done | `~/.herdr`, `HERDR_PANE_ID` in `desktop-notify.ts`, `herdr-agent-state.ts`, `scripts/agent-pane.sh` | Attention inbox not used as the review queue it could be. |
+| 95. Herdr | done | `~/.config/herdr/`, `~/.pi/herdr-mods`, `agent/extensions/herdr-agent-state.ts`, `scripts/agent-pane.sh` | Attention inbox not used as the review queue it could be. |
 | 96. Hunk | missing | — | Agent diffs are read via `gh pr diff`. |
 | 97. nono.sh | done (equivalent) | `sandbox/pi-sandbox.sh` via bubblewrap | Same class of tool: OS-level isolation, no VM or daemon. |
 | 99. Safe Chain | done | `npm config get min-release-age` → `2880` (48 h quarantine) | The key is `min-release-age`; `minimum-release-age` is rejected by npm 11.20 as an unknown option. |
-| 110. Promptfoo | missing | — | No red-team or eval gate on prompts, skills or hooks. |
 
 ## 4. Caution ring — are the warnings being respected?
 
-| Blip | Status | Evidence |
-| --- | --- | --- |
-| 36. Agent instruction bloat | respected | `AGENTS.md` 2.9 KB, 670 lines across 8 skills, every extension declares its Radar basis, `/retro` exists to delete rules. Watch: `cost-optimizer` and `secret-guard` inject always-on prompt text from extensions, which is the accumulation path this blip describes. |
-| 37. Agent skill cognitive surrender | respected | All 8 skills are hand-written here, not imported. `i-have-adhd` and `pi-web-access` come from packages — the only two not authored locally. |
-| 38. AI-accelerated shadow IT | respected | Every change lands through CI and a PR; nothing runs unattended. |
-| 39. AI-driven documentation sprawl | partial | This audit adds two documents; on trunk the repo has no prune step for them. Fix landed in this docs PR: both `docs/` files carry `Owner:` and `Review:` headers — keep that header current or delete the doc. |
-| 40. Blanket frontier model usage | respected | Default is `deepseek-flash`, not a frontier model; local model for chores; no automatic frontier escalation. |
-| 41. Coding throughput as a metric | respected | `usage-footer` reports tokens and cost only. No LOC or "AI-generated %" counters. |
-| 42. Human-in-the-loop theater | partial | `merge-guard` guarantees the human is *asked*. It cannot guarantee the human *can evaluate* the diff — that is what risk tiers and mutation tests are for. |
-| 43. Meat proxy | respected | Agent output is never forwarded without local verification; the habit to keep. |
-| 44. Naive context compression | partial | `om-autostart.ts` turns observational memory on for every session and compacts at 120k tokens. Compaction is summarisation by `deepseek-flash`, so it is exactly the "LLM summarises during compression" pattern. It runs at a threshold, not mid-task, which protects the cache prefix — keep it that way. |
-| 45. Stacked pull requests | respected | One branch, one PR, merged before the next starts. `merge-guard` makes stacking awkward on purpose. |
+| Blip | Status | Evidence | Gap |
+| --- | --- | --- | --- |
+| 36. Agent instruction bloat | respected | `AGENTS.md` 3040 bytes under the 3072-byte budget in `scripts/harness-check.sh`; 670 lines across 8 skills; `/retro` deletes rules | Watch: `cost-optimizer` and `secret-guard` inject always-on prompt text from extensions, the accumulation path this blip describes. |
+| 37. Agent skill cognitive surrender | respected | All 8 skills in `agent/skills/` are hand-written here | `i-have-adhd` and `pi-web-access` come from packages — the only two not authored locally. |
+| 38. AI-accelerated shadow IT | respected | Every change lands through CI and a PR (`.github/workflows/`, `merge-guard.ts`) | — |
+| 39. AI-driven documentation sprawl | partial | `scripts/harness-check.sh` fails any `docs/*.md` without `Owner:` and `Review:` | No prune step: nothing deletes a doc whose review date passed. |
+| 40. Blanket frontier model usage | respected | `agent/settings.json` default `deepseek-flash`; local model for chores | — |
+| 41. Coding throughput as a metric | respected | `usage-footer` reports tokens and cost only | — |
+| 42. Human-in-the-loop theater | partial | `merge-guard` guarantees the human is *asked*; risk tiers in `agent/AGENTS.md:14` | It cannot guarantee the human *can evaluate* the diff. |
+| 43. Meat proxy | respected | Agent output is never forwarded without local verification; the habit to keep | — |
+| 44. Naive context compression | partial | `agent/extensions/om-autostart.ts`, `observational-memory.compactAtContextTokens` 120000 | Compaction is `deepseek-flash` summarisation, exactly the pattern named; it runs at a threshold, not mid-task, which protects the cache prefix — keep it that way. |
+| 45. Stacked pull requests | respected | One branch, one PR, merged before the next starts; `merge-guard` makes stacking awkward | — |
 
 ## 5. Gaps ranked by cost of leaving them open
 
-1. **Sandboxing is opt-in** (blip 1, Adopt). One accidental `rm -rf` or one prompt-injected
-   instruction and the blast radius is the whole home directory. Fix: run `pi` through
-   `sandbox/pi-sandbox.sh` by default for anything touching unfamiliar repos, and add the
-   one-line alias. Cost: 5 minutes. Highest value per minute in this list.
-2. **No mutation tests** (blip 2, Adopt). 224 green tests do not prove the assertions bite,
-   and agent-written tests are the exact failure mode the blip names. Fix: one Stryker run
-   over `extensions/lib`, incremental after that. Cost: half a day for the first pass.
-3. **Skills and `AGENTS.md` are unevaluated** (blip 29). The deterministic half is tested;
-   the half that shapes every turn is not. Fix: 10 fixed prompts, one monthly run, judge
-   against yesterday's answers. Cost: 2 hours to set up.
-4. **No grilling before work starts** (blip 13). Guessing is the default whenever a request
-   is vague. Fix: a `grill` skill: 5 questions, no code until answered. Cost: 30 minutes.
-5. **Risk tiers are flat** (blip 17/42). Everything needs the same yes. Fix: a `HIGH-RISK`
-   path list in `AGENTS.md` (extensions, git hooks, CI, `sandbox/`) and auto-merge allowed
-   for the rest once CI is green. Cost: 15 minutes.
+1. **No threat model** (blip 6, Adopt, missing). The sandbox claims a scope informed by
+   threat modeling, but nothing names what the harness must protect or what the sandbox
+   does not cover. Fix: one page — assets (`~/.ssh`, cloud creds, `~/.pi` itself), attacker
+   paths (fetched pages, package installs, the model's own commands), covered vs uncovered.
+   Cost: 45 minutes. It re-scopes gap 2, so it goes first.
+2. **Mutation score never recorded** (blip 2, Adopt, partial). Config and a weekly CI job
+   exist; no number has ever been pasted back, so 238 green tests still prove nothing about
+   whether the assertions bite. Fix: `cd agent && npm install && make mutate`, then write the
+   score in the §1 row. Cost: half a day for the first full pass.
+3. **Skills and `AGENTS.md` are unevaluated** (blip 29, partial). The deterministic half is
+   tested (244); the half that shapes every turn is not. Fix: 10 fixed prompts, one monthly
+   run, judge against last month's answers. Cost: 2 hours to set up.
+4. **Promptfoo absent at Trial** (blip 110, missing). No eval or red-team gate on prompts,
+   skills or hooks, and it is the natural home for gap 4's 10 prompts. Cost: 3 hours for one
+   suite.
 
-Five gaps are tracked here; `#16` closes gap 2 and `#14` closes gap 4, both still open on
-trunk. Gaps 1, 3 and 5 stay as written — the sandbox remains opt-in, nothing evaluates
-skills, and review tiers are flat until `AGENTS.md` carries the high-risk path list.
+Closed since the previous audit: grilling (blip 13, `agent/prompts/grill.md` plus the
+`session-nudge` grill rule), risk tiers (blips 17/42, `agent/AGENTS.md:14` plus the `pr-tier`
+CI job) and sandbox enforcement (blip 1, the `install.sh` shell wrapper).
 
-Then, in order: `min-release-age` (blip 99, done — 2880), a Hunk or `gh pr diff`
-review habit for agent-authored PRs (blip 96), semantic review of `AGENTS.md`/plan edits
-(blip 34), Promptfoo for the feedback loop (blip 110). Skipped deliberately: subagents
+Enforced by `scripts/harness-check.sh` on every commit and in CI: a cited blip must exist in
+`docs/radar-blips.tsv` (no invented blip numbers), a stale `Review:` date fails the check
+(blips 36, 39), and a flagship `defaultModel` fails (blip 40). `make audit` runs the whole
+set for the quarterly pass.
+
+Then, in order: Hunk or a `gh pr diff` review habit for agent-authored PRs (blip 96),
+semantic review of `AGENTS.md` and plan edits (blip 34). Skipped deliberately: subagents
 (blip 21) conflict with Pi's design — parallel sessions cover most of the need; and
-unattended overnight builds (blip 23) stay blocked until gaps 1, 2 and 3 are closed.
+unattended overnight builds (blip 23) stay blocked until gaps 1–3 are closed.
 
 ## 6. Re-running this audit
 
-1. Copy the blip list: `pdftotext -layout werken-met-ai.pdf - | grep -E '^[0-9]{1,3}\.'`
+1. Copy the blip list: `awk -F'\t' 'NR>1{print $1"\t"$4}' docs/radar-blips.tsv`.
 2. For each harness-relevant blip, name the file that implements it. No file, no credit.
 3. Any row that was `missing` and is now `done` should point at a commit, not at an intention.
 4. Delete rows that no longer apply — a Radar audit that only grows is the instruction bloat
