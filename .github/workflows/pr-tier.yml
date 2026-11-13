@@ -40,7 +40,11 @@ jobs:
         env:
           # Untrusted input: quoted, never expanded into a command.
           PR_BODY: ${{ github.event.pull_request.body }}
-          BASE_REF: ${{ github.base_ref }}
+          # Commits, not refs: both shas are in the checked-out history, so the
+          # job needs no network and no credentials (blip 103, unpinned-uses /
+          # artipacked).
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           shopt -s nocasematch
@@ -63,8 +67,9 @@ jobs:
           echo "tier: $tier"
 
           # 2) The diff. Merge-base diff, so unrelated trunk commits do not count.
-          git fetch --no-tags origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
-          mapfile -t changed < <(git diff --name-only "origin/${BASE_REF}...HEAD")
+          # Both endpoints are already in the local clone (fetch-depth: 0), which
+          # is why this needs neither the token nor a fetch.
+          mapfile -t changed < <(git diff --name-only "${BASE_SHA}...${HEAD_SHA}")
           echo "changed files: ${#changed[@]}"
 
           # 3) Harness paths. Touching any of them is High, whatever the body says.
