@@ -172,6 +172,7 @@ The harness is code and needs the same ownership as code (blips 11, 18, 36).
 | Every session | `/suggest <what got in the way>` — one line, while it is fresh |
 | Weekly | `/retro` — read the aggregate, then either fix the tool or delete the note |
 | Monthly | Delete one rule from `AGENTS.md` or one skill nobody used. Deletion is the point; rules that only accumulate become bloat |
+| Every compaction | Nothing, unless `self-learn` tripped its gate — then read `~/.pi/agent/proposals/` and either land the diff or delete the file. A proposal marked "nothing" is a judgement already made; do not re-open it |
 | Quarterly | Re-run the Radar conformance audit (`docs/radar-conformance.md`) |
 | After a model upgrade | Re-test whether an instruction is still needed — progression, not regression |
 
@@ -237,6 +238,8 @@ gh pr checks <n>
 # harness maintenance
 /suggest <what got in the way>
 /retro
+/learn                                 # judge the harness now, in a separate pi session
+ls ~/.pi/agent/proposals/              # learner output: a diff, or a recorded "nothing"
 scripts/harness-check.sh               # skill/AGENTS.md budget check (automation PR)
 make mutate                            # mutation tests, incremental (blip 2)
 /secretguard status        # session secret-guard state
