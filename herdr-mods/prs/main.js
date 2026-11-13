@@ -1,25 +1,28 @@
 /**
- * prs — open GitHub pull requests, with diff and review, in a Herdr pane.
+ * prs — pull requests on the left, the diff on the right, and the actions you
+ * take on one: review it, or hand it to an agent in a new space.
  *
- * Two sections: PRs waiting for your review, then your own. Each row carries
- * the facts that decide whether it can land: checks, review decision,
- * conflicts, draft, age.
+ * Left: open pull requests grouped by repository, review requests first. Click
+ * one and the right side shows its diff — file headers with +/− counts, hunk
+ * headers, line numbers, a green/red sign gutter.
  *
- * List:   ↑/↓ or j/k move · enter diff · m merge · a approve · x request
- *         changes · c comment · o open in browser · r refresh · esc cancel
- * Diff:   ↑/↓ scroll · m merge · a/x/c review · esc back, same as the list
- * Merge and review both need two presses when they are destructive (merge,
- * request changes): the first arms, the second acts.
+ * Right, below the diff: a note field with Approve / Request changes / Comment,
+ * and four buttons that open a new space with a pi agent already told what to
+ * do — review the PR, fix the pipeline, fix the merge conflicts, fix the review
+ * comments.
  *
- * Props: `{ "open": "owner/repo#12" }` starts on that pull request's diff.
+ * Keys: ↑/↓ move · a/x/c review · m merge (twice) · o browser · r refresh ·
+ * esc cancel · 1..4 the four agent actions.
+ *
+ * Props: `{ "open": "owner/repo#12" }` starts on that pull request.
  *
  * Radar basis: #17 risk-tiered human oversight and #42 human-in-the-loop
- * theater — the human reads the change and presses the key; the pane only
- * shows what is about to land and keeps the buttons where the decision is.
+ * theater — the human reads the change and presses the key, and the agent that
+ * acts on it is visible in its own space instead of behind a button.
  */
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, Input, InputState, Scrollbar, v_virtual_list } from "gpui-base";
-import { exec, home, nextCommand, props, settings, theme } from "herdr";
+import { exec, home, nextCommand, props, run, settings, theme } from "herdr";
 
 const QUERY = `query($n: Int!) {
   viewer {
@@ -38,76 +41,118 @@ fragment PR on PullRequest {
 const CONFIRM_MS = 8000;
 const MAX_DIFF_LINES = 4000;
 
-/**
- * Run gh, retrying once with the usual install location. The app is started by
- * a desktop session, whose PATH is not always the shell's.
- */
+/** Where a local clone of a repository usually sits, most specific first. */
+const CLONE_ROOTS = ["", "code", "src", "repos", "projects", "work", "git", "agent-office/mjmeijerman", "agent-office/bakmark"];
+
 async function gh(args, timeout) {
 	const first = await exec("gh", args, { timeout });
 	if (first.code !== 127 && !/ENOENT|no such file/i.test(first.stderr)) return first;
 	return exec(`${home()}/.local/bin/gh`, args, { timeout });
 }
 
-/** "3m", "5h", "2d" — a PR list needs recency, not an ISO timestamp. */
 function ago(iso) {
 	const seconds = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
 	if (seconds < 90) return "just now";
 	const minutes = Math.round(seconds / 60);
-	if (minutes < 60) return `${minutes}m ago`;
+	if (minutes < 60) return `${minutes}m`;
 	const hours = Math.round(minutes / 60);
-	if (hours < 24) return `${hours}h ago`;
-	return `${Math.round(hours / 24)}d ago`;
+	if (hours < 24) return `${hours}h`;
+	return `${Math.round(hours / 24)}d`;
 }
 
-/** Text draws a tab as nothing: pad each to the next 4-column stop. */
 const untab = (text) => text.replace(/[^\t]*\t/g, (s) => s.slice(0, -1).padEnd((s.length - 1) - (s.length - 1) % 4 + 4));
 
-/** A unified diff as rows: hunk headers, and +/- lines numbered per side. */
-function diffRows(text) {
-	let old = 0;
-	let next = 0;
-	return text.split("\n").map((line) => {
+/**
+ * A unified diff as rows. Each file is one row carrying its own path and +/−
+ * counts, so a long diff still says which file you are in and what it costs.
+ */
+function parseDiff(text) {
+	const files = [];
+	let file = null;
+	let oldLine = 0;
+	let newLine = 0;
+	const ignore = /^(index |--- |\+\+\+ |new file mode|deleted file mode|similarity index|rename (from|to)|old mode|new mode|Binary files)/;
+	for (const line of text.split("\n")) {
+		const start = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+		if (start) {
+			file = { path: start[2], add: 0, del: 0, rows: [] };
+			files.push(file);
+			continue;
+		}
+		if (!file) {
+			file = { path: "", add: 0, del: 0, rows: [] };
+			files.push(file);
+		}
+		if (start || ignore.test(line)) continue;
 		const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
 		if (hunk) {
-			old = +hunk[1];
-			next = +hunk[2];
-			return { kind: "@", text: line };
+			oldLine = +hunk[1];
+			newLine = +hunk[2];
+			file.rows.push({ kind: "@", text: line });
+			continue;
 		}
-		if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ "))
-			return { kind: "file", text: line };
 		const kind = line[0];
-		if (kind === "-") return { kind, number: old++, text: untab(line.slice(1)) || " " };
-		if (kind === "+") return { kind, number: next++, text: untab(line.slice(1)) || " " };
-		if (kind === " ") {
-			old++;
-			return { kind, number: next++, text: untab(line.slice(1)) || " " };
-		}
-		return { kind: "", text: line };
-	});
+		if (kind === "+") {
+			file.add++;
+			file.rows.push({ kind, number: newLine++, text: untab(line.slice(1)) || " " });
+		} else if (kind === "-") {
+			file.del++;
+			file.rows.push({ kind, number: oldLine++, text: untab(line.slice(1)) || " " });
+		} else if (kind === " ") {
+			oldLine++;
+			file.rows.push({ kind, number: newLine++, text: untab(line.slice(1)) || " " });
+		} else file.rows.push({ kind: "", text: line });
+	}
+	const rows = [];
+	for (const entry of files) {
+		rows.push({ kind: "file", text: entry.path, add: entry.add, del: entry.del });
+		rows.push(...entry.rows);
+	}
+	return rows;
 }
 
-const CHECK_ORDER = ["SUCCESS", "PENDING", "FAILURE", "ERROR"];
+/** What each of the four agent actions is asked to do. */
+function task(kind, pr) {
+	const head = `Pull request ${pr.repo}#${pr.number} — ${pr.title}`;
+	const repo = pr.repo;
+	const n = pr.number;
+	const common = `\n\nWork in this folder. Never merge, never push to the trunk branch, and leave a one-line summary when you stop.`;
+	if (kind === "review")
+		return `${head}\n\nReview it. Read \`gh pr view ${n} -R ${repo}\` and \`gh pr diff ${n} -R ${repo}\`, and read the code around the change before judging it. Then post one review: \`gh pr review ${n} -R ${repo} --comment --body-file -\` (use --request-changes if something must change before it lands), naming the files and lines you are unsure about. Do not touch the code.${common}`;
+	if (kind === "checks")
+		return `${head}\n\nIts checks are failing. List them with \`gh pr checks ${n} -R ${repo}\`, read the failing job with \`gh run view <run-id> --log-failed\`, then \`gh pr checkout ${n} -R ${repo}\` and reproduce it here. Fix the cause, not the assertion, unless the test is wrong — say which in the commit message. Run what CI runs, then push to the PR branch.${common}`;
+	if (kind === "conflicts")
+		return `${head}\n\nIt conflicts with its base branch. \`gh pr view ${n} -R ${repo} --json baseRefName,headRefName\`, then \`gh pr checkout ${n} -R ${repo}\` and merge the base branch in. Resolve each conflict by keeping both intents — the PR's and the base branch's — not by picking a side. Run the tests, then push to the PR branch.${common}`;
+	return `${head}\n\nIt has review comments to address. Read them with \`gh pr view ${n} -R ${repo} --comments\` and \`gh api repos/${repo}/pulls/${n}/comments --jq '.[] | {path, line, body}'\`. \`gh pr checkout ${n} -R ${repo}\`, then fix each comment in code. Where you disagree, reply with the reason instead of silently skipping it. Push to the PR branch.${common}`;
+}
+
+const ACTIONS = [
+	{ key: "review", label: "review the PR" },
+	{ key: "checks", label: "fix pipeline" },
+	{ key: "conflicts", label: "fix merge conflicts" },
+	{ key: "comments", label: "fix review comments" },
+];
 
 export default class PullRequests extends View {
 	init(_props, cx) {
 		this.handle = cx.focus_handle();
-		this.mine = [];
-		this.reviewing = [];
+		this.me = "";
+		this.prs = [];
 		this.selected = 0;
-		this.view = "list";
-		this.diff = { rows: [], width: 600, title: "", loading: false };
+		this.diff = { rows: [], width: 600, key: "", loading: false };
 		this.error = "";
 		this.notice = "";
 		this.loading = true;
 		this.pending = "";
 		this.reviewAction = "";
 		this.busy = "";
-		this.note = InputState.new({ placeholder: "Review note — Enter sends, Esc cancels" });
+		this.folders = {};
+		this.note = InputState.new({ placeholder: "Note — Enter sends it with the review" });
 		this.note.on("change", () => cx.notify());
 		this.note.on("submit", (_e, cx) => this.sendReview(cx));
 		this.refresh(cx);
 		const start = props()?.open;
-		if (start) cx.timer.after(1200, (cx) => this.openDiff(start, cx));
+		if (start) cx.timer.after(1200, (cx) => this.select(start, cx));
 		cx.timer.every(120000, (cx) => this.refresh(cx));
 		cx.spawn(async (cx) => {
 			for (;;) {
@@ -120,13 +165,18 @@ export default class PullRequests extends View {
 		});
 	}
 
-	get rows() {
-		return [...this.reviewing, ...this.mine];
+	get current() {
+		return this.prs[Math.min(this.selected, this.prs.length - 1)];
 	}
 
-	get current() {
-		const list = this.rows;
-		return list[Math.min(this.selected, list.length - 1)];
+	/** Grouped for the left column: one block per repository, newest first. */
+	get groups() {
+		const byRepo = new Map();
+		for (const pr of this.prs) {
+			if (!byRepo.has(pr.repo)) byRepo.set(pr.repo, []);
+			byRepo.get(pr.repo).push(pr);
+		}
+		return [...byRepo.entries()].map(([repo, list]) => ({ repo, list })).sort((a, b) => a.repo.localeCompare(b.repo));
 	}
 
 	refresh(cx, done) {
@@ -138,41 +188,71 @@ export default class PullRequests extends View {
 				try {
 					const data = JSON.parse(result.stdout).data;
 					this.me = data.viewer.login;
-					const shape = (n) => ({
+					const shape = (n, review) => ({
 						key: `${n.repository.nameWithOwner}#${n.number}`,
 						repo: n.repository.nameWithOwner,
 						number: n.number,
 						title: n.title,
 						url: n.url,
 						author: n.author?.login ?? "",
+						review,
 						draft: n.isDraft,
-						review: n.reviewDecision,
+						decision: n.reviewDecision,
 						mergeable: n.mergeable,
 						checks: n.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? "",
 						updated: ago(n.updatedAt),
 					});
-					const searching = data.search.nodes.filter((n) => n && n.number).map(shape);
-					const mine = data.viewer.pullRequests.nodes.map(shape);
-					const asked = new Set(searching.map((row) => row.key));
-					this.reviewing = searching;
-					this.mine = mine.filter((row) => !asked.has(row.key));
+					const asked = data.search.nodes.filter((n) => n && n.number).map((n) => shape(n, true));
+					const askedKeys = new Set(asked.map((pr) => pr.key));
+					const mine = data.viewer.pullRequests.nodes.map((n) => shape(n, false)).filter((pr) => !askedKeys.has(pr.key));
+					this.prs = [...asked.sort((a, b) => a.repo.localeCompare(b.repo)), ...mine.sort((a, b) => a.repo.localeCompare(b.repo))];
 					this.error = "";
 				} catch (e) {
 					this.error = `could not read gh output: ${e}`;
 				}
 			}
 			this.loading = false;
-			if (this.selected >= this.rows.length) this.selected = Math.max(0, this.rows.length - 1);
+			if (this.selected >= this.prs.length) this.selected = Math.max(0, this.prs.length - 1);
 			cx.notify();
+			const current = this.current;
+			if (current && this.diff.key !== current.key) this.loadDiff(current, cx);
 			if (done) done();
 		});
 	}
 
-	move(delta, cx) {
-		if (this.view !== "list" || !this.rows.length) return;
-		this.selected = Math.min(this.rows.length - 1, Math.max(0, this.selected + delta));
-		this.pending = "";
+	loadDiff(pr, cx) {
+		if (!pr) return;
+		this.diff = { rows: [], width: 600, key: pr.key, loading: true };
 		cx.notify();
+		cx.spawn(async (cx) => {
+			const result = await gh(["pr", "diff", String(pr.number), "-R", pr.repo], 120000);
+			const lines = result.code === 0 ? result.stdout.split("\n") : [(result.stderr || "no diff").trim()];
+			const shown = lines.length > MAX_DIFF_LINES ? lines.slice(0, MAX_DIFF_LINES) : lines;
+			if (lines.length > MAX_DIFF_LINES) shown.push(`… ${lines.length - MAX_DIFF_LINES} more lines — press o for the whole diff`);
+			const rows = parseDiff(shown.join("\n"));
+			const width = Math.max(400, ...rows.map((r) => (r.text.length + 1) * 6.6 + 70));
+			this.diff = { rows, width, key: pr.key, loading: false };
+			cx.notify();
+		});
+	}
+
+	select(key, cx) {
+		const index = this.prs.findIndex((pr) => pr.key === key);
+		if (index < 0) return;
+		this.selected = index;
+		this.pending = "";
+		this.reviewAction = "";
+		this.loadDiff(this.prs[index], cx);
+	}
+
+	move(delta, cx) {
+		if (!this.prs.length) return;
+		const next = Math.min(this.prs.length - 1, Math.max(0, this.selected + delta));
+		if (next === this.selected) return;
+		this.selected = next;
+		this.pending = "";
+		this.reviewAction = "";
+		this.loadDiff(this.current, cx);
 	}
 
 	arm(row, cx) {
@@ -186,80 +266,45 @@ export default class PullRequests extends View {
 		});
 	}
 
-	openDiff(key, cx) {
-		const row = key ? this.rows.find((r) => r.key === key) : this.current;
-		if (!row) return;
-		this.selected = this.rows.indexOf(row);
-		this.view = "diff";
-		this.pending = "";
-		this.diff = { rows: [], width: 600, title: `${row.repo}#${row.number} ${row.title}`, loading: true };
-		cx.notify();
-		cx.spawn(async (cx) => {
-			const result = await gh(["pr", "diff", String(row.number), "-R", row.repo], 120000);
-			if (result.code !== 0) {
-				this.diff = { ...this.diff, loading: false, rows: [{ kind: "", text: (result.stderr || "no diff").trim() }] };
-				cx.notify();
-				return;
-			}
-			const lines = result.stdout.split("\n");
-			const shown = lines.length > MAX_DIFF_LINES ? lines.slice(0, MAX_DIFF_LINES) : lines;
-			if (lines.length > MAX_DIFF_LINES) shown.push(`… ${lines.length - MAX_DIFF_LINES} more lines — press o for the full diff`);
-			const rows = diffRows(shown.join("\n"));
-			const width = Math.max(600, ...rows.map((r) => (r.text.length + 1) * 6.6 + 80));
-			this.diff = { rows, width, title: this.diff.title, loading: false };
-			cx.notify();
-		});
-	}
-
-	back(cx) {
-		this.view = "list";
-		this.reviewAction = "";
-		this.handle.focus();
-		cx.notify();
-	}
-
-	merge(row, cx) {
-		if (this.busy) return;
-		this.busy = row.key;
+	merge(cx) {
+		const pr = this.current;
+		if (!pr || this.busy) return;
+		this.busy = pr.key;
 		this.notice = "";
+		this.error = "";
 		cx.notify();
 		cx.spawn(async (cx) => {
-			const result = await gh(
-				["pr", "merge", String(row.number), "-R", row.repo, "--squash", "--delete-branch"],
-				120000,
-			);
+			const result = await gh(["pr", "merge", String(pr.number), "-R", pr.repo, "--squash", "--delete-branch"], 120000);
 			this.busy = "";
 			if (result.code !== 0) {
 				this.error = `merge failed: ${(result.stderr || result.stdout || "").trim().split("\n")[0]}`;
 				cx.notify();
 				return;
 			}
-			this.notice = `merged ${row.key}`;
-			this.view = "list";
+			this.notice = `merged ${pr.key}`;
+			this.diff = { rows: [], width: 600, key: "", loading: false };
 			this.refresh(cx);
 		});
 	}
 
-	/** Choose a review action; the note field decides whether it needs a body. */
 	startReview(kind, cx) {
-		const row = this.current;
-		if (!row) return;
-		if (row.author && row.author === this.me) {
-			this.error = `${row.key} is yours — GitHub does not allow reviewing your own pull request`;
+		const pr = this.current;
+		if (!pr) return;
+		if (pr.author === this.me) {
+			this.error = `${pr.key} is yours — GitHub does not accept reviews on your own pull request`;
 			cx.notify();
 			return;
 		}
-		this.reviewAction = this.reviewAction === kind ? "" : kind;
 		this.error = "";
+		this.reviewAction = kind;
 		cx.notify();
-		if (this.reviewAction) this.note.focus();
-		else this.handle.focus();
+		this.note.focus();
 	}
 
 	sendReview(cx) {
-		const row = this.current;
+		const pr = this.current;
 		const kind = this.reviewAction;
-		if (!row || !kind) return;
+		if (!pr || !kind) return;
 		const body = this.note.value().trim();
 		if (!body && kind !== "approve") {
 			this.error = "this review needs a note — type one, then Enter";
@@ -267,9 +312,10 @@ export default class PullRequests extends View {
 			return;
 		}
 		const flags = { approve: "--approve", changes: "--request-changes", comment: "--comment" };
-		const args = ["pr", "review", String(row.number), "-R", row.repo, flags[kind]];
+		const args = ["pr", "review", String(pr.number), "-R", pr.repo, flags[kind]];
 		if (body) args.push("--body", body);
-		this.busy = row.key;
+		this.busy = pr.key;
+		this.error = "";
 		this.notice = "";
 		cx.notify();
 		cx.spawn(async (cx) => {
@@ -281,7 +327,7 @@ export default class PullRequests extends View {
 				return;
 			}
 			const verb = kind === "approve" ? "approved" : kind === "changes" ? "requested changes on" : "commented on";
-			this.notice = `${verb} ${row.key}`;
+			this.notice = `${verb} ${pr.key}`;
 			this.reviewAction = "";
 			this.note.set_value("");
 			this.handle.focus();
@@ -289,110 +335,150 @@ export default class PullRequests extends View {
 		});
 	}
 
+	async folderFor(repo) {
+		if (this.folders[repo] !== undefined) return this.folders[repo];
+		const name = repo.split("/")[1];
+		let found = null;
+		for (const root of CLONE_ROOTS) {
+			const candidate = root ? `${home()}/${root}/${name}` : `${home()}/${name}`;
+			const remote = await exec("git", ["-C", candidate, "remote", "get-url", "origin"], { timeout: 5000 }).catch(() => null);
+			if (remote && remote.code === 0 && remote.stdout.includes(repo)) {
+				found = candidate;
+				break;
+			}
+		}
+		this.folders[repo] = found;
+		return found;
+	}
+
+	/** The pi binary: the desktop session's PATH usually lacks wherever it was installed. */
+	async piPath() {
+		if (this.pi) return this.pi;
+		const script =
+			'for c in "$HOME/.local/share/pnpm/bin/pi" "$HOME/.local/bin/pi" /usr/local/bin/pi /usr/bin/pi; do [ -x "$c" ] && { echo "$c"; exit 0; }; done; command -v pi';
+		const found = (await exec("/bin/sh", ["-c", script], { timeout: 8000 }).catch(() => null))?.stdout?.trim();
+		this.pi = found || `${home()}/.local/share/pnpm/bin/pi`;
+		return this.pi;
+	}
+
+	startAgent(kind, cx) {
+		const pr = this.current;
+		if (!pr) return;
+		this.error = "";
+		this.notice = "";
+		cx.notify();
+		cx.spawn(async (cx) => {
+			const folder = await this.folderFor(pr.repo);
+			const argv = [await this.piPath()];
+			const name = `${pr.repo.split("/")[1]}#${pr.number} ${kind}`;
+			const where = folder ?? home();
+			const text = task(kind, pr) + (folder ? "" : `\n\nThere is no local clone of ${pr.repo} yet: \`gh repo clone ${pr.repo} ${home()}/code/${pr.repo.split("/")[1]}\`, then work there.`);
+			try {
+				run("space.new", { name, folder: where, argv, task: text });
+				this.notice = `started ${name} in a new space${folder ? ` (${folder})` : ""}`;
+			} catch (e) {
+				this.error = `could not start the agent: ${e}`;
+			}
+			cx.notify();
+		});
+	}
+
 	key(event, cx) {
 		const k = event.key;
-		const row = this.current;
-		if (k === "down" || k === "j") this.move(1, cx);
-		else if (k === "up" || k === "k") this.move(-1, cx);
-		else if (k === "r" && this.view === "list") this.refresh(cx);
+		if ((k === "down" || k === "j") && !this.reviewAction) this.move(1, cx);
+		else if ((k === "up" || k === "k") && !this.reviewAction) this.move(-1, cx);
+		else if (k === "r") this.refresh(cx);
 		else if (k === "escape") {
-			if (this.view === "diff") this.back(cx);
-			else {
-				this.pending = "";
-				this.reviewAction = "";
-				cx.notify();
-			}
-		} else if (k === "enter") {
-			if (this.reviewAction) this.sendReview(cx);
-			else if (row) this.openDiff(null, cx);
-		} else if (!row) return;
+			this.pending = "";
+			this.reviewAction = "";
+			this.handle.focus();
+			cx.notify();
+		} else if (k === "enter" && this.reviewAction) this.sendReview(cx);
 		else if (k === "a") this.startReview("approve", cx);
 		else if (k === "x") this.startReview("changes", cx);
 		else if (k === "c") this.startReview("comment", cx);
-		else if (k === "o") exec("xdg-open", [row.url]);
-		else if (k === "m") {
-			if (this.pending === row.key) {
+		else if (k === "o" && this.current) exec("xdg-open", [this.current.url]);
+		else if (k === "m" && this.current) {
+			if (this.pending === this.current.key) {
 				this.pending = "";
-				this.merge(row, cx);
-			} else this.arm(row, cx);
+				this.merge(cx);
+			} else this.arm(this.current, cx);
+		} else if (/^[1-4]$/.test(k)) {
+			const action = ACTIONS[Number(k) - 1];
+			if (action) this.startAgent(action.key, cx);
 		} else return;
 		cx.stop_propagation();
 	}
 
-	badge(text, color, t) {
-		return div().px(6).rounded(4).bg(t.raised).text_size(11).text_color(color).child(text);
+	textButton(id, label, on, primary, t) {
+		return div()
+			.id(id)
+			.px(9)
+			.py(3)
+			.rounded(6)
+			.text_size(11.5)
+			.bg(primary ? t.solid : t.raised)
+			.text_color(primary ? t.solid_foreground : t.foreground)
+			.hover((s) => s.opacity(0.85))
+			.on_click(on)
+			.child(label);
 	}
 
-	rowLine(r, index, cx) {
-		const t = theme();
+	checksBadge(pr, t) {
+		const color = pr.checks === "SUCCESS" ? t.done : pr.checks === "PENDING" || pr.checks === "" ? t.muted : t.blocked;
+		const text = pr.checks === "SUCCESS" ? "checks ✓" : pr.checks === "" ? "no checks" : `checks ${pr.checks.toLowerCase()}`;
+		return div().px(6).py(1).rounded(4).bg(t.raised).text_size(11).text_color(color).child(text);
+	}
+
+	listRow(pr, t, cx) {
+		const index = this.prs.indexOf(pr);
 		const selected = index === this.selected;
-		const pending = this.pending === r.key;
-		const merging = this.busy === r.key;
-		const checkColor = r.checks === "SUCCESS" ? t.done : CHECK_ORDER.includes(r.checks) && r.checks !== "PENDING" ? t.blocked : t.muted;
-		const checkText =
-			r.checks === "SUCCESS" ? "checks ✓" : r.checks === "" ? "no checks" : `checks ${r.checks.toLowerCase()}`;
 		return h_flex()
-			.id(`pr-${r.key}`)
-			.gap(10)
+			.id(`pr-${pr.key}`)
+			.gap(6)
 			.px(8)
 			.py(4)
 			.items_center()
 			.rounded(6)
 			.when(selected, (el) => el.bg(t.selection))
 			.when(!selected, (el) => el.hover((s) => s.bg(t.hover)))
-			.on_click((_e, cx) => {
-				this.selected = index;
-				this.pending = "";
-				cx.notify();
-			})
-			.child(div().w(190).flex_shrink_0().text_color(t.muted).truncate().child(`${r.repo}#${r.number}`))
+			.on_click((_e, cx) => this.select(pr.key, cx))
+			.child(div().w(34).flex_none().text_color(t.muted).text_size(11.5).child(`#${pr.number}`))
 			.child(
 				v_flex()
 					.flex_1()
 					.min_w(0)
 					.justify_start()
 					.items_start()
-					.child(div().truncate().text_color(r.draft ? t.dim : t.foreground).child(r.draft ? `draft · ${r.title}` : r.title))
-					.child(div().text_size(11).text_color(t.dim).child(`${r.author} · ${r.updated}`)),
-			)
-			.child(this.badge(checkText, checkColor, t))
-			.when(r.review === "APPROVED", (el) => el.child(this.badge("approved", t.done, t)))
-			.when(r.review === "CHANGES_REQUESTED", (el) => el.child(this.badge("changes asked", t.blocked, t)))
-			.when(r.mergeable === "CONFLICTING", (el) => el.child(this.badge("conflict", t.blocked, t)))
-			.when(merging, (el) => el.child(this.badge("working…", t.working, t)))
-			.when(pending, (el) => el.child(this.badge("press m again to merge", t.working, t)))
-			.when(
-				!merging,
-				(el) =>
-					el.child(
-						div()
-							.id(`merge-${r.key}`)
-							.px(8)
-							.py(2)
-							.rounded(4)
-							.text_size(11)
-							.bg(pending ? t.working : t.raised)
-							.text_color(pending ? t.background : t.muted)
-							.hover((s) => s.bg(pending ? t.working : t.hover))
-							.on_click((_e, cx) => {
-								this.selected = index;
-								if (this.pending === r.key) {
-									this.pending = "";
-									this.merge(r, cx);
-								} else this.arm(r, cx);
-								cx.stop_propagation();
-								cx.notify();
-							})
-							.child(pending ? "confirm merge" : "merge"),
+					.child(div().truncate().text_size(12).text_color(pr.draft ? t.dim : t.foreground).child(pr.title))
+					.child(
+						h_flex()
+							.gap(6)
+							.text_size(10.5)
+							.text_color(t.dim)
+							.child(`${pr.author} · ${pr.updated}`)
+							.when(pr.review, (el) => el.child(div().text_color(t.accent).child("review asked"))),
 					),
-			);
+			)
+			.when(pr.checks === "SUCCESS", (el) => el.child(div().text_size(10).text_color(t.done).child("✓")))
+			.when(pr.checks !== "SUCCESS" && pr.checks !== "", (el) => el.child(div().text_size(10).text_color(t.blocked).child("!")))
+			.when(pr.mergeable === "CONFLICTING", (el) => el.child(div().text_size(10).text_color(t.blocked).child("≠")));
 	}
 
-	diffRow({ kind, number, text }, t) {
-		if (kind === "@")
-			return div().w_full().px(12).h(20).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
+	diffRow({ kind, number, text, add, del }, t) {
 		if (kind === "file")
-			return div().w_full().px(12).h(20).flex_none().truncate().text_color(t.accent).child(text);
+			return h_flex()
+				.w_full()
+				.px(12)
+				.h(22)
+				.flex_none()
+				.gap(8)
+				.items_center()
+				.bg(t.background)
+				.child(div().flex_1().min_w(0).truncate().text_color(t.accent).child(text))
+				.when(add > 0, (e) => e.child(div().text_size(10).text_color(t.ansi2).child(`+${add}`)))
+				.when(del > 0, (e) => e.child(div().text_size(10).text_color(t.ansi1).child(`−${del}`)));
+		if (kind === "@") return div().w_full().px(12).h(20).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
 		return h_flex()
 			.w_full()
 			.h(20)
@@ -407,144 +493,191 @@ export default class PullRequests extends View {
 					.text_color(kind === "+" ? t.ansi2 : kind === "-" ? t.ansi1 : t.dim)
 					.child(kind === "+" ? "+" : kind === "-" ? "−" : " "),
 			)
-			.child(div().w(34).flex_none().text_right().text_color(t.dim).child(number === undefined ? "" : String(number)))
-			.child(div().pl(10).flex_1().min_w(0).truncate().child(text));
+			.child(div().w(38).flex_none().text_right().pr(6).text_color(t.dim).child(number === undefined ? "" : String(number)))
+			.child(div().pl(8).flex_1().min_w(0).truncate().child(text));
 	}
 
-	header(t) {
-		const row = this.current;
-		const title =
-			this.view === "diff" ? this.diff.title : `Pull requests · ${this.reviewing.length} to review · ${this.mine.length} yours`;
-		const hint =
-			this.view === "diff"
-				? "↑↓ scroll · m merge · a approve · x changes · c comment · esc back"
-				: "↑↓ move · enter diff · m merge · a/x/c review · o open · r refresh";
-		return h_flex()
-			.px(10)
-			.py(6)
-			.gap(8)
-			.items_center()
-			.justify_between()
-			.border_b_1()
+	list(t) {
+		return v_flex()
+			.id("prs-list")
+			.w(360)
+			.flex_none()
+			.h_full()
+			.min_h(0)
+			.border_r_1()
 			.border_color(t.border)
 			.child(
 				h_flex()
-					.gap(8)
+					.px(10)
+					.py(8)
 					.items_center()
-					.when(this.view === "diff", (el) =>
-						el.child(div().id("prs-back").px(6).rounded(4).bg(t.raised).text_size(11).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.back(cx)).child("← back")),
-					)
-					.child(div().font_semibold().truncate().child(title)),
+					.justify_between()
+					.border_b_1()
+					.border_color(t.border)
+					.child(div().text_size(12).font_semibold().child("Pull requests"))
+					.child(div().text_size(10.5).text_color(t.dim).child(`${this.prs.length} open`)),
 			)
-			.child(div().text_size(11).text_color(t.dim).child(hint));
-	}
-
-	status(t) {
-		if (this.error) return div().px(10).py(4).text_size(11).text_color(t.blocked).child(this.error);
-		if (this.notice) return div().px(10).py(4).text_size(11).text_color(t.done).child(this.notice);
-		return null;
-	}
-
-	reviewBar(t) {
-		if (!this.reviewAction) return div();
-		const label = this.reviewAction === "approve" ? "Approve" : this.reviewAction === "changes" ? "Request changes" : "Comment";
-		return h_flex()
-			.gap(8)
-			.px(10)
-			.py(6)
-			.items_center()
-			.border_t_1()
-			.border_color(t.border)
-			.child(div().text_size(11).text_color(t.accent).w(120).child(`${label}:`))
+			.when(this.loading, (el) => el.child(div().p(10).text_color(t.muted).child("loading…")))
+			.when(!this.loading && !this.prs.length && !this.error, (el) =>
+				el.child(div().p(10).text_color(t.muted).child("nothing open, nothing waiting for your review")),
+			)
 			.child(
-				Input.new(this.note)
-					.h(30)
-					.px(8)
-					.rounded(6)
-					.border_1()
-					.border_color(t.input)
-					.bg(t.background)
-					.text_size(12)
-					.text_color(t.foreground),
+				v_flex()
+					.id("prs-list-scroll")
+					.flex_1()
+					.min_h(0)
+					.p(4)
+					.overflow_y_scrollbar()
+					.children(
+						this.groups.flatMap((group) => [
+							div().px(8).pt(8).pb(2).text_size(10.5).text_color(t.dim).child(group.repo),
+							...group.list.map((pr) => this.listRow(pr, t, undefined)),
+						]),
+					),
+			);
+	}
+
+	detail(t, cx) {
+		const pr = this.current;
+		if (!pr) return v_flex().flex_1().min_h(0).h_full().items_center().justify_center().child(div().text_color(t.dim).child("pick a pull request"));
+		return v_flex()
+			.flex_1()
+			.min_w(0)
+			.min_h(0)
+			.h_full()
+			.justify_start()
+			.child(
+				v_flex()
+					.px(12)
+					.py(8)
+					.gap(4)
+					.border_b_1()
+					.border_color(t.border)
+					.child(
+						h_flex()
+							.gap(8)
+							.items_center()
+							.child(div().text_size(12).text_color(t.muted).child(pr.key))
+							.child(div().flex_1().min_w(0).truncate().font_semibold().child(pr.title))
+							.child(this.checksBadge(pr, t))
+							.when(pr.decision === "APPROVED", (el) => el.child(div().px(6).py(1).rounded(4).bg(t.raised).text_size(11).text_color(t.done).child("approved")))
+							.when(pr.decision === "CHANGES_REQUESTED", (el) =>
+								el.child(div().px(6).py(1).rounded(4).bg(t.raised).text_size(11).text_color(t.blocked).child("changes asked")),
+							)
+							.when(pr.mergeable === "CONFLICTING", (el) =>
+								el.child(div().px(6).py(1).rounded(4).bg(t.raised).text_size(11).text_color(t.blocked).child("conflict")),
+							)
+							.when(this.pending === pr.key, (el) =>
+								el.child(div().px(6).py(1).rounded(4).bg(t.working).text_size(11).text_color(t.background).child("press m again to merge")),
+							),
+					)
+					.child(
+						h_flex()
+							.gap(10)
+							.items_center()
+							.text_size(11)
+							.text_color(t.dim)
+							.child(`${pr.author} · ${pr.updated}`)
+							.child("·")
+							.child(this.textButton("prs-open", "open in browser", () => exec("xdg-open", [pr.url]), false, t))
+							.child(this.textButton("prs-merge", this.pending === pr.key ? "confirm merge" : "merge", (_e, cx) => {
+								if (this.pending === pr.key) {
+									this.pending = "";
+									this.merge(cx);
+								} else this.arm(pr, cx);
+								cx.notify();
+							}, false, t)),
+					),
+			)
+			.child(
+				div()
+					.flex_1()
+					.min_h(0)
+					.relative()
+					.font_family(settings().font_family ?? "JetBrains Mono")
+					.text_size(11.5)
+					.child(
+						this.diff.loading || !this.diff.rows.length
+							? v_flex().p(12).child(div().text_color(t.muted).child(this.diff.loading ? "loading diff…" : "no diff"))
+							: div()
+									.id("prs-diff-x")
+									.size_full()
+									.overflow_x_scrollbar()
+									.child(
+										div()
+											.w_full()
+											.min_w(this.diff.width)
+											.h_full()
+											.child(
+												v_virtual_list("prs-diff", this.diff.rows.length, 20, (i) => String(i), (range) =>
+													this.diff.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t)),
+												).size_full(),
+											),
+									),
+					)
+					.child(Scrollbar.vertical("prs-diff").viewport_from_layout().absolute().inset_0()),
+			)
+			.child(
+				v_flex()
+					.gap(6)
+					.px(12)
+					.py(8)
+					.border_t_1()
+					.border_color(t.border)
+					.child(
+						h_flex()
+							.gap(6)
+							.items_center()
+							.child(
+								Input.new(this.note)
+									.h(28)
+									.px(8)
+									.rounded(6)
+									.border_1()
+									.border_color(t.input)
+									.bg(t.background)
+									.text_size(12)
+									.text_color(t.foreground),
+							)
+							.child(this.textButton("prs-approve", "approve", (_e, cx) => this.startReview("approve", cx), false, t))
+							.child(this.textButton("prs-changes", "request changes", (_e, cx) => this.startReview("changes", cx), false, t))
+							.child(this.textButton("prs-comment", "comment", (_e, cx) => this.startReview("comment", cx), false, t)),
+					)
+					.child(
+						h_flex()
+							.gap(6)
+							.items_center()
+							.child(div().text_size(10.5).text_color(t.dim).w(74).child("new space:"))
+							.children(
+								ACTIONS.map((action, i) =>
+									this.textButton(`prs-agent-${action.key}`, `${i + 1} ${action.label}`, (_e, cx) => this.startAgent(action.key, cx), false, t),
+								),
+							),
+					),
 			);
 	}
 
 	render(cx) {
 		const t = theme();
-		const list = this.rows;
 		return v_flex()
 			.id("prs-root")
 			.size_full()
 			.min_h(0)
 			.bg(t.surface)
-			.text_size(13)
+			.text_size(12.5)
 			.text_color(t.foreground)
 			.track_focus(this.handle)
 			.on_key_down((e, cx) => this.key(e, cx))
-			.child(this.header(t))
-			.when(Boolean(this.status(t)), (el) => el.child(this.status(t)))
-			.when(this.view === "list", (el) =>
-				el
-					.when(this.loading, (e) => e.child(div().p(10).text_color(t.muted).child("loading…")))
-					.when(!this.loading && list.length === 0 && !this.error, (e) =>
-						e.child(div().p(10).text_color(t.muted).child("nothing open, and nothing waiting for your review")),
-					)
-					.child(
-						v_flex()
-							.id("prs-list")
-							.flex_1()
-							.min_h(0)
-							.p(6)
-							.gap(2)
-							.overflow_y_scrollbar()
-							.when(this.reviewing.length > 0, (e) =>
-								e.child(div().px(8).pt(6).pb(2).text_size(11).text_color(t.accent).child("WAITING FOR YOUR REVIEW")),
-							)
-							.children(this.reviewing.map((r) => this.rowLine(r, list.indexOf(r), cx)))
-							.when(this.mine.length > 0, (e) =>
-								e.child(
-									div()
-										.px(8)
-										.pt(this.reviewing.length ? 10 : 6)
-										.pb(2)
-										.text_size(11)
-										.text_color(t.dim)
-										.child(this.reviewing.length ? "YOURS" : "OPEN PULL REQUESTS"),
-								),
-							)
-							.children(this.mine.map((r) => this.rowLine(r, list.indexOf(r), cx))),
-					),
-			)
-			.when(this.view === "diff", (el) =>
+			.when(Boolean(this.error || this.notice), (el) =>
 				el.child(
 					div()
-						.flex_1()
-						.min_h(0)
-						.relative()
-						.font_family(settings().font_family ?? "JetBrains Mono")
+						.px(10)
+						.py(3)
 						.text_size(11)
-						.child(
-							div()
-								.id("prs-diff-x")
-								.size_full()
-								.overflow_x_scrollbar()
-								.child(
-									div()
-										.w_full()
-										.min_w(this.diff.width)
-										.h_full()
-										.child(
-											this.diff.loading
-												? v_flex().p(12).child(div().text_color(t.muted).child("loading diff…"))
-												: v_virtual_list("prs-diff", Math.max(1, this.diff.rows.length), 20, (i) => String(i), (range) =>
-														this.diff.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t)),
-													).size_full(),
-										),
-								),
-						)
-						.child(Scrollbar.vertical("prs-diff").viewport_from_layout().absolute().inset_0()),
+						.text_color(this.error ? t.blocked : t.done)
+						.child(this.error || this.notice),
 				),
 			)
-			.when(Boolean(this.reviewAction), (el) => el.child(this.reviewBar(t)));
+			.child(h_flex().flex_1().min_h(0).items_stretch().child(this.list(t)).child(this.detail(t, cx)));
 	}
 }

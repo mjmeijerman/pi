@@ -64,25 +64,39 @@ secrets and no system packages (`--no-apt --no-verify`).
 
 ### Herdr window
 
-`herdr-mods/prs` is a mod for the Herdr app: one pane listing the pull
-requests waiting for your review, then your own, newest activity first, with
-checks and conflicts on the row.
+`herdr-mods/prs` is a mod for the Herdr app: open pull requests on the left,
+the diff on the right, and what you do about it underneath.
+
+Left: pull requests grouped by repository — review requests first — with
+author, age, a check mark, an `!` for failing checks and `≠` for conflicts.
+Click one and the right side shows its diff: file headers with `+n −n` counts,
+hunk headers, line numbers, a green/red sign gutter, horizontal scroll.
+
+Right, below the diff: a note field with `approve`, `request changes` and
+`comment`, then four buttons that open **a new space** with a pi agent already
+told what to do:
+
+| button | the agent is asked to |
+| --- | --- |
+| `1 review the PR` | read the diff and its surroundings, post one review, touch no code |
+| `2 fix pipeline` | read the failing job, reproduce it, fix the cause, push to the branch |
+| `3 fix merge conflicts` | merge the base branch in, keep both intents, run the tests, push |
+| `4 fix review comments` | address each comment, reply where it disagrees, push |
+
+The space starts in the repository's local clone when one can be found (a few
+usual roots are probed for a matching `origin`), otherwise in `$HOME` with an
+instruction to clone it first. Every task says: never merge, never push to
+trunk.
 
 | key | does |
 | --- | --- |
 | `↑` `↓` / `j` `k` | move |
-| `enter` | open the diff |
-| `m` | merge (squash, delete branch) — press twice |
-| `a` | approve — press twice, note optional |
-| `x` | request changes — needs a note |
-| `c` | comment — needs a note |
+| `a` `x` `c` | approve · request changes · comment (note required for the last two) |
+| `m` | merge, squash — press twice |
+| `1` `2` `3` `4` | the four agent actions |
 | `o` | open the PR in the browser |
 | `r` | refresh (it also repolls every two minutes) |
-| `esc` | back from the diff, cancel |
-
-Review actions need a note for `x` and `c`; typing it in and pressing Enter
-sends it. GitHub refuses reviews on your own pull requests, so a row you
-authored says so instead of failing.
+| `esc` | cancel |
 
 It lives in the `Apps` space, `Pull requests` tab. Rebuild on a new machine:
 `install.sh` copies the folder into `$HOME/.config/herdr-app/mods/` when the app
@@ -92,8 +106,6 @@ edited the mod in place). Then:
 ```bash
 herdr-app do space.new --name Apps --folder "$HOME"
 herdr-app do tab.new --space <space-id> --name "Pull requests" --mod prs
-# a pane that opens straight on one diff:
-herdr-app do tab.new --space <space-id> --name "PR diff" --mod prs --props '{"open":"owner/repo#12"}'
 ```
 
 ### What is not in git, and why
