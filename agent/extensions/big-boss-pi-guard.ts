@@ -94,14 +94,69 @@ function segments(command: string): string[] {
 }
 
 /** Write verbs that touch a path directly. */
-const WRITE_VERB =
-	/\b(rm|mv|cp|tee|touch|truncate|mkdir|rmdir|ln|chmod|chown|sed\s+-i|perl\s+-i|dd|install)\b/;
+const WRITE_VERB = /^(rm|mv|cp|tee|touch|truncate|mkdir|rmdir|ln|chmod|chown|dd|install)$/;
 
-/** `>`/`>>` redirects, and `>|`/`2>`; not `>/dev/null`-style device sinks. */
+/**
+ * Words that run the command that follows them, so a verb behind one is still in command
+ * position. `eval` takes the command as its next word too.
+ */
+const COMMAND_WRAPPERS = new Set(["sudo", "env", "nohup", "time", "command", "xargs", "eval"]);
+
+/** Shells that run their `-c` argument as a command: `bash -c 'rm …'`. */
+const SHELL_WRAPPERS = new Set(["sh", "bash", "zsh", "dash"]);
+
+/**
+ * The write verb this segment actually runs, or undefined.
+ *
+ * Only command position counts: the first word, or the word right after a wrapper such as
+ * `sudo`, with the wrapper's flags and `KEY=value` assignments stepped over. A verb-shaped
+ * argument (`echo install /path`, `rg install`) must not arm the path scan — `install` as
+ * an argument is a read-only command, and treating it as a write was a false positive.
+ */
+function commandVerb(segment: string): string | undefined {
+	const words = segment.split(/\s+/).filter(Boolean);
+	let i = 0;
+	while (i < words.length) {
+		const word = words[i];
+		if (COMMAND_WRAPPERS.has(word)) {
+			i += 1;
+			continue;
+		}
+		const next = words[i + 1] ?? "";
+		if (SHELL_WRAPPERS.has(word) && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(next)) {
+			i += 2;
+			continue;
+		}
+		if (i > 0 && (word.startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(word))) {
+			i += 1;
+			continue;
+		}
+		break;
+	}
+	const command = words[i] ?? "";
+	// `sed -i`/`perl -i` edit in place, so the flag, not the verb alone, is the write.
+	if ((command === "sed" || command === "perl") && words.slice(i + 1).some((word) => /^-[a-zA-Z]*i/.test(word))) {
+		return `${command} -i`;
+	}
+	return WRITE_VERB.test(command) ? command : undefined;
+}
+
+/**
+ * A greater-than preceded by `=`, `<`, `!` or `-` is code, not a redirect: the `>` in a
+ * JavaScript arrow (`(x) => x`), in `->`, in `<>` or in `!>`. Counting it as a redirect
+ * made every `node -e` with an arrow function look like a write into the workspace.
+ */
+const NOT_A_REDIRECT_BEFORE = new Set(["=", "<", "!", "-"]);
+
+/** `>>`/`>` redirects, and `2>`; not `>/dev/null`-style device sinks. */
 function redirectsInto(segment: string): string[] {
 	const hits: string[] = [];
-	const re = /(?:^|[^0-9])\d?>>?\s*([^\s;&|>]+)/g;
-	for (const match of segment.matchAll(re)) hits.push(match[1]);
+	const re = />>?\s*([^\s;&|>]+)/g;
+	for (const match of segment.matchAll(re)) {
+		const at = match.index ?? 0;
+		if (at > 0 && NOT_A_REDIRECT_BEFORE.has(segment[at - 1])) continue;
+		hits.push(match[1]);
+	}
 	return hits;
 }
 
@@ -142,7 +197,7 @@ function pathTokens(segment: string, cwd: string, bare: boolean, verb: string | 
  */
 export function shellWriteReason(command: string, cwd: string): string | null {
 	for (const segment of segments(command)) {
-		const verb = segment.match(WRITE_VERB)?.[0]?.trim();
+		const verb = commandVerb(segment);
 		const redirected = redirectsInto(segment).length > 0;
 		if (!verb && !redirected) continue;
 		for (const path of pathTokens(segment, cwd, Boolean(verb), verb)) {
