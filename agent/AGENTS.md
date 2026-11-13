@@ -6,7 +6,7 @@
 
 ## Landing changes
 
-- Never merge a pull request or push to trunk without the user's explicit permission in this session. Ask, wait for a yes, then `/mergeguard allow` and run that one command. `merge-guard` blocks `gh pr merge`, the merge API and trunk pushes mechanically; a green CI run is not permission.
+- Never merge a pull request, push to trunk, or commit while on trunk without the user's explicit permission in this session. Ask, wait for a yes, then `/mergeguard allow` and run that one command. `merge-guard` blocks `gh pr merge`, the merge API, trunk pushes, and `git commit`/`git merge` while HEAD is trunk, main or master; a green CI run is not permission.
 
 ## Harness sources
 

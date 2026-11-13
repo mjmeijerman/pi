@@ -7,12 +7,24 @@
  */
 import "./helpers/hooks.ts";
 import assert from "node:assert/strict";
-import { describe, test } from "node:test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, test } from "node:test";
 import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
 
 const mod = await import("../merge-guard.ts");
 const mergeGuard = mod.default;
-const { mergeReason } = mod;
+const { mergeReason, trunkCommitReason, currentBranch } = mod;
+
+/** A throwaway repo whose HEAD is on `branch`, for the branch-dependent rules. */
+function repoOn(branch: string): string {
+	const dir = mkdtempSync(join(tmpdir(), `pi-merge-guard-${branch.replace(/[^a-z0-9]+/gi, "-")}-`));
+	execFileSync("git", ["init", "-q", "-b", branch, dir]);
+	execFileSync("git", ["-C", dir, "commit", "-q", "--allow-empty", "-m", "init"]);
+	return dir;
+}
 
 function setup() {
 	const fake = createFakePi();
@@ -71,6 +83,42 @@ describe("merge-guard: decision", () => {
 	}
 });
 
+describe("merge-guard: branch rules", () => {
+	const dirs = ["trunk", "main", "master", "feat/x"].map(repoOn);
+	after(() => {
+		for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+	});
+
+	test("currentBranch reads the real repository", () => {
+		assert.equal(currentBranch(dirs[0]), "trunk");
+		assert.equal(currentBranch(dirs[3]), "feat/x");
+		assert.equal(currentBranch(tmpdir()), null, "outside a repo there is no branch");
+	});
+
+	for (const branch of ["trunk", "main", "master"]) {
+		test(`a commit on ${branch} needs permission`, () => {
+			assert.match(trunkCommitReason('git commit -m "x"', branch), new RegExp(branch));
+		});
+		test(`a merge on ${branch} needs permission`, () => {
+			assert.ok(trunkCommitReason("git merge feat/x", branch));
+		});
+	}
+
+	test("a commit on a feature branch is free", () => {
+		assert.equal(trunkCommitReason('git commit -m "x"', "feat/x"), null);
+		assert.equal(trunkCommitReason("git merge trunk", "feat/x"), null);
+	});
+
+	test("outside a repository nothing is blocked by the branch rule", () => {
+		assert.equal(trunkCommitReason('git commit -m "x"', null), null);
+	});
+
+	test("--help and quoted mentions are not commits", () => {
+		assert.equal(trunkCommitReason("git commit --help", "trunk"), null);
+		assert.equal(trunkCommitReason('echo "git commit -m x"', "trunk"), null);
+	});
+});
+
 describe("merge-guard: handler", () => {
 	test("a merge command is blocked, not run", async () => {
 		const result = await run("gh pr merge 1 --squash");
@@ -117,10 +165,35 @@ describe("merge-guard: handler", () => {
 	test("/mergeguard status reports the state", async () => {
 		const { ctx, commands, notices } = setup();
 		await commands.get("mergeguard").handler("", ctx);
-		assert.match(notices.at(-1).message, /merges blocked/);
+		assert.match(notices.at(-1).message, /landing blocked/);
 		await commands.get("mergeguard").handler("allow", ctx);
 		await commands.get("mergeguard").handler("status", ctx);
-		assert.match(notices.at(-1).message, /one merge allowed/);
+		assert.match(notices.at(-1).message, /one landing allowed/);
+	});
+
+	test("a commit on trunk is blocked through the handler", async () => {
+		const dir = repoOn("trunk");
+		try {
+			const { emit } = setup();
+			const { ctx } = createFakeCtx({ cwd: dir });
+			const [result] = await emit("tool_call", { toolName: "bash", input: { command: 'git commit -m "x"' } }, ctx);
+			assert.equal(result?.block, true);
+			assert.match(result.reason, /on trunk/);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("the same commit on a feature branch runs", async () => {
+		const dir = repoOn("feat/x");
+		try {
+			const { emit } = setup();
+			const { ctx } = createFakeCtx({ cwd: dir });
+			const [result] = await emit("tool_call", { toolName: "bash", input: { command: 'git commit -m "x"' } }, ctx);
+			assert.equal(result, undefined);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("non-bash tools are ignored", async () => {
