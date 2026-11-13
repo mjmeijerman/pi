@@ -24,6 +24,8 @@ agent/.stryker-tmp/
 agent/deepseek.key
 agent/suggestions.jsonl
 agent/retro/
+# Learner output: a proposal is a review artefact, not harness code.
+agent/proposals/
 scripts/.agent-panes.json
 *.bak
 werken-met-ai.pdf

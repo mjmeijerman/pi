@@ -161,6 +161,13 @@ check_release_age() {
 		verdict npm-min-release-age - 0 "npm not installed"
 		return
 	fi
+	# Inside the sandbox the npm config file is bound to /dev/null, so npm reports
+	# the setting as unset no matter what it says on the host. Failing here would
+	# be a check reading its own blindfold: say so instead (blip 99, blip 42).
+	if [ -n "${PI_SANDBOX_MODE-}" ]; then
+		verdict npm-min-release-age - 1 "not readable inside the sandbox (npm config is masked) — verify outside"
+		return
+	fi
 	value=$(npm config get min-release-age 2>/dev/null | tr -d '[:space:]')
 	case "$value" in
 	'' | undefined | null) value=$(npm config get minimum-release-age 2>/dev/null | tr -d '[:space:]') ;;
@@ -412,6 +419,26 @@ check_model_route() {
 # wraps `pi`, the contained session and the one launched with PI_BARE=1 look
 # identical in Herdr. The marker the launcher exports is the only honest source,
 # so this check keeps the launcher and the display from drifting apart.
+check_self_learn() {
+	local ext="agent/extensions/self-learn.ts" spec="agent/prompts/learn.md"
+	if [ ! -f "$ROOT/$ext" ]; then
+		record WARN self-learn "$ext" "missing — compactions teach the harness nothing (blip 18)"
+		return
+	fi
+	if [ ! -f "$ROOT/$spec" ]; then
+		verdict self-learn "$spec" 0 \
+			"missing — the learner would be spawned without a spec to follow"
+		return
+	fi
+	if ! grep -q 'PI_SELF_LEARN' "$ROOT/$ext"; then
+		verdict self-learn "$ext" 0 \
+			"does not guard against recursion — a learner could spawn learners"
+		return
+	fi
+	verdict self-learn "$ext" 1 \
+		"after a compaction, a separate pi session judges the harness; proposals land in ~/.pi/agent/proposals/"
+}
+
 check_sandbox_marker() {
 	local launcher="sandbox/pi-sandbox.sh" badge="agent/extensions/sandbox-badge.ts"
 	if [ ! -f "$ROOT/$launcher" ]; then
@@ -470,6 +497,7 @@ if [ "$QUICK" = 0 ]; then
 	check_git_hooks
 	check_model_route
 	check_sandbox_marker
+	check_self_learn
 
 	section "metadata — ownership and provenance"
 	check_doc_metadata

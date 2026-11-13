@@ -7,7 +7,7 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 | Path | What |
 |---|---|
 | `agent/skills/` | 8 pi skills: `achterhoek-agenda`, `cost-optimizer`, `ethical-hacker`, `gh-repo-scan`, `github-workflow`, `questionnaire`, `secret-guard`, `ui-ux` |
-| `agent/extensions/` | 12 always-on extensions: `cost-optimizer`, `desktop-notify`, `dictation`, `feedback-flywheel`, `herdr-agent-state` (installed by herdr), `local-llm`, `merge-guard`, `om-autostart`, `sandbox-badge`, `secret-guard`, `session-nudge`, `usage-footer` |
+| `agent/extensions/` | 13 always-on extensions: `cost-optimizer`, `desktop-notify`, `dictation`, `feedback-flywheel`, `herdr-agent-state` (installed by herdr), `local-llm`, `merge-guard`, `om-autostart`, `sandbox-badge`, `secret-guard`, `self-learn`, `session-nudge`, `usage-footer` |
 | `agent/prompts/` | prompt templates: `/grill` (interview the plan before coding, blip 13) |
 | `git-hooks/` | global secret-scan hooks (`pre-commit`, `commit-msg`, `pre-push`) + installer |
 | `git-vuln-scan` | pre-push agent vulnerability scan (GitHub pushes) |
@@ -34,7 +34,7 @@ pi
 
 `setup.sh` is the whole story: it asks for the API key, installs the system
 packages it can, puts config and hooks on disk, reconciles the pi packages named
-in `settings.json`, and then verifies the result (sandbox selftest, 260 extension
+in `settings.json`, and then verifies the result (sandbox selftest, 278 extension
 tests, hook paths, key present). Read it before running it — 300 lines, no
 network calls except apt, `pi update` and the optional model pull.
 

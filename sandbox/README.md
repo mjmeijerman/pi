@@ -20,6 +20,22 @@ install.sh replaces it on every run (never duplicates it) and keeps the
 pre-wrapper file as `~/.bashrc.bak-pi` / `~/.zshrc.bak-pi`. Delete the block to
 go back to the bare binary; the raw `pi` stays on PATH either way.
 
+### What is mounted
+
+Read-only: `/usr`, `/etc`, the node and pnpm prefixes, `~/.local/bin` and the tool
+stores behind its symlinks (`~/.local/share/pipx`, `~/.local/share/uv`).
+
+That last group is why `gh`, `uvx`, `gitleaks`, `semgrep`, `trivy`, `herdr` and `hc`
+exist inside a session at all — without it they are `command not found`, and every
+`gh pr …` step the agent is told to run needs `PI_BARE=1`.
+
+What does *not* come with them is their config. `~/.config/gh`, `~/.ssh`, `~/.aws`,
+`~/.kube`, `~/.docker` and `~/.config/1Password` are masked, and `.netrc`/`.npmrc` are
+bound to `/dev/null`. So `gh` inside reports `not logged into any GitHub hosts`, npm
+reports every setting as unset, and both are telling the truth: a sandbox that hands out
+a GitHub token has stopped being a sandbox. Run the credentialed step outside, or pass a
+narrow `GH_TOKEN` for that one command.
+
 ### Starting a session without the sandbox
 
 `scripts/pi-bare` is the named way out — the same binary, started without the
