@@ -70,7 +70,8 @@ function redactText(input: string): { text: string; count: number } {
 	let text = input;
 	let count = 0;
 	for (const p of PATTERNS) {
-		text = text.replace(p.re, () => {
+		text = text.replace(p.re, (m) => {
+			if (hasMatch(SAFE_RE, m)) return m;
 			count++;
 			return `[REDACTED:${p.name}]`;
 		});
@@ -82,9 +83,58 @@ function isSecretPath(path: string): boolean {
 	return hasMatch(SECRET_FILE_RE, path) && !hasMatch(SAFE_RE, path);
 }
 
+/** Shell-ish word split, tracking which words were quoted. */
+function shellWords(command: string): { text: string; quoted: boolean }[] {
+	const words: { text: string; quoted: boolean }[] = [];
+	const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(command)) !== null) {
+		if (m[0] === "") {
+			re.lastIndex += 1;
+			continue;
+		}
+		const text = m[1] ?? m[2] ?? m[3] ?? "";
+		words.push({ text, quoted: m[1] !== undefined || m[2] !== undefined });
+	}
+	return words;
+}
+
+/**
+ * True when the command hands a secret file to a reader or transfer tool.
+ *
+ * A secret path only counts as an argument. Mentioning a name inside quoted
+ * code (a grep of a script, an inline `node -e`) must not trip the guard, while
+ * `cat .env` or `cat "$HOME/.ssh/id_rsa"` still must.
+ */
+function leaksSecretFile(command: string): boolean {
+	if (!hasMatch(READER_RE, command)) return false;
+	for (const word of shellWords(command)) {
+		if (!hasMatch(SECRET_FILE_RE, word.text)) continue;
+		if (hasMatch(SAFE_RE, word.text)) continue;
+		if (!word.quoted) return true;
+		// Quoted: only a path-shaped token is an argument, a bare name is prose.
+		if (/[\/~]|^\.|^\$/.test(word.text)) return true;
+	}
+	return false;
+}
+
 function findSecretValue(input: string, patterns = PATTERNS): string | null {
 	for (const p of patterns) {
-		if (hasMatch(p.re, input)) return p.name;
+		p.re.lastIndex = 0;
+		let m: RegExpExecArray | null;
+		while ((m = p.re.exec(input)) !== null) {
+			if (m[0] === "") {
+				p.re.lastIndex += 1;
+				continue;
+			}
+			// Judge the match itself, never the surrounding text: a key sent to
+			// evil.test must not pass because the command mentions "example".
+			if (!hasMatch(SAFE_RE, m[0])) {
+				p.re.lastIndex = 0;
+				return p.name;
+			}
+		}
+		p.re.lastIndex = 0;
 	}
 	return null;
 }
@@ -139,14 +189,14 @@ export default function secretGuard(pi: ExtensionAPI) {
 
 			// a) command carries a secret value
 			const value = findSecretValue(cmd);
-			if (value && !hasMatch(SAFE_RE, cmd)) {
+			if (value) {
 				await log(`tool_call bash: blocked command containing ${value}`);
 				ctx.ui.notify(`secret-guard: blocked a command containing a ${value}`, "warning");
 				return { block: true, reason: `secret-guard: blocked — command contains a likely ${value}. Use /secretguard allow if intentional.` };
 			}
 
 			// b) command reads/transfers a secret file
-			if (hasMatch(SECRET_FILE_RE, cmd) && !hasMatch(SAFE_RE, cmd) && hasMatch(READER_RE, cmd)) {
+			if (leaksSecretFile(cmd)) {
 				await log("tool_call bash: blocked read of secret file");
 				ctx.ui.notify("secret-guard: blocked a command reading a secret file", "warning");
 				return { block: true, reason: "secret-guard: blocked — command reads a secret file (.env, key, credentials, …). Use /secretguard allow if intentional." };
@@ -170,7 +220,7 @@ export default function secretGuard(pi: ExtensionAPI) {
 			if (isToolCallEventType("write", event)) texts.push(event.input.content ?? "");
 			else if (isToolCallEventType("edit", event)) for (const e of event.input.edits ?? []) texts.push(e.oldText ?? "", e.newText ?? "");
 			const value = texts.map((t) => findSecretValue(t, BLOCK_WRITE_PATTERNS)).find((v) => v !== null);
-			if (value && !hasMatch(SAFE_RE, event.input.path)) {
+			if (value) {
 				await log(`tool_call ${event.toolName}: blocked writing ${value} into file`);
 				return { block: true, reason: `secret-guard: blocked — the file content contains a likely ${value}. Use env vars or placeholders instead. Use /secretguard allow if intentional.` };
 			}
@@ -229,7 +279,7 @@ export default function secretGuard(pi: ExtensionAPI) {
 	// User runs bash directly (! command).
 	pi.on("user_bash", async (event, ctx) => {
 		if (passthrough) return;
-		if (hasMatch(SECRET_FILE_RE, event.command) && !hasMatch(SAFE_RE, event.command) && hasMatch(READER_RE, event.command)) {
+		if (leaksSecretFile(event.command)) {
 			await log("user_bash: blocked read of secret file");
 			ctx.ui.notify("secret-guard: blocked your command — it reads a secret file", "warning");
 			return { result: { output: "secret-guard: blocked — command reads a secret file.", exitCode: 1, cancelled: true, truncated: false } };
