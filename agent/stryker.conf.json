@@ -15,12 +15,21 @@
     "reports/**",
     "node_modules/**",
     "sessions/**",
-    "*.log"
+    "*.log",
+    "dictation/venv/**",
+    "**/venv/**",
+    "**/lib64/**",
+    ".stryker-tmp/**"
   ],
   "incremental": true,
   "incrementalFile": "reports/stryker/stryker-incremental.json",
   "timeoutMS": 60000,
-  "reporters": ["clear-text", "progress", "html", "json"],
+  "reporters": [
+    "clear-text",
+    "progress",
+    "html",
+    "json"
+  ],
   "htmlReporter": {
     "fileName": "reports/stryker/mutation.html"
   },

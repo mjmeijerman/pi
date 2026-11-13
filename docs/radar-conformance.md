@@ -24,7 +24,7 @@ Status values:
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
 | 1. Agent sandboxing | done | `install.sh` §4b installs a managed `pi()` shell function into `~/.bashrc` and `~/.zshrc` → `scripts/pisandbox` → `sandbox/pi-sandbox.sh` (bubblewrap); `PI_BARE=1 pi` bypasses, `pisandbox --no-net -- pi` adds isolation. `scripts/pi-bare` (symlinked into `~/.local/bin`, listed as "Pi (bare)" in Herdr's new-agent menu via `sandbox/herdr-programs.json`) is the sanctioned exit, so the choice is made before the session starts. `sandbox/pi-sandbox.sh` mounts `~/.local/bin`, `~/.local/share/pipx` and `~/.local/share/uv` read-only so `gh`, `uvx`, `gitleaks`, `semgrep`, `trivy` and `hc` exist inside, while `~/.config/gh` and the other credential directories stay masked — `gh` there reports "not logged in", which is the point. The launcher's `PI_SANDBOX_MODE`/`PI_SANDBOX_NET` markers show as the words `sandbox`/`bare` in front of the title (`agent/extensions/sandbox-badge.ts`) and in the footer status, so a contained session and a bare one are told apart at a glance (blip 42) | The wrapper is a shell function, so a launcher that skips the rc file (`env -i`, an IDE, cron) still gets the bare binary. Fallback prints one stderr line when `bwrap` is absent. |
-| 2. Mutation testing | partial | `agent/stryker.conf.json`, `.github/workflows/test.yml` (weekly `npx stryker run`), `make mutate` | Score never recorded — run `make mutate`, paste the score here. `agent/node_modules/@stryker-mutator` is not installed; `cd agent && npm install` first. |
+| 2. Mutation testing | done | `agent/stryker.conf.json`, `.github/workflows/test.yml` (weekly `npx stryker run`), `make mutate-full` → **74.47%** (551 killed, 193 survived, 12 timeout, 0 uncovered; merge-guard 81.35%, secret-guard 69.77%) on 2026-11-13 | Below the 80% target: the survivors are `ConditionalExpression` and `EqualityOperator` mutants, i.e. tests that assert the string but not the branch. |
 | 3. Path-to-production mapping | partial | `.github/workflows/{test,secret-scan}.yml`, PR-per-change | The path exists in CI config, not as a reviewed map. Review capacity per day is unmeasured. |
 | 4. Post-quantum cryptography | n/a | — | Nothing here holds a long-lived key: model traffic terminates at the provider's TLS, and the only secrets in scope are API tokens rotated by the providers. Revisit if the harness ever stores keys it must keep for years. |
 | 5. Progressive context disclosure | done | 8 skills load on demand; `agent/AGENTS.md` is 3040 bytes under the 3072-byte budget in `scripts/harness-check.sh` | — |
@@ -110,10 +110,10 @@ Status values:
    does not cover. Fix: one page — assets (`~/.ssh`, cloud creds, `~/.pi` itself), attacker
    paths (fetched pages, package installs, the model's own commands), covered vs uncovered.
    Cost: 45 minutes. It re-scopes gap 2, so it goes first.
-2. **Mutation score never recorded** (blip 2, Adopt, partial). Config and a weekly CI job
-   exist; no number has ever been pasted back, so 260 green tests still prove nothing about
-   whether the assertions bite. Fix: `cd agent && npm install && make mutate`, then write the
-   score in the §1 row. Cost: half a day for the first full pass.
+2. **Mutation survivors in `secret-guard.ts`** (blip 2, Adopt, done at 74.47%). The score
+   exists now; the 193 survivors are concentrated in one file (69.77%), mostly branch
+   conditions the tests do not distinguish. Fix: read `agent/reports/stryker/mutation.html`,
+   kill the survivors that map to a real branch. Cost: 2 hours.
 3. **Skills and `AGENTS.md` are unevaluated** (blip 29, partial). The deterministic half is
    tested (260); the half that shapes every turn is not. Fix: 10 fixed prompts, one monthly
    run, judge against last month's answers. Cost: 2 hours to set up.
@@ -126,7 +126,8 @@ Status values:
 
 Closed since the previous audit: grilling (blip 13, `agent/prompts/grill.md` plus the
 `session-nudge` grill rule), risk tiers (blips 17/42, `agent/AGENTS.md:14` plus the `pr-tier`
-CI job) and sandbox enforcement (blip 1, the `install.sh` shell wrapper).
+CI job), sandbox enforcement (blip 1, the `install.sh` shell wrapper) and the mutation score
+(blip 2, 74.47% from a reproducible `make mutate-full`).
 
 Enforced by `scripts/harness-check.sh` on every commit and in CI: a cited blip must exist in
 `docs/radar-blips.tsv` (no invented blip numbers), a stale `Review:` date fails the check
