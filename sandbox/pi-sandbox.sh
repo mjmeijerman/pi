@@ -151,6 +151,22 @@ for d in "$node_prefix" "$pi_prefix"; do
 	fi
 done
 
+# ~/.local/bin: gh, uv/uvx, gitleaks, semgrep, trivy, herdr, git-vuln-scan live
+# here, and without it a sandboxed session cannot run the commands AGENTS.md
+# tells it to run. Binaries only: their config directories (~/.config/gh,
+# ~/.config/herdr) stay masked below, so a tool that needs a token says it has
+# none instead of quietly using one the sandbox was meant to withhold.
+if [ -d "$home/.local/bin" ] && ! path_covered_ro "$home/.local/bin"; then
+	args+=(--ro-bind "$home/.local/bin" "$home/.local/bin")
+fi
+# Those binaries point into their tool homes: pipx venvs (semgrep), uv tools,
+# npm/pnpm prefixes. Mount the stores read-only so the symlinks resolve.
+for d in "$home/.local/share/pipx" "$home/.local/share/uv"; do
+	if [ -d "$d" ] && ! path_covered_ro "$d"; then
+		args+=(--ro-bind "$d" "$d")
+	fi
+done
+
 args+=(--tmpfs /tmp --dev /dev --proc /proc)
 
 # Read-write: pi's own config/state directory, git identity, project trees.
@@ -267,7 +283,7 @@ if [ "$no_net" -eq 1 ]; then args+=(--unshare-net); fi
 # ---------------------------------------------------------------- environment
 # The environment is inherited (so provider API keys and PI_* variables survive);
 # only the paths that must match the sandbox layout are overridden.
-sandbox_path="$node_bindir:$pi_bindir:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+sandbox_path="$home/.local/bin:$node_bindir:$pi_bindir:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 # The markers are the only honest answer to "is this agent contained?": the
 # session itself reads them, so the pane title can say it (extension
 # `sandbox-badge.ts`, Radar blip 1). An unset marker therefore means "not

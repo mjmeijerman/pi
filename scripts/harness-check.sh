@@ -161,6 +161,13 @@ check_release_age() {
 		verdict npm-min-release-age - 0 "npm not installed"
 		return
 	fi
+	# Inside the sandbox the npm config file is bound to /dev/null, so npm reports
+	# the setting as unset no matter what it says on the host. Failing here would
+	# be a check reading its own blindfold: say so instead (blip 99, blip 42).
+	if [ -n "${PI_SANDBOX_MODE-}" ]; then
+		verdict npm-min-release-age - 1 "not readable inside the sandbox (npm config is masked) — verify outside"
+		return
+	fi
 	value=$(npm config get min-release-age 2>/dev/null | tr -d '[:space:]')
 	case "$value" in
 	'' | undefined | null) value=$(npm config get minimum-release-age 2>/dev/null | tr -d '[:space:]') ;;

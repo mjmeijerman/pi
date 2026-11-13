@@ -209,6 +209,28 @@ else
 	bad "broad parents (/, /home, /tmp) are refused with the documented message" "$(printf '%s' "${refused[*]}")"
 fi
 
+# 15. the tools AGENTS.md tells the agent to run are on PATH.
+missing=()
+for c in gh uvx gitleaks trivy semgrep hc; do
+	out=$(inside --exec -- sh -c "command -v $c" 2>/dev/null)
+	[ -n "$out" ] || missing+=("$c")
+done
+if [ "${#missing[@]}" -eq 0 ]; then
+	ok "the local tool binaries (~/.local/bin) are on PATH inside"
+else
+	bad "the local tool binaries (~/.local/bin) are on PATH inside" "missing: ${missing[*]}"
+fi
+
+# 16. ... but their credentials are not. A sandbox that hands out a GitHub token
+# has stopped being a sandbox: masked config means the tool says so instead.
+out=$(inside --exec -- sh -c 'gh auth status 2>&1 | head -2' 2>/dev/null)
+case $out in
+*'not logged into any GitHub hosts'*)
+	ok "gh inside the sandbox has no stored credentials"
+	;;
+*) bad "gh inside the sandbox has no stored credentials" "${out:-no output}" ;;
+esac
+
 printf '\n'
 if [ "$failures" -eq 0 ]; then
 	printf 'all checks passed\n'
