@@ -268,12 +268,20 @@ if [ "$no_net" -eq 1 ]; then args+=(--unshare-net); fi
 # The environment is inherited (so provider API keys and PI_* variables survive);
 # only the paths that must match the sandbox layout are overridden.
 sandbox_path="$node_bindir:$pi_bindir:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+# The markers are the only honest answer to "is this agent contained?": the
+# session itself reads them, so the pane title can say it (extension
+# `sandbox-badge.ts`, Radar blip 1). An unset marker therefore means "not
+# sandboxed", which is exactly what should show up in Herdr.
+sandbox_net=on
+[ "$no_net" -eq 1 ] && sandbox_net=off
 args+=(
 	--setenv HOME "$home"
 	--setenv USER "$(id -un)"
 	--setenv LOGNAME "$(id -un)"
 	--setenv PATH "$sandbox_path"
 	--setenv TMPDIR /tmp
+	--setenv PI_SANDBOX_MODE bwrap
+	--setenv PI_SANDBOX_NET "$sandbox_net"
 )
 
 # ---------------------------------------------------------------- run
