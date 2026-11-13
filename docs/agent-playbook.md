@@ -30,7 +30,7 @@ the only step that makes the next session better than this one.
 | Directory | Start in the repo you are changing, not `~` | Project config comes from `<cwd>/.pi`; starting in `~` loads nothing project-specific and used to trigger the stale `tools/` warning |
 | Model | Default `deepseek-flash`; `qwen3.8:27b` for chores via `local_llm` | Blip 40: frontier by default is the mistake being avoided |
 | Thinking level | `medium` for edits, `high` only for design and debugging | Thinking tokens bill as output |
-| Trust | `pi` is sandboxed by default (`install.sh` installs the wrapper); `PI_BARE=1 pi` bypasses it, `pisandbox --no-net -- pi` adds network isolation (`sandbox/README.md`) | Blip 1: sandboxing is Adopt, and it is now the installed default instead of an opt-in prefix |
+| Trust | `pi` is sandboxed by default (`install.sh` installs the wrapper); `pi-bare` (the "Pi (bare)" row in Herdr's `+` menu) or `PI_BARE=1 pi` bypasses it, `pisandbox --no-net -- pi` adds network isolation (`sandbox/README.md`) | Blip 1: sandboxing is Adopt, and it is now the installed default instead of an opt-in prefix |
 | Task size | One PR per session | A session that produced two PRs produced one PR nobody reviewed properly |
 
 Sandbox choices:
