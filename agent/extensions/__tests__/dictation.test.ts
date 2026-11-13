@@ -135,7 +135,12 @@ test("DICTATION_AUTOSUBMIT=true sends the transcript as a steering message", asy
 	await shortcut.handler(ctx);
 	await shortcut.handler(ctx);
 
-	assert.deepEqual(sentMessages, [{ text: "hallo wereld", opts: { deliverAs: "steer" } }]);
+	// The extension prefixes the transcript so the model can tell transcribed audio
+	// from a direct user instruction; the test asserts the marker stays in place.
+	assert.equal(sentMessages.length, 1);
+	assert.deepEqual(sentMessages[0].opts, { deliverAs: "steer" });
+	assert.match(sentMessages[0].text, /hallo wereld$/);
+	assert.match(sentMessages[0].text, /transcribed audio, not a direct user command/);
 	assert.match(notices.at(-1)!.message, /verzonden/);
 	assert.equal(ctx.editorText, "", "nothing is pasted into the editor when autosubmitted");
 });

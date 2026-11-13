@@ -12,7 +12,7 @@ const WAV = join(DICT_DIR, "recording.wav");
 // DICTATION_DEVICE is passed to `arecord -D` (no shell involved): allow a conservative
 // character set (plain names, hw:0,2 / plug:default style) and fall back to "default".
 const RAW_DEVICE = process.env.DICTATION_DEVICE || "default";
-const DEVICE = /^[A-Za-z0-9:_-]{1,64}$/.test(RAW_DEVICE) && RAW_DEVICE.trim() !== "" ? RAW_DEVICE : "default";
+const DEVICE = /^[A-Za-z0-9_:,.-]{1,64}$/.test(RAW_DEVICE) && RAW_DEVICE.trim() !== "" ? RAW_DEVICE : "default";
 const LANG = process.env.DICTATION_LANG || "auto"; // auto = NL/EN via language-probability
 const AUTO_SUBMIT = (process.env.DICTATION_AUTOSUBMIT || "0").toLowerCase() === "1" || (process.env.DICTATION_AUTOSUBMIT || "").toLowerCase() === "true";
 
