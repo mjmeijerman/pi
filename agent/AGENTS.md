@@ -6,7 +6,7 @@
 
 ## Sandbox
 
-- Unfamiliar repo, fresh clone, or any run that would deserve `--no-net`: `~/.pi/scripts/pisandbox -- pi` (until it exists, `~/.pi/sandbox/pi-sandbox.sh -- pi`). Default, not opt-in (blip 1).
+- `pi` runs sandboxed by default (`install.sh` wraps it); `PI_BARE=1 pi` bypasses, `pisandbox --no-net -- pi` adds network isolation for unfamiliar repos (blip 1).
 
 ## Landing changes
 

@@ -27,6 +27,20 @@ echo "   source : $SOURCE_DIR"
 echo "   agent  : $AGENT_DIR"
 
 # --- 0. pi binary -----------------------------------------------------------
+# A pnpm/fnm install is often on disk but not on this shell's PATH (a bash login
+# shell never reads the PNPM_HOME export from ~/.zshrc), so look there before
+# declaring pi missing. Same resolution the pi() wrapper uses.
+if ! command -v pi >/dev/null 2>&1; then
+	for candidate in "${PNPM_HOME:-$HOME/.local/share/pnpm}/bin/pi" "$HOME/.local/bin/pi"; do
+		if [ -x "$candidate" ]; then
+			PATH="${candidate%/*}:$PATH"
+			export PATH
+			echo "== pi found on disk, added to PATH: $candidate"
+			break
+		fi
+	done
+fi
+
 if ! command -v pi >/dev/null 2>&1; then
 	if [ "${1:-}" = "--install-pi" ] && command -v npm >/dev/null 2>&1; then
 		echo "== installing pi via npm (global) =="
@@ -167,6 +181,83 @@ if [ -f "$HOME/.pi/scripts/pisandbox" ]; then
 else
 	echo "!! scripts/pisandbox not found — skipping"
 fi
+
+# --- 4b. sandbox by default for interactive pi (Radar blip 1, Adopt) -------
+# AGENTS.md called sandboxing "the default, not opt-in" while `pi` on PATH stayed
+# the raw binary: a wrapper you have to remember to type is willpower, not a
+# default. This installs a shell function that runs pisandbox, with PI_BARE=1 as
+# the documented escape hatch and a fallback to the plain binary whenever the
+# sandbox itself is missing — a broken sandbox must never make pi unusable.
+PI_WRAPPER_BEGIN='# >>> pi sandbox >>>'
+PI_WRAPPER_END='# <<< pi sandbox <<<'
+
+install_pi_wrapper() {
+	rc="$1"
+	[ -f "$rc" ] || return 0
+	# One backup, kept from the first run: that is the pre-wrapper file.
+	[ -f "$rc.bak-pi" ] || cp "$rc" "$rc.bak-pi"
+	tmp="$(mktemp)"
+	# Drop a previous managed block, then append the current one: re-running
+	# install.sh must replace, never duplicate.
+	awk -v b="$PI_WRAPPER_BEGIN" -v e="$PI_WRAPPER_END" '
+		BEGIN { keep = 1 }
+		$0 == b { keep = 0; next }
+		$0 == e { keep = 1; next }
+		keep' "$rc" >"$tmp"
+	cat >>"$tmp" <<'WRAPPER'
+# >>> pi sandbox >>>
+# Managed by ~/.pi/install.sh — edit there, not here; re-run it to refresh.
+# Radar blip 1 (Adopt, agent sandboxing): plain `pi` is sandboxed, so safety
+# does not depend on remembering a prefix. Bypass one session: PI_BARE=1 pi
+pi() {
+	local _pi_bin="${PI_BIN:-$HOME/.local/share/pnpm/bin/pi}"
+	[ -x "$_pi_bin" ] || _pi_bin="$HOME/.local/bin/pi"
+	if [ ! -x "$_pi_bin" ]; then
+		printf 'pi: binary not found (set PI_BIN=/path/to/pi)\n' >&2
+		return 127
+	fi
+	# A bash login shell carries no PNPM_HOME, and pisandbox refuses to start
+	# when it cannot find pi on PATH: put the shim's directory on PATH first.
+	case ":$PATH:" in
+	*":${_pi_bin%/*}:"*) ;;
+	*) PATH="${_pi_bin%/*}:$PATH" ;;
+	esac
+	export PATH
+	if [ "${PI_BARE:-}" = 1 ]; then
+		"$_pi_bin" "$@"
+		return
+	fi
+	if [ ! -x "$HOME/.pi/scripts/pisandbox" ] || ! command -v bwrap >/dev/null 2>&1; then
+		printf 'pi: sandbox unavailable (pisandbox or bwrap missing) — running unsandboxed\n' >&2
+		"$_pi_bin" "$@"
+		return
+	fi
+	"$HOME/.pi/scripts/pisandbox" -- pi "$@"
+}
+# <<< pi sandbox <<<
+WRAPPER
+	if cmp -s "$tmp" "$rc"; then
+		rm -f "$tmp"
+		echo "== pi sandbox wrapper already current -> $rc"
+		return 0
+	fi
+	cat "$tmp" >"$rc"
+	rm -f "$tmp"
+	case "$rc" in
+	*zshrc) syntax_check="zsh" ;;
+	*) syntax_check="bash" ;;
+	esac
+	if command -v "$syntax_check" >/dev/null 2>&1 && ! "$syntax_check" -n "$rc" 2>/dev/null; then
+		echo "!! $rc does not parse ($syntax_check -n) — the pi wrapper will not load"
+		echo "   previous version kept as $rc.bak-pi"
+	else
+		echo "== pi sandbox wrapper -> $rc (PI_BARE=1 pi bypasses it)"
+	fi
+}
+
+for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+	install_pi_wrapper "$rc"
+done
 
 if [ -d "$SOURCE_DIR/git-templates" ] && [ "$SOURCE_DIR/git-templates" != "$HOME/.git-templates" ]; then
 	rm -rf "$HOME/.git-templates"
