@@ -1,0 +1,24 @@
+# Baseline for scripts/harness-check.sh — a ratchet that can only shrink.
+#
+# One `path:check` per line. A violation listed here reports WARN instead of
+# FAIL, so pre-existing debt does not block new work while new violations still
+# fail. Never add a line to make a new violation pass: fix it, or delete the
+# rule it enforces (blip 36). Delete the line when the violation is gone.
+
+# 223 lines, over the 150-line skill budget. Another PR is splitting this file;
+# delete this line when it lands.
+agent/skills/achterhoek-agenda/SKILL.md:skill-lines
+
+# Neither document declares an owner or a review date yet (blip 39): the docs
+# PR adds the Owner:/Review: frontmatter, then these two lines come out.
+docs/agent-playbook.md:doc-metadata
+docs/radar-conformance.md:doc-metadata
+
+# Extensions written before the Radar-basis rule existed. Each needs a one-line
+# header citing its blips; until then it is unowned and cannot be argued about.
+agent/extensions/cost-optimizer.ts:extension-radar-basis
+agent/extensions/desktop-notify.ts:extension-radar-basis
+agent/extensions/herdr-agent-state.ts:extension-radar-basis
+agent/extensions/om-autostart.ts:extension-radar-basis
+agent/extensions/secret-guard.ts:extension-radar-basis
+agent/extensions/usage-footer.ts:extension-radar-basis

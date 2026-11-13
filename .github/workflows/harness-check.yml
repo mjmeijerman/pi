@@ -1,0 +1,55 @@
+# Harness budgets and metadata as checks, in CI and once a week.
+#
+# Radar basis: #29 harness quality evaluation, #36 agent instruction bloat,
+# #99 Safe Chain. Blip 39 (documentation sprawl) needs a scheduled prune, not a
+# paragraph: the weekly run is the automated "monthly delete a rule / quarterly
+# re-audit" trigger from the playbook.
+#
+# PRs: catch a bloated AGENTS.md or skill before merge.
+# Weekly: catch bit-rot the pull request path cannot see — an expired Review:
+# date, an install step someone unset, a doc that lost its owner.
+name: harness-check
+
+on:
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harness-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  harness:
+    name: harness-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # Provision the runner the way setup.sh provisions a laptop, so the config
+      # checks test the installer rather than the runner's defaults.
+      - name: provision (npm release age + global hooks + template layer)
+        run: |
+          set -euo pipefail
+          npm config set min-release-age 2880
+          mkdir -p "$HOME/.pi"
+          cp -R git-hooks "$HOME/.pi/git-hooks"
+          bash "$HOME/.pi/git-hooks/install-hooks.sh"
+          echo "hooksPath  : $(git config --global --get core.hooksPath)"
+          echo "templateDir: $(git config --global --get init.templateDir)"
+          echo "templates  : $(find "$HOME/.git-templates/hooks" -maxdepth 1 -type f | wc -l) files"
+
+      - name: harness-check
+        run: bash scripts/harness-check.sh
+
+      - name: harness-check (json, for the log)
+        if: always()
+        run: bash scripts/harness-check.sh --json | python3 -m json.tool >/dev/null

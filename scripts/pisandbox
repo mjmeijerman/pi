@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# ============================================================================
+# pisandbox — the sandbox one-liner without the path.
+#
+# Radar basis: #1 agent sandboxing (Adopt), #20 stateful guardrails.
+#
+# Thin exec wrapper around ~/.pi/sandbox/pi-sandbox.sh, so the playbook can say
+# `pisandbox -- pi` instead of a 40-character absolute path. The path form is
+# the kind of friction that makes an opt-in safety measure never get used.
+#
+# Every argument is passed through untouched.
+# ============================================================================
+set -uo pipefail
+
+SANDBOX="${PI_SANDBOX:-$HOME/.pi/sandbox/pi-sandbox.sh}"
+
+case "${1:-}" in
+-h | --help)
+	cat <<'EOF'
+usage: pisandbox [options] -- [pi arguments...]
+
+  pisandbox -- pi                     no SSH keys, no cloud creds, network on
+  pisandbox --no-net -- pi            also no network at all
+  pisandbox --rw ~/scratch -- pi      one extra writable directory (repeatable)
+
+All options and everything after -- go to ~/.pi/sandbox/pi-sandbox.sh.
+Unfamiliar repo or a fresh clone: use the first form, not plain `pi`.
+EOF
+	exit 0
+	;;
+esac
+
+if [ ! -x "$SANDBOX" ]; then
+	printf 'pisandbox: %s not found — run ~/.pi/install.sh first\n' "$SANDBOX" >&2
+	exit 127
+fi
+
+exec "$SANDBOX" "$@"
