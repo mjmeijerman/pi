@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # pi-sandbox.sh — run the pi coding agent inside a bubblewrap sandbox.
 #
+# Radar Vol. 35: blip 1 (agent sandboxing, Adopt), blip 29 (harness quality
+# evaluation — the policy is only as good as the check that it still holds).
+#
 #   pi-sandbox.sh [--no-net] [--rw DIR]... -- <pi args...>
 #
 # See README.md in this directory for the policy and the known gaps.
@@ -61,6 +64,12 @@ home=$(readlink -f -- "$home")
 [ -d /etc ] || die "required directory /etc does not exist"
 [ -d "$home/.pi" ] || die "required directory $home/.pi does not exist"
 
+# The current directory drives the policy below, and $HOME itself needs its
+# read-only bind *before* the read-write binds that live inside it.
+cwd=$(pwd -P)
+home_ro=0
+if [ "$cwd" = "$home" ]; then home_ro=1; fi
+
 pi_bin=$(command -v pi || true)
 [ -n "$pi_bin" ] || die "pi is not on PATH (looked for an executable named 'pi')"
 pi_bin=$(readlink -f -- "$pi_bin")
@@ -91,7 +100,9 @@ path_covered_ro() {
 # (browsers, docker, 1Password, ssh agent sockets) or the whole home directory.
 too_broad() {
 	local p=$1 d
-	case $p in / | /home | /root) return 0 ;; esac
+	# A read-only mount of a broad parent buys nothing, and a read-write one
+	# exposes every other process on the machine.
+	case $p in / | /home | /root | /tmp | /var | /var/tmp | /run | /dev | /proc | /sys) return 0 ;; esac
 	[ "$p" = "$home" ] && return 0
 	for d in "$home/.local" "$home/.config" "$home/.cache" "$home/.docker" "$home/.ssh" "$home/.gnupg" "$home/.aws" "$home/.kube"; do
 		case $p in "$d" | "$d"/*) return 0 ;; esac
@@ -128,6 +139,11 @@ for d in /usr /bin /sbin /lib /lib32 /lib64 /etc; do
 	if [ -e "$d" ]; then args+=(--ro-bind "$d" "$d"); fi
 done
 
+# Started in $HOME: mount the home tree read-only instead of refusing to start.
+# The read-write binds below ($HOME/.pi, the allow-listed trees, --rw) are mounted
+# afterwards and win, and the credential masks further down still apply.
+if [ "$home_ro" -eq 1 ]; then args+=(--ro-bind "$home" "$home"); fi
+
 # Read-only toolchain (node + the pi package tree) unless it already lives in /usr.
 for d in "$node_prefix" "$pi_prefix"; do
 	if [ -e "$d" ] && ! path_covered_ro "$d"; then
@@ -159,12 +175,13 @@ for d in "${rw_extra[@]+"${rw_extra[@]}"}"; do
 done
 
 # The current directory, when the policy does not already cover it.
-cwd=$(pwd -P)
 cwd_covered=0
 for d in "${rw_dirs[@]+"${rw_dirs[@]}"}"; do
 	case $cwd in "$d" | "$d"/*) cwd_covered=1; break ;; esac
 done
-if [ "$cwd_covered" -eq 0 ] && ! path_covered_ro "$cwd"; then
+if [ "$home_ro" -eq 1 ]; then
+	note '$HOME is read-only inside the sandbox; pass --rw DIR to make a directory writable'
+elif [ "$cwd_covered" -eq 0 ] && ! path_covered_ro "$cwd"; then
 	if too_broad "$cwd"; then
 		die "the current directory '$cwd' cannot be mounted read-write — cd into a project directory or pass --rw DIR"
 	fi
@@ -174,12 +191,14 @@ fi
 
 # ---------------------------------------------------------------- credential masks
 # These come after the binds above, so the masks win. The path still exists
-# inside the sandbox, but it is empty (or an empty file).
+# inside the sandbox, but it is empty (or an empty file). A path that does not
+# exist on the host needs no mask: it is absent inside too, and bwrap cannot
+# create a mountpoint under a read-only $HOME.
 for rel in .ssh .gnupg .aws .kube .config/gh .docker .config/1Password; do
-	args+=(--tmpfs "$home/$rel")
+	if [ -e "$home/$rel" ]; then args+=(--tmpfs "$home/$rel"); fi
 done
 for rel in .netrc .npmrc; do
-	args+=(--ro-bind /dev/null "$home/$rel")
+	if [ -e "$home/$rel" ]; then args+=(--ro-bind /dev/null "$home/$rel"); fi
 done
 
 # Provider credentials: pi needs them, the agent should not get *every* key.
