@@ -1,6 +1,9 @@
 /**
  * Cost Optimizer — always active.
  *
+ * Radar basis: #26 context profiling, #36 agent instruction bloat, #40 blanket
+ * frontier model usage, #41 throughput as a productivity metric.
+ *
  * Injects the cost-optimizer skill rules into the system prompt on every turn,
  * so token-minimal, professional-quality responses are guaranteed rather than
  * relying on the model deciding to load the skill on-demand.

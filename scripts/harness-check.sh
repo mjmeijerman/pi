@@ -29,6 +29,7 @@ WARN_N=0
 FAIL_N=0
 JSON_ITEMS=()
 BASELINE_KEYS=""
+BASELINE_HITS=""
 
 AGENTS_MD_LIMIT=3072
 SKILL_LINES_LIMIT=150
@@ -78,7 +79,27 @@ load_baseline() {
 
 baselined() { # path check
 	[ -n "$BASELINE_KEYS" ] || return 1
-	printf '%s\n' "$BASELINE_KEYS" | grep -qxF -e "$1:$2"
+	printf '%s\n' "$BASELINE_KEYS" | grep -qxF -e "$1:$2" || return 1
+	# Remember that this entry still pays for itself, so check_stale_baseline
+	# can point at the ones that do not.
+	BASELINE_HITS="${BASELINE_HITS}$1:$2"$'\n'
+	return 0
+}
+
+# Every baseline line that suppressed nothing this run is stale: the violation
+# it was written for is gone, so the ratchet is looser than it needs to be.
+# Loud, never fatal — a stale line only asks for a deletion.
+check_stale_baseline() {
+	local key
+	[ -n "$BASELINE_KEYS" ] || return 0
+	while IFS= read -r key; do
+		[ -n "$key" ] || continue
+		case $'\n'"${BASELINE_HITS}" in
+		*$'\n'"${key}"$'\n'*) continue ;;
+		esac
+		record WARN stale-baseline "$key" \
+			"no longer violates anything — delete this line, the ratchet only shrinks"
+	done <<<"${BASELINE_KEYS}"
 }
 
 verdict() { # check path ok message   (ok: 1 pass, 0 violation)
@@ -283,6 +304,8 @@ if [ "$QUICK" = 0 ]; then
 	check_doc_metadata
 	check_radar_basis
 	check_review_freshness
+	# --quick runs budgets only, so it would call every other entry stale.
+	check_stale_baseline
 fi
 
 if [ "$JSON" = 1 ]; then

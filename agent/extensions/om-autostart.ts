@@ -1,6 +1,10 @@
 /**
  * Turn observational memory on for every session.
  *
+ * Radar basis: #44 naive context compression — the compaction here is
+ * deliberate and lands at a task boundary, not mid-stream — and #26 context
+ * profiling.
+ *
  * `pi-observational-memory` gates itself per session: the gate lives in the
  * session ledger and defaults to off, so a new session starts without it unless
  * someone types `/om on`. This dispatches that command at session start, which
