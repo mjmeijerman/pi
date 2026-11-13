@@ -2,8 +2,8 @@
 
 Owner: Mark Meijerman (`mjmeijerman`)
 Review: 2027-02-15 — quarterly, see §6 below.
-Re-measured 2026-11-13: 260 extension tests (35 suites), 8 skills, `agent/AGENTS.md`
-3007 bytes, 59 entries in `~/.pi/agent/suggestions.jsonl`.
+Re-measured 2026-11-13: 279 extension tests (40 suites), 8 skills, `agent/AGENTS.md`
+3007 bytes, 62 entries in `~/.pi/agent/suggestions.jsonl`.
 
 Audit date: 2026-11-13. Source: `werken-met-ai.pdf` (Radar Vol. 35, November 2026).
 Scope: the 63 rows below, out of the 117 in `docs/radar-blips.tsv` — every Technique
@@ -38,14 +38,14 @@ Status values:
 | 8. Agent-maintained knowledge bases | partial | `agent/extensions/om-autostart.ts` + `pi-observational-memory` | Memory is per-session transcript compaction; nothing survives as a curated, cross-project base the agent maintains. |
 | 9. Anchoring coding agents to a reference application | n/a | — | No reference application exists — the harness is the only codebase, and its conventions live in `AGENTS.md` and the skills. |
 | 10. Coding harness for general-purpose agents | partial | `agent/skills/achterhoek-agenda/` runs research, not code | No non-coding workflow: research and writing inherit branch/PR/test rules that do not apply to them. |
-| 11. Feedback flywheel | done | `agent/extensions/feedback-flywheel.ts`, `/suggest`, `/retro` | The remove half is manual: nothing flags rules that stopped earning their place. |
+| 11. Feedback flywheel | done | `agent/extensions/feedback-flywheel.ts` (`/suggest`, `/retro`) and `agent/extensions/self-learn.ts`: every compaction is judged by a separate pi session, which writes a proposal to `~/.pi/agent/proposals/` | The remove half still needs a human: the learner can propose a deletion, but the review is what lands it. |
 | 12. Graph-grounded codebase reasoning | missing | — | Navigation is `rg` and whole-file reads; no code graph or AST index. |
 | 13. Grilling | done | `/grill` → `agent/prompts/grill.md`; `agent/extensions/session-nudge.ts` nudges once per session after 4 distinct edited files with no `/grill` | The nudge is advice, not a gate: a session that ignores it still edits. |
 | 14. Interactive visual plans with agents | n/a | — | Single-user, small changes; text plans suffice. |
 | 15. Managed agents runtime | n/a | — | Local workstation is the runtime; nothing long-running. |
 | 16. Open-weight models | partial | DeepSeek V4 Flash API, `qwen3.8:27b` local | No GLM-class open-weight model in the default route. |
 | 17. Risk-tiered human oversight | done | `agent/AGENTS.md:14` (High/Medium/Low table), `agent/extensions/merge-guard.ts`, `.github/workflows/pr-tier.yml` | The check proves a tier is *stated* and that harness paths claim High. It cannot prove the human read the diff — that stays gap-ranked in §5. |
-| 18. Self-improving harness | partial | `/retro` aggregates evidence; the agent proposes edits | The agent never runs the loop unattended; bounded experiments absent. |
+| 18. Self-improving harness | done | On `session_compact`, `self-learn.ts` gates on evidence (two identical failed-tool signatures, or one `/suggest` note) — no model call before the gate trips — then starts a learner in its own pi process (Herdr pane, else headless `pisandbox -- pi -p`) with `PI_SELF_LEARN=1`, so a reflection never stalls or pollutes the session that triggered it. `agent/prompts/learn.md` is the spec: check before prose, deletion before addition, "nothing" is a valid verdict | Applying a proposal is a High-tier review, by design (blip 17, blip 42): an agent rewriting its own prompt unread is the failure mode. No A/B scoring of competing rules. |
 | 19. Small language models | done | `local_llm` tool → Ollama `qwen3.8:27b` | Nothing measures whether the local route is cheaper per finished task. |
 | 20. Stateful guardrails | partial | `agent/extensions/secret-guard.ts` holds session state (`allow`/`block`) | Guards single actions, not conversation-level policy over turns. |
 | 21. Subagents for better context management | missing | Parallel *sessions* instead (`scripts/agent-pane.sh` + Herdr) | Pi deliberately ships no subagents; exploration still lands in the main context. |
@@ -53,7 +53,7 @@ Status values:
 | 71. Act | missing | — | CI only runs on GitHub: `pr-tier.yml` and `test.yml` cannot be executed before a push, so a failing gate costs a round trip. |
 | 73. ast-grep | missing | — | Structural search is `rg` and regex; conventions that are syntactic (import order, hook shape) are checked by hand. |
 | 74. Beads | missing | — | Task state lives in `/tmp` spec files and PR bodies; nothing survives the session as a queryable backlog. |
-| 84. Pi | done | This repository: pi 1.5.2, 12 extensions, 260 tests over 35 suites, `/home/mark/.pi` | Pinned to 1.5.2; the extension API is exercised but an upgrade is untested until it happens. |
+| 84. Pi | done | This repository: pi 1.5.2, 13 extensions, 279 tests over 40 suites, `/home/mark/.pi` | Pinned to 1.5.2; the extension API is exercised but an upgrade is untested until it happens. |
 | 23. Unattended overnight agentic builds | missing | — | Blocked by the same three prerequisites the blip names: default sandboxing, spec-up-front, sensors that validate without line-by-line review. |
 | 110. Promptfoo | missing | — | No eval or red-team gate on prompts, skills or hooks: the deterministic half is tested, the half that shapes every turn is not. Ranked in §5. |
 
@@ -67,7 +67,7 @@ Status values:
 | 26. Context profiling | done | `scripts/session-report.mjs` (cost, cache hit, context fill per project) | Profiling is after-the-fact; no per-turn attribution. |
 | 27. Enterprise harness | n/a | — | One user; the "harness" is this repo. |
 | 28. Foundation models for structured data | n/a | — | No tabular or warehouse workload; `local_llm` `extract` pulls fields out of prose, which is not the modelling this blip describes. |
-| 29. Harness quality evaluation | partial | 260 tests in 35 suites (`cd agent && node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh` | Zero evaluation of skills, `AGENTS.md` and hooks — the nondeterministic half. |
+| 29. Harness quality evaluation | partial | 279 tests in 40 suites (`cd agent && node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh` | Zero evaluation of skills, `AGENTS.md` and hooks — the nondeterministic half. |
 | 30. Local coding models | done | `agent/extensions/local-llm.ts`, `/local` health check | Route is manual, chosen by the model's own judgement. |
 | 31. MITRE ATLAS | missing | — | No AI-threat taxonomy in use; threat modelling of the harness never done. |
 | 32. Production-aware coding agents | n/a | — | Nothing in production; project work is local. |
@@ -115,7 +115,7 @@ Status values:
    conditions the tests do not distinguish. Fix: read `agent/reports/stryker/mutation.html`,
    kill the survivors that map to a real branch. Cost: 2 hours.
 3. **Skills and `AGENTS.md` are unevaluated** (blip 29, partial). The deterministic half is
-   tested (260); the half that shapes every turn is not. Fix: 10 fixed prompts, one monthly
+   tested (279); the half that shapes every turn is not. Fix: 10 fixed prompts, one monthly
    run, judge against last month's answers. Cost: 2 hours to set up.
 4. **Actions pinned but not linted** (blip 103, partial). SHAs replace tags and
    `persist-credentials: false` is set, but zizmor runs only when someone remembers it.
