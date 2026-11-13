@@ -13,6 +13,7 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 | `git-templates/` | `git init` template that installs the vuln-scan hook into new repos |
 | `gitignore_global` | global gitignore for secret files |
 | `sandbox/` | bubblewrap launcher + policy selftest (`pi-sandbox.sh`) |
+| `herdr-mods/` | Herdr window mods: `prs` shows open pull requests with merge |
 | `scripts/` | session report / prune helpers + Herdr pane launcher |
 | `docs/` | Radar conformance audit and the agent working playbook |
 | `install.sh` | config + hooks only, non-interactive |
@@ -60,6 +61,23 @@ missing.
 
 `make setup` runs `./setup.sh`. `make bootstrap` runs the subset that touches no
 secrets and no system packages (`--no-apt --no-verify`).
+
+### Herdr window
+
+`herdr-mods/prs` is a mod for the Herdr app: one pane listing every open PR you
+authored, newest activity first, with checks and conflicts on the row. Enter
+merges (squash, delete branch) after a second press; `o` opens it; `r`
+refreshes every two minutes on its own.
+
+It lives in the `Apps` space, `Pull requests` tab. Rebuild on a new machine:
+`install.sh` copies the folder into `$HOME/.config/herdr-app/mods/` when the app
+is installed, and never overwrites a folder that already exists (you may have
+edited the mod in place). Then:
+
+```bash
+herdr-app do space.new --name Apps --folder "$HOME"
+herdr-app do tab.new --space <space-id> --name "Pull requests" --mod prs
+```
 
 ### What is not in git, and why
 

@@ -104,6 +104,24 @@ for sub in sandbox scripts; do
 	fi
 done
 
+# --- 1c. herdr-app mods ----------------------------------------------------
+# Only when the app is installed, and only into folders that do not exist yet:
+# a mod is a file the person may have edited in place, and install.sh must not
+# undo that.
+HERDR_MODS="${HERDR_MODS:-$HOME/.config/herdr-app/mods}"
+if [ -d "$SOURCE_DIR/herdr-mods" ] && [ -d "$HOME/.config/herdr-app" ]; then
+	for mod in "$SOURCE_DIR/herdr-mods"/*/; do
+		name=$(basename "$mod")
+		if [ -d "$HERDR_MODS/$name" ]; then
+			echo "== kept existing herdr mod: $name"
+		else
+			mkdir -p "$HERDR_MODS/$name"
+			cp -R "$mod/." "$HERDR_MODS/$name/"
+			echo "== installed herdr mod: $name -> $HERDR_MODS/$name"
+		fi
+	done
+fi
+
 # --- 2. git hooks ------------------------------------------------------------
 if [ -d "$SOURCE_DIR/git-hooks" ] && [ "$SOURCE_DIR/git-hooks" != "$GIT_HOOKS_DIR" ]; then
 	mkdir -p "$GIT_HOOKS_DIR"
