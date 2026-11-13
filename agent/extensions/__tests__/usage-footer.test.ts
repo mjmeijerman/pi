@@ -92,22 +92,34 @@ describe("fmtTokens", () => {
 		[999, "999"],
 		[1000, "1.0k"],
 		[1500, "1.5k"],
-		[9999, "10.0k"],
+		[9999, "10k"],
 		[10_000, "10k"],
-		[999_999, "1000k"],
+		[125_000, "125k"],
+		[999_999, "1.0M"],
 		[1_000_000, "1.0M"],
 		[1_250_000, "1.3M"],
-		[9_999_999, "10.0M"],
+		[9_999_999, "10M"],
 		[10_000_000, "10M"],
 		[123_456_789, "123M"],
+		[999_999_999, "1.0B"],
+		[1_000_000_000, "1.0B"],
 	];
 
 	for (const [input, expected] of cases) {
 		test(`${input} -> ${expected}`, () => assert.equal(fmtTokens(input), expected));
 	}
 
-	test("999_999 rounds up to 1000k rather than 1.0M (cosmetic quirk, documented)", () => {
-		assert.equal(fmtTokens(999_999), "1000k");
+	// The bug class these all share: the precision was chosen from the raw value,
+	// so the rounded string filled its unit (1000k, 10.0k) or showed a decimal the
+	// next tier does not use.
+	test("no boundary value prints a full unit (1000x) or a trailing .0 below ten", () => {
+		for (const n of [999, 9999, 10_000, 999_999, 1_000_000, 9_999_999, 10_000_000, 999_999_999]) {
+			const out = fmtTokens(n);
+			assert.ok(!out.startsWith("1000"), `${n} -> ${out} should have been promoted`);
+			if (/[kMBT]$/.test(out)) {
+				assert.ok(!/^10\.0[kMBT]$/.test(out), `${n} -> ${out} should drop the decimal`);
+			}
+		}
 	});
 });
 
@@ -120,10 +132,14 @@ describe("fmtCost", () => {
 		[0.00005, "$0.0001"],
 		[0.25, "$0.2500"],
 		[0.9999, "$0.9999"],
+		[0.99999, "$1.000"],
 		[1, "$1.000"],
 		[1.2345, "$1.234"],
 		[12.3456, "$12.346"],
-		[100, "$100.0"],
+		[99.999, "$100.00"],
+		[100, "$100.00"],
+		[999.4, "$999.40"],
+		[999.999, "$1000.0"],
 		[1234.56, "$1234.6"],
 	];
 
@@ -134,6 +150,11 @@ describe("fmtCost", () => {
 
 describe("fmtCostPart", () => {
 	test("two decimals for positive finite values", () => assert.equal(fmtCostPart(1.234), "1.23"));
+	test("boundary values round before formatting", () => {
+		assert.equal(fmtCostPart(0.9999), "1.00");
+		assert.equal(fmtCostPart(99.999), "100.00");
+		assert.equal(fmtCostPart(999.999), "1000.00");
+	});
 	test("empty string for zero/negative/non-finite", () => {
 		assert.equal(fmtCostPart(0), "");
 		assert.equal(fmtCostPart(-1), "");
