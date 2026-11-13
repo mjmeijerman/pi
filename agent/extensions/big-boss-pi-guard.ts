@@ -3,8 +3,12 @@
  *
  * When the session's cwd is inside the delegation workspace, the `write` and `edit`
  * tools are blocked, and so are the obvious shell writes (`echo x > …/state/y`,
- * `rm/mv/cp/tee/sed -i` on a path there). Everywhere else this extension does nothing,
- * so a worker with its own cwd keeps full write access.
+ * `rm/mv/cp/tee/sed -i` on a path there). Everywhere else this extension does nothing.
+ *
+ * A delegated worker is the exception inside the workspace: the runners export
+ * `PI_WORKER=1`, and a worker session writes normally. The boss delegates and the worker
+ * edits, so the guard enforces the rule on the session that is supposed to delegate, and
+ * the runners mark the session that is supposed to work.
  *
  * During the rename both trees are guarded: `/home/mark/big-boss-pi` (the live workspace)
  * and `/home/mark/pi-master` (the rollback copy, which must not be edited either).
@@ -125,8 +129,27 @@ export function shellWriteReason(command: string, cwd: string): string | null {
 	return null;
 }
 
+/**
+ * True when this session is a delegated worker.
+ *
+ * The boss delegates and the worker edits, so the guard enforces the rule on the session
+ * that is supposed to delegate and the runners mark the session that is supposed to work:
+ * `bin/pi-bare`, `bin/pi-sandboxed` and `bin/pi-nonet` export `PI_WORKER=1` into the
+ * environment the worker's pi process sees.
+ *
+ * Unset, empty, `0` and `false` all mean the boss session, which stays guarded.
+ */
+export function workerSession(env: Record<string, string | undefined>): boolean {
+	const value = env.PI_WORKER;
+	if (typeof value !== "string") return false;
+	const normalized = value.trim().toLowerCase();
+	return normalized !== "" && normalized !== "0" && normalized !== "false";
+}
+
 export default function bigBossPiGuard(pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
+		// A worker was delegated to work here; the guard is for the session that delegates.
+		if (workerSession(process.env)) return;
 		if (!cwdIsGuarded(ctx.cwd)) return;
 
 		if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {

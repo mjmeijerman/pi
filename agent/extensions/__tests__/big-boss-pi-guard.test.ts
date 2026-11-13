@@ -12,13 +12,36 @@ import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
 
 const mod = await import("../big-boss-pi-guard.ts");
 const bigBossPiGuard = mod.default;
-const { insideGuarded, shellWriteReason, GUARDED_ROOTS } = mod;
+const { insideGuarded, shellWriteReason, GUARDED_ROOTS, workerSession } = mod;
 
 function setup(cwd: string) {
 	const fake = createFakePi();
 	bigBossPiGuard(fake.pi);
 	const { ctx, notices } = createFakeCtx({ cwd });
 	return { ...fake, ctx, notices };
+}
+
+/** Run `body` with PI_WORKER set, then put the environment back exactly as it was. */
+async function asWorker(body: () => Promise<void>): Promise<void> {
+	const before = process.env.PI_WORKER;
+	process.env.PI_WORKER = "1";
+	try {
+		await body();
+	} finally {
+		if (before === undefined) delete process.env.PI_WORKER;
+		else process.env.PI_WORKER = before;
+	}
+}
+
+/** Run `body` with PI_WORKER absent (the boss session), then restore the environment. */
+async function asBoss(body: () => Promise<void>): Promise<void> {
+	const before = process.env.PI_WORKER;
+	delete process.env.PI_WORKER;
+	try {
+		await body();
+	} finally {
+		if (before !== undefined) process.env.PI_WORKER = before;
+	}
 }
 
 describe("big-boss-pi-guard: which paths are guarded", () => {
@@ -65,6 +88,21 @@ describe("big-boss-pi-guard: shell writes", () => {
 	});
 });
 
+describe("big-boss-pi-guard: worker sessions", () => {
+	test("PI_WORKER marks a delegated worker", () => {
+		for (const value of ["1", "true", "yes", " 1 ", "TRUE"]) {
+			assert.equal(workerSession({ PI_WORKER: value }), true, `PI_WORKER=${JSON.stringify(value)}`);
+		}
+	});
+
+	test("unset, empty, 0 and false are the boss session", () => {
+		assert.equal(workerSession({}), false);
+		assert.equal(workerSession({ PI_WORKER: "" }), false);
+		assert.equal(workerSession({ PI_WORKER: "0" }), false);
+		assert.equal(workerSession({ PI_WORKER: "false" }), false);
+	});
+});
+
 describe("big-boss-pi-guard: the handler", () => {
 	test("write and edit are blocked inside the workspace", async () => {
 		const { emit, ctx, notices } = setup("/home/mark/big-boss-pi");
@@ -92,5 +130,30 @@ describe("big-boss-pi-guard: the handler", () => {
 		const { emit, ctx } = setup("/home/mark/big-boss-pi");
 		assert.equal((await emit("tool_call", { toolName: "read", input: { path: "AGENTS.md" } }, ctx))[0], undefined);
 		assert.equal((await emit("tool_call", { toolName: "bash", input: { command: "delegate list" } }, ctx))[0], undefined);
+	});
+
+	test("a worker session writes and redirects inside the workspace, no block, no notice", async () => {
+		await asWorker(async () => {
+			const { emit, ctx, notices } = setup("/home/mark/big-boss-pi");
+			assert.equal((await emit("tool_call", { toolName: "write", input: { path: "x.md" } }, ctx))[0], undefined);
+			assert.equal((await emit("tool_call", { toolName: "edit", input: { path: "x.md" } }, ctx))[0], undefined);
+			assert.equal((await emit("tool_call", { toolName: "bash", input: { command: "echo x > state/y" } }, ctx))[0], undefined);
+			assert.deepEqual(notices, []);
+		});
+	});
+
+	test("the boss session still blocks write, edit and a redirect", async () => {
+		await asBoss(async () => {
+			const { emit, ctx } = setup("/home/mark/big-boss-pi");
+			const calls: { toolName: string; input: any }[] = [
+				{ toolName: "write", input: { path: "x.md" } },
+				{ toolName: "edit", input: { path: "x.md" } },
+				{ toolName: "bash", input: { command: "echo x > state/y" } },
+			];
+			for (const call of calls) {
+				const [result] = await emit("tool_call", call, ctx);
+				assert.equal(result?.block, true, `${call.toolName} should stay blocked for the boss`);
+			}
+		});
 	});
 });
