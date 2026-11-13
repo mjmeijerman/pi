@@ -21,6 +21,7 @@
 ## Local model
 
 - `local_llm` runs summarize/classify/extract/tidy/translate on the local `qwen3.8:27b` (no API cost). Use it for text chores; `/local` checks the endpoint.
+- `jev` decides instead of guessing (0 yes, 1 no, 3 unsure).
 
 ## Harness feedback
 
