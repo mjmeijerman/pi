@@ -37,7 +37,7 @@ Sandbox choices:
 
 ```bash
 pisandbox -- pi                         # no SSH keys, no cloud creds, network on
-pisandbox --no-net -- pi                # also no network
+pisandbox --no-net --exec -- make test  # also no network (no net = no model)
 pisandbox --rw ~/scratch -- pi          # one extra writable dir
 ```
 

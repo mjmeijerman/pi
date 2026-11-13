@@ -175,7 +175,7 @@ Thin `exec` wrapper around `~/.pi/sandbox/pi-sandbox.sh`, symlinked to
 
 ```bash
 pisandbox -- pi                     # no SSH keys, no cloud creds, network on
-pisandbox --no-net -- pi            # also no network at all
+pisandbox --no-net --exec -- cmd    # also no network at all (no net = no model)
 pisandbox --rw ~/scratch -- pi      # one extra writable directory
 ```
 
