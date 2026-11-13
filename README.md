@@ -125,12 +125,15 @@ herdr-app do tab.new --space <space-id> --name "Pull requests" --mod prs
 ```
 
 What the merge does locally, in the repository's clone (found by name in `$HOME`,
-`$HOME/code`, … and matched on its `origin` URL): `git fetch --prune`, checkout
-the default branch if the merged branch was checked out, `merge --ff-only
-origin/<default>`, then delete the merged branch — forced only when it pointed
-at exactly what was pushed. A dirty tree, local commits on the branch, or a
-trunk that is not a fast-forward is reported in the sentence at the top instead
-of being forced.
+`$HOME/code`, … and matched on its `origin` URL): `git fetch --prune`, then the
+default branch is brought up to date — `merge --ff-only` when it is checked out,
+`branch -f` when it is not, so trunk follows the merge either way. Before that it
+switches off the merged branch when that branch is checked out and its tracked
+files are clean (untracked files do not count, they never block a checkout).
+Then the merged branch is deleted — `<code>-D` because a squash merge never makes
+it an ancestor — and only after checking it pointed at exactly what was pushed
+upstream. Uncommitted changes, local commits, or a default branch that is not a
+fast-forward are reported in the sentence at the top instead of being forced.
 
 ### What is not in git, and why
 

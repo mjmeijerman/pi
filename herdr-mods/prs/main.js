@@ -395,30 +395,45 @@ export default class PullRequests extends View {
 		// so "was anything of mine still only here" = where it pointed upstream.
 		const remoteTip = (await git("rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`)).stdout.trim();
 		const localTip = (await git("rev-parse", "--verify", "--quiet", `refs/heads/${branch}`)).stdout.trim();
-		const dirty = (await git("status", "--porcelain")).stdout.trim();
-		const current = (await git("rev-parse", "--abbrev-ref", "HEAD")).stdout.trim();
+		// Untracked files do not block a checkout, so they must not count as dirty here.
+		const dirty = (await git("status", "--porcelain", "--untracked-files=no")).stdout.trim();
+		let current = (await git("rev-parse", "--abbrev-ref", "HEAD")).stdout.trim();
 		await git("fetch", "--prune", "origin");
-		let onBase = current === base;
-		if (current === branch && !dirty) onBase = (await git("checkout", base)).code === 0;
-		if (onBase) {
-			const pulled = await git("merge", "--ff-only", `origin/${base}`);
-			said.push(pulled.code === 0 ? `${base} updated` : `${base} not fast-forwarded`);
-		} else if (current !== branch) {
-			const behind = await git("merge-base", "--is-ancestor", base, `origin/${base}`);
-			if (behind.code !== 0) said.push(`${base} not a fast-forward, left alone`);
-			else if ((await git("branch", "-f", base, `origin/${base}`)).code === 0) said.push(`${base} updated (not checked out)`);
-			else said.push(`${base} could not be moved`);
-		} else said.push(`${base} not updated (still on ${branch})`);
-		if (!branch) return said.join(" · ");
-		if (branch === base) {
-			said.push(`${branch} is the trunk branch, nothing to delete`);
-			return said.join(" · ");
+
+		/** Bring the trunk branch up to date, checked out or not, and say what happened. */
+		const updateBase = async () => {
+			current = (await git("rev-parse", "--abbrev-ref", "HEAD")).stdout.trim();
+			if (current === base) {
+				const pulled = await git("merge", "--ff-only", `origin/${base}`);
+				return pulled.code === 0 ? `${base} updated` : `${base} not fast-forwarded, left alone`;
+			}
+			const exists = (await git("rev-parse", "--verify", "--quiet", `refs/heads/${base}`)).code === 0;
+			if (!exists) {
+				const made = await git("branch", base, `origin/${base}`);
+				return made.code === 0 ? `${base} created from origin` : `${base} missing and could not be created`;
+			}
+			const ancestor = await git("merge-base", "--is-ancestor", base, `origin/${base}`);
+			if (ancestor.code !== 0) return `${base} has local commits, left alone`;
+			const moved = await git("branch", "-f", base, `origin/${base}`);
+			return moved.code === 0 ? `${base} updated (not checked out)` : `${base} could not be moved`;
+		};
+
+		const onBranch = current === branch;
+		if (onBranch && !dirty) {
+			const switched = await git("checkout", base);
+			if (switched.code === 0) current = base;
+			else said.push(`could not switch to ${base}: ${(switched.stderr || "").trim().split("\n")[0]}`);
+		} else if (onBranch && dirty) {
+			said.push(`${branch} has uncommitted changes, staying on it`);
 		}
+		said.push(await updateBase());
+
+		if (!branch || branch === base) return said.join(" · ");
 		if (!localTip) {
 			said.push(`${branch} was not in the clone`);
 			return said.join(" · ");
 		}
-		if (current === branch && !onBase) {
+		if (current === branch) {
 			said.push(`${branch} still checked out, kept`);
 			return said.join(" · ");
 		}
