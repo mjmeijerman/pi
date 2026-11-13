@@ -16,7 +16,7 @@ import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
 
 const mod = await import("../merge-guard.ts");
 const mergeGuard = mod.default;
-const { mergeReason, trunkCommitReason, currentBranch } = mod;
+const { mergeReason, trunkCommitReason, currentBranch, gitSegments } = mod;
 
 /** A throwaway repo whose HEAD is on `branch`, for the branch-dependent rules. */
 function repoOn(branch: string): string {
@@ -241,5 +241,110 @@ describe("merge-guard: handler", () => {
 		const { emit, ctx } = setup();
 		const [result] = await emit("tool_call", { toolName: "write", input: { path: "notes.md", content: "gh pr merge 1" } }, ctx);
 		assert.equal(result, undefined);
+	});
+});
+
+/**
+ * The false positive this fixes: the branch rule read the session cwd, so a commit in a
+ * completely different repository was refused whenever the session happened to sit on
+ * `main`. The rule now judges the repository the command targets.
+ */
+describe("merge-guard: the repository the command targets", () => {
+	const trunkDir = repoOn("trunk");
+	const featureDir = repoOn("feat/x");
+	const detachedDir = (() => {
+		const dir = repoOn("trunk");
+		execFileSync("git", ["-C", dir, "switch", "-q", "--detach"]);
+		return dir;
+	})();
+	const plainDir = mkdtempSync(join(tmpdir(), "pi-merge-guard-not-a-repo-"));
+	after(() => {
+		for (const dir of [trunkDir, featureDir, detachedDir, plainDir]) rmSync(dir, { recursive: true, force: true });
+	});
+
+	const session = "/home/mark/big-boss-pi";
+
+	/** The resolver the handler installs: the branch of the directory, else the session's. */
+	const resolver = (dir: string | null) => currentBranch(dir ?? session);
+
+	test("git -C puts the commit in the named repository", () => {
+		assert.equal(trunkCommitReason(`git -C ${featureDir} commit -m "x"`, resolver, session), null);
+		assert.match(
+			trunkCommitReason(`git -C ${trunkDir} commit -m "x"`, resolver, session) ?? "",
+			/a commit on trunk/,
+		);
+	});
+
+	test("a cd earlier in the command does too", () => {
+		assert.equal(trunkCommitReason(`cd ${featureDir} && git commit -m "x"`, resolver, session), null);
+		assert.match(
+			trunkCommitReason(`cd ${trunkDir} && git commit -m "x"`, resolver, session) ?? "",
+			/a commit on trunk/,
+		);
+	});
+
+	test("a command that names no directory still uses the session cwd", () => {
+		assert.match(trunkCommitReason('git commit -m "x"', { [session]: "main" }, session) ?? "", /a commit on main/);
+		assert.equal(trunkCommitReason('git commit -m "x"', { [session]: "feat/x" }, session), null);
+		// No session cwd known and no branch named: nothing to block on.
+		assert.equal(trunkCommitReason('git commit -m "x"', null), null);
+	});
+
+	test("a detached HEAD is not a trunk commit", () => {
+		assert.equal(trunkCommitReason(`git -C ${detachedDir} commit -m "x"`, resolver, session), null);
+	});
+
+	test("a path that is not a repository is not a trunk commit", () => {
+		assert.equal(trunkCommitReason(`git -C ${plainDir} commit -m "x"`, resolver, session), null);
+		assert.equal(trunkCommitReason("git -C /nonexistent/repo commit -m x", resolver, session), null);
+	});
+
+	test("a bare branch name cannot describe a directory the command names", () => {
+		// The old shape: a string only ever described the session's own repository.
+		assert.equal(trunkCommitReason(`git -C ${trunkDir} commit -m "x"`, "trunk", session), null);
+		assert.match(trunkCommitReason('git commit -m "x"', "trunk", session) ?? "", /a commit on trunk/);
+	});
+
+	test("the segments say which directory they target", () => {
+		assert.deepEqual(gitSegments(`cd ${featureDir} && git commit -m "x"`).map((s) => s.dir), [featureDir]);
+		assert.deepEqual(gitSegments(`git -C ${trunkDir} commit -m "x"`).map((s) => s.dir), [trunkDir]);
+		assert.deepEqual(gitSegments("git status").map((s) => s.dir), [null]);
+		// `-c` is a git config flag, not a directory.
+		assert.deepEqual(gitSegments("git -c user.name=x commit -m y").map((s) => s.dir), [null]);
+	});
+
+	test("through the handler: a commit in another repo on a feature branch runs", async () => {
+		const { emit } = setup();
+		const { ctx } = createFakeCtx({ cwd: trunkDir }); // the session sits on trunk
+		const [result] = await emit(
+			"tool_call",
+			{ toolName: "bash", input: { command: `git -C ${featureDir} commit -m "x"` } },
+			ctx,
+		);
+		assert.equal(result, undefined);
+	});
+
+	test("through the handler: -C into a trunk repo is blocked", async () => {
+		const { emit } = setup();
+		const { ctx } = createFakeCtx({ cwd: featureDir });
+		const [result] = await emit(
+			"tool_call",
+			{ toolName: "bash", input: { command: `git -C ${trunkDir} commit -m "x"` } },
+			ctx,
+		);
+		assert.equal(result?.block, true);
+		assert.match(result.reason, /on trunk/);
+	});
+
+	test("through the handler: cd into a trunk repo is blocked", async () => {
+		const { emit } = setup();
+		const { ctx } = createFakeCtx({ cwd: featureDir });
+		const [result] = await emit(
+			"tool_call",
+			{ toolName: "bash", input: { command: `cd ${trunkDir} && git commit -m "x"` } },
+			ctx,
+		);
+		assert.equal(result?.block, true);
+		assert.match(result.reason, /on trunk/);
 	});
 });
