@@ -7,7 +7,7 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 | Path | What |
 |---|---|
 | `agent/skills/` | pi skills: `cost-optimizer`, `secret-guard`, `ethical-hacker`, `gh-repo-scan`, `questionnaire`, `ui-ux` |
-| `agent/extensions/` | always-on extensions: `cost-optimizer`, `secret-guard`, `dictation`, `usage-footer` |
+| `agent/extensions/` | always-on extensions: `cost-optimizer`, `secret-guard`, `om-autostart`, `dictation`, `usage-footer` |
 | `git-hooks/` | global secret-scan hooks (`pre-commit`, `commit-msg`, `pre-push`) + installer |
 | `git-vuln-scan` | pre-push agent vulnerability scan (GitHub pushes) |
 | `git-templates/` | `git init` template that installs the vuln-scan hook into new repos |
@@ -43,6 +43,14 @@ Where this repo came from, in Radar terms:
 | #36 agent instruction bloat | Caution | lean `AGENTS.md`, rules replaced by hooks where possible |
 
 The edition PDF is not committed (15 MB, third-party, read once) — read it from the Radar site instead.
+
+## Observational memory
+
+Long sessions are compacted by [`pi-observational-memory`](https://github.com/michielpapenhove/pi-observational-memory) (community fork of Amos Blomqvist's extension) instead of Pi's default threshold compaction. It observes ~10k-token chunks, keeps an index plus topic files in `.memory/<session-id>/`, and compacts at `observational-memory.compactAtContextTokens` (set to 120k here, under the 150k working limit).
+
+`agent/extensions/om-autostart.ts` enables it at session start — the extension's own gate defaults to off, so without it every session needs a manual `/om on`. Pi's built-in `compaction.enabled` threshold stays as the far-away last resort.
+
+Notes: the worker models are configured separately from the chat model (`deepseek-flash`, medium/high thinking), `.memory/` is in the global gitignore, and `/om:status` shows memory path, coverage and worker cost.
 
 ## Protection layers
 
