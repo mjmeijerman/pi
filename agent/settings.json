@@ -1,7 +1,18 @@
 {
-  "lastChangelogVersion": "0.84.2",
+  "lastChangelogVersion": "1.5.2",
   "theme": "dark",
   "enableSkillCommands": true,
+  "defaultTools": [
+    "+codemode"
+  ],
   "defaultProvider": "deepseek",
-  "defaultModel": "deepseek-v4-flash"
+  "defaultModel": "deepseek-flash",
+  "packages": [
+    "https://github.com/ayghri/i-have-adhd",
+    "npm:pi-web-access"
+  ],
+  "extensionChangelogVersions": {
+    "{\"source\":\"npm:pi-web-access\",\"scope\":\"user\"}": "0.47.0"
+  },
+  "hideThinkingBlock": true
 }
