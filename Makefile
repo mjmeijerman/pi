@@ -1,7 +1,7 @@
 # pi agent setup — one-command install for a new machine.
 # Usage:  make setup   (or just: make)
 
-.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full
+.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit
 
 # Full provisioning on a new machine: config, hooks, system packages, API key,
 # pi packages, optional local model / dictation venv, then verification.
@@ -31,6 +31,15 @@ mutate:
 mutate-full:
 	@rm -f $(CURDIR)/agent/reports/stryker/stryker-incremental.json
 	@cd $(CURDIR)/agent && npx stryker run
+
+# Quarterly Radar audit (blip 29 harness quality evaluation, blip 39 doc sprawl).
+# Staleness is detected by harness-check's review-freshness check; this target is
+# the single command the calendar entry needs, so hygiene stops being willpower.
+audit:
+	@bash $(CURDIR)/scripts/harness-check.sh
+	@echo
+	@echo "Next: refresh docs/radar-conformance.md against the PDF (its §6 recipe),"
+	@echo "then delete every row that no longer earns its place (blip 36)."
 
 update:
 	@git pull --ff-only

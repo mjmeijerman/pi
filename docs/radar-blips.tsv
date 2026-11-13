@@ -1,0 +1,118 @@
+blip	ring	quadrant	name
+1	Adopt	Techniques	Agent sandboxing
+2	Adopt	Techniques	Mutation testing
+3	Adopt	Techniques	Path-to-production mapping
+4	Adopt	Techniques	Post-quantum cryptography
+5	Adopt	Techniques	Progressive context disclosure
+6	Adopt	Techniques	Threat modeling
+7	Trial	Techniques	Agent plugin marketplace
+8	Trial	Techniques	Agent-maintained knowledge bases
+9	Trial	Techniques	Anchoring coding agents to a reference application
+10	Trial	Techniques	Coding harness for general-purpose agents
+11	Trial	Techniques	Feedback flywheel
+12	Trial	Techniques	Graph-grounded codebase reasoning
+13	Trial	Techniques	Grilling
+14	Trial	Techniques	Interactive visual plans with agents
+15	Trial	Techniques	Managed agents runtime
+16	Trial	Techniques	Open-weight models
+17	Trial	Techniques	Risk-tiered human oversight
+18	Trial	Techniques	Self-improving harness
+19	Trial	Techniques	Small language models
+20	Trial	Techniques	Stateful guardrails
+21	Trial	Techniques	Subagents for better context management
+22	Trial	Techniques	Toxic flow analysis for AI
+23	Trial	Techniques	Unattended overnight agentic builds
+24	Assess	Techniques	Agent pipeline responsibility
+25	Assess	Techniques	Agent suggestion box
+26	Assess	Techniques	Context profiling
+27	Assess	Techniques	Enterprise harness
+28	Assess	Techniques	Foundation models for structured data
+29	Assess	Techniques	Harness quality evaluation
+30	Assess	Techniques	Local coding models
+31	Assess	Techniques	MITRE ATLAS
+32	Assess	Techniques	Production-aware coding agents
+33	Assess	Techniques	Programmatic tool calling
+34	Assess	Techniques	Semantic review of AI-edited prose
+35	Assess	Techniques	Tests as data over tests as code
+36	Caution	Techniques	Agent instruction bloat
+37	Caution	Techniques	Agent skill cognitive surrender
+38	Caution	Techniques	AI-accelerated shadow IT
+39	Caution	Techniques	AI-driven documentation sprawl
+40	Caution	Techniques	Blanket frontier model usage
+41	Caution	Techniques	Coding throughput as a measure of productivity
+42	Caution	Techniques	Human-in-the-loop theater
+43	Caution	Techniques	Meat proxy
+44	Caution	Techniques	Naive context compression
+45	Caution	Techniques	Stacked pull requests
+46	Adopt	Platforms	VictoriaMetrics
+47	Trial	Platforms	Kafka share groups
+48	Trial	Platforms	KServe
+49	Trial	Platforms	LibreChat
+50	Trial	Platforms	LiteLLM
+51	Trial	Platforms	Microsoft Copilot Retrieval API
+52	Trial	Platforms	Restate
+53	Trial	Platforms	Talos Linux
+54	Trial	Platforms	Temporal
+55	Trial	Platforms	vCluster
+56	Trial	Platforms	VictoriaLogs
+57	Assess	Platforms	Agent Client Protocol (ACP)
+58	Assess	Platforms	Agent Plugins
+59	Assess	Platforms	agentgateway
+60	Assess	Platforms	AWS DevOps Agent
+61	Assess	Platforms	Claude Managed Agents
+62	Assess	Platforms	Decision models
+63	Assess	Platforms	KAITO
+64	Assess	Platforms	llm-d
+65	Assess	Platforms	Netris
+66	Assess	Platforms	Omnigent
+67	Assess	Platforms	VAST DataStore
+68	Adopt	Tools	mise
+69	Adopt	Tools	OpenAI Codex
+70	Adopt	Tools	OpenCode
+71	Trial	Tools	Act
+72	Trial	Tools	Agent Package Manager
+73	Trial	Tools	ast-grep
+74	Trial	Tools	Beads
+75	Trial	Tools	Chaos Mesh
+76	Trial	Tools	Cube Core
+77	Trial	Tools	Figma Code Connect
+78	Trial	Tools	FluxMarkdown
+79	Trial	Tools	Git AI
+80	Trial	Tools	Linear
+81	Trial	Tools	mattpocock/skills
+82	Trial	Tools	OpenSpec
+83	Trial	Tools	OpenWiki
+84	Trial	Tools	Pi
+85	Trial	Tools	Sourcebot
+86	Trial	Tools	Timefold Solver
+87	Assess	Tools	AgentsView
+88	Assess	Tools	Apple container
+89	Assess	Tools	Deepsec
+90	Assess	Tools	DeepSeek Harness (DSH)
+91	Assess	Tools	Entire CLI
+92	Assess	Tools	FreeToken
+93	Assess	Tools	GLM
+94	Assess	Tools	Habit Hooks
+95	Assess	Tools	Herdr
+96	Assess	Tools	Hunk
+97	Assess	Tools	nono.sh
+98	Assess	Tools	OpenResearch CLI (orx)
+99	Assess	Tools	Safe Chain
+100	Assess	Tools	Swamp
+101	Assess	Tools	Vale
+102	Assess	Tools	Varlock
+103	Assess	Tools	zizmor
+104	Adopt	Languages and Frameworks	Open Data Contract Standard (ODCS)
+105	Trial	Languages and Frameworks	BoTorch
+106	Trial	Languages and Frameworks	Deep Agents
+107	Trial	Languages and Frameworks	Kagent
+108	Trial	Languages and Frameworks	OpenFGA
+109	Trial	Languages and Frameworks	Presidio
+110	Trial	Languages and Frameworks	Promptfoo
+111	Assess	Languages and Frameworks	Apple Core AI
+112	Assess	Languages and Frameworks	CALM
+113	Assess	Languages and Frameworks	Hindsight
+114	Assess	Languages and Frameworks	Quint
+115	Assess	Languages and Frameworks	SolidJS
+116	Assess	Languages and Frameworks	spartan/ui
+117	Assess	Languages and Frameworks	TLA+
