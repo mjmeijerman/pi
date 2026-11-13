@@ -19,6 +19,10 @@
 #   scripts/harness-check.sh --quick      # budgets only (<1 s), used by the hook
 #   scripts/harness-check.sh --json       # same checks, one JSON document
 #   scripts/harness-check.sh --root DIR   # check DIR instead of this repo
+#   scripts/harness-check.sh --verify-release-age
+#                                         # only the npm quarantine gate; run it
+#                                         # bare (npm's config is masked in the
+#                                         # sandbox, and the check then FAILs)
 #   scripts/harness-check.sh --help
 #
 # Exit 0 when nothing FAILs (a baselined violation reports WARN), 1 on any FAIL.
@@ -28,6 +32,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JSON=0
 QUICK=0
+VERIFY_RELEASE_AGE=0
 
 PASS_N=0
 WARN_N=0
@@ -40,7 +45,7 @@ AGENTS_MD_LIMIT=3072
 SKILL_LINES_LIMIT=150
 MIN_RELEASE_AGE=1440
 
-usage() { sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() {
 	printf 'harness-check: %s\n' "$*" >&2
 	exit 2
@@ -155,26 +160,38 @@ check_skill_lines() {
 
 # ------------------------------------------------------------------- config --
 
+# min-release-age only exists from npm 11. An older npm still echoes the key back
+# from .npmrc, so "the config says 2880" proves nothing there: the npm version is
+# half of the check, and the effective setting is the other half (blip 99, blip 42).
 check_release_age() {
-	local value
+	local version value
 	if ! command -v npm >/dev/null 2>&1; then
 		verdict npm-min-release-age - 0 "npm not installed"
 		return
 	fi
-	# Inside the sandbox the npm config file is bound to /dev/null, so npm reports
-	# the setting as unset no matter what it says on the host. Failing here would
-	# be a check reading its own blindfold: say so instead (blip 99, blip 42).
-	if [ -n "${PI_SANDBOX_MODE-}" ]; then
-		verdict npm-min-release-age - 1 "not readable inside the sandbox (npm config is masked) — verify outside"
+	version=$(npm --version 2>/dev/null | tr -d '[:space:]')
+	case "$version" in
+	'' | undefined | null)
+		verdict npm-min-release-age - 0 "cannot read the npm version — npm's config is masked inside the sandbox, so run this bare: bash scripts/harness-check.sh --verify-release-age"
+		return
+		;;
+	[0-9]*.[0-9]*.[0-9]*) ;;
+	*)
+		verdict npm-min-release-age - 0 "unreadable npm version: $version"
+		return
+		;;
+	esac
+	if [ "${version%%.*}" -lt 11 ]; then
+		verdict npm-min-release-age - 0 "npm $version ignores min-release-age (needs npm ≥ 11) — install one: npm i -g --prefix ~/.local npm@11"
 		return
 	fi
+	# Inside the sandbox npm's config file is bound to /dev/null, so the read comes
+	# back empty even when the host is set. That is unverifiable, not a pass: say
+	# FAIL and name the bare command that does read it.
 	value=$(npm config get min-release-age 2>/dev/null | tr -d '[:space:]')
 	case "$value" in
-	'' | undefined | null) value=$(npm config get minimum-release-age 2>/dev/null | tr -d '[:space:]') ;;
-	esac
-	case "$value" in
 	'' | undefined | null)
-		verdict npm-min-release-age - 0 "unset — run: npm config set min-release-age 2880"
+		verdict npm-min-release-age - 0 "npm $version cannot read min-release-age${PI_SANDBOX_MODE:+ (masked by the sandbox — run this bare)} — verify with: bash scripts/harness-check.sh --verify-release-age ; set with: npm config set min-release-age 2880"
 		return
 		;;
 	esac
@@ -185,9 +202,9 @@ check_release_age() {
 		;;
 	esac
 	if [ "$value" -ge "$MIN_RELEASE_AGE" ]; then
-		verdict npm-min-release-age - 1 "$value min ≥ $MIN_RELEASE_AGE"
+		verdict npm-min-release-age - 1 "npm $version, effective min-release-age=$value ≥ $MIN_RELEASE_AGE"
 	else
-		verdict npm-min-release-age - 0 "$value min < $MIN_RELEASE_AGE — run: npm config set min-release-age 2880"
+		verdict npm-min-release-age - 0 "npm $version, effective min-release-age=$value < $MIN_RELEASE_AGE — run: npm config set min-release-age 2880"
 	fi
 }
 
@@ -470,6 +487,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	--json) JSON=1 ;;
 	--quick) QUICK=1 ;;
+	--verify-release-age) VERIFY_RELEASE_AGE=1 ;;
 	--root)
 		[ $# -ge 2 ] || die "--root needs a directory"
 		ROOT="$2"
@@ -486,6 +504,21 @@ while [ $# -gt 0 ]; do
 done
 ROOT="$(cd "$ROOT" 2>/dev/null && pwd)" || die "no such directory"
 load_baseline
+
+# One check, on demand, for a bare-mode run: the whole report is the release-age
+# verdict, and its exit status is the answer.
+if [ "$VERIFY_RELEASE_AGE" = 1 ]; then
+	section "config — npm quarantine (blip 99)"
+	check_release_age
+	if [ "$JSON" = 1 ]; then
+		printf '{"pass":%d,"warn":%d,"fail":%d,"results":[%s]}\n' \
+			"$PASS_N" "$WARN_N" "$FAIL_N" "${JSON_ITEMS[*]}"
+	else
+		printf '\n%d passed, %d warn, %d failed\n' "$PASS_N" "$WARN_N" "$FAIL_N"
+	fi
+	[ "$FAIL_N" -eq 0 ]
+	exit $?
+fi
 
 section "budgets — files that load on every turn"
 check_agents_md
