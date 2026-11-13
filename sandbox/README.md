@@ -29,6 +29,13 @@ That last group is why `gh`, `uvx`, `gitleaks`, `semgrep`, `trivy`, `herdr` and 
 exist inside a session at all — without it they are `command not found`, and every
 `gh pr …` step the agent is told to run needs `PI_BARE=1`.
 
+A `~/.local/bin` symlink that points outside those trees gets its resolved directory
+mounted read-only as well, so the link is not a dangling `command not found`: `jev` and
+`local-run` live in `~/big-boss-pi/bin`, and that one directory (never the repo, never
+read-write) is what makes the mandatory `jev route` check work inside the sandbox.
+Directories the `too_broad` rule refuses — anything under `~/.local`, `~/.config`,
+`~/.ssh` — stay out, so `herdr-app` is still absent inside.
+
 What does *not* come with them is their config. `~/.config/gh`, `~/.ssh`, `~/.aws`,
 `~/.kube`, `~/.docker` and `~/.config/1Password` are masked, and `.netrc`/`.npmrc` are
 bound to `/dev/null`. So `gh` inside reports `not logged into any GitHub hosts`, npm
