@@ -345,6 +345,26 @@ export default class PullRequests extends View {
 		this.loadDiff(this.current, cx);
 	}
 
+	/** Take one pull request out of the list now, keeping the selection where it was. */
+	drop(key, cx) {
+		const at = this.prs.findIndex((pr) => pr.key === key);
+		if (at < 0) return;
+		this.prs.splice(at, 1);
+		if (this.selected >= at) this.selected = Math.max(0, this.selected - 1);
+		if (this.selected >= this.prs.length) this.selected = Math.max(0, this.prs.length - 1);
+		this.pending = "";
+		this.reviewAction = "";
+		this.line = null;
+		if (this.diff.key === key) this.diff = { rows: [], width: 600, key: "", loading: false };
+		const next = this.current;
+		if (!next) {
+			cx.notify();
+			return;
+		}
+		this.listScroll?.scroll_to_item(this.flatIndex(next.key));
+		this.loadDiff(next, cx);
+	}
+
 	arm(row, cx) {
 		this.pending = row.key;
 		cx.notify();
@@ -371,10 +391,15 @@ export default class PullRequests extends View {
 				cx.notify();
 				return;
 			}
-			const local = await this.syncLocal(pr);
+			// Gone this frame, before the local clone is touched: waiting for the
+			// two-minute poll to drop the row made a finished merge look ignored.
 			this.busy = "";
+			this.drop(pr.key, cx);
+			this.notice = `merged ${pr.key} · updating the local clone…`;
+			cx.notify();
+			const local = await this.syncLocal(pr);
 			this.notice = `merged ${pr.key} · ${local}`;
-			this.diff = { rows: [], width: 600, key: "", loading: false };
+			cx.notify();
 			this.refresh(cx);
 		});
 	}
