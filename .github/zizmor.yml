@@ -1,0 +1,13 @@
+# Audit configuration for the zizmor gate (.github/workflows/zizmor.yml).
+#
+# adhoc-packages is clean except for one deliberate install: harness-check.yml
+# bumps npm itself (`npm install -g npm@11.21.2`) because min-release-age is
+# only honoured from npm 11.10 (blip 99) and the runner's bundled npm is older.
+# npm cannot be installed "from a lockfile" in that spot — the whole point is to
+# replace the npm that would run `npm ci` — so the install is pinned to an exact
+# version instead and the finding is ignored for that line only. Any other
+# ad-hoc install, or a second one in this file, still fails the gate.
+rules:
+  adhoc-packages:
+    ignore:
+      - harness-check.yml:42
