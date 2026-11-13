@@ -18,8 +18,9 @@ on:
     types: [opened, edited, synchronize, reopened]
 
 permissions:
+  # The job reads the PR body and the diff, and nothing else.
   contents: read
-  pull-requests: read
+  pull-requests: read  # read the PR body only; never write
 
 concurrency:
   group: pr-tier-${{ github.ref }}

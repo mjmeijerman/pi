@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   extension-tests:
     name: extension tests (node ${{ matrix.node }})
@@ -38,6 +42,11 @@ jobs:
       # skip instead of failing the build.
       - name: install pi packages (optional)
         continue-on-error: true
+        # Deliberately outside a lockfile: the two packages are already pinned to
+        # exact versions here, --no-save/--no-package-lock keep the agent
+        # lockfile from being rewritten by a fidelity-only test dependency, and
+        # the step is continue-on-error because the registry can be absent.
+        # zizmor: ignore[adhoc-packages]
         run: npm install --no-save --no-package-lock @earendil-works/pi-ai@1.5.2 @earendil-works/pi-tui@1.5.2
 
       - name: test
