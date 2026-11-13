@@ -46,11 +46,26 @@ scan_commit() {
 		done < "$CONTENT_PAT"
 	fi
 
-	# filenames + contents in the commit's tree
-	local f base content line rest
+	# Files this commit touches, not every file that happens to exist in its
+	# tree. A file added long ago was scanned when it was added; rescanning it
+	# on every later commit blocks pushes over something already in history,
+	# which is how a public DH parameter file used to stop every push.
+	local parent
+	parent="$(git rev-parse -q --verify "$c^" 2>/dev/null)"
+	if [ -n "$parent" ]; then
+		changed() { git diff-tree -r --no-commit-id --name-only "$parent" "$c" 2>/dev/null; }
+	else
+		# Root commit: everything is new.
+		changed() { git ls-tree -r --name-only "$c" 2>/dev/null; }
+	fi
+
+	# Filenames + contents of the changed files only.
+	local f base content line rest status
 	while IFS= read -r f; do
 		[ -z "$f" ] && continue
 		base="${f##*/}"
+		# Deleted files have nothing left to scan.
+		git cat-file -e "$c:$f" 2>/dev/null || continue
 		if printf '%s\n' "$f" | grep -qEf "$NAME_PAT" && ! printf '%s\n' "$base" | grep -qiEf "$SAFE_PAT"; then
 			report "secret-looking filename in $short: $f"
 			continue
@@ -65,7 +80,7 @@ scan_commit() {
 				report "possible $name in $short:$f:${line%%:*}"
 			done < <(printf '%s\n' "$content" | grep -nE -e "$pat")
 		done < "$CONTENT_PAT"
-	done < <(git ls-tree -r --name-only "$c" 2>/dev/null)
+	done < <(changed)
 }
 
 # pre-push feeds ref lines on stdin: "<local ref> <local sha> <remote ref> <remote sha>"

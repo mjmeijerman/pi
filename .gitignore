@@ -8,7 +8,17 @@ agent/dictation/venv/
 
 # IDE
 .idea/
+
+# installed packages and runtime state
+agent/git/
+agent/npm/
+agent/pi-web-access/
+agent/secret-guard.log
+
+# secrets and local scratch — never in git
 agent/deepseek.key
 agent/suggestions.jsonl
 agent/retro/
 tools/.agent-panes.json
+*.bak
+werken-met-ai.pdf

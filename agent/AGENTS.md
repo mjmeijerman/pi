@@ -4,6 +4,10 @@
 - Use codemode whenever a response would need 2 or more tool calls. Batch them in one `codemode` script (`tools.read`, `tools.bash`, `Promise.allSettled` for independent calls) instead of emitting separate calls. Single tool calls go direct.
 - ADHD output mode is always on (`~/.pi/agent/i-have-adhd.json` → `alwaysOn`). Its rules apply to every outward-facing artifact, not just chat replies: commit messages, PR titles/bodies, review comments, issue text, and any file content written for humans. Only the user turns it off, with "stop adhd mode" or `/i-have-adhd off`.
 
+## Harness sources
+
+- Harness changes are driven by the Thoughtworks Technology Radar, https://www.thoughtworks.com/radar (currently Volume 35, November 2026). When proposing a change to skills, extensions, sandboxing, model routing or review practice, cite the blip number and prefer the Adopt ring. Do not add a technique just because it is new; say which problem it fixes and how it will be measured.
+
 ## Local model
 
 - `local_llm` runs summarize/classify/extract/tidy/translate on the local `qwen3.8:27b` (no API cost). Use it for text chores; `/local` checks the endpoint.
