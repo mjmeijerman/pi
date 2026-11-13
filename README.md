@@ -94,15 +94,20 @@ trunk.
 | key | does |
 | --- | --- |
 | `↑` `↓` / `j` `k` | move |
-| click a changed line | pick it: its number turns into `#` and the note field gets a `note on <file>:<line>` chip |
+| click a changed line | pick it: its number turns into `#` and a comment box opens underneath it |
 | `[` `]` | move the line cursor without the mouse |
-| `enter` | with a line picked: post the note as a review comment on that line and start an agent that fixes it. Otherwise it sends the pending review |
+| `post comment` in that box | posts the text as a review comment on that line and starts an agent that fixes it; the line stays picked |
 | `a` `x` `c` | approve · request changes · comment (note required for the last two; `x` and `c` also start an agent on the comments) |
 | `m` | merge, squash — press twice. Afterwards the local clone's trunk is fast-forwarded and the merged branch is deleted there |
 | `1` `2` `3` `4` | the four agent actions |
 | `o` | open the PR in the browser |
 | `r` | refresh (it also repolls every two minutes) |
 | `esc` | drop the picked line, then the pending review |
+
+Both note boxes are multi-line: Enter starts a new line and never posts, the box
+grows to four rows and then scrolls, and posting is only ever the button next to
+it. The box under the diff is the comment on the picked line; the box at the
+bottom is the note that goes with the whole-PR review.
 
 A line note goes out as a one-comment review (`POST /pulls/<n>/reviews` with
 `event: COMMENT`), so added and context lines use `side: RIGHT` with the new
