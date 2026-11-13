@@ -3,10 +3,10 @@
 Owner: Mark Meijerman (`mjmeijerman`)
 Review: 2027-02-15 — quarterly, see §6 below.
 Re-measured 2026-11-13: 503 extension tests in 59 suites, 15 extensions, 9 skills,
-`agent/AGENTS.md` 3041 bytes against the 3072-byte budget, 192 entries in
-`~/.pi/agent/suggestions.jsonl`.
+`agent/AGENTS.md` 3041 bytes against the 3072-byte budget, 207 entries in
+`~/.pi/agent/suggestions.jsonl` (measured 2026-11-13).
 
-Audit date: 2026-11-13; threat-model pass 2026-11-14. Source: `werken-met-ai.pdf` (Radar Vol. 35, November 2026).
+Audit date: 2026-11-13; threat-model pass 2026-11-13. Source: `werken-met-ai.pdf` (Radar Vol. 35, November 2026).
 Scope: the 85 rows below, out of the 117 in `docs/radar-blips.tsv` — every Technique
 (1–45), the three Platforms that touch a coding harness (57, 58, 62), all 36 Tools
 (68–103, each with an explicit verdict, `n/a` included), and Promptfoo (110). The other 32
@@ -78,7 +78,7 @@ Status values:
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
 | 24. Agent pipeline responsibility | partial | `agent/extensions/merge-guard.ts` forces an explicit human yes per landing | Owner, reviewer and approver are the same person; nothing records who accepted an agent-built change beyond that yes. |
-| 25. Agent suggestion box | done | `/suggest` → `agent/suggestions.jsonl` (192 entries), `/retro` dedupes | Nothing reviews the box on a schedule. |
+| 25. Agent suggestion box | done | `/suggest` → `agent/suggestions.jsonl` (207 entries, measured 2026-11-13), `/retro` dedupes | Nothing reviews the box on a schedule. |
 | 26. Context profiling | done | `scripts/session-report.mjs` (cost, cache hit, context fill per project) | Profiling is after-the-fact; no per-turn attribution. |
 | 27. Enterprise harness | n/a | — | One user; the "harness" is this repo. |
 | 28. Foundation models for structured data | n/a | — | No tabular or warehouse workload; `local_llm` `extract` pulls fields out of prose, which is not the modelling this blip describes. |
@@ -148,8 +148,11 @@ shell wrapper), the mutation score (blip 2, 74.47% from a reproducible `make mut
 prompt evals (blip 110, `agent/evals/` plus `make evals`) and workflow linting (blip 103,
 `.github/workflows/zizmor.yml`, 0 findings).
 
-The threat model re-scoped the gaps that remain: gap 3 inherits the fetched-page and
-malicious-skill paths, and gap 4 inherits the supply-chain path.
+The threat model re-scoped what remains, and both listed gaps inherit one of its paths.
+The fetched-page and malicious-skill paths (`docs/threat-model.md` §2.1 and §2.4) are what
+an adversarial eval set exists to catch, which is the second gap. The supply-chain path
+(§2.2, package installs) has no test at all: no lock file, no provenance check, no
+hidden-Unicode scan — the audit trail blip 72's row records as missing.
 
 Enforced by `scripts/harness-check.sh` on every commit and in CI: a cited blip must exist in
 `docs/radar-blips.tsv` (no invented blip numbers), a stale `Review:` date fails the check
@@ -159,7 +162,7 @@ set for the quarterly pass.
 Then, in order: Hunk or a `gh pr diff` review habit for agent-authored PRs (blip 96),
 semantic review of `AGENTS.md` and plan edits (blip 34). Skipped deliberately: subagents
 (blip 21) conflict with Pi's design — parallel sessions cover most of the need; and
-unattended overnight builds (blip 23) stay blocked until gaps 1–3 are closed.
+unattended overnight builds (blip 23) stay blocked until the gaps listed above are closed.
 
 ## 6. Re-running this audit
 
