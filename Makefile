@@ -1,7 +1,7 @@
 # pi agent setup — one-command install for a new machine.
 # Usage:  make setup   (or just: make)
 
-.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit
+.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit evals
 
 # Full provisioning on a new machine: config, hooks, system packages, API key,
 # pi packages, optional local model / dictation venv, then verification.
@@ -40,6 +40,13 @@ audit:
 	@echo
 	@echo "Next: refresh docs/radar-conformance.md against the PDF (its §6 recipe),"
 	@echo "then delete every row that no longer earns its place (blip 36)."
+
+# Promptfoo evals of the instructions themselves (blip 110, and the nondeterministic
+# half of blip 29): eleven prompts that check AGENTS.md and the skills change behaviour.
+# Monthly manual run, not PR CI — it grades a local model, so it is advisory and needs
+# ollama on this machine. See agent/evals/README.md.
+evals:
+	@cd $(CURDIR)/agent/evals && npx --yes promptfoo@0.125.1 eval -c promptfooconfig.yaml
 
 update:
 	@git pull --ff-only
