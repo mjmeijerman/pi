@@ -2,15 +2,16 @@
 
 Owner: Mark Meijerman (`mjmeijerman`)
 Review: 2027-02-15 — quarterly, see §6 below.
-Re-measured 2026-11-14: 342 extension tests in 49 suites, 9 skills, `agent/AGENTS.md`
-3041 bytes against the 3072-byte budget, 140 entries in `~/.pi/agent/suggestions.jsonl`.
+Re-measured 2026-11-13: 503 extension tests in 59 suites, 15 extensions, 9 skills,
+`agent/AGENTS.md` 3041 bytes against the 3072-byte budget, 192 entries in
+`~/.pi/agent/suggestions.jsonl`.
 
 Audit date: 2026-11-13; threat-model pass 2026-11-14. Source: `werken-met-ai.pdf` (Radar Vol. 35, November 2026).
-Scope: the 63 rows below, out of the 117 in `docs/radar-blips.tsv` — every Technique
-(1–45), the two Platforms that touch a coding harness (57, 58), the Tools a one-person
-harness could use (68–103), and Promptfoo (110). The other 54 rows are Kubernetes, model
-serving, storage, networking, data contracts, Bayesian optimization and other
-infrastructure, out of scope for a single-developer harness.
+Scope: the 85 rows below, out of the 117 in `docs/radar-blips.tsv` — every Technique
+(1–45), the three Platforms that touch a coding harness (57, 58, 62), all 36 Tools
+(68–103, each with an explicit verdict, `n/a` included), and Promptfoo (110). The other 32
+rows are Kubernetes, model serving, storage, networking, data contracts, Bayesian
+optimization and other infrastructure, out of scope for a single-developer harness.
 
 Status values:
 
@@ -29,6 +30,9 @@ Status values:
 | 4. Post-quantum cryptography | n/a | — | Nothing here holds a long-lived key: model traffic terminates at the provider's TLS, and the only secrets in scope are API tokens rotated by the providers. Revisit if the harness ever stores keys it must keep for years. |
 | 5. Progressive context disclosure | done | 9 skills load on demand; `agent/AGENTS.md` is 3041 bytes under the 3072-byte budget in `scripts/harness-check.sh` | — |
 | 6. Threat modeling | done | `docs/threat-model.md` — assets (with `~/.ssh`, `~/.config/gh`, `~/.pi/agent/auth.json`, `~/.pi`, git remotes), attacker paths (fetched pages and PDFs, package installs, model-issued shell commands, malicious skills), the real binds and masks quoted from `sandbox/pi-sandbox.sh`, and an explicit "does not cover" list whose first item is bare mode and the bare big-boss-pi boss | The doc is a snapshot: nothing fails when `pi-sandbox.sh` and the mask list drift apart. Review date 2027-05-15 is the only trigger. |
+| 68. mise | missing | — | Toolchains are host-installed and unpinned: no `mise.toml`, no `.tool-versions`, no `.nvmrc`, and `node -v` reports 22.23.4 by hand. Nothing here checks a toolchain bump against signatures or attestations either, which is the half of the blip that matters for supply chain. |
+| 69. OpenAI Codex | n/a | — | pi is the harness (blip 84). A second CLI agent repeats what this repo already implements for pi — `sandbox/pi-sandbox.sh`, `merge-guard.ts`, the tier table in `agent/AGENTS.md:14` — and would sit outside all three. |
+| 70. OpenCode | n/a | — | Same as 69: its headless/server mode is the enterprise-harness path, and the harness here is one person's pi with extensions. |
 
 ## 2. Trial ring
 
@@ -53,9 +57,20 @@ Status values:
 | 71. Act | missing | — | CI only runs on GitHub: `pr-tier.yml` and `test.yml` cannot be executed before a push, so a failing gate costs a round trip. |
 | 73. ast-grep | missing | — | Structural search is `rg` and regex; conventions that are syntactic (import order, hook shape) are checked by hand. |
 | 74. Beads | missing | — | Task state lives in `/tmp` spec files and PR bodies; nothing survives the session as a queryable backlog. |
-| 84. Pi | done | This repository: pi 1.5.2, 13 extensions, 342 tests in 49 suites, `/home/mark/.pi` | Pinned to 1.5.2; the extension API is exercised but an upgrade is untested until it happens. |
+| 84. Pi | done | This repository: pi 1.5.2, 15 extensions, 503 tests in 59 suites, `/home/mark/.pi` | Pinned to 1.5.2; the extension API is exercised but an upgrade is untested until it happens. |
 | 23. Unattended overnight agentic builds | missing | — | Blocked by the same three prerequisites the blip names: default sandboxing, spec-up-front, sensors that validate without line-by-line review. |
 | 110. Promptfoo | partial | `agent/evals/` — 11 behaviour cases over `agent/AGENTS.md` and the skills, `make evals` (promptfoo 0.125.1, local `qwen3.8:27b`, ~2 min, zero cost) | Trial ring, manual monthly run only: no red-team or adversarial cases, no scheduled run, and the grader is a 27B local model whose verdicts vary run to run. |
+| 75. Chaos Mesh | n/a | — | Fault injection as Kubernetes custom resources; there is no cluster. The failure surface is one workstation, and `scripts/harness-check.sh` covers it deterministically rather than by scheduled chaos. |
+| 76. Cube Core | n/a | — | A semantic layer over an analytics warehouse; this repo has no warehouse, no metric definitions and no BI consumers. |
+| 77. Figma Code Connect | n/a | — | No design system and no Figma file: the artefacts here are markdown skills and TypeScript extensions, not UI components built from frames. |
+| 78. FluxMarkdown | n/a | — | A macOS QuickLook plugin; the host is Linux x86_64 and docs are read in the terminal or on GitHub, so rendered-markdown preview needs no tool. |
+| 79. Git AI | missing | — | Nothing records which lines an agent wrote. `git log` carries PR-level provenance only (author, tier, PR body) — no commit trailer and no `git notes` attribution — so a line's origin is inferred from the PR it landed in. |
+| 80. Linear | n/a | — | No team backlog: work arrives as one-shot spec files and PR bodies, and there is no second person to assign an issue to. |
+| 81. mattpocock/skills | n/a | — | All 9 skills in `agent/skills/` are hand-written here (blip 37); importing a library is the cognitive-surrender path this blip itself warns about, not a gap. |
+| 82. OpenSpec | missing | — | Specs are one-shot files (`/home/mark/big-boss-pi/specs/*.md`) written per task; there is no persistent source-of-truth spec and no delta/archive step, so a second change to the same area starts from nothing. |
+| 83. OpenWiki | missing | — | `docs/` is hand-written and `scripts/harness-check.sh` only enforces an `Owner:`/`Review:` header. Nothing regenerates a doc when the code it describes changes, which is what the blip's checkpointing buys. |
+| 85. Sourcebot | n/a | — | Self-hosted multi-repo code search; there is one repo, and `rg` answers without an index to maintain. |
+| 86. Timefold Solver | n/a | — | A constraint solver for routing, rostering and task assignment. No such planning problem exists here, and nothing is written in Java or Kotlin. |
 
 
 ## 3. Assess ring
@@ -63,11 +78,11 @@ Status values:
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
 | 24. Agent pipeline responsibility | partial | `agent/extensions/merge-guard.ts` forces an explicit human yes per landing | Owner, reviewer and approver are the same person; nothing records who accepted an agent-built change beyond that yes. |
-| 25. Agent suggestion box | done | `/suggest` → `agent/suggestions.jsonl` (140 entries), `/retro` dedupes | Nothing reviews the box on a schedule. |
+| 25. Agent suggestion box | done | `/suggest` → `agent/suggestions.jsonl` (192 entries), `/retro` dedupes | Nothing reviews the box on a schedule. |
 | 26. Context profiling | done | `scripts/session-report.mjs` (cost, cache hit, context fill per project) | Profiling is after-the-fact; no per-turn attribution. |
 | 27. Enterprise harness | n/a | — | One user; the "harness" is this repo. |
 | 28. Foundation models for structured data | n/a | — | No tabular or warehouse workload; `local_llm` `extract` pulls fields out of prose, which is not the modelling this blip describes. |
-| 29. Harness quality evaluation | partial | 342 tests in 49 suites (`cd agent && node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh`, 11 prompt evals in `agent/evals/` (`make evals`, measured 10/11) | The instruction half is now sampled, not proven: evals are manual, model-dependent, and cover behaviour on 11 fixed prompts only; hooks still have no nondeterministic evaluation. |
+| 29. Harness quality evaluation | partial | 503 tests in 59 suites (`cd agent && env -u PI_WORKER node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh`, 11 prompt evals in `agent/evals/` (`make evals`, measured 10/11) | The instruction half is now sampled, not proven: evals are manual, model-dependent, and cover behaviour on 11 fixed prompts only; hooks still have no nondeterministic evaluation. |
 | 30. Local coding models | done | `agent/extensions/local-llm.ts`, `/local` health check | Route is manual, chosen by the model's own judgement. |
 | 31. MITRE ATLAS | done | `docs/threat-model.md` §2 groups attacker paths by ATLAS tactic (prompt injection, Execution, Persistence, Defense Evasion, Exfiltration) and names `AML.T0051` for the fetched-page path | Tactic names only, no per-technique ID mapping and no ATLAS-driven detection: the taxonomy shapes the document, not a test. |
 | 32. Production-aware coding agents | n/a | — | Nothing in production; project work is local. |
@@ -88,6 +103,13 @@ Status values:
 | 99. Safe Chain | done | `npm config get min-release-age` → `2880` (48 h quarantine, measured on the host) | The key is `min-release-age`; `minimum-release-age` is rejected by npm 11.20. Inside the sandbox the config is masked, so `harness-check` reports it as unverifiable there instead of failing. |
 | 102. Varlock | missing | — | `agent/settings.json`, `keys.json` and the rc blocks are unvalidated: a typo is found when a feature silently stops working. |
 | 103. zizmor | done | `.github/workflows/zizmor.yml` runs `uvx --from zizmor==1.32.0 zizmor --pedantic .` on PRs, trunk pushes and weekly → 0 findings (1 justified ignore, 2026-11-13: 4 low cleared); every action pinned by full SHA with `persist-credentials: false` | The gate fails the job on any finding, so a pin cannot drift back to a tag unnoticed. |
+| 88. Apple container | n/a | — | macOS-only lightweight VMs on Apple silicon; the host is Linux x86_64 and process isolation is bubblewrap (blip 97). |
+| 89. Deepsec | missing | — | The only code scanner wired into CI is gitleaks in `.github/workflows/secret-scan.yml`. Nothing does architecture-first, agent-driven vulnerability review; `semgrep` and `trivy` are mounted into the sandbox (blip 1) but no workflow or `harness-check` rule runs them. |
+| 91. Entire CLI | missing | — | Sessions stay in `~/.pi` JSONL and are read locally by `scripts/session-report.mjs`; nothing writes a session into the repo next to its commit, so a session cannot be replayed from the branch it produced. |
+| 92. FreeToken | n/a | — | An inference engine for MoE models larger than consumer GPU memory; the local model is `qwen3.8:27b` served by Ollama on the host, which fits. |
+| 98. OpenResearch CLI (orx) | n/a | — | Runs parallel research experiments in isolated git worktrees with one pinned run command. There is no experiment workload here; the worktree discipline it automates is done by hand per worker. |
+| 100. Swamp | missing | — | Operational jobs are ad-hoc shell invocations (`scripts/harness-check.sh`, `make audit`, `make mutate-full`) with no typed model of the systems they touch and no versioned run history to query later. |
+| 101. Vale | missing | — | Docs are checked for headers by `scripts/harness-check.sh`, not for prose: no style rules, so generated-text tells and drift in `AGENTS.md` and `docs/*.md` go unchecked. |
 
 ## 4. Caution ring — are the warnings being respected?
 
