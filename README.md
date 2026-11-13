@@ -67,10 +67,12 @@ secrets and no system packages (`--no-apt --no-verify`).
 `herdr-mods/prs` is a mod for the Herdr app: open pull requests on the left,
 the diff on the right, and what you do about it underneath.
 
-Left: pull requests grouped by repository — review requests first — with
-author, age, a check mark, an `!` for failing checks and `≠` for conflicts.
-Click one and the right side shows its diff: file headers with `+n −n` counts,
-hunk headers, line numbers, a green/red sign gutter, horizontal scroll.
+Left: **every open pull request you can see** — your own repositories, your
+organisations and anything you are involved in — grouped by repository, review
+requests first, with author, age, a green check, `!` for failing checks and `≠`
+for conflicts. Click one and the right side shows its diff: file headers with
+`+n −n` counts, hunk headers, line numbers, a filled green/red sign gutter,
+tinted added and removed lines, horizontal scroll.
 
 Right, below the diff: a note field with `approve`, `request changes` and
 `comment`, then four buttons that open **a new space** with a pi agent already
@@ -92,7 +94,7 @@ trunk.
 | --- | --- |
 | `↑` `↓` / `j` `k` | move |
 | `a` `x` `c` | approve · request changes · comment (note required for the last two) |
-| `m` | merge, squash — press twice |
+| `m` | merge, squash — press twice. Afterwards the local clone's trunk is fast-forwarded and the merged branch is deleted there |
 | `1` `2` `3` `4` | the four agent actions |
 | `o` | open the PR in the browser |
 | `r` | refresh (it also repolls every two minutes) |
@@ -102,11 +104,18 @@ It lives in the `Apps` space, `Pull requests` tab. Rebuild on a new machine:
 `install.sh` copies the folder into `$HOME/.config/herdr-app/mods/` when the app
 is installed, and never overwrites a folder that already exists (you may have
 edited the mod in place). Then:
-
 ```bash
 herdr-app do space.new --name Apps --folder "$HOME"
 herdr-app do tab.new --space <space-id> --name "Pull requests" --mod prs
 ```
+
+What the merge does locally, in the repository's clone (found by name in `$HOME`,
+`$HOME/code`, … and matched on its `origin` URL): `git fetch --prune`, checkout
+the default branch if the merged branch was checked out, `merge --ff-only
+origin/<default>`, then delete the merged branch — forced only when it pointed
+at exactly what was pushed. A dirty tree, local commits on the branch, or a
+trunk that is not a fast-forward is reported in the sentence at the top instead
+of being forced.
 
 ### What is not in git, and why
 

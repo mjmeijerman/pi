@@ -21,28 +21,42 @@
  * acts on it is visible in its own space instead of behind a button.
  */
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, Input, InputState, Scrollbar, v_virtual_list } from "gpui-base";
+import { v_flex, h_flex, Input, InputState, ScrollHandle, Scrollbar, v_virtual_list } from "gpui-base";
 import { exec, home, nextCommand, props, run, settings, theme } from "herdr";
 
-const QUERY = `query($n: Int!) {
-  viewer {
-    login
-    pullRequests(first: $n, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { ...PR } }
-  }
-  search(query: "is:open is:pr review-requested:@me", type: ISSUE, first: $n) { nodes { ...PR } }
-}
-fragment PR on PullRequest {
-  number title url isDraft reviewDecision mergeable updatedAt
+const FRAGMENT = `fragment PR on PullRequest {
+  number title url isDraft reviewDecision mergeable updatedAt headRefName
   author { login }
-  repository { nameWithOwner }
+  repository { nameWithOwner defaultBranchRef { name } }
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
 }`;
 
+/** Two searches per owner we can see, so every repository with an open pull request shows up. */
+function searchQuery(owners) {
+	const parts = owners
+		.map((qualifier, i) => `s${i}: search(query: "is:open is:pr archived:false ${qualifier}", type: ISSUE, first: 60) { nodes { ...PR } }`)
+		.join("\n  ");
+	return `query {
+  viewer { login }
+  ${parts}
+  asked: search(query: "is:open is:pr archived:false review-requested:@me", type: ISSUE, first: 60) { nodes { ...PR } }
+}
+${FRAGMENT}`;
+}
+
 const CONFIRM_MS = 8000;
 const MAX_DIFF_LINES = 4000;
+/** Alpha suffixes on the theme's green and red: readable, not faded. */
+const ADD_TINT = "52";
+const DEL_TINT = "52";
 
-/** Where a local clone of a repository usually sits, most specific first. */
-const CLONE_ROOTS = ["", "code", "src", "repos", "projects", "work", "git", "agent-office/mjmeijerman", "agent-office/bakmark"];
+/** Finds a local clone by name, in the home directory, a dotted one, or one folder down. */
+const FIND_CLONE = `
+for d in "$HOME/$1" "$HOME/.$1" "$HOME/code/$1" "$HOME/src/$1" "$HOME/repos/$1" "$HOME/projects/$1" "$HOME/work/$1" "$HOME/git/$1" "$HOME"/*/"$1" "$HOME"/.*/"$1"; do
+  [ -d "$d/.git" ] || continue
+  git -C "$d" remote get-url origin 2>/dev/null | grep -q "$2" && { echo "$d"; exit 0; }
+done
+`;
 
 async function gh(args, timeout) {
 	const first = await exec("gh", args, { timeout });
@@ -137,6 +151,7 @@ export default class PullRequests extends View {
 	init(_props, cx) {
 		this.handle = cx.focus_handle();
 		this.me = "";
+		this.listScroll = ScrollHandle.new();
 		this.prs = [];
 		this.selected = 0;
 		this.diff = { rows: [], width: 600, key: "", loading: false };
@@ -169,19 +184,36 @@ export default class PullRequests extends View {
 		return this.prs[Math.min(this.selected, this.prs.length - 1)];
 	}
 
-	/** Grouped for the left column: one block per repository, newest first. */
+	/** Grouped for the left column: one block per repository, review requests first. */
 	get groups() {
 		const byRepo = new Map();
 		for (const pr of this.prs) {
 			if (!byRepo.has(pr.repo)) byRepo.set(pr.repo, []);
 			byRepo.get(pr.repo).push(pr);
 		}
-		return [...byRepo.entries()].map(([repo, list]) => ({ repo, list })).sort((a, b) => a.repo.localeCompare(b.repo));
+		return [...byRepo.entries()]
+			.map(([repo, list]) => ({ repo, list, asked: list.some((pr) => pr.review) }))
+			.sort((a, b) => (a.asked === b.asked ? a.repo.localeCompare(b.repo) : a.asked ? -1 : 1));
+	}
+
+	/** The owners to search: me, and every organisation I am in. */
+	async owners() {
+		if (this.ownerList) return this.ownerList;
+		const result = await gh(["api", "graphql", "-f", 'query={ viewer { login organizations(first: 50) { nodes { login } } } }'], 30000);
+		if (result.code !== 0) return ["user:@me"];
+		try {
+			const data = JSON.parse(result.stdout).data.viewer;
+			const orgs = data.organizations.nodes.map((o) => `org:${o.login}`);
+			this.ownerList = [`user:${data.login}`, ...orgs];
+		} catch {
+			this.ownerList = ["user:@me"];
+		}
+		return this.ownerList;
 	}
 
 	refresh(cx, done) {
 		cx.spawn(async (cx) => {
-			const result = await gh(["api", "graphql", "-f", `query=${QUERY}`, "-F", "n=40"], 60000);
+			const result = await gh(["api", "graphql", "-f", `query=${searchQuery(await this.owners())}`], 60000);
 			if (result.code !== 0) {
 				this.error = (result.stderr || "gh api graphql failed").trim().split("\n")[0];
 			} else {
@@ -194,6 +226,8 @@ export default class PullRequests extends View {
 						number: n.number,
 						title: n.title,
 						url: n.url,
+						branch: n.headRefName,
+						base: n.repository.defaultBranchRef?.name ?? "",
 						author: n.author?.login ?? "",
 						review,
 						draft: n.isDraft,
@@ -201,18 +235,33 @@ export default class PullRequests extends View {
 						mergeable: n.mergeable,
 						checks: n.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? "",
 						updated: ago(n.updatedAt),
+						updatedMs: Date.parse(n.updatedAt) || 0,
 					});
-					const asked = data.search.nodes.filter((n) => n && n.number).map((n) => shape(n, true));
+					const asked = (data.asked?.nodes ?? []).filter((n) => n?.number).map((n) => shape(n, true));
 					const askedKeys = new Set(asked.map((pr) => pr.key));
-					const mine = data.viewer.pullRequests.nodes.map((n) => shape(n, false)).filter((pr) => !askedKeys.has(pr.key));
-					this.prs = [...asked.sort((a, b) => a.repo.localeCompare(b.repo)), ...mine.sort((a, b) => a.repo.localeCompare(b.repo))];
+					const seen = new Set(askedKeys);
+					const others = [];
+					for (const [alias, value] of Object.entries(data)) {
+						if (!alias.startsWith("s") || !value?.nodes) continue;
+						for (const n of value.nodes) {
+							if (!n?.number || seen.has(`${n.repository.nameWithOwner}#${n.number}`)) continue;
+							seen.add(`${n.repository.nameWithOwner}#${n.number}`);
+							others.push(shape(n, false));
+						}
+					}
+					const order = (a, b) => b.updatedMs - a.updatedMs;
+					this.prs = [...asked.sort(order), ...others.sort(order)];
 					this.error = "";
 				} catch (e) {
 					this.error = `could not read gh output: ${e}`;
 				}
 			}
 			this.loading = false;
-			if (this.selected >= this.prs.length) this.selected = Math.max(0, this.prs.length - 1);
+			// Keep the selection on the same pull request when the list is rebuilt.
+			const kept = this.current?.key;
+			const index = kept ? this.prs.findIndex((pr) => pr.key === kept) : -1;
+			this.selected = index >= 0 ? index : 0;
+			if (this.current) this.listScroll?.scroll_to_item(this.flatIndex(this.current.key));
 			cx.notify();
 			const current = this.current;
 			if (current && this.diff.key !== current.key) this.loadDiff(current, cx);
@@ -236,12 +285,26 @@ export default class PullRequests extends View {
 		});
 	}
 
+	/** The row's position in the flat list, counting repository headers. */
+	flatIndex(key) {
+		let index = 0;
+		for (const group of this.groups) {
+			index++;
+			for (const pr of group.list) {
+				if (pr.key === key) return index;
+				index++;
+			}
+		}
+		return 0;
+	}
+
 	select(key, cx) {
 		const index = this.prs.findIndex((pr) => pr.key === key);
 		if (index < 0) return;
 		this.selected = index;
 		this.pending = "";
 		this.reviewAction = "";
+		this.listScroll?.scroll_to_item(this.flatIndex(key));
 		this.loadDiff(this.prs[index], cx);
 	}
 
@@ -252,6 +315,7 @@ export default class PullRequests extends View {
 		this.selected = next;
 		this.pending = "";
 		this.reviewAction = "";
+		this.listScroll?.scroll_to_item(this.flatIndex(this.current.key));
 		this.loadDiff(this.current, cx);
 	}
 
@@ -275,16 +339,73 @@ export default class PullRequests extends View {
 		cx.notify();
 		cx.spawn(async (cx) => {
 			const result = await gh(["pr", "merge", String(pr.number), "-R", pr.repo, "--squash", "--delete-branch"], 120000);
-			this.busy = "";
 			if (result.code !== 0) {
+				this.busy = "";
 				this.error = `merge failed: ${(result.stderr || result.stdout || "").trim().split("\n")[0]}`;
 				cx.notify();
 				return;
 			}
-			this.notice = `merged ${pr.key}`;
+			const local = await this.syncLocal(pr);
+			this.busy = "";
+			this.notice = `merged ${pr.key} · ${local}`;
 			this.diff = { rows: [], width: 600, key: "", loading: false };
 			this.refresh(cx);
 		});
+	}
+
+	/**
+	 * After a merge: bring the local clone's trunk up to date and drop the merged
+	 * branch. Nothing is forced — a dirty tree, a branch with local commits and a
+	 * trunk that is not a fast-forward all change the sentence and nothing else.
+	 */
+	async syncLocal(pr) {
+		const folder = await this.folderFor(pr.repo);
+		if (!folder) return "no local clone to update";
+		const git = async (...args) => (await exec("git", ["-C", folder, ...args], { timeout: 90000 }).catch(() => null)) ?? { code: 1, stdout: "", stderr: "" };
+		const base = pr.base || "trunk";
+		const branch = pr.branch || "";
+		const said = [];
+		// Read before the prune: a squash merge leaves the branch unreachable from trunk,
+		// so "was anything of mine still only here" = where it pointed upstream.
+		const remoteTip = (await git("rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`)).stdout.trim();
+		const localTip = (await git("rev-parse", "--verify", "--quiet", `refs/heads/${branch}`)).stdout.trim();
+		const dirty = (await git("status", "--porcelain")).stdout.trim();
+		const current = (await git("rev-parse", "--abbrev-ref", "HEAD")).stdout.trim();
+		await git("fetch", "--prune", "origin");
+		let onBase = current === base;
+		if (current === branch && !dirty) onBase = (await git("checkout", base)).code === 0;
+		if (onBase) {
+			const pulled = await git("merge", "--ff-only", `origin/${base}`);
+			said.push(pulled.code === 0 ? `${base} updated` : `${base} not fast-forwarded`);
+		} else if (current !== branch) {
+			const behind = await git("merge-base", "--is-ancestor", base, `origin/${base}`);
+			if (behind.code !== 0) said.push(`${base} not a fast-forward, left alone`);
+			else if ((await git("branch", "-f", base, `origin/${base}`)).code === 0) said.push(`${base} updated (not checked out)`);
+			else said.push(`${base} could not be moved`);
+		} else said.push(`${base} not updated (still on ${branch})`);
+		if (!branch) return said.join(" · ");
+		if (branch === base) {
+			said.push(`${branch} is the trunk branch, nothing to delete`);
+			return said.join(" · ");
+		}
+		if (!localTip) {
+			said.push(`${branch} was not in the clone`);
+			return said.join(" · ");
+		}
+		if (current === branch && !onBase) {
+			said.push(`${branch} still checked out, kept`);
+			return said.join(" · ");
+		}
+		const remoteGone = (await git("rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`)).code !== 0;
+		const unpushed = remoteTip !== "" && localTip !== remoteTip;
+		if (!remoteGone && unpushed) {
+			said.push(`${branch} kept (has commits that were never pushed)`);
+			return said.join(" · ");
+		}
+		const flag = unpushed ? "-d" : "-D";
+		if ((await git("branch", flag, branch)).code === 0) said.push(`${branch} deleted`);
+		else said.push(`${branch} kept (local commits)`);
+		return said.join(" · ");
 	}
 
 	startReview(kind, cx) {
@@ -338,17 +459,9 @@ export default class PullRequests extends View {
 	async folderFor(repo) {
 		if (this.folders[repo] !== undefined) return this.folders[repo];
 		const name = repo.split("/")[1];
-		let found = null;
-		for (const root of CLONE_ROOTS) {
-			const candidate = root ? `${home()}/${root}/${name}` : `${home()}/${name}`;
-			const remote = await exec("git", ["-C", candidate, "remote", "get-url", "origin"], { timeout: 5000 }).catch(() => null);
-			if (remote && remote.code === 0 && remote.stdout.includes(repo)) {
-				found = candidate;
-				break;
-			}
-		}
-		this.folders[repo] = found;
-		return found;
+		const found = await exec("/bin/sh", ["-c", FIND_CLONE, "sh", name, repo], { timeout: 15000 }).catch(() => null);
+		this.folders[repo] = found?.code === 0 && found.stdout.trim() ? found.stdout.trim().split("\n")[0] : null;
+		return this.folders[repo];
 	}
 
 	/** The pi binary: the desktop session's PATH usually lacks wherever it was installed. */
@@ -483,15 +596,17 @@ export default class PullRequests extends View {
 			.w_full()
 			.h(20)
 			.flex_none()
-			.when(kind === "+", (e) => e.bg(t.ansi2 + "26"))
-			.when(kind === "-", (e) => e.bg(t.ansi1 + "26"))
+			.when(kind === "+", (e) => e.bg(t.ansi2 + ADD_TINT))
+			.when(kind === "-", (e) => e.bg(t.ansi1 + DEL_TINT))
 			.child(
-				div()
-					.w(14)
+				h_flex()
+					.w(16)
 					.flex_none()
-					.text_center()
-					.text_color(kind === "+" ? t.ansi2 : kind === "-" ? t.ansi1 : t.dim)
-					.child(kind === "+" ? "+" : kind === "-" ? "−" : " "),
+					.items_center()
+					.justify_center()
+					.when(kind === "+", (e) => e.bg(t.ansi2).child(div().text_color(t.background).child("+")))
+					.when(kind === "-", (e) => e.bg(t.ansi1).child(div().text_color(t.background).child("−")))
+					.when(kind !== "+" && kind !== "-", (e) => e.child(div().text_color(t.dim).child(" "))),
 			)
 			.child(div().w(38).flex_none().text_right().pr(6).text_color(t.dim).child(number === undefined ? "" : String(number)))
 			.child(div().pl(8).flex_1().min_w(0).truncate().child(text));
@@ -528,6 +643,7 @@ export default class PullRequests extends View {
 					.min_h(0)
 					.p(4)
 					.overflow_y_scrollbar()
+					.track_scroll(this.listScroll)
 					.children(
 						this.groups.flatMap((group) => [
 							div().px(8).pt(8).pb(2).text_size(10.5).text_color(t.dim).child(group.repo),
