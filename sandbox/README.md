@@ -26,7 +26,7 @@ go back to the bare binary; the raw `pi` stays on PATH either way.
 wrapper. `install.sh` symlinks it into `~/.local/bin`, so it is a program:
 
 ```
-pi-bare            # unsandboxed; the session shows ⚠ in its title
+pi-bare            # unsandboxed; the session title starts with "bare"
 ```
 
 Herdr's new-agent menu (`+`, top right) lists agents from
@@ -46,12 +46,18 @@ A sandbox you cannot see becomes a sandbox you stop trusting: once the wrapper
 exists, the contained session and the `PI_BARE=1` escape look identical. Every
 session therefore carries its own state:
 
-- the terminal title starts with `⛨` when the launcher ran and `⚠` when it did
-  not, with `· no net` appended for `--no-net` runs. Herdr shows that title as
-  the agent's name in its Agents list — per tab, not per pane: rows take the
-  title of the tab's lead agent, so two agents sharing a tab share one badge;
-- the `sandbox` status line says `⛨ sandboxed (bwrap)` or `⚠ bare: real home
-  and credentials` in that session's own footer, which is per session;
+- the terminal title starts with the word `sandbox` when the launcher ran and
+  `bare` when it did not, plus `no-net` for `--no-net` runs. Herdr shows that
+  title as the agent's name in its Agents list — per tab, not per pane: rows
+  take the title of the tab's lead agent, so two agents sharing a tab share one
+  tag, and a *named* tab shows its name instead of the title;
+- the `sandbox` status line says `sandboxed (bwrap)` or `bare: real home and
+  credentials` in that session's own footer, which is per session;
+
+Words and not glyphs, deliberately: Herdr's agents mod strips leading
+non-alphanumerics from a title (`clean()` in `mods/agents/main.js`), so the
+`⛨`/`⚠` prefixes this started with never reached the list, and a symbol the
+terminal font lacks would have been invisible in a plain terminal too;
 - `sandbox/pi-sandbox.sh` exports `PI_SANDBOX_MODE=bwrap` and
   `PI_SANDBOX_NET=on|off` inside the sandbox. An unset marker means "not
   sandboxed" — absence is the signal, not an unknown.

@@ -184,7 +184,7 @@ fi
 
 # pi-bare: the sanctioned way out, as a program a menu can launch. A default
 # with no exit gets bypassed silently; one row in Herdr's new-agent menu keeps
-# the choice visible, and the session starts with ⚠ in its title (blip 1).
+# the choice visible, and the session title says "bare" (blip 1).
 if [ -f "$HOME/.pi/scripts/pi-bare" ]; then
 	chmod +x "$HOME/.pi/scripts/pi-bare"
 	ln -sf "$HOME/.pi/scripts/pi-bare" "$PI_BIN_DIR/pi-bare"

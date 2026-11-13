@@ -1,19 +1,24 @@
 /**
  * sandbox-badge: the terminal title says whether this agent is contained.
  *
- * Radar basis: #1 agent sandboxing (Adopt), #95 Herdr (Assess).
+ * Radar basis: #1 agent sandboxing (Adopt), #95 Herdr (Assess), #42
+ * human-in-the-loop theater (Caution).
  *
- * Why the title: Herdr shows each agent's terminal title in the pane header and
- * in the Agents list, so the title is the one surface where "is this session
- * actually sandboxed?" is visible without clicking anything. A sandbox you
- * cannot see is a sandbox you stop trusting: after `install.sh` wraps `pi`,
- * every session looks identical, and the one that bypassed the wrapper with
- * `PI_BARE=1` looks exactly like the one that did not (blip 42's failure mode).
+ * Why the title: Herdr shows an agent's terminal title as its name in the
+ * Agents list, so the title is the one surface where "is this session actually
+ * sandboxed?" is visible without clicking anything. A sandbox you cannot see is
+ * a sandbox you stop trusting: after `install.sh` wraps `pi`, every session
+ * looks identical, and the one that bypassed the wrapper looks exactly like the
+ * one that did not (blip 42's failure mode).
  *
- *   ⛨  the session runs inside bubblewrap (PI_SANDBOX_MODE is set by pi-sandbox.sh)
- *   ⚠  the session runs with your real home directory, SSH keys and cloud creds
+ *   sandbox          the session runs inside bubblewrap (PI_SANDBOX_MODE is set)
+ *   sandbox no-net   ... and --no-net unshared the network too
+ *   bare             the session runs with your real home, keys and cloud creds
  *
- * `PI_SANDBOX_NET=off` appends "· no net" when the run also unshared the network.
+ * Words, not glyphs: Herdr's agents mod strips leading non-alphanumerics from a
+ * title (`clean()` in its main.js), so a `⛨` prefix was silently deleted before
+ * it reached the list — and a symbol the terminal font happens to lack would be
+ * invisible anyway. A word survives both.
  *
  * Nothing else: no timers, no network, no file reads. The env read is the
  * sandbox launcher's own claim, which is the only claim worth displaying — a
@@ -28,9 +33,9 @@ export const MODE_ENV = "PI_SANDBOX_MODE";
 export const NET_ENV = "PI_SANDBOX_NET";
 
 /** Contained. */
-export const SANDBOXED_GLYPH = "⛨";
+export const SANDBOXED_TAG = "sandbox";
 /** Not contained: the bare binary with the real home directory. */
-export const BARE_GLYPH = "⚠";
+export const BARE_TAG = "bare";
 
 export interface Containment {
 	/** `bwrap` when the launcher said so, null when it said nothing. */
@@ -49,9 +54,9 @@ export function readContainment(env: Record<string, string | undefined>): Contai
 	};
 }
 
-/** The single character that answers the question at a glance. */
-export function badgeGlyph(containment: Containment): string {
-	return containment.mode ? SANDBOXED_GLYPH : BARE_GLYPH;
+/** The single word that answers the question at a glance. */
+export function badgeTag(containment: Containment): string {
+	return containment.mode ? SANDBOXED_TAG : BARE_TAG;
 }
 
 /**
@@ -60,8 +65,8 @@ export function badgeGlyph(containment: Containment): string {
  * gets cut off is a marker that lies by omission.
  */
 export function badgeTitle(base: string, containment: Containment): string {
-	const net = containment.mode && containment.net === "off" ? " · no net" : "";
-	return `${badgeGlyph(containment)} ${base}${net}`;
+	const tag = containment.mode && containment.net === "off" ? `${SANDBOXED_TAG} no-net` : badgeTag(containment);
+	return `${tag} ${base}`;
 }
 
 /**
@@ -93,7 +98,7 @@ export default function sandboxBadge(pi: ExtensionAPI) {
 		try {
 			ctx.ui.setTitle(title);
 			if (typeof ctx.ui.setStatus === "function") {
-				ctx.ui.setStatus("sandbox", `${badgeGlyph(containment)} ${badgeStatus(containment)}`);
+				ctx.ui.setStatus("sandbox", badgeStatus(containment));
 			}
 		} catch {
 			// A title that cannot be set must never break the session.
