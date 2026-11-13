@@ -23,28 +23,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-
-/** Format token counts for compact display (mirrors pi's built-in footer). */
-function fmtTokens(count: number): string {
-	if (count < 1000) return `${count}`;
-	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-	if (count < 1000000) return `${Math.round(count / 1000)}k`;
-	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
-	return `${Math.round(count / 1000000)}M`;
-}
-
-/** Adaptive cost formatting: $0.0001 vs $1.234 vs $12.34. */
-function fmtCost(n: number): string {
-	if (!Number.isFinite(n) || n <= 0) return "$0";
-	if (n < 1) return `$${n.toFixed(4)}`;
-	if (n < 100) return `$${n.toFixed(3)}`;
-	return `$${n.toFixed(1)}`;
-}
-
-/** Fixed 2-decimal cost part for the breakdown, e.g. 0.12. */
-function fmtCostPart(n: number): string {
-	return Number.isFinite(n) && n > 0 ? n.toFixed(2) : "";
-}
+import { fmtCost, fmtCostPart, fmtTokens } from "./lib/usage-format.ts";
 
 /** Replace $HOME with ~ in a path (mirrors pi's footer formatting). */
 function fmtCwd(cwd: string): string {
@@ -130,31 +109,37 @@ function addUsage(totals: Totals, usage: Usage | undefined, model?: Model<any> |
 	totals.cacheWrite += usage.cacheWrite ?? 0;
 
 	// openai-completions-compatible APIs (e.g. DeepSeek) report zero cost.
-	// When the provider didn't price the request, compute the cost from the
-	// token usage: DeepSeek is priced per request timestamp (peak/off-peak),
-	// other models use their configured static rates.
-	let cost = usage.cost;
-	const reported =
-		cost && (cost.total || cost.input || cost.output || cost.cacheRead || cost.cacheWrite);
-
-	let effectiveModel = model;
-	let priced = false;
+	// DeepSeek: ALWAYS recompute — recorded cost may be stale (mutated by earlier
+	// extension versions) or provider-zero, and pricing depends on each request's
+	// UTC timestamp (peak/off-peak). Other models: trust provider-reported cost,
+	// else compute from their configured static rates.
+	let cost: Usage["cost"] | undefined;
 	if (model?.id?.toLowerCase().startsWith("deepseek")) {
-		effectiveModel = { ...model, cost: isPeakHour(timestampMs ?? Date.now()) ? DEEPSEEK_PEAK : DEEPSEEK_OFFPEAK };
-		priced = true;
-	} else {
-		const rates = model?.cost;
-		priced =
-			!!rates &&
-			(rates.input > 0 || rates.output > 0 || rates.cacheRead > 0 || rates.cacheWrite > 0);
-	}
-
-	if (!reported && priced && effectiveModel) {
 		try {
-			if (!usage.cost) usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-			cost = calculateCost(effectiveModel, usage);
+			const rates = isPeakHour(timestampMs ?? Date.now()) ? DEEPSEEK_PEAK : DEEPSEEK_OFFPEAK;
+			// clone usage so calculateCost's in-place mutation never taints the session
+			cost = calculateCost({ ...model, cost: rates }, { ...usage, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 		} catch {
-			cost = usage.cost;
+			cost = undefined;
+		}
+	} else {
+		const reported =
+			usage.cost &&
+			(usage.cost.total || usage.cost.input || usage.cost.output || usage.cost.cacheRead || usage.cost.cacheWrite);
+		if (reported) {
+			cost = usage.cost; // provider-reported (native providers e.g. Anthropic)
+		} else {
+			const rates = model?.cost;
+			const priced =
+				!!rates &&
+				(rates.input > 0 || rates.output > 0 || rates.cacheRead > 0 || rates.cacheWrite > 0);
+			if (priced && model) {
+				try {
+					cost = calculateCost(model, { ...usage, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
+				} catch {
+					cost = undefined;
+				}
+			}
 		}
 	}
 	totals.cost += cost?.total ?? 0;
@@ -222,7 +207,13 @@ export default function (pi: ExtensionAPI) {
 
 					const model = context.model;
 					let modelLabel = model ? model.id : "no-model";
-					if (model?.reasoning) modelLabel += ` • ${context.thinkingLevel ?? "off"}`;
+					// "off" alone said nothing about what was off. It is the
+					// thinking level: the model can reason, and that reasoning is
+					// turned off for this session.
+					if (model?.reasoning) {
+						const level = context.thinkingLevel ?? "off";
+						modelLabel += level === "off" ? " • thinking off" : ` • thinking ${level}`;
+					}
 
 					const line1 = padBetween(dim(leftParts.join(" ")), dim(modelLabel), width);
 
