@@ -29,8 +29,8 @@
 
 ## Herdr
 
-- Spawn delegated agents with `~/.pi/scripts/agent-pane.sh spawn <slug> <spec.md>`: creates a real herdr pane running interactive pi and sends the spec path. Never `hc run --bg` — a terminal without a pane cannot be tiled.
-- Close with `agent-pane.sh close <slug>`; `agent-pane.sh list` shows panes.
+- Spawn delegated agents with `~/.pi/scripts/agent-pane.sh spawn <slug> <spec.md>`: a hidden `hc` worker — no pane, no tab, focus does not move.
+- `show <slug>` borrows the pane you are in to watch it, `hide <slug>` puts it back, `close <slug>` ends it, `list` shows them.
 - `herdr-app shot /tmp/x.png` captures the window; use it to check layout instead of guessing.
 
 ## Machine / screens
