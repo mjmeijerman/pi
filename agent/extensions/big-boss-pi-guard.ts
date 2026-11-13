@@ -3,8 +3,18 @@
  *
  * When the session's cwd is inside the delegation workspace, the `write` and `edit`
  * tools are blocked, and so are the obvious shell writes (`echo x > …/state/y`,
- * `rm/mv/cp/tee/sed -i` on a path there). Everywhere else this extension does nothing,
- * so a worker with its own cwd keeps full write access.
+ * `rm/mv/cp/tee/sed -i` on a path there). Everywhere else this extension does nothing.
+ *
+ * A delegated worker is the exception inside the workspace: the runners export
+ * `PI_WORKER=1`, and a worker session writes normally. The boss delegates and the worker
+ * edits, so the guard enforces the rule on the session that is supposed to delegate, and
+ * the runners mark the session that is supposed to work.
+ *
+ * `reports/` and `specs/` are carved out for every session, worker or boss. The
+ * delegation flow owns those two directories — `delegate` writes the spec it hands a
+ * worker and reads the report the worker writes back — and the sandbox already mounts
+ * them read-write. Blocking them made a worker unable to file its own report. Everything
+ * else under the guarded roots, `state/` included, stays blocked for the boss session.
  *
  * During the rename both trees are guarded: `/home/mark/big-boss-pi` (the live workspace)
  * and `/home/mark/pi-master` (the rollback copy, which must not be edited either).
@@ -21,6 +31,12 @@ import { resolve } from "node:path";
 
 /** Both trees are delegation-only during the transition. */
 export const GUARDED_ROOTS = ["/home/mark/big-boss-pi", "/home/mark/pi-master"];
+
+/** The workspace whose delegation directories are carved out of the rule. */
+const DELEGATION_ROOT = "/home/mark/big-boss-pi";
+
+/** The two directories the delegation flow owns: the spec in, the report out. */
+export const DELEGATION_DIRS = ["reports", "specs"];
 
 /** Resolve symlinks when the path exists; fall back to a plain absolute path. */
 function real(path: string): string {
@@ -43,6 +59,18 @@ export function insideGuarded(path: string): boolean {
 /** True when the session's working directory is inside a guarded workspace. */
 export function cwdIsGuarded(cwd: string): boolean {
 	return insideGuarded(cwd);
+}
+
+/**
+ * True when `path` is a spec or a report in the live workspace: the one place inside a
+ * guarded root that every session may write, because the delegation flow writes it.
+ * Replacing a report is allowed too — reports are regenerated, not curated.
+ */
+export function delegationPath(path: string): boolean {
+	if (!path) return false;
+	const target = real(path);
+	const base = real(DELEGATION_ROOT);
+	return DELEGATION_DIRS.some((dir) => target === `${base}/${dir}` || target.startsWith(`${base}/${dir}/`));
 }
 
 /** Drop quoted text so a path inside `echo "…"` is still seen, but a mention in prose is not. */
@@ -110,7 +138,7 @@ function pathTokens(segment: string, cwd: string, bare: boolean, verb: string | 
 /**
  * Reason this shell command writes into a guarded workspace, or null.
  * Pure, so it can be unit tested without the pi runtime. `cwd` is the session's cwd,
- * used to resolve relative paths.
+ * used to resolve relative paths. Specs and reports are not writes for this purpose.
  */
 export function shellWriteReason(command: string, cwd: string): string | null {
 	for (const segment of segments(command)) {
@@ -119,17 +147,40 @@ export function shellWriteReason(command: string, cwd: string): string | null {
 		if (!verb && !redirected) continue;
 		for (const path of pathTokens(segment, cwd, Boolean(verb), verb)) {
 			if (!insideGuarded(path)) continue;
+			if (delegationPath(path)) continue;
 			return `${verb ? `\`${verb}\`` : "a shell redirect"} into ${path}`;
 		}
 	}
 	return null;
 }
 
+/**
+ * True when this session is a delegated worker.
+ *
+ * The boss delegates and the worker edits, so the guard enforces the rule on the session
+ * that is supposed to delegate and the runners mark the session that is supposed to work:
+ * `bin/pi-bare`, `bin/pi-sandboxed` and `bin/pi-nonet` export `PI_WORKER=1` into the
+ * environment the worker's pi process sees.
+ *
+ * Unset, empty, `0` and `false` all mean the boss session, which stays guarded.
+ */
+export function workerSession(env: Record<string, string | undefined>): boolean {
+	const value = env.PI_WORKER;
+	if (typeof value !== "string") return false;
+	const normalized = value.trim().toLowerCase();
+	return normalized !== "" && normalized !== "0" && normalized !== "false";
+}
+
 export default function bigBossPiGuard(pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
+		// A worker was delegated to work here; the guard is for the session that delegates.
+		if (workerSession(process.env)) return;
 		if (!cwdIsGuarded(ctx.cwd)) return;
 
 		if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
+			// The spec and the report are the delegation flow's own files.
+			const target = toPath(String((event.input as { path?: string }).path ?? ""), ctx.cwd);
+			if (delegationPath(target)) return;
 			ctx.ui.notify("big-boss-pi-guard: this workspace is for delegation, not direct edits", "warning");
 			return {
 				block: true,

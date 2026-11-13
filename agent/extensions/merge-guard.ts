@@ -7,6 +7,12 @@
  * git and gh stays available: branching, committing on a feature branch,
  * pushing it, opening a PR.
  *
+ * The branch rule judges the repository the command actually targets, not the
+ * session's cwd: `git -C /path commit` and `cd /path && git commit` are decided
+ * by the branch `/path` is on. A command that names no directory falls back to
+ * the session cwd, and a path that is not a repository or sits on a detached
+ * HEAD is never reported as a trunk commit.
+ *
  * Matching is per command segment, after heredoc bodies are dropped: a commit
  * message or a PR body that happens to mention `gh pr merge` or `--base trunk`
  * is text, not a landing.
@@ -21,6 +27,8 @@
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 
 const TRUNK = /\b(trunk|main|master)\b/;
 
@@ -49,14 +57,100 @@ function segments(command: string): string[] {
 		.filter(Boolean);
 }
 
+/** Global git flags that take an argument, so the next token is not the subcommand. */
+const GIT_FLAG_WITH_VALUE = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+
+/**
+ * The git subcommand a segment runs — `commit`, `push`, `log` — or null when the
+ * segment is not git at all. Global flags and their arguments are skipped, so
+ * `git -C /path commit` and `git -c user.name=x commit` both report `commit`.
+ */
+function gitSubcommand(segment: string): string | null {
+	const after = /\bgit\b(.*)$/.exec(segment)?.[1];
+	if (after === undefined) return null;
+	const tokens = after.trim().split(/\s+/).filter(Boolean);
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i];
+		if (GIT_FLAG_WITH_VALUE.has(token)) {
+			i++; // its value is not the subcommand
+			continue;
+		}
+		if (token.startsWith("-")) continue;
+		return token;
+	}
+	return null;
+}
+
 /** True when this `git push` leaves the current branch alone. */
 function pushesExplicitBranch(segment: string): boolean {
-	const rest = segment.split(/\bgit\s+push\b/)[1] ?? "";
+	const tokens = segment.split(/\s+/);
+	const at = tokens.indexOf("push");
 	// Positional arguments are the remote first, then the refspecs.
-	const positional = rest.split(/\s+/).filter((token) => token && !token.startsWith("-"));
+	const positional = tokens.slice(at + 1).filter((token) => token && !token.startsWith("-"));
 	const refspecs = positional.slice(1);
 	if (refspecs.length === 0) return false; // pushes wherever HEAD points
 	return refspecs.every((refspec) => refspec !== "HEAD" && !TRUNK.test(refspec));
+}
+
+/** One command segment, paired with the directory its git command runs in. */
+export interface GitSegment {
+	segment: string;
+	/** The directory named by `git -C PATH` or by an earlier `cd PATH`, or null. */
+	dir: string | null;
+}
+
+/**
+ * The command's segments, each with the directory it targets: `git -C PATH`
+ * names it inline, and a `cd PATH` earlier in the same command carries over,
+ * the way the shell would. A command that names no directory has `dir: null`.
+ */
+export function gitSegments(command: string): GitSegment[] {
+	const out: GitSegment[] = [];
+	let dir: string | null = null;
+	for (const segment of segments(command)) {
+		const cd = /^(?:cd|pushd)\s+(?:--\s+)?(\S+)/.exec(segment);
+		if (cd) {
+			dir = cd[1];
+			continue;
+		}
+		// `git -C PATH …` puts that one command in PATH; `-c` (lowercase) is a config flag.
+		const inline = /\bgit\b[^&;|]*?\s-C\s*(\S+)/.exec(segment);
+		out.push({ segment, dir: inline ? inline[1] : dir });
+	}
+	return out;
+}
+
+/** Absolute path for a directory token, expanding a leading `~`. */
+function absolutePath(dir: string, cwd: string | undefined): string {
+	const expanded = dir.startsWith("~") ? dir.replace(/^~/, homedir()) : dir;
+	if (expanded.startsWith("/")) return resolve(expanded);
+	return cwd ? resolve(cwd, expanded) : expanded;
+}
+
+/**
+ * How the guard learns the branch of the repository a command targets. Injected so
+ * the decision function stays pure, offline and deterministic under test.
+ *
+ * - a string: the branch of the session's own repository, used when the command
+ *   names no directory (a command that names one cannot be judged from it);
+ * - a function: resolve per target directory, `null` meaning the session's own;
+ * - a map: absolute directory to branch, the offline form the tests use.
+ */
+export type BranchLookup =
+	| string
+	| null
+	| ((dir: string | null) => string | null)
+	| Record<string, string | null>;
+
+/** The branch `lookup` gives for this target directory, or null when it cannot say. */
+function branchOf(lookup: BranchLookup, dir: string | null, namesDirectory: boolean): string | null {
+	if (typeof lookup === "function") return lookup(dir);
+	if (lookup === null || typeof lookup === "string") {
+		// A bare branch describes the session repository; it says nothing about `dir`.
+		return namesDirectory ? null : lookup;
+	}
+	const branch = lookup[dir ?? ""];
+	return typeof branch === "string" ? branch : null;
 }
 
 /**
@@ -69,7 +163,7 @@ export function mergeReason(command: string): string | null {
 	for (const segment of segments(command)) {
 		if (/\bgh\s+pr\s+merge\b/.test(segment)) return "gh pr merge";
 		if (/\bgh\s+api\b/.test(segment) && /\/(merge|merges)\b/.test(segment)) return "the pull-request merge API";
-		if (/\bgit\s+push\b/.test(segment) && TRUNK.test(segment) && !/--dry-run\b/.test(segment))
+		if (gitSubcommand(segment) === "push" && TRUNK.test(segment) && !/--dry-run\b/.test(segment))
 			return "a push to the trunk branch";
 	}
 	return null;
@@ -91,17 +185,28 @@ export function currentBranch(cwd: string): string | null {
 
 /**
  * Reason this command would put a commit straight onto trunk/main, or null.
- * `branch` comes from currentBranch, because the command text cannot say.
+ * `lookup` supplies the branch of the repository each git segment targets — the
+ * command text cannot say, and the session cwd is only the fallback. `cwd` is the
+ * session's own directory, used when the command names none.
  */
-export function trunkCommitReason(command: string, branch: string | null): string | null {
-	if (!branch || !TRUNK.test(branch)) return null;
+export function trunkCommitReason(
+	command: string,
+	lookup: BranchLookup,
+	cwd?: string,
+): string | null {
+	// `--help` prints usage and exits; it cannot commit anything.
 	if (/--help\b/.test(unquoted(command))) return null;
-	for (const segment of segments(command)) {
-		if (/\bgit\s+commit\b/.test(segment)) return `a commit on ${branch}`;
-		if (/\bgit\s+merge\b/.test(segment)) return `a merge on ${branch}`;
+	for (const { segment, dir } of gitSegments(command)) {
+		const sub = gitSubcommand(segment);
+		if (sub !== "commit" && sub !== "merge" && sub !== "push") continue;
+		const namesDirectory = dir !== null;
+		const target = namesDirectory ? absolutePath(dir, cwd) : cwd ? resolve(cwd) : null;
+		const branch = branchOf(lookup, target, namesDirectory);
+		if (!branch || !TRUNK.test(branch)) continue;
+		if (sub === "commit") return `a commit on ${branch}`;
+		if (sub === "merge") return `a merge on ${branch}`;
 		// A bare `git push` on trunk pushes trunk, even without the word in it.
-		if (/\bgit\s+push\b/.test(segment) && !/--dry-run\b/.test(segment) && !pushesExplicitBranch(segment))
-			return `a push from ${branch}`;
+		if (!/--dry-run\b/.test(segment) && !pushesExplicitBranch(segment)) return `a push from ${branch}`;
 	}
 	return null;
 }
@@ -116,8 +221,10 @@ export default function mergeGuard(pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		if (!isToolCallEventType("bash", event)) return;
+		// The branch of the repository this command actually touches, not the session's.
+		const branches: BranchLookup = (dir) => currentBranch(dir ?? ctx.cwd);
 		const reason =
-			mergeReason(event.input.command) ?? trunkCommitReason(event.input.command, currentBranch(ctx.cwd));
+			mergeReason(event.input.command) ?? trunkCommitReason(event.input.command, branches, ctx.cwd);
 		if (!reason) return;
 		if (allowedOnce) {
 			allowedOnce = false;
