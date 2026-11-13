@@ -2,7 +2,7 @@
 
 Owner: Mark Meijerman (`mjmeijerman`)
 Review: 2027-02-15 — quarterly, see §6 below.
-Re-measured 2026-11-13: 278 extension tests (40 suites), 8 skills, `agent/AGENTS.md`
+Re-measured 2026-11-13: 279 extension tests (40 suites), 8 skills, `agent/AGENTS.md`
 3007 bytes, 62 entries in `~/.pi/agent/suggestions.jsonl`.
 
 Audit date: 2026-11-13. Source: `werken-met-ai.pdf` (Radar Vol. 35, November 2026).
@@ -53,7 +53,7 @@ Status values:
 | 71. Act | missing | — | CI only runs on GitHub: `pr-tier.yml` and `test.yml` cannot be executed before a push, so a failing gate costs a round trip. |
 | 73. ast-grep | missing | — | Structural search is `rg` and regex; conventions that are syntactic (import order, hook shape) are checked by hand. |
 | 74. Beads | missing | — | Task state lives in `/tmp` spec files and PR bodies; nothing survives the session as a queryable backlog. |
-| 84. Pi | done | This repository: pi 1.5.2, 13 extensions, 278 tests over 40 suites, `/home/mark/.pi` | Pinned to 1.5.2; the extension API is exercised but an upgrade is untested until it happens. |
+| 84. Pi | done | This repository: pi 1.5.2, 13 extensions, 279 tests over 40 suites, `/home/mark/.pi` | Pinned to 1.5.2; the extension API is exercised but an upgrade is untested until it happens. |
 | 23. Unattended overnight agentic builds | missing | — | Blocked by the same three prerequisites the blip names: default sandboxing, spec-up-front, sensors that validate without line-by-line review. |
 | 110. Promptfoo | missing | — | No eval or red-team gate on prompts, skills or hooks: the deterministic half is tested, the half that shapes every turn is not. Ranked in §5. |
 
@@ -67,7 +67,7 @@ Status values:
 | 26. Context profiling | done | `scripts/session-report.mjs` (cost, cache hit, context fill per project) | Profiling is after-the-fact; no per-turn attribution. |
 | 27. Enterprise harness | n/a | — | One user; the "harness" is this repo. |
 | 28. Foundation models for structured data | n/a | — | No tabular or warehouse workload; `local_llm` `extract` pulls fields out of prose, which is not the modelling this blip describes. |
-| 29. Harness quality evaluation | partial | 278 tests in 40 suites (`cd agent && node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh` | Zero evaluation of skills, `AGENTS.md` and hooks — the nondeterministic half. |
+| 29. Harness quality evaluation | partial | 279 tests in 40 suites (`cd agent && node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh` | Zero evaluation of skills, `AGENTS.md` and hooks — the nondeterministic half. |
 | 30. Local coding models | done | `agent/extensions/local-llm.ts`, `/local` health check | Route is manual, chosen by the model's own judgement. |
 | 31. MITRE ATLAS | missing | — | No AI-threat taxonomy in use; threat modelling of the harness never done. |
 | 32. Production-aware coding agents | n/a | — | Nothing in production; project work is local. |
@@ -115,7 +115,7 @@ Status values:
    conditions the tests do not distinguish. Fix: read `agent/reports/stryker/mutation.html`,
    kill the survivors that map to a real branch. Cost: 2 hours.
 3. **Skills and `AGENTS.md` are unevaluated** (blip 29, partial). The deterministic half is
-   tested (278); the half that shapes every turn is not. Fix: 10 fixed prompts, one monthly
+   tested (279); the half that shapes every turn is not. Fix: 10 fixed prompts, one monthly
    run, judge against last month's answers. Cost: 2 hours to set up.
 4. **Actions pinned but not linted** (blip 103, partial). SHAs replace tags and
    `persist-credentials: false` is set, but zizmor runs only when someone remembers it.
