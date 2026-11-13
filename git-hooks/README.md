@@ -7,7 +7,7 @@ Mechanical protection so secrets never end up in git, in any repo you commit to.
 - `pre-commit`: scans **staged** files (names and content) for secrets and blocks the commit (max 10 findings reported, as `pattern name` + `file:line` — never the value).
 - `commit-msg`: scans commit messages for secret values.
 - `pre-push`: scans every **pushed commit** (file contents, filenames, commit messages) — the last gate before secrets leave your machine. Catches `--no-verify`/`-f` commits, merges, cherry-picks.
-- `pre-push` also **chains to the repo's own hook**, which runs the `git-vuln-scan` agent vulnerability scan (GitHub pushes) from the git template.
+- `pre-push` also **chains to the repo's own hook** (e.g. husky, a team hook), if one exists. The `git-vuln-scan` agent scan was removed from the pre-push path.
 - Every other hook name is a thin wrapper that **chains to your repo's own `.git/hooks/<name>`**, so existing hooks (husky, pre-commit framework, …) keep working.
 - `~/.pi/gitignore_global` (via `core.excludesFile`) keeps `.env`, `*.pem`, `*.key`, credentials, etc. from being staged with `git add .`.
 
@@ -18,7 +18,7 @@ Mechanical protection so secrets never end up in git, in any repo you commit to.
 <clone>/install.sh
 ```
 
-Installs everything: agent skills/extensions/settings, global hooks, global gitignore, `git-vuln-scan`, and the git templates. Idempotent — re-run any time.
+Installs everything: agent skills/extensions/settings, global hooks, global gitignore, and the git templates. Idempotent — re-run any time.
 
 ## Install / undo
 
@@ -43,6 +43,6 @@ rm -rf ~/.pi/git-hooks ~/.pi/gitignore_global ~/.git-templates ~/.local/bin/git-
 ## Notes
 
 - Repos that set their own `core.hooksPath` (e.g. husky) bypass the global wrappers.
-- `git-vuln-scan` runs on GitHub pushes only (agent-based CVE/vuln review); secret scans run on every push.
+- Secret scans still run on every push. The agent-based `git-vuln-scan` is no longer wired into any hook; run `git-vuln-scan` by hand when you want it.
 - If a secret was ever committed and pushed, **rotation is required** — history is permanent.
 - The pre-commit hook scans only staged content. Secrets in untracked files are covered by the global gitignore.
