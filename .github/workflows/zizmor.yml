@@ -1,0 +1,48 @@
+# Workflow security lint: actions pinned by SHA, no credential bleed, no injection.
+#
+# Radar basis: #103 GitHub Actions supply chain (Trial). Blip 103 was "partial":
+# every action is pinned by full SHA and sets `persist-credentials: false`, but
+# nothing enforced that — a copy-pasted `@v4` would land green. The measurement
+# is this job: red on any finding, so the pinning rule is a check and not a habit.
+#
+# `--pedantic` promotes the help-level audits (undocumented permissions, missing
+# concurrency, ad-hoc package installs) to findings, which is the only way the
+# baseline stays at zero instead of drifting back up. `--no-progress` keeps the
+# CI log plain; zizmor's own exit code is the gate (1 = findings).
+name: zizmor
+
+on:
+  pull_request:
+  push:
+    branches: [trunk]
+  schedule:
+    - cron: "23 6 * * 1"  # Mondays 06:23 UTC, after harness-check
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zizmor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zizmor:
+    name: zizmor --pedantic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          # The lint reads the commit, not the API, and the token is of no use
+          # to it: nothing gets persisted into .git/config.
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          # The zizmor version is pinned below, not by the action's resolution.
+          enable-cache: false
+
+      - name: zizmor (pinned, --pedantic)
+        # Pinned by version, not by "latest": a new audit must not turn the gate
+        # red overnight. Bumping this line is a deliberate, reviewed change.
+        run: uvx --from zizmor==1.32.0 zizmor --pedantic --no-progress .
