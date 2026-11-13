@@ -1,13 +1,16 @@
 # pi session hygiene tools
 
-Two scripts for answering "where did my tokens and disk go?" and "what can I
-throw away?". Both live here, use only core modules / coreutils, and neither
-deletes anything.
+Scripts for answering "where did my tokens and disk go?", "what can I
+throw away?" and "is the harness still inside its own budgets?". They use only
+core modules / coreutils, and none of them deletes anything.
 
 | File | What it does |
 | --- | --- |
 | `session-report.mjs` | Read-only report: tokens, cost, cache hit rate, context fill, disk per project + most expensive sessions + stale sessions. |
 | `prune-sessions.sh` | Moves old session logs into `./archive/`. Dry-run unless `--apply`. |
+| `harness-check.sh` | Read-only `PASS`/`WARN`/`FAIL` checks for the playbook's rules: budgets, install state, ownership. |
+| `harness-baseline.txt` | The ratchet `harness-check.sh` reads: known violations report `WARN`, not `FAIL`. |
+| `pisandbox` | `~/.pi/sandbox/pi-sandbox.sh` without typing the path. |
 | `archive/` | Created on first `--apply`. Holds moved sessions, same project layout. |
 
 Data source: `~/.pi/agent/sessions/<slugified-cwd>/<timestamp>_<uuid>.jsonl`.
@@ -115,6 +118,69 @@ mv ~/.pi/scripts/archive/--home-mark-projects-ACE--/<name>.jsonl \
 ```
 
 pi will list it again on the next `--resume` in that directory.
+
+## harness-check.sh
+
+Anything a script can check must not be a paragraph in `AGENTS.md` (blip 36).
+`harness-check.sh` is that script for the harness itself: the playbook's hard
+budgets, plus the install state they depend on. Read-only — it never writes and
+never touches the network.
+
+```bash
+bash scripts/harness-check.sh            # everything, one line per check
+bash scripts/harness-check.sh --quick    # budgets only, <1 s (the git hook runs this)
+bash scripts/harness-check.sh --json     # one JSON document, same exit code
+bash scripts/harness-check.sh --root DIR # check another checkout
+```
+
+Exit 0 when nothing `FAIL`s, 1 on any `FAIL`. What it checks:
+
+| Check | Rule |
+| --- | --- |
+| `agents-md-size` | `agent/AGENTS.md` ≤ 3072 B — it loads on every turn. |
+| `skill-lines` | every `agent/skills/*/SKILL.md` ≤ 150 lines. |
+| `doc-metadata` | every `docs/*.md` has `Owner:` and `Review:` (blip 39). |
+| `review-freshness` | no doc or skill past its own `Review:` date. |
+| `extension-radar-basis` | every `agent/extensions/*.ts` header cites its Radar blips. |
+| `npm-min-release-age` | npm refuses versions younger than 1440 min (blip 99). |
+| `git-hooks-path` | global `core.hooksPath` is `~/.pi/git-hooks`. |
+| `git-hooks-templates` | `~/.git-templates/hooks` is populated (the `git init` layer). |
+
+Two hooks call this: the global pre-commit wrapper runs `harness-pre-commit`
+(`--quick`) before the secret scan, only when a budgeted file is staged; CI runs
+the full check on every PR and weekly on a schedule. The schedule is the
+automated version of "delete a rule monthly / re-audit quarterly" — a check that
+nobody runs is a paragraph with extra steps.
+
+## harness-baseline.txt
+
+One `path:check` per line, `#` starts a comment. A violation listed there is
+reported `WARN` instead of `FAIL`, so pre-existing debt does not block new work
+while new violations still fail. It is a ratchet: **lines only ever come out.**
+Fixing the violation means deleting its line, not adding a rule to `AGENTS.md`.
+
+```text
+# 223 lines, over the 150-line skill budget. Delete when the split lands.
+agent/skills/achterhoek-agenda/SKILL.md:skill-lines
+```
+
+Do not add a line to make a new violation pass. Fix it, delete the rule, or
+delete the file.
+
+## pisandbox
+
+Thin `exec` wrapper around `~/.pi/sandbox/pi-sandbox.sh`, symlinked to
+`~/.local/bin/pisandbox` by `install.sh`. An opt-in safety measure behind a
+40-character path is one that never gets used (blip 1, Adopt).
+
+```bash
+pisandbox -- pi                     # no SSH keys, no cloud creds, network on
+pisandbox --no-net -- pi            # also no network at all
+pisandbox --rw ~/scratch -- pi      # one extra writable directory
+```
+
+Every argument is passed through untouched; `PI_SANDBOX` overrides the path to
+the underlying script. `pisandbox --help` prints the three forms above.
 
 ## When to prune — recommendation
 

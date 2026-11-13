@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# ============================================================================
+# harness-pre-commit — no bloated AGENTS.md, no oversized skill, ever again.
+#
+# Radar basis: #29 harness quality evaluation, #36 agent instruction bloat.
+#
+# Runs `scripts/harness-check.sh --quick` (budget checks only, <1 s) when the
+# staged diff touches a budgeted file: agent/AGENTS.md or a skill's SKILL.md.
+# Anything else commits without the check, so it cannot become a tax on every
+# commit in every repo.
+#
+# Wired in by the generated pre-commit wrapper in git-hooks/install-hooks.sh:
+# this runs first, then the secret scan. A non-zero exit here aborts the commit.
+#
+# Environment:
+#   PI_HARNESS_CHECK   path to harness-check.sh (default ~/.pi/scripts/harness-check.sh)
+# ============================================================================
+set -uo pipefail
+
+CHECK="${PI_HARNESS_CHECK:-$HOME/.pi/scripts/harness-check.sh}"
+[ -x "$CHECK" ] || exit 0
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+[ -n "$ROOT" ] || exit 0
+# Not a harness checkout: nothing budgeted to check here.
+[ -f "$ROOT/agent/AGENTS.md" ] || exit 0
+
+STAGED="$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)"
+[ -n "$STAGED" ] || exit 0
+printf '%s\n' "$STAGED" | grep -qE '^(agent/AGENTS\.md|agent/skills/[^/]+/SKILL\.md)$' || exit 0
+
+exec bash "$CHECK" --quick --root "$ROOT"

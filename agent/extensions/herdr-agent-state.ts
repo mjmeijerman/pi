@@ -3,6 +3,7 @@
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=pi
 // HERDR_INTEGRATION_VERSION=9
+// Radar basis: #95 Herdr.
 // @ts-nocheck
 
 import net from "node:net";

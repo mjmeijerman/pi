@@ -156,6 +156,18 @@ else
 	echo "!! git-vuln-scan not found — skipping"
 fi
 
+# pisandbox: the sandbox without the absolute path (Radar blip 1, Adopt). An
+# opt-in safety measure that costs a 40-character path is one nobody uses.
+PI_BIN_DIR="$HOME/.local/bin"
+mkdir -p "$PI_BIN_DIR"
+if [ -f "$HOME/.pi/scripts/pisandbox" ]; then
+	chmod +x "$HOME/.pi/scripts/pisandbox"
+	ln -sf "$HOME/.pi/scripts/pisandbox" "$PI_BIN_DIR/pisandbox"
+	echo "== pisandbox -> $PI_BIN_DIR/pisandbox"
+else
+	echo "!! scripts/pisandbox not found — skipping"
+fi
+
 if [ -d "$SOURCE_DIR/git-templates" ] && [ "$SOURCE_DIR/git-templates" != "$HOME/.git-templates" ]; then
 	rm -rf "$HOME/.git-templates"
 	cp -R "$SOURCE_DIR/git-templates" "$HOME/.git-templates"
@@ -174,5 +186,7 @@ echo "   git config --global --get core.hooksPath            # prints $GIT_HOOKS
 echo "   git config --global --get core.excludesFile         # global gitignore"
 echo "   git config --global --get init.templateDir          # pre-push vuln scan"
 echo "   git-vuln-scan                                       # should print usage help"
+echo "   pisandbox --help                                    # sandbox one-liner"
+echo "   bash scripts/harness-check.sh                        # harness budgets as checks"
 echo
 echo "Reminder if you ever forget the hooks: just run this script again."

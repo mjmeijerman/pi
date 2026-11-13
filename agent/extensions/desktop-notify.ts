@@ -1,4 +1,7 @@
 // Desktop notification when Pi finishes a task or needs your input.
+//
+// Radar basis: #95 Herdr (attention states), #17 risk-tiered human oversight.
+//
 // Uses the freedesktop notification service over D-Bus via `gdbus`
 // (works with GNOME Shell, which has no notify-send installed here).
 

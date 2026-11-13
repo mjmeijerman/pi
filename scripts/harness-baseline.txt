@@ -1,0 +1,9 @@
+# Baseline for scripts/harness-check.sh — a ratchet that can only shrink.
+#
+# One `path:check` per line. A violation listed here reports WARN instead of
+# FAIL, so pre-existing debt does not block new work while new violations still
+# fail. Never add a line to make a new violation pass: fix it, or delete the
+# rule it enforces (blip 36). Delete the line when the violation is gone.
+#
+# An entry that no longer violates anything is printed as `WARN stale-baseline`
+# and does not fail the run: stale means the ratchet should be tightened now.

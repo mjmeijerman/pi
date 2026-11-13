@@ -1,6 +1,8 @@
 /**
  * Usage footer — a rich, multi-line footer with live session usage stats.
  *
+ * Radar basis: #26 context profiling, #41 throughput as a productivity metric.
+ *
  * Replaces pi's default footer in interactive (TUI) sessions with a layout
  * that uses the available width:
  *

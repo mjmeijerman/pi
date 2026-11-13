@@ -1,6 +1,9 @@
 /**
  * Secret Guard — always-on protection for secrets.
  *
+ * Radar basis: #20 stateful guardrails, #22 toxic flow analysis for AI,
+ * #1 agent sandboxing (Adopt).
+ *
  * Layers:
  *  1. input       — redacts secret values from user input before they reach the model
  *  2. tool_call   — blocks reading secret files, commands carrying secret values,

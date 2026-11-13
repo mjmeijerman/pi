@@ -281,6 +281,16 @@ else
 	hash -r 2>/dev/null || true # a just-installed pi may not be on PATH yet
 fi
 
+# Blip 99 (Safe Chain): a malicious npm version is normally installable for
+# hours. This is the one-line mitigation, so it belongs in the config step and
+# not in a paragraph telling the user to remember it.
+if have npm; then
+	run npm config set min-release-age 2880
+	note "npm min-release-age: $(npm config get min-release-age 2>/dev/null || echo unset)"
+else
+	warn "npm not found — min-release-age not set (blip 99)"
+fi
+
 # --------------------------------------------------------------- 2. secrets --
 
 step "provider API key"
@@ -459,7 +469,13 @@ if [ "$DO_VERIFY" = 1 ]; then
 	note "excludesFile: $(git config --global --get core.excludesFile || echo MISSING)"
 	note "templateDir : $(git config --global --get init.templateDir || echo MISSING)"
 	note "vuln-scan   : $(command -v git-vuln-scan || echo MISSING)"
+	note "pisandbox   : $(command -v pisandbox || echo MISSING)"
 	note "sandbox     : $PI_HOME/sandbox/pi-sandbox.sh $([ -x "$PI_HOME/sandbox/pi-sandbox.sh" ] && echo present || echo MISSING)"
+	# Report-only: the harness check is a ratchet, not a gate on the install.
+	if [ -x "$PI_HOME/scripts/harness-check.sh" ]; then
+		HARNESS_OUT=$(bash "$PI_HOME/scripts/harness-check.sh" 2>&1 || true)
+		note "harness-chk : $(printf '%s\n' "$HARNESS_OUT" | grep -E '^[0-9]+ passed' || echo 'could not run')"
+	fi
 	note "scripts     : $PI_HOME/scripts/agent-pane.sh $([ -x "$PI_HOME/scripts/agent-pane.sh" ] && echo present || echo MISSING)"
 	note "api key     : $KEY_FILE $([ -s "$KEY_FILE" ] && echo present || echo MISSING)"
 	if have pi; then
