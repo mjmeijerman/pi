@@ -80,11 +80,29 @@ describe("merge-guard: decision", () => {
 		`echo "gh pr merge 4"`,
 		`git commit -m 'never git push origin trunk'`,
 		"npm test",
+		// The regression that blocked a real push: the PR body below is stdin.
+		["git push -u origin feat/x && gh pr create --base trunk --body-file - <<'EOF'",
+			"## What",
+			"merges with `gh pr merge` once approved, base trunk",
+			"EOF"].join("\n"),
+		["git commit -F - <<'EOF'", "feat(x): y", "", "gh pr merge 3", "trunk", "EOF"].join("\n"),
+		["cat <<EOF", "git push origin trunk", "EOF"].join("\n"),
 	];
 
 	for (const command of allowed) {
 		test(`allows \`${command}\``, () => {
 			assert.equal(mergeReason(command), null, `unexpected block: ${command}`);
+		});
+	}
+	const blockedCommands = [
+		["git status && git push origin trunk", "trunk"],
+		[["git status", "git push origin main"].join("\n"), "trunk"],
+		["gh pr view 4 ; gh pr merge 4", "gh pr merge"],
+	];
+
+	for (const [command, why] of blockedCommands) {
+		test(`blocks a later segment: \`${command.replace(/\n/g, " ; ")}\` (${why})`, () => {
+			assert.ok(mergeReason(command), `expected a reason for: ${command}`);
 		});
 	}
 });
@@ -113,6 +131,23 @@ describe("merge-guard: branch rules", () => {
 	test("a commit on a feature branch is free", () => {
 		assert.equal(trunkCommitReason('git commit -m "x"', "feat/x"), null);
 		assert.equal(trunkCommitReason("git merge trunk", "feat/x"), null);
+	});
+
+	test("a push with no refspec on trunk pushes trunk", () => {
+		assert.match(trunkCommitReason("git push", "trunk"), /push from trunk/);
+		assert.match(trunkCommitReason("git push -u origin", "main"), /push from main/);
+		assert.match(trunkCommitReason("git push origin HEAD", "master"), /push from master/);
+	});
+
+	test("pushing another branch while on trunk is free", () => {
+		assert.equal(trunkCommitReason("git push -u origin feat/x", "trunk"), null);
+		assert.equal(trunkCommitReason("git push origin HEAD:refs/heads/feat/x", "main"), null);
+		assert.equal(trunkCommitReason("git push --dry-run origin trunk", "trunk"), null);
+	});
+
+	test("a heredoc body cannot smuggle a commit onto trunk", () => {
+		const command = ["git status", "cat <<'EOF'", 'git commit -m "x"', "EOF"].join("\n");
+		assert.equal(trunkCommitReason(command, "trunk"), null);
 	});
 
 	test("outside a repository nothing is blocked by the branch rule", () => {
