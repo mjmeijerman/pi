@@ -3,12 +3,12 @@
 Owner: Mark Meijerman (`mjmeijerman`)
 Review: 2027-02-15 — quarterly, see §6 below.
 Re-measured 2026-11-13: 260 extension tests (35 suites), 8 skills, `agent/AGENTS.md`
-3012 bytes, 51 entries in `~/.pi/agent/suggestions.jsonl`.
+3007 bytes, 59 entries in `~/.pi/agent/suggestions.jsonl`.
 
 Audit date: 2026-11-13. Source: `werken-met-ai.pdf` (Radar Vol. 35, November 2026).
-Scope: the 56 rows below, out of the 117 in `docs/radar-blips.tsv` — every Technique
+Scope: the 63 rows below, out of the 117 in `docs/radar-blips.tsv` — every Technique
 (1–45), the two Platforms that touch a coding harness (57, 58), the Tools a one-person
-harness could use (68–103), and Promptfoo (110). The other 61 rows are Kubernetes, model
+harness could use (68–103), and Promptfoo (110). The other 54 rows are Kubernetes, model
 serving, storage, networking, data contracts, Bayesian optimization and other
 infrastructure, out of scope for a single-developer harness.
 
@@ -23,7 +23,7 @@ Status values:
 
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
-| 1. Agent sandboxing | done | `install.sh` §4b installs a managed `pi()` shell function into `~/.bashrc` and `~/.zshrc` → `scripts/pisandbox` → `sandbox/pi-sandbox.sh` (bubblewrap); `PI_BARE=1 pi` bypasses, `pisandbox --no-net -- pi` adds isolation. `scripts/pi-bare` (symlinked into `~/.local/bin`, listed as "Pi (bare)" in Herdr's new-agent menu via `sandbox/herdr-programs.json`) is the sanctioned exit, so the choice is made before the session starts. The launcher's `PI_SANDBOX_MODE`/`PI_SANDBOX_NET` markers show as the words `sandbox`/`bare` in front of the title (`agent/extensions/sandbox-badge.ts`) and in the footer status, so a contained session and a bare one are told apart at a glance (blip 42) | The wrapper is a shell function, so a launcher that skips the rc file (`env -i`, an IDE, cron) still gets the bare binary. Fallback prints one stderr line when `bwrap` is absent. |
+| 1. Agent sandboxing | done | `install.sh` §4b installs a managed `pi()` shell function into `~/.bashrc` and `~/.zshrc` → `scripts/pisandbox` → `sandbox/pi-sandbox.sh` (bubblewrap); `PI_BARE=1 pi` bypasses, `pisandbox --no-net -- pi` adds isolation. `scripts/pi-bare` (symlinked into `~/.local/bin`, listed as "Pi (bare)" in Herdr's new-agent menu via `sandbox/herdr-programs.json`) is the sanctioned exit, so the choice is made before the session starts. `sandbox/pi-sandbox.sh` mounts `~/.local/bin`, `~/.local/share/pipx` and `~/.local/share/uv` read-only so `gh`, `uvx`, `gitleaks`, `semgrep`, `trivy` and `hc` exist inside, while `~/.config/gh` and the other credential directories stay masked — `gh` there reports "not logged in", which is the point. The launcher's `PI_SANDBOX_MODE`/`PI_SANDBOX_NET` markers show as the words `sandbox`/`bare` in front of the title (`agent/extensions/sandbox-badge.ts`) and in the footer status, so a contained session and a bare one are told apart at a glance (blip 42) | The wrapper is a shell function, so a launcher that skips the rc file (`env -i`, an IDE, cron) still gets the bare binary. Fallback prints one stderr line when `bwrap` is absent. |
 | 2. Mutation testing | partial | `agent/stryker.conf.json`, `.github/workflows/test.yml` (weekly `npx stryker run`), `make mutate` | Score never recorded — run `make mutate`, paste the score here. `agent/node_modules/@stryker-mutator` is not installed; `cd agent && npm install` first. |
 | 3. Path-to-production mapping | partial | `.github/workflows/{test,secret-scan}.yml`, PR-per-change | The path exists in CI config, not as a reviewed map. Review capacity per day is unmeasured. |
 | 4. Post-quantum cryptography | n/a | — | Nothing here holds a long-lived key: model traffic terminates at the provider's TLS, and the only secrets in scope are API tokens rotated by the providers. Revisit if the harness ever stores keys it must keep for years. |
@@ -50,6 +50,10 @@ Status values:
 | 20. Stateful guardrails | partial | `agent/extensions/secret-guard.ts` holds session state (`allow`/`block`) | Guards single actions, not conversation-level policy over turns. |
 | 21. Subagents for better context management | missing | Parallel *sessions* instead (`scripts/agent-pane.sh` + Herdr) | Pi deliberately ships no subagents; exploration still lands in the main context. |
 | 22. Toxic flow analysis for AI | partial | `agent/extensions/secret-guard.ts` (cites blip 22) | Guards a single value leaving a tool call, not multi-step flows where each step is harmless alone. |
+| 71. Act | missing | — | CI only runs on GitHub: `pr-tier.yml` and `test.yml` cannot be executed before a push, so a failing gate costs a round trip. |
+| 73. ast-grep | missing | — | Structural search is `rg` and regex; conventions that are syntactic (import order, hook shape) are checked by hand. |
+| 74. Beads | missing | — | Task state lives in `/tmp` spec files and PR bodies; nothing survives the session as a queryable backlog. |
+| 84. Pi | done | This repository: pi 1.5.2, 12 extensions, 260 tests over 35 suites, `/home/mark/.pi` | Pinned to 1.5.2; the extension API is exercised but an upgrade is untested until it happens. |
 | 23. Unattended overnight agentic builds | missing | — | Blocked by the same three prerequisites the blip names: default sandboxing, spec-up-front, sensors that validate without line-by-line review. |
 | 110. Promptfoo | missing | — | No eval or red-team gate on prompts, skills or hooks: the deterministic half is tested, the half that shapes every turn is not. Ranked in §5. |
 
@@ -63,7 +67,7 @@ Status values:
 | 26. Context profiling | done | `scripts/session-report.mjs` (cost, cache hit, context fill per project) | Profiling is after-the-fact; no per-turn attribution. |
 | 27. Enterprise harness | n/a | — | One user; the "harness" is this repo. |
 | 28. Foundation models for structured data | n/a | — | No tabular or warehouse workload; `local_llm` `extract` pulls fields out of prose, which is not the modelling this blip describes. |
-| 29. Harness quality evaluation | partial | 244 tests in 31 suites (`cd agent && node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh` | Zero evaluation of skills, `AGENTS.md` and hooks — the nondeterministic half. |
+| 29. Harness quality evaluation | partial | 260 tests in 35 suites (`cd agent && node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh` | Zero evaluation of skills, `AGENTS.md` and hooks — the nondeterministic half. |
 | 30. Local coding models | done | `agent/extensions/local-llm.ts`, `/local` health check | Route is manual, chosen by the model's own judgement. |
 | 31. MITRE ATLAS | missing | — | No AI-threat taxonomy in use; threat modelling of the harness never done. |
 | 32. Production-aware coding agents | n/a | — | Nothing in production; project work is local. |
@@ -79,7 +83,10 @@ Status values:
 | 95. Herdr | done | `~/.config/herdr/`, `~/.pi/herdr-mods`, `agent/extensions/herdr-agent-state.ts`, `scripts/agent-pane.sh` | Attention inbox not used as the review queue it could be. |
 | 96. Hunk | missing | — | Agent diffs are read via `gh pr diff`. |
 | 97. nono.sh | done (equivalent) | `sandbox/pi-sandbox.sh` via bubblewrap | Same class of tool: OS-level isolation, no VM or daemon. |
-| 99. Safe Chain | done | `npm config get min-release-age` → `2880` (48 h quarantine) | The key is `min-release-age`; `minimum-release-age` is rejected by npm 11.20 as an unknown option. |
+| 94. Habit Hooks | done (equivalent) | `git-hooks/pre-commit` runs the budget, skill-length and secret checks; `scripts/harness-check.sh` is the same ruleset on demand | Hooks fire on commit only, so an edit-and-never-commit session is unchecked. |
+| 99. Safe Chain | done | `npm config get min-release-age` → `2880` (48 h quarantine, measured on the host) | The key is `min-release-age`; `minimum-release-age` is rejected by npm 11.20. Inside the sandbox the config is masked, so `harness-check` reports it as unverifiable there instead of failing. |
+| 102. Varlock | missing | — | `agent/settings.json`, `keys.json` and the rc blocks are unvalidated: a typo is found when a feature silently stops working. |
+| 103. zizmor | partial | `uvx zizmor .github/workflows` → 0 high, 0 medium, 1 low (2026-11-13); every action pinned by SHA with `persist-credentials: false` | zizmor is a manual run, not a CI gate: the pins can drift back to tags unnoticed. |
 
 ## 4. Caution ring — are the warnings being respected?
 
@@ -104,13 +111,16 @@ Status values:
    paths (fetched pages, package installs, the model's own commands), covered vs uncovered.
    Cost: 45 minutes. It re-scopes gap 2, so it goes first.
 2. **Mutation score never recorded** (blip 2, Adopt, partial). Config and a weekly CI job
-   exist; no number has ever been pasted back, so 238 green tests still prove nothing about
+   exist; no number has ever been pasted back, so 260 green tests still prove nothing about
    whether the assertions bite. Fix: `cd agent && npm install && make mutate`, then write the
    score in the §1 row. Cost: half a day for the first full pass.
 3. **Skills and `AGENTS.md` are unevaluated** (blip 29, partial). The deterministic half is
-   tested (244); the half that shapes every turn is not. Fix: 10 fixed prompts, one monthly
+   tested (260); the half that shapes every turn is not. Fix: 10 fixed prompts, one monthly
    run, judge against last month's answers. Cost: 2 hours to set up.
-4. **Promptfoo absent at Trial** (blip 110, missing). No eval or red-team gate on prompts,
+4. **Actions pinned but not linted** (blip 103, partial). SHAs replace tags and
+   `persist-credentials: false` is set, but zizmor runs only when someone remembers it.
+   Fix: `uvx zizmor --pedantic .github/workflows` as a CI job. Cost: 30 minutes.
+5. **Promptfoo absent at Trial** (blip 110, missing). No eval or red-team gate on prompts,
    skills or hooks, and it is the natural home for gap 4's 10 prompts. Cost: 3 hours for one
    suite.
 
