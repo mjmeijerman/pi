@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Global pre-push hook: agent vulnerability scan for GitHub pushes.
+# pre-push args: $1 = remote name, $2 = remote URL
+exec "${HOME}/.local/bin/git-vuln-scan" "${2:-}"

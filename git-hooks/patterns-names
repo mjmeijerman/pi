@@ -1,0 +1,4 @@
+(^|/)(\.env(\.[a-zA-Z0-9_-]+)?|\.git-credentials|\.netrc|\.pypirc|\.npmrc|id_rsa|id_ed25519|id_dsa|id_ecdsa|credentials\.(json|ya?ml|toml)|secrets\.(json|ya?ml|toml)|kubeconfig|auth\.json)(/|$)
+\.(pem|p12|pfx|jks|keystore|key)$
+(^|/)(\.aws|\.ssh|\.gnupg|\.kube)(/|$)
+\.config[/\\]gcloud

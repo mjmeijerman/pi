@@ -8,3 +8,7 @@ agent/dictation/venv/
 
 # IDE
 .idea/
+agent/deepseek.key
+agent/suggestions.jsonl
+agent/retro/
+tools/.agent-panes.json

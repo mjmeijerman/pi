@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# pi-sandbox.sh — run the pi coding agent inside a bubblewrap sandbox.
+#
+#   pi-sandbox.sh [--no-net] [--rw DIR]... -- <pi args...>
+#
+# See README.md in this directory for the policy and the known gaps.
+set -euo pipefail
+
+prog=${0##*/}
+
+die() { printf '%s: error: %s\n' "$prog" "$*" >&2; exit 1; }
+note() { printf '%s: %s\n' "$prog" "$*" >&2; }
+
+usage() {
+	cat <<'EOF'
+usage: pi-sandbox.sh [options] -- [pi arguments...]
+
+options:
+  --no-net       run with an unshared network namespace (no network at all)
+  --rw DIR       mount DIR read-write inside the sandbox (repeatable)
+  --exec         run the command after -- directly instead of pi (test hook)
+  -h, --help     show this help
+
+Everything after -- is passed to pi:
+  pi-sandbox.sh -- -p "summarise this repo"
+  pi-sandbox.sh --no-net -- --continue
+  pi-sandbox.sh --rw ~/scratch --
+EOF
+}
+
+# ---------------------------------------------------------------- arguments
+no_net=0
+exec_mode=0
+rw_extra=()
+while [ "$#" -gt 0 ]; do
+	case $1 in
+	--no-net) no_net=1; shift ;;
+	--rw)
+		[ "$#" -ge 2 ] || die "--rw needs a directory argument"
+		rw_extra+=("$2")
+		shift 2
+		;;
+	--exec) exec_mode=1; shift ;;
+	--help | -h) usage; exit 0 ;;
+	--) shift; break ;;
+	*) die "unknown argument '$1' (pi arguments go after --)" ;;
+	esac
+done
+payload=("$@")
+
+# ---------------------------------------------------------------- toolchain
+bwrap=$(command -v bwrap || true)
+[ -n "$bwrap" ] || die "bwrap (bubblewrap) is not installed — see README.md"
+
+home=${HOME:-}
+[ -n "$home" ] || home=$(getent passwd "$(id -un)" | cut -d: -f6)
+home=$(readlink -f -- "$home")
+[ -d "$home" ] || die "home directory '$home' does not exist"
+
+[ -d /usr ] || die "required directory /usr does not exist"
+[ -d /etc ] || die "required directory /etc does not exist"
+[ -d "$home/.pi" ] || die "required directory $home/.pi does not exist"
+
+pi_bin=$(command -v pi || true)
+[ -n "$pi_bin" ] || die "pi is not on PATH (looked for an executable named 'pi')"
+pi_bin=$(readlink -f -- "$pi_bin")
+pi_bindir=$(dirname "$pi_bin")
+# The pnpm shim lives in <prefix>/bin and loads the package from <prefix>/global.
+# Bind the whole prefix read-only so the shim, its NODE_PATH and the store resolve.
+pi_prefix=$(dirname "$pi_bindir")
+
+node_bin=$(command -v node || true)
+[ -n "$node_bin" ] || die "node is not on PATH — pi cannot run without it"
+node_real=$(readlink -f -- "$node_bin")
+node_bindir=$(dirname "$node_real")
+# .../fnm/node-versions/vX/installation/bin/node -> .../fnm/node-versions/vX/installation
+node_prefix=$(dirname "$node_bindir")
+[ -e "$node_real" ] || die "node at '$node_real' does not exist"
+
+# A directory is already covered when it is /usr, /bin, /lib* or /etc (read-only),
+# or lives inside one of the read-write binds.
+path_covered_ro() {
+	local p=$1 d
+	for d in /usr /bin /sbin /lib /lib32 /lib64 /etc; do
+		case $p in "$d" | "$d"/*) return 0 ;; esac
+	done
+	return 1
+}
+
+# Directories that are too broad to hand out read-write: they hold credentials
+# (browsers, docker, 1Password, ssh agent sockets) or the whole home directory.
+too_broad() {
+	local p=$1 d
+	case $p in / | /home | /root) return 0 ;; esac
+	[ "$p" = "$home" ] && return 0
+	for d in "$home/.local" "$home/.config" "$home/.cache" "$home/.docker" "$home/.ssh" "$home/.gnupg" "$home/.aws" "$home/.kube"; do
+		case $p in "$d" | "$d"/*) return 0 ;; esac
+	done
+	# An ancestor of $home is just as bad as $home itself.
+	case $home in "$p"/*) return 0 ;; esac
+	return 1
+}
+
+rw_dirs=()
+# Resolve and validate a read-write bind, then print the real path.
+resolve_rw() {
+	local src=$1 resolved
+	resolved=$(readlink -f -- "$src" 2>/dev/null) || die "cannot resolve '$src'"
+	[ -e "$resolved" ] || die "'$src' does not exist"
+	if too_broad "$resolved"; then
+		die "refusing to bind '$resolved' read-write: it exposes credentials or the whole home directory — bind a project directory instead"
+	fi
+	printf '%s\n' "$resolved"
+}
+
+# ---------------------------------------------------------------- base policy
+args=(
+	--die-with-parent
+	--new-session
+	--unshare-pid
+	--unshare-ipc
+	--unshare-uts
+	--hostname pi-sandbox
+)
+
+# Read-only system tree. /lib32 and friends are missing on most hosts; skip them.
+for d in /usr /bin /sbin /lib /lib32 /lib64 /etc; do
+	if [ -e "$d" ]; then args+=(--ro-bind "$d" "$d"); fi
+done
+
+# Read-only toolchain (node + the pi package tree) unless it already lives in /usr.
+for d in "$node_prefix" "$pi_prefix"; do
+	if [ -e "$d" ] && ! path_covered_ro "$d"; then
+		args+=(--ro-bind "$d" "$d")
+	fi
+done
+
+args+=(--tmpfs /tmp --dev /dev --proc /proc)
+
+# Read-write: pi's own config/state directory, git identity, project trees.
+args+=(--bind "$home/.pi" "$home/.pi")
+rw_dirs+=("$home/.pi")
+for f in .gitconfig .gitignore_global; do
+	if [ -e "$home/$f" ]; then args+=(--bind "$home/$f" "$home/$f"); fi
+done
+if [ -d "$home/.git-templates" ]; then args+=(--ro-bind "$home/.git-templates" "$home/.git-templates"); fi
+if [ -d "$home/.config/git" ]; then args+=(--ro-bind "$home/.config/git" "$home/.config/git"); fi
+
+for d in projects agent-office achterhoek-uitagenda pi-projects; do
+	[ -d "$home/$d" ] || continue
+	args+=(--bind "$home/$d" "$home/$d")
+	rw_dirs+=("$home/$d")
+done
+
+for d in "${rw_extra[@]+"${rw_extra[@]}"}"; do
+	resolved=$(resolve_rw "$d")
+	args+=(--bind "$resolved" "$resolved")
+	rw_dirs+=("$resolved")
+done
+
+# The current directory, when the policy does not already cover it.
+cwd=$(pwd -P)
+cwd_covered=0
+for d in "${rw_dirs[@]+"${rw_dirs[@]}"}"; do
+	case $cwd in "$d" | "$d"/*) cwd_covered=1; break ;; esac
+done
+if [ "$cwd_covered" -eq 0 ] && ! path_covered_ro "$cwd"; then
+	if too_broad "$cwd"; then
+		die "the current directory '$cwd' cannot be mounted read-write — cd into a project directory or pass --rw DIR"
+	fi
+	args+=(--bind "$cwd" "$cwd")
+	rw_dirs+=("$cwd")
+fi
+
+# ---------------------------------------------------------------- credential masks
+# These come after the binds above, so the masks win. The path still exists
+# inside the sandbox, but it is empty (or an empty file).
+for rel in .ssh .gnupg .aws .kube .config/gh .docker .config/1Password; do
+	args+=(--tmpfs "$home/$rel")
+done
+for rel in .netrc .npmrc; do
+	args+=(--ro-bind /dev/null "$home/$rel")
+done
+
+# Provider credentials: pi needs them, the agent should not get *every* key.
+# Rebuild the credential store with only the providers allowed for this run
+# (default: the configured defaultProvider). An empty store stays empty.
+auth_src="$home/.pi/agent/auth.json"
+auth_tmp=""
+if [ -f "$auth_src" ]; then
+	allowed=${PI_SANDBOX_AUTH_PROVIDERS-}
+	if [ -z "$allowed" ]; then
+		allowed=$(node -e '
+			try { const s = JSON.parse(require("node:fs").readFileSync(process.env.HOME + "/.pi/agent/settings.json", "utf8")); process.stdout.write(s.defaultProvider || ""); } catch {}
+		' 2>/dev/null || true)
+	fi
+	auth_tmp=$(mktemp "${TMPDIR:-/tmp}/pi-sandbox-auth.XXXXXX")
+	chmod 600 "$auth_tmp"
+	if node -e '
+		const { readFileSync, writeFileSync } = require("node:fs");
+		const [src, dest, allowed] = process.argv.slice(1);
+		let store = {};
+		try { store = JSON.parse(readFileSync(src, "utf8")) || {}; } catch { store = {}; }
+		const keep = allowed.split(",").map((s) => s.trim()).filter(Boolean);
+		const pick = (obj) => Object.fromEntries(Object.entries(obj).filter(([k]) => keep.includes(k)));
+		let out = store;
+		if (store.providers) out = { ...store, providers: pick(store.providers) };
+		else out = pick(store);
+		writeFileSync(dest, JSON.stringify(out, null, 2));
+	' "$auth_src" "$auth_tmp" "$allowed"; then
+		chmod 600 "$auth_tmp"
+		args+=(--ro-bind "$auth_tmp" "$auth_src")
+		note "credentials limited to: ${allowed:-none}"
+	else
+		args+=(--ro-bind /dev/null "$auth_src")
+		note "credential store unreadable (filter failed)"
+	fi
+fi
+
+# Mask dotenv files under every read-write tree. They hold API keys and DB
+# passwords, and prompt-injected code likes to read them.
+find_dotenv() {
+	local dir=$1
+	find "$dir" \( -path "$dir/node_modules" -o -path "$dir/.git" \) -prune -o \
+		-type f \( -name '.env' -o -name '.env.*' -o -name '*.env' \) -print 2>/dev/null
+}
+mask_count=0
+while IFS= read -r f; do
+	[ -n "$f" ] || continue
+	args+=(--ro-bind /dev/null "$f")
+	mask_count=$((mask_count + 1))
+	if [ "$mask_count" -ge 500 ]; then
+		note "warning: masked 500 dotenv files, stopping there"
+		break
+	fi
+done < <(
+	for d in "${rw_dirs[@]+"${rw_dirs[@]}"}"; do
+		find_dotenv "$d"
+	done | sort -u
+)
+if [ "$mask_count" -gt 0 ]; then
+	note "masked $mask_count dotenv file(s) as empty — git reports tracked dotenv files as modified, so do not run 'git commit -a' or 'git add -A' in here"
+fi
+
+# ---------------------------------------------------------------- network
+if [ "$no_net" -eq 1 ]; then args+=(--unshare-net); fi
+
+# ---------------------------------------------------------------- environment
+# The environment is inherited (so provider API keys and PI_* variables survive);
+# only the paths that must match the sandbox layout are overridden.
+sandbox_path="$node_bindir:$pi_bindir:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+args+=(
+	--setenv HOME "$home"
+	--setenv USER "$(id -un)"
+	--setenv LOGNAME "$(id -un)"
+	--setenv PATH "$sandbox_path"
+	--setenv TMPDIR /tmp
+)
+
+# ---------------------------------------------------------------- run
+if [ "$exec_mode" -eq 1 ]; then
+	[ "${#payload[@]}" -gt 0 ] || die "--exec needs a command after --"
+	args+=(-- "${payload[@]}")
+else
+	args+=(-- "$pi_bin" "${payload[@]+"${payload[@]}"}")
+fi
+
+if [ "${PI_SANDBOX_DEBUG:-0}" = 1 ]; then
+	printf '%q ' "$bwrap" "${args[@]}" >&2
+	echo >&2
+fi
+
+set +e
+"$bwrap" "${args[@]}"
+status=$?
+set -e
+[ -n "$auth_tmp" ] && rm -f "$auth_tmp"
+exit "$status"
