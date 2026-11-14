@@ -22,6 +22,11 @@
  *    review. An agent that rewrites its own system prompt unread is the failure
  *    mode blips 17 and 42 are about.
  *
+ * Detection has two sources, because there are two compaction paths: pi's own
+ * `session_compact` event, and a compaction entry committed at a turn boundary
+ * with no event (what pi-observational-memory does — it runs below pi's own
+ * auto-compaction threshold, so without this the learner would never start).
+ *
  * Proposals land in `~/.pi/agent/proposals/` (outside git, next to
  * `suggestions.jsonl` and `retro/`), one Markdown file with a `git apply`-able
  * diff or a recorded "nothing". `proposals/runs.jsonl` is the audit trail and
@@ -125,6 +130,25 @@ export function shortSignature(signature: string): string {
 	return signature.slice(0, 12);
 }
 
+/**
+ * Ids of the compaction entries on a branch, oldest first.
+ *
+ * Why this exists: pi-observational-memory (0.87+) returns its compaction draft
+ * from its `turn_end` handler, so pi commits it in `_commitBoundaryDrafts` →
+ * `sessionManager.appendCompaction` and emits only the internal `entry_appended`
+ * event. `session_compact` never fires for that path, and om compacts well below
+ * pi's own auto-compaction threshold, so an extension that only listens for
+ * `session_compact` never learns. The committed entry is the signal.
+ */
+export function compactionEntryIds(entries: unknown): string[] {
+	if (!Array.isArray(entries)) return [];
+	const ids: string[] = [];
+	for (const entry of entries as { type?: string; id?: string }[]) {
+		if (entry?.type === "compaction" && typeof entry.id === "string") ids.push(entry.id);
+	}
+	return ids;
+}
+
 const SECRET_PATTERNS: [RegExp, string][] = [
 	[/\b(sk|pk|rk)-[A-Za-z0-9_-]{12,}/g, "<redacted-key>"],
 	[/\bgh[pousr]_[A-Za-z0-9]{16,}/g, "<redacted-token>"],
@@ -220,16 +244,57 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 	let spawns = 0;
 	let lastSpawnAt: number | null = null;
 	let disabled = Boolean(process.env.PI_SELF_LEARN);
+	/** Compaction entries this session has already handled, by id. */
+	let seenCompactions = new Set<string>();
+	/** False until the first scan, so a resumed session's history is not "new". */
+	let compactionsBaselined = false;
 
 	const reset = () => {
 		errors = new Map();
 		lastCompactIso = null;
 		spawns = 0;
 		lastSpawnAt = null;
+		seenCompactions = new Set<string>();
+		compactionsBaselined = false;
 	};
 
-	pi.on("session_start", () => {
+	/** Mark every compaction on the branch as handled (cheap, never throws). */
+	const seenCompactionsOnBranch = (ctx: any) => {
+		try {
+			for (const id of compactionEntryIds(ctx?.sessionManager?.getBranch?.())) seenCompactions.add(id);
+		} catch {
+			// An unreadable branch must not break the session.
+		}
+		compactionsBaselined = true;
+	};
+
+	/**
+	 * The newest compaction entry this session has not handled yet, if any. All
+	 * fresh ids are marked here, so two signals for one entry fire the gate once.
+	 */
+	const newCompaction = (ctx: any): string | null => {
+		try {
+			const ids = compactionEntryIds(ctx?.sessionManager?.getBranch?.());
+			if (!compactionsBaselined) {
+				for (const id of ids) seenCompactions.add(id);
+				compactionsBaselined = true;
+				return null;
+			}
+			let fresh: string | null = null;
+			for (const id of ids) {
+				if (seenCompactions.has(id)) continue;
+				seenCompactions.add(id);
+				fresh = id;
+			}
+			return fresh;
+		} catch {
+			return null;
+		}
+	};
+
+	pi.on("session_start", (_event: any, ctx: any) => {
 		reset();
+		seenCompactionsOnBranch(ctx);
 	});
 
 	pi.on("tool_result", (event: any) => {
@@ -327,8 +392,30 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			await learn("compact", ctx);
 		} catch {
 			// The gate failing must never break the session that just compacted.
+		} finally {
+			// pi appends the entry before it emits this event, so the boundary scan
+			// must not treat the same compaction as new on the next turn.
+			seenCompactionsOnBranch(ctx);
 		}
 	});
+
+	/**
+	 * Compaction committed at a turn boundary (om's path): pi never emits
+	 * `session_compact`, only the entry appears on the branch. Same gate, same
+	 * learn path, no second reflection for an entry another signal already saw.
+	 */
+	const onBoundary = async (_event: any, ctx: any) => {
+		if (disabled) return;
+		if (!newCompaction(ctx)) return;
+		try {
+			await learn("compact", ctx);
+		} catch {
+			// Same rule as above: detection may never break the host session.
+		}
+	};
+
+	pi.on("turn_start", onBoundary);
+	pi.on("before_agent_start", onBoundary);
 
 	pi.registerCommand("learn", {
 		description: "Judge the harness from this session's evidence in a separate pi session",

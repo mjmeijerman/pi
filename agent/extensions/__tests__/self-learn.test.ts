@@ -142,16 +142,21 @@ describe("wiring", () => {
 		clock += 20 * minutes(1);
 		const base = clock;
 		const started: { launcher: any; env: NodeJS.ProcessEnv }[] = [];
+		// learn() is the only caller of countNotes, so this counts gate evaluations.
+		const learn = { calls: 0 };
 		const fake = createFakePi();
 		const api = selfLearn(fake.pi, {
 			start: (launcher: any, env: NodeJS.ProcessEnv) => started.push({ launcher, env }),
-			countNotes: async () => 0,
+			countNotes: async () => {
+				learn.calls += 1;
+				return 0;
+			},
 			has: () => false,
 			now: () => base,
 			...deps,
 		});
 		const { ctx, notices } = createFakeCtx({ mode: "tui", hasUI: true });
-		return { ...fake, ctx, notices, started, api };
+		return { ...fake, ctx, notices, started, api, learn };
 	}
 
 	const boom = { isError: true, toolName: "bash", content: "command not found: zizmor" };
@@ -219,6 +224,50 @@ describe("wiring", () => {
 		await emit("tool_result", boom, ctx);
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		assert.equal(started.length, 0);
+	});
+
+	test("a boundary-committed compaction fires the gate, with no session_compact event", async () => {
+		const { emit, ctx, started, learn } = setup();
+		// om 0.87+ returns its draft from turn_end; pi appends the entry itself and
+		// emits only the internal entry_appended event. The branch is the only signal.
+		const branch: any[] = [{ type: "message", id: "m1", message: { role: "user", content: "hi" } }];
+		ctx.sessionManager = { getBranch: () => branch };
+		await emit("session_start", { reason: "startup" }, ctx);
+		await emit("tool_result", boom, ctx);
+		await emit("tool_result", boom, ctx);
+
+		branch.push({ type: "compaction", id: "c-om-1", summary: "s", firstKeptEntryId: "m1", tokensBefore: 120_000 });
+		await emit("turn_start", { type: "turn_start" }, ctx);
+		assert.equal(learn.calls, 1, "the committed entry reached the gate without session_compact");
+		assert.equal(started.length, 1);
+
+		// The same entry, via the other boundary signal and the next turn: once.
+		await emit("before_agent_start", { type: "before_agent_start" }, ctx);
+		await emit("turn_start", { type: "turn_start" }, ctx);
+		assert.equal(learn.calls, 1, "one compaction entry, one gate evaluation");
+
+		// A new entry is new evidence and reaches the gate again (the ten-minute
+		// gap in decideLearner is a separate rule, already tested above).
+		branch.push({ type: "compaction", id: "c-om-2", summary: "s", firstKeptEntryId: "m1", tokensBefore: 120_000 });
+		await emit("turn_start", { type: "turn_start" }, ctx);
+		assert.equal(learn.calls, 2);
+	});
+
+	test("a pi-native compaction is not counted twice by the boundary scan", async () => {
+		const { emit, ctx, started, learn } = setup();
+		const branch: any[] = [];
+		ctx.sessionManager = { getBranch: () => branch };
+		await emit("session_start", { reason: "startup" }, ctx);
+		await emit("tool_result", boom, ctx);
+		await emit("tool_result", boom, ctx);
+		// pi appends the entry, then emits session_compact for it.
+		branch.push({ type: "compaction", id: "c-pi-1", summary: "s", firstKeptEntryId: "m1", tokensBefore: 90_000 });
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		assert.equal(started.length, 1);
+
+		await emit("turn_start", { type: "turn_start" }, ctx);
+		assert.equal(learn.calls, 1, "already handled by session_compact, not re-evaluated");
+		assert.equal(started.length, 1);
 	});
 
 	test("the queue file holds the evidence and no raw error text", async () => {
