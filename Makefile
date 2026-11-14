@@ -1,7 +1,7 @@
 # pi agent setup — one-command install for a new machine.
 # Usage:  make setup   (or just: make)
 
-.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit evals evals-install pr-check
+.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit evals evals-install pr-check scripts-test
 
 # Full provisioning on a new machine: config, hooks, system packages, API key,
 # pi packages, optional local model / dictation venv, then verification.
@@ -67,6 +67,12 @@ pr-check:
 	@bash $(CURDIR)/scripts/pr-gate.sh --body "$(BODY)" \
 		--base "$(or $(BASE),origin/trunk)" --head "$(or $(HEAD),HEAD)" \
 		$(if $(PATHS),--paths "$(PATHS)")
+
+# The gates' own tests, next to the scripts they test (blip 29 harness quality
+# evaluation): a gate whose passing case was never run is a gate that can go
+# dead quietly. Same runner as the extensions, no dependencies.
+scripts-test:
+	@node --test scripts/tests/*.test.mjs
 
 update:
 	@git pull --ff-only

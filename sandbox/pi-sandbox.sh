@@ -238,6 +238,32 @@ elif [ "$cwd_covered" -eq 0 ] && ! path_covered_ro "$cwd"; then
 	rw_dirs+=("$cwd")
 fi
 
+# ---------------------------------------------------------------- npm quarantine
+# npm 11 keeps the supply-chain quarantine in ~/.npmrc, which the masks below
+# blank out — so a sandboxed harness-check could not read the setting and FAILed.
+# Forward the one number that matters instead of the file: NPM_CONFIG_MIN_RELEASE_AGE
+# is the effective value to npm, and only a value matching ^[0-9]+$ crosses the
+# boundary. No other key, comment or token of that file is read into the argument
+# list or the log (blip 99 Safe Chain, blip 1 agent sandboxing, blip 29 harness
+# quality evaluation).
+host_npm_release_age() {
+	local line value
+	if command -v npm >/dev/null 2>&1; then
+		value=$(npm config get min-release-age 2>/dev/null | tr -d '[:space:]')
+	else
+		line=$(grep -m1 -E '^[[:space:]]*min-release-age[[:space:]]*=' "$home/.npmrc" 2>/dev/null) || return 1
+		value=$(printf '%s' "${line#*=}" | tr -d '[:space:]')
+	fi
+	case "$value" in '' | *[!0-9]*) return 1 ;; esac
+	printf '%s\n' "$value"
+}
+if release_age=$(host_npm_release_age); then
+	args+=(--setenv NPM_CONFIG_MIN_RELEASE_AGE "$release_age")
+	note "npm min-release-age forwarded: $release_age days"
+else
+	note "npm min-release-age not forwarded (no numeric value on the host)"
+fi
+
 # ---------------------------------------------------------------- credential masks
 # These come after the binds above, so the masks win. The path still exists
 # inside the sandbox, but it is empty (or an empty file). A path that does not
