@@ -89,6 +89,18 @@ CLI flags still work next to the manifest: `--val --vlt --draw --vit --pieces
   schalen"), per-sheet `blad n van m`, a 100 mm scale bar and
   `geprint op (100%)`. Verify page size (`pdfinfo`) and the scale from a
   raster of the scale bar, never from the PDF's own claim.
+- **The measurement table is a real table**: header row with the full names out
+  of the `.vit` `full_name` attributes (parsed, never hardcoded), one row per
+  size, first column `maat`, order tw/hw/hh/rl, `(mm)` exactly once in the
+  header. Column width comes from the widest text in the column (`CHAR_W`), so
+  values sit under their own header and headers never overlap the next column.
+  Abbreviations (`tw / hw / hh / rl`) on the sheet are the old bug.
+- **One term per thing**: the grainline reads `recht van draad` both on the
+  line and in the legend row (`GRAIN_LABEL`). Two terms for the same line
+  ("rechtdraad - alle maten" next to a legend row saying something else) is a
+  checker FAIL, not a style choice.
+- **No red (#a33) text on a sheet.** The notes that used to be printed in red
+  are human documentation: `patroon.json` `note` and the markdown files.
 
 ## A0 layout: pack units, never tile the sheet
 
@@ -98,8 +110,9 @@ on 2 sheets for the skirt, 5 on 2 for the spijkerrok. Unusable for a plotter.
 
 - **A unit is one thing that must stay whole**: every spec of one piece across
   all six sizes (`data_piece`) plus that piece's label, the header (`kop`),
-  and the legend block (`legenda`) — the legend carries the 5 × 5 cm block,
-  the size table and the note.
+  and the legend block (`legenda`) — the legend carries the 5 × 5 cm block and
+  the measurement table. The red note block is gone from the sheet: those
+  notes live in the `note` blocks of `patroon.json` and in the markdown docs.
 - Pack with first-fit shelves inside the frame, `GAP = 12 mm`, after trying
   both orientations and three orders (`kop`-then-height, reading order, all by
   height). Pick fewest sheets, then fewest used mm. Result: both patterns on
@@ -214,6 +227,11 @@ piece does, and the `builtIn=true` half lies inside.
   `val` `rotation` / geometry), the source angle modulo 180, and which end
   carries the point. Skirt: 24/24 lines 0.00° off vertical; spijkerrok: 48/54
   vertical, the 6 horizontal vp-tailleband lines named.
+- **The label on the line is `recht van draad`** (`GRAIN_LABEL`), the same term
+  as the legend row. It sits an offset beside the line (3.2 mm), shrinks with a
+  short line but never below 2.6 mm, and carries `data-grainline-label` plus
+  `data-piece` — without `data-piece` every label lands in the legend unit of
+  the A0 layout and that block grows to the whole sheet.
 - No fallback by piece name. A piece without a grainline inherits nothing
   silently: derive one from the longest straight edge, parallel, at margin,
   or leave it out with a legend line.
@@ -235,6 +253,14 @@ anchor side, band pairs).
 - **Count per (piece, size), not totals.** "15 keeps" passes while one piece
   has none. Same for grainlines and arrows: 4 × 6 = 24 lines and 24 arrowheads,
   per size 4.
+- **The sheet's own text is checked** (section 9): every `data-grainline-label`
+  reads exactly `recht van draad`, the legend row keeps its explanation, no
+  `#a33` remains in the element tree *or* in the SVG source, the table header
+  carries the `.vit` full names (uniform across sizes), `(mm)` appears once, and
+  each size row's cells sit inside their own column and do not overlap. This is
+  what caught the generator reading the skirt's `.vit` for the spijkerrok
+  (`@hh` 215 instead of 210 in size 42): take the `.vit` template from the
+  manifest (`ctx.pad("maattabel")`), not from the default constant.
 - Thresholds and expectations come from `patroon.json`; never from the skirt.
   A correct trouser must not FAIL on skirt facts (four fixed piece names, six
   fixed sizes, exactly three keeps, 2+1 split, exactly 90°, exactly 4.5 mm
