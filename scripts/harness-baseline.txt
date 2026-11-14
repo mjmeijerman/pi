@@ -7,3 +7,8 @@
 #
 # An entry that no longer violates anything is printed as `WARN stale-baseline`
 # and does not fail the run: stale means the ratchet should be tightened now.
+
+# Pre-existing: the valentina-grading skill was written outside the repo and lands already over
+# the 150-line cap. Committed as WARN so the ratchet does not block the commit; trim it to 150
+# lines (or split it) and delete this line.
+agent/skills/valentina-grading/SKILL.md:skill-lines
