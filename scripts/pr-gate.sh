@@ -14,18 +14,24 @@
 #
 # Usage:
 #   scripts/pr-gate.sh --body FILE
-#       body-only gates (mission). The diff gates are reported as skipped.
+#       all gates. With no file list, the changed files come from the merge base
+#       of origin/trunk and HEAD — a diff that cannot be resolved is an error
+#       naming why, never an empty list that passes.
 #   scripts/pr-gate.sh --body FILE --base REV --head REV
 #       all gates; changed paths come from `git diff --name-only REV...REV`.
+#       BASE_SHA/HEAD_SHA in the environment, as CI sets them, do the same.
 #   scripts/pr-gate.sh --body FILE --paths FILE
-#       all gates; changed paths are read from FILE, one per line.
+#       all gates; changed paths are read from FILE, one per line. An empty
+#       FILE is a gate handed nothing, so the diff gates fail, not pass.
 #   scripts/pr-gate.sh --body FILE --gate mission|tier|test-change
-#       one gate only, the way each CI job runs it.
+#       one gate only, the way each CI job runs it. Mission needs no diff;
+#       tier and test-change fail when they cannot see one.
 #
 #   make pr-check BODY=pr.md [BASE=origin/trunk] [HEAD=HEAD] [PATHS=paths.txt]
 #
-# Exit codes: 0 every gate that ran passed, 1 a gate failed (CI would be red),
-# 2 bad usage or unreadable input. Output is the CI verdict verbatim: the
+# Exit codes: 0 every gate that ran passed, 1 a gate failed or was handed no
+# file list it needs (CI would be red), 2 bad usage, unreadable input, or a diff
+# that cannot be resolved. Output is the CI verdict verbatim: the
 # `::error::` / `::notice::` annotations, plus the markdown summary block.
 # In CI the block goes to $GITHUB_STEP_SUMMARY; anywhere else it goes to stdout.
 # ============================================================================
@@ -41,8 +47,13 @@ BASE_REV=""
 HEAD_REV=""
 GATES="all"
 
+# DIFF_CHECKED is the point of this file: green means checked. A gate that
+# needs the changed files and never got them is red (PR 67: the local run was
+# handed zero files, called that "nothing to justify", and printed green for a
+# body the same CI run rejected).
 CHANGED=()
-HAS_DIFF=0
+DIFF_CHECKED=0
+DIFF_WHY="no changed-file list and no diff range were given"
 FAILED=0
 
 usage() { sed -n '/^# Usage:/,/^# In CI the block/p' "${BASH_SOURCE[0]}" | sed -e 's/^# \{0,1\}//'; }
@@ -109,28 +120,100 @@ esac
 BODY="$(cat -- "$BODY_FILE")"
 
 # ---------------------------------------------------------------- changed paths --
-# One place decides what "the diff" means: an explicit --paths file, or the
-# merge-base diff CI already has both endpoints for. No paths at all is legal
-# for a body-only run, and the diff gates then say so instead of guessing.
+# One place decides what "the diff" means, in this order: an explicit --paths
+# file, an explicit --base/--head pair (flags, or the BASE_SHA/HEAD_SHA CI puts
+# in the environment), then the merge base of origin/trunk and HEAD. Deriving
+# is what makes `make pr-check BODY=pr.md` alone honest: handed nothing, the old
+# version diffed nothing, found no test file, and printed green.
+
+# origin/trunk, or a local trunk when the remote-tracking ref is absent.
+resolve_trunk() {
+	local ref
+	for ref in origin/trunk trunk; do
+		if git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null 2>&1; then
+			printf '%s\n' "$ref"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# Read REV...REV into CHANGED. Failure is loud and names the fix: a ref that
+# does not resolve (no origin/trunk, a shallow clone, a detached head with no
+# merge base) used to become an empty list — a green verdict for a diff nobody
+# looked at.
+diff_range() {
+	local base_rev="$1" head_rev="$2" out=""
+	if ! out="$(git diff --name-only "${base_rev}...${head_rev}" 2>&1)"; then
+		die "cannot diff ${base_rev}...${head_rev}: ${out}
+  The harness-path and test-change rules need the changed files, and guessing
+  'nothing changed' is how a local green hid a red CI (PR 67). Fix one of:
+  'git fetch origin trunk' (a merge base is required), '--paths FILE' with
+  'git diff --name-only BASE..HEAD', or '--base REV --head REV'."
+	fi
+	mapfile -t CHANGED < <(printf '%s\n' "$out" | awk 'NF')
+	DIFF_CHECKED=1
+	DIFF_WHY="${base_rev}...${head_rev} (${#CHANGED[@]} changed files)"
+}
+
 load_changed() {
+	local trunk base
 	if [ -n "$PATHS_FILE" ]; then
 		[ -f "$PATHS_FILE" ] || die "no such paths file: $PATHS_FILE"
 		mapfile -t CHANGED < <(awk 'NF' "$PATHS_FILE")
-		HAS_DIFF=1
-		return 0
+		if ((${#CHANGED[@]} == 0)); then
+			# An empty list is the bug, not the answer: the gate was handed no
+			# files, so require_diff makes it red instead of green.
+			DIFF_WHY="the paths file ${PATHS_FILE} lists no files"
+		else
+			DIFF_CHECKED=1
+			DIFF_WHY="paths file ${PATHS_FILE} (${#CHANGED[@]} changed files)"
+		fi
+	elif [ -n "$BASE_REV" ] || [ -n "$HEAD_REV" ]; then
+		if [ -z "$BASE_REV" ] || [ -z "$HEAD_REV" ]; then
+			die "--base and --head go together (base='$BASE_REV' head='$HEAD_REV')"
+		fi
+		diff_range "$BASE_REV" "$HEAD_REV"
+	elif [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+		# CI's form: both shas arrive in the environment and no flags are passed.
+		diff_range "$BASE_SHA" "$HEAD_SHA"
+	else
+		trunk="$(resolve_trunk)" || die "no origin/trunk to diff HEAD against (and no --base/--head or --paths)
+  A gate with no file list cannot check its rule, so it does not pass. Run
+  'git fetch origin trunk', or pass '--paths FILE' / '--base REV --head REV'."
+		if ! base="$(git merge-base "$trunk" HEAD 2>&1)"; then
+			die "no merge base between ${trunk} and HEAD: ${base}
+  A shallow clone or an unrelated HEAD has nothing to diff; fetch the history
+  ('git fetch --unshallow origin' or 'git fetch origin trunk'), or pass
+  '--paths FILE' / '--base REV --head REV'."
+		fi
+		diff_range "$base" HEAD
+		DIFF_WHY="merge base of ${trunk} and HEAD (${base}), ${#CHANGED[@]} changed files"
 	fi
-	if [ -z "$BASE_REV" ] && [ -z "$HEAD_REV" ]; then
-		return 0
-	fi
-	if [ -z "$BASE_REV" ] || [ -z "$HEAD_REV" ]; then
-		die "--base and --head go together (base='$BASE_REV' head='$HEAD_REV')"
-	fi
-	local out=""
-	if ! out="$(git diff --name-only "${BASE_REV}...${HEAD_REV}" 2>&1)"; then
-		die "cannot read the diff ${BASE_REV}...${HEAD_REV}: $out"
-	fi
-	mapfile -t CHANGED < <(printf '%s\n' "$out" | awk 'NF')
-	HAS_DIFF=1
+	# Which diff was checked belongs in the output: "green" over the wrong diff
+	# is the failure this file exists to stop.
+	printf 'diff: %s\n' "$DIFF_WHY"
+}
+
+# A gate that needs a file list and was handed no usable one is red. Second
+# requirement of PR 67: "green (all)" is only ever printed for rules that
+# actually ran, so a local green cannot hide the red CI check.
+require_diff() {
+	local gate="$1"
+	((DIFF_CHECKED == 1)) && return 0
+	fail "the ${gate} gate was given no changed-file list (${DIFF_WHY}), so the rule was never applied — a gate that checked nothing is not green. Pass --paths FILE, --base REV --head REV, or run where 'git merge-base origin/trunk HEAD' resolves"
+	{
+		echo "## ${gate}: not checked"
+		echo ""
+		echo "This gate needs the changed files. This run supplied none:"
+		echo ""
+		echo "\`${DIFF_WHY}\`"
+		echo ""
+		echo "The rule was not applied, so the verdict is red rather than green."
+		echo "Pass \`--paths FILE\` (\`git diff --name-only BASE..HEAD\`),"
+		echo "\`--base REV --head REV\`, or run from a checkout with \`origin/trunk\`."
+	} | summary
+	return 1
 }
 
 # ------------------------------------------------------------------- mission --
@@ -229,10 +312,7 @@ gate_tier() {
 	fi
 	echo "tier: $tier"
 
-	if ((HAS_DIFF == 0)); then
-		printf 'pr-gate: review tier %s stated; no diff given, so the harness-path rule was not checked — pass --base/--head or --paths to check it\n' "$tier"
-		return 0
-	fi
+	require_diff tier || return 1
 
 	for path in "${CHANGED[@]}"; do
 		case "$path" in
@@ -274,10 +354,7 @@ gate_test_change() {
 	local path flat found reason line
 	local -a tests=() source=()
 
-	if ((HAS_DIFF == 0)); then
-		printf 'pr-gate: no diff given, so the test-change rule was not checked — pass --base/--head or --paths to check it\n'
-		return 0
-	fi
+	require_diff test-change || return 1
 
 	# Any recognised test suffix counts, not just the one this repo happens to
 	# use today: a .test.mjs is as much a test as a .test.ts, and a gate that
@@ -353,13 +430,22 @@ gate_test_change() {
 	return 0
 }
 
-load_changed
-
 ORDER=()
 case "$GATES" in
 all) ORDER=(mission tier test-change) ;;
 *) ORDER=("$GATES") ;;
 esac
+
+# Only read a diff when a gate needs one: `--gate mission` is the body-only CI
+# job, and it must keep working in a checkout with no usable diff.
+for gate in "${ORDER[@]}"; do
+	case "$gate" in
+	tier | test-change)
+		load_changed
+		break
+		;;
+	esac
+done
 
 for gate in "${ORDER[@]}"; do
 	case "$gate" in
@@ -373,5 +459,5 @@ if ((FAILED == 0)); then
 	echo "pr-gate: green${GATES:+ (${GATES})}"
 	exit 0
 fi
-printf 'pr-gate: red — a PR body like this one fails CI (%s)\n' "${ORDER[*]}"
+printf 'pr-gate: red (%s) — CI rejects this body, and a gate handed no file list counts as red until it can check\n' "${ORDER[*]}"
 exit 1

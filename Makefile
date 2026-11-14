@@ -56,16 +56,17 @@ evals:
 
 # The PR body gates, before the push instead of after the red check. This is
 # the same scripts/pr-gate.sh CI runs, so a local verdict and the CI verdict
-# cannot disagree. Give it the body file; BASE/HEAD default to origin/trunk..HEAD
-# so the harness-path rule is checked against the real diff. PATHS=<file> checks
-# an explicit changed-path list instead (a branch you have not pushed yet).
+# cannot disagree. Give it the body file and nothing else: the script diffs the
+# merge base of origin/trunk and HEAD itself, and fails loudly when it cannot,
+# rather than checking a diff nobody supplied. PATHS=<file> checks an explicit
+# changed-path list instead (a branch you have not pushed yet).
 #
 #   make pr-check BODY=pr.md
 #   make pr-check BODY=pr.md PATHS=changed.txt
 #   make pr-check BODY=pr.md BASE=origin/trunk HEAD=HEAD
 pr-check:
 	@bash $(CURDIR)/scripts/pr-gate.sh --body "$(BODY)" \
-		--base "$(or $(BASE),origin/trunk)" --head "$(or $(HEAD),HEAD)" \
+		$(if $(or $(BASE),$(HEAD)),--base "$(or $(BASE),origin/trunk)" --head "$(or $(HEAD),HEAD)") \
 		$(if $(PATHS),--paths "$(PATHS)")
 
 # The gates' own tests, next to the scripts they test (blip 29 harness quality
