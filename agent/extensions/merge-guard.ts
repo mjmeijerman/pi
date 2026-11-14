@@ -7,6 +7,13 @@
  * git and gh stays available: branching, committing on a feature branch,
  * pushing it, opening a PR.
  *
+ * Also blocked: `git stash` in its saving and deleting forms. A stash empties a
+ * tree another session is still working in, and `delegate` tells the agent to
+ * run exactly that when it refuses a spawn on a dirty trunk — the clean trunk it
+ * wants is one `git worktree add … origin/trunk` away. `stash list`, `show`,
+ * `pop`, `apply` and `branch` stay open, because restoring work must never be
+ * blocked.
+ *
  * The branch rule judges the repository the command actually targets, not the
  * session's cwd: `git -C /path commit` and `cd /path && git commit` are decided
  * by the branch `/path` is on. A command that names no directory falls back to
@@ -169,6 +176,29 @@ export function mergeReason(command: string): string | null {
 	return null;
 }
 
+/** `git stash` subcommands that read or restore, never park or delete. */
+const STASH_SAFE = new Set(["list", "show", "pop", "apply", "branch"]);
+
+/**
+ * Reason this command would park or drop uncommitted work, or null.
+ *
+ * Pure, like the other decisions, so the stashing forms can be enumerated in a
+ * test. A bare `git stash` saves, so it counts as `push`.
+ */
+export function parkReason(command: string): string | null {
+	// `--help` prints usage and exits; it cannot park anything.
+	if (/--help\b/.test(unquoted(command))) return null;
+	for (const segment of segments(command)) {
+		if (gitSubcommand(segment) !== "stash") continue;
+		const tokens = segment.split(/\s+/);
+		const after = tokens.slice(tokens.indexOf("stash") + 1).filter((token) => !token.startsWith("-"));
+		const verb = after[0] ?? "push";
+		if (STASH_SAFE.has(verb)) continue;
+		return verb === "push" ? "a `git stash`" : `a \`git stash ${verb}\``;
+	}
+	return null;
+}
+
 /** The branch HEAD points at, or null outside a repository / detached HEAD. */
 export function currentBranch(cwd: string): string | null {
 	try {
@@ -222,6 +252,23 @@ export default function mergeGuard(pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (!isToolCallEventType("bash", event)) return;
 		// The branch of the repository this command actually touches, not the session's.
+		const park = parkReason(event.input.command);
+		if (park) {
+			if (allowedOnce) {
+				allowedOnce = false;
+				ctx.ui.notify("merge-guard: allowed once, as you approved", "info");
+				return;
+			}
+			ctx.ui.notify("merge-guard: blocked a stash — the checkout is in use", "warning");
+			return {
+				block: true,
+				reason:
+					`merge-guard: ${park} parks uncommitted work in a checkout another session is still using. ` +
+					"For a clean trunk, cut a worktree from origin/trunk instead: " +
+					"git -C <repo> worktree add ../<slug>-worktree -b <branch> origin/trunk. " +
+					"If the user asked for this stash, run /mergeguard allow and retry.",
+			};
+		}
 		const branches: BranchLookup = (dir) => currentBranch(dir ?? ctx.cwd);
 		const reason =
 			mergeReason(event.input.command) ?? trunkCommitReason(event.input.command, branches, ctx.cwd);
