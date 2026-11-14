@@ -96,7 +96,7 @@ Status values:
 | 87. AgentsView | done (equivalent) | `scripts/session-report.mjs` reads pi session JSONL | Local-first, but no search or browse of past sessions. |
 | 90. DeepSeek Harness | n/a | — | — |
 | 93. GLM | missing | — | Reasoning-effort tuning per complexity is unaddressed; `thinking` level is manual. |
-| 95. Herdr | done | `~/.config/herdr/`, `~/.pi/herdr-mods`, `agent/extensions/herdr-agent-state.ts`, `scripts/agent-pane.sh` | Attention inbox not used as the review queue it could be. |
+| 95. Herdr | done | `~/.config/herdr/`, `~/.pi/herdr-mods`, `agent/extensions/herdr-agent-state.ts`, `scripts/agent-pane.sh`, `agent/extensions/herdr-resume-map.ts` + `scripts/herdr-resume.mjs` (sessions resume after a reboot) | Attention inbox not used as the review queue it could be. |
 | 96. Hunk | missing | — | Agent diffs are read via `gh pr diff`. |
 | 97. nono.sh | done (equivalent) | `sandbox/pi-sandbox.sh` via bubblewrap | Same class of tool: OS-level isolation, no VM or daemon. |
 | 94. Habit Hooks | done (equivalent) | `git-hooks/pre-commit` runs the budget, skill-length and secret checks; `scripts/harness-check.sh` is the same ruleset on demand | Hooks fire on commit only, so an edit-and-never-commit session is unchecked. |
