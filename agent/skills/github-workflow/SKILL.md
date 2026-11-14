@@ -63,6 +63,22 @@ Body template:
 <commands run, test results, manual verification>
 ```
 
+### Body gates (the ones CI actually reads)
+
+`.github/workflows/pr-tier.yml` runs `scripts/pr-gate.sh`, and so does
+`make pr-check BODY=<file>`. Same script, so the local verdict is the CI
+verdict — run it before handing the PR over, not after a red check.
+
+- `Mission: <line>` — a literal line, **not** a `## Mission` heading; 20+
+  characters after the colon. A heading is markup and no gate reads it.
+- `Review tier: High|Medium|Low` — a harness path in the diff
+  (`agent/extensions/`, `agent/AGENTS.md`, `.github/`, `git-hooks/`,
+  `sandbox/`) is **High whatever the body claims**.
+- `Test change: <reason>` — required when a test file changes beside its
+  source; delete the line when it does not apply.
+
+Start from `.github/pull_request_template.md`; every line a gate reads is in it.
+
 - Small, focused PRs: one logical change per PR. Split large changes.
 - WIP → open as **draft** (`gh pr create --draft`), promote when ready.
 - Update the PR from `main` before it grows stale: `git switch main && git pull && git switch <branch> && git rebase main` (or merge `main` into the branch). Fix conflicts on the branch.

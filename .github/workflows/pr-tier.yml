@@ -25,6 +25,11 @@
 # prefix, so "Mission: fix" does not pass as a mission. Measured the way the
 # Radar blip is measured: the share of PRs with a mission line, which is the
 # check itself — red on a body without one, red on a one-word mission.
+#
+# Both gates are `scripts/pr-gate.sh` now, not bash written into this file.
+# Carrying the logic here meant the first news of a bad body was a red check
+# after the push, and that CI and any local check were two copies that could
+# disagree; the script is the one copy, and `make pr-check` is the local caller.
 name: pr-tier
 
 on:
@@ -62,59 +67,23 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          shopt -s nocasematch
 
-          # 1) The tier. `Review tier: High`, `**Review tier:** high`, `Review tier : LOW`.
-          tier=""
-          if [[ $PR_BODY =~ review[[:space:]]+tier[[:space:]]*:[[:space:]]*\*{0,2}[[:space:]]*(high|medium|low) ]]; then
-            tier="${BASH_REMATCH[1],,}"
-          fi
-          if [[ -z $tier ]]; then
-            echo "::error::the PR body states no review tier (blips 17, 42). Add one of: Review tier: High / Medium / Low"
-            {
-              echo "## Review tier: missing"
-              echo ""
-              echo "No \`Review tier: High|Medium|Low\` line in the PR body."
-              echo "Tiers are defined in \`agent/AGENTS.md\`."
-            } >>"$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          echo "tier: $tier"
+          # The body reaches the gate as a file, never as an argument: it is
+          # untrusted text and stays quoted (blip 38).
+          printf '%s' "$PR_BODY" >"$RUNNER_TEMP/pr-body.md"
 
-          # 2) The diff. Merge-base diff, so unrelated trunk commits do not count.
-          # Both endpoints are already in the local clone (fetch-depth: 0), which
-          # is why this needs neither the token nor a fetch.
-          mapfile -t changed < <(git diff --name-only "${BASE_SHA}...${HEAD_SHA}")
-          echo "changed files: ${#changed[@]}"
-
-          # 3) Harness paths. Touching any of them is High, whatever the body says.
-          harness=()
-          for path in "${changed[@]}"; do
-            case "$path" in
-              agent/extensions/*|git-hooks/*|sandbox/*|.github/*|agent/AGENTS.md)
-                harness+=("$path")
-                ;;
-            esac
-          done
-
-          {
-            echo "## Review tier: ${tier}"
-            echo ""
-            echo "Changed files: ${#changed[@]}"
-            if (( ${#harness[@]} > 0 )); then
-              echo ""
-              echo "Harness paths in the diff (tier must be High):"
-              echo ""
-              printf -- '- `%s`\n' "${harness[@]}"
-            fi
-          } >>"$GITHUB_STEP_SUMMARY"
-
-          if (( ${#harness[@]} > 0 )) && [[ $tier != high ]]; then
-            printf '::error::harness paths changed; tier must be High (blips 17, 42) — offending paths: %s\n' "${harness[*]}"
-            exit 1
+          # One implementation, two callers: this job and `make pr-check` run
+          # the same script, so CI and a local run cannot disagree about a body.
+          # The copy is taken from the base commit — a gate a branch may rewrite
+          # is not a gate — and only on the PR that first adds this file, when
+          # the base copy does not exist yet, does the checked-out one stand in.
+          gate="$RUNNER_TEMP/pr-gate.sh"
+          if ! git show "${BASE_SHA}:scripts/pr-gate.sh" >"$gate" 2>/dev/null; then
+            cp scripts/pr-gate.sh "$gate"
           fi
 
-          echo "tier check passed: $tier"
+          bash "$gate" --gate tier --body "$RUNNER_TEMP/pr-body.md" \
+            --base "$BASE_SHA" --head "$HEAD_SHA"
 
   # A test change and a source change in the same pull request have to explain
   # themselves. Editing `x.test.ts` beside `x.ts` is how an assertion gets bent
@@ -139,64 +108,18 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          shopt -s nocasematch
 
-          mapfile -t changed < <(git diff --name-only "${BASE_SHA}...${HEAD_SHA}")
+          printf '%s' "$PR_BODY" >"$RUNNER_TEMP/pr-body.md"
 
-          tests=(); source=()
-          for path in "${changed[@]}"; do
-            case "$path" in
-              *.test.ts) tests+=("$path") ;;
-              *.ts|*.tsx|*.js|*.mjs|*.cjs|*.sh|*.py) source+=("$path") ;;
-            esac
-          done
-
-          echo "tests changed: ${#tests[@]}; source changed: ${#source[@]}"
-
-          if (( ${#tests[@]} == 0 )); then
-            echo "no test file changed; nothing to justify"
-            exit 0
-          fi
-          if (( ${#source[@]} == 0 )); then
-            echo "tests changed without source beside them; not this gate"
-            exit 0
+          # Same shared script as the tier job, and taken from the base commit
+          # for the same reason: a branch does not get to rewrite its gate.
+          gate="$RUNNER_TEMP/pr-gate.sh"
+          if ! git show "${BASE_SHA}:scripts/pr-gate.sh" >"$gate" 2>/dev/null; then
+            cp scripts/pr-gate.sh "$gate"
           fi
 
-          # `Test change: the retry needed a fake clock` and `**Test change:** ...`
-          # both count: emphasis is stripped first, and `.` stops at the end of
-          # the line, so the reason is one line, not the rest of the body.
-          flat="${PR_BODY//\*/}"
-          reason=""
-          if [[ $flat =~ test[[:space:]]+change[[:space:]]*:[[:space:]]*(.+) ]]; then
-            reason="${BASH_REMATCH[1]}"
-          fi
-          # Trailing whitespace would make an empty reason look long enough.
-          reason="$(printf '%s' "$reason" | sed -e 's/[[:space:]]*$//')"
-          echo "reason: ${reason:-<none>}"
-
-          if (( ${#reason} < 10 )); then
-            {
-              echo "## Test change: reason missing"
-              echo ""
-              echo "This pull request changes a test file next to source:"
-              echo ""
-              printf -- '- test: `%s`\n' "${tests[@]}"
-              printf -- '- source: `%s`\n' "${source[@]}"
-              echo ""
-              echo "Add a line to the PR body:"
-              echo ""
-              echo '`Test change: <why the test had to change>`'
-            } >>"$GITHUB_STEP_SUMMARY"
-            echo "::error::a test file and its source changed together; the PR body needs a 'Test change: <reason>' line"
-            exit 1
-          fi
-
-          echo "::notice::test change justified: ${reason}"
-          {
-            echo "## Test change: justified"
-            echo ""
-            echo "${reason}"
-          } >>"$GITHUB_STEP_SUMMARY"
+          bash "$gate" --gate test-change --body "$RUNNER_TEMP/pr-body.md" \
+            --base "$BASE_SHA" --head "$HEAD_SHA"
 
   # A pull request has to say who is better off. Tier says how much review the
   # change needs; mission says why the change is worth reviewing at all, and the
@@ -208,63 +131,28 @@ jobs:
     name: mission stated
     runs-on: ubuntu-latest
     steps:
-      # No checkout: this gate reads the PR body and nothing else, so no branch
-      # content is fetched or executed to decide it.
+      # No diff and no branch content decides this gate; it reads the PR body
+      # and the shared gate script, which comes from the base commit. History is
+      # fetched only so `${BASE_SHA}:scripts/pr-gate.sh` resolves without a
+      # second network call and without the token.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
       - name: mission line in the PR body, and long enough to mean something
         env:
           # Untrusted input: quoted, and only ever matched in bash below.
           PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          shopt -s nocasematch
 
-          # Emphasis is stripped first, the way the test-change gate does it, so
-          # `**Mission:** ...` counts as a mission line.
-          flat="${PR_BODY//\*/}"
+          printf '%s' "$PR_BODY" >"$RUNNER_TEMP/pr-body.md"
 
-          found=0
-          mission=""
-          while IFS= read -r line; do
-            # Leading whitespace and space around the colon are tolerated; the
-            # line is what matters, not its punctuation.
-            if [[ $line =~ ^[[:space:]]*mission[[:space:]]*:[[:space:]]*(.*)$ ]]; then
-              found=1
-              mission="${BASH_REMATCH[1]}"
-              break
-            fi
-          done <<<"$flat"
-
-          if (( found == 0 )); then
-            echo "::error::the PR body states no mission (blip 41: effort is not mission). Add a line: Mission: <who is better off, and how you would see it>"
-            {
-              echo "## Mission: missing"
-              echo ""
-              echo "No \`Mission:\` line in the PR body."
-              echo "Define it as \`docs/kent-beck-craft-harness.md\` does: who is better off,"
-              echo "and the observation that shows the gain. Effort is not mission."
-            } >>"$GITHUB_STEP_SUMMARY"
-            exit 1
+          gate="$RUNNER_TEMP/pr-gate.sh"
+          if ! git show "${BASE_SHA}:scripts/pr-gate.sh" >"$gate" 2>/dev/null; then
+            cp scripts/pr-gate.sh "$gate"
           fi
 
-          # Trailing whitespace would make a short mission look long enough.
-          mission="$(printf '%s' "$mission" | sed -e 's/[[:space:]]*$//')"
-          echo "mission: ${mission:-<empty>}"
-
-          if (( ${#mission} < 20 )); then
-            echo "::error::the Mission line is ${#mission} characters after the prefix; a mission names who gains and how we would see it, at least 20 characters"
-            {
-              echo "## Mission: too short"
-              echo ""
-              echo "\`Mission:\` is filled in, but only with \`${mission:-<empty>}\`."
-              echo "A mission names the person or system that gains and the observation that shows it."
-              echo "Example: \`Mission: a reviewer sees which gate failed without opening the logs.\`"
-            } >>"$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-
-          echo "::notice::mission stated: ${mission}"
-          {
-            echo "## Mission: stated"
-            echo ""
-            echo "${mission}"
-          } >>"$GITHUB_STEP_SUMMARY"
+          bash "$gate" --gate mission --body "$RUNNER_TEMP/pr-body.md"

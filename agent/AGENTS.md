@@ -1,8 +1,8 @@
 # Global rules
 
 - Always respond in English, regardless of the language the user writes in.
-- Use codemode whenever a response would need 2 or more tool calls. Batch them in one `codemode` script (`tools.read`, `tools.bash`, `Promise.allSettled` for independent calls) instead of emitting separate calls. Single tool calls go direct.
-- ADHD output mode is always on (`~/.pi/agent/i-have-adhd.json` → `alwaysOn`). Its rules apply to every outward-facing artifact, not just chat: commit messages, PR bodies, review comments, issue text, any file written for humans. Only the user turns it off, with "stop adhd mode" or `/i-have-adhd off`.
+- Use codemode when a response needs 2+ tool calls: one script (`tools.read`, `tools.bash`, `Promise.allSettled` for independent calls) beats separate calls. Single calls go direct.
+- ADHD output mode is always on (`~/.pi/agent/i-have-adhd.json` → `alwaysOn`). Its rules apply to anything written for humans: commits, PR bodies, review comments, any file. Only the user turns it off: "stop adhd mode" or `/i-have-adhd off`.
 
 ## Sandbox
 
@@ -11,12 +11,12 @@
 ## Landing changes
 
 - Never merge, push to trunk, or commit while on trunk without the user's explicit permission in this session. Ask, wait for a yes, then `/mergeguard allow` and run that one command. `merge-guard` blocks `gh pr merge`, the merge API, trunk pushes, and trunk commits; green CI is not permission.
-- State the review tier in the PR body before you open it, and refuse to merge at high (blips 17, 42). High: `agent/extensions/`, `agent/AGENTS.md`, `.github/`, `git-hooks/`, `sandbox/`, anything touching auth, secrets, money or data deletion → user reads it line by line, never auto-merged. Medium: application code, tests, migrations → diff read, tests green. Low: docs, comments, formatting, patch bumps → CI green, skim.
+- Body gates: run `make pr-check BODY=<file>` before the PR goes out — seconds, same `pr-tier` verdict. The tier goes in the PR body (blips 17, 42): High = `agent/extensions/`, `agent/AGENTS.md`, `.github/`, `git-hooks/`, `sandbox/`, auth, secrets, money, deletion → read line by line, never auto-merged; Medium = application code, tests, migrations → diff read, tests green; Low = docs, comments, formatting → CI green, skim. A mission is a literal `Mission:` line — not a `## Mission` heading, 20+ chars after the colon — and a harness path in the diff is High whatever the body says.
 - Vague request, more than one file, or a design choice → `/grill` first; no code before the answers (blip 13).
 
 ## Harness sources
 
-- Harness changes follow the Thoughtworks Radar (https://www.thoughtworks.com/radar), Volume 35. Cite the blip number, prefer the Adopt ring, name the problem it fixes and how it is measured.
+- Harness changes follow the Thoughtworks Radar — thoughtworks.com/radar, Vol. 35. Cite the blip number, prefer the Adopt ring, name the problem it fixes and how it is measured.
 
 ## Local model
 
@@ -36,5 +36,5 @@
 ## Machine / screens
 
 - X11, DISPLAY `:1`, root window 9840x3840 (multi-monitor, scaled). Never grab the whole root.
-- Shotcut sits on the right-hand screen. Never hardcode coordinates: run `xwininfo -root -tree` and pick the largest window whose title contains `Shotcut`.
+- Shotcut: right-hand screen. Never hardcode coordinates — run `xwininfo -root -tree`, pick the largest window whose title contains `Shotcut`.
 - Screenshot helper: `/home/mark/projects/bakmark/scripts/shotcut-window.py [out.png] [width]`.
