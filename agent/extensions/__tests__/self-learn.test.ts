@@ -9,10 +9,10 @@
  */
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
-import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
+import { createFakeCtx, createFakePi, waitFor } from "./helpers/fake-pi.ts";
 
 // The extension resolves its proposal directory at import time; point it at a
 // scratch directory so a test run never writes into ~/.pi/agent/proposals.
@@ -22,7 +22,8 @@ delete process.env.PI_SELF_LEARN;
 
 const mod = await import("../self-learn.ts");
 const selfLearn = mod.default;
-const { decideLearner, signatureOf, redact, pickLauncher } = mod;
+const { decideLearner, signatureOf, redact, pickLauncher, paneTerminal, withSelfClose, clipDetail } = mod;
+const REPO = join(homedir(), ".pi");
 
 after(async () => {
 	await rm(scratch, { recursive: true, force: true });
@@ -120,6 +121,19 @@ describe("pickLauncher", () => {
 		assert.match(launcher.argv[0], /agent-pane\.sh$/);
 	});
 
+	test("the learner is started in the repo, never in the queue", () => {
+		for (const launcher of [
+			pickLauncher(() => true, slug, queue, () => true),
+			pickLauncher(() => false, slug, queue, () => true),
+			pickLauncher(() => false, slug, queue, () => false),
+		]) {
+			assert.equal(launcher.cwd, join(homedir(), ".pi"));
+		}
+		// agent-pane.sh spawns in the spec's directory unless it is told otherwise.
+		const pane = pickLauncher(() => true, slug, queue, () => true);
+		assert.deepEqual(pane.argv.slice(4), ["--cwd", join(homedir(), ".pi")]);
+	});
+
 	test("otherwise a headless sandboxed run", () => {
 		const launcher = pickLauncher(() => false, slug, queue, (path) => path.endsWith("pisandbox"));
 		assert.equal(launcher.kind, "headless");
@@ -134,10 +148,73 @@ describe("pickLauncher", () => {
 	});
 });
 
+describe("launch verification", () => {
+	test("a spawn report with a terminal is a started learner", () => {
+		assert.equal(paneTerminal('{"slug":"learn-1200","terminal":"t7","spec":"q"}\n'), "t7");
+	});
+
+	test("empty, unparsable or terminal-less output is not a space", () => {
+		assert.equal(paneTerminal(""), null);
+		assert.equal(paneTerminal("not json at all\n"), null);
+		assert.equal(paneTerminal('{"slug":"learn-1200","terminal":""}'), null);
+		assert.equal(paneTerminal("{"), null);
+	});
+
+	test("stderr is redacted and clipped before it reaches the run log", () => {
+		const key = "sk-" + "b".repeat(20);
+		const detail = clipDetail(`${key}\n${"x".repeat(1000)}`);
+		assert.ok(!detail.includes(key), "a credential in stderr must not be logged");
+		assert.ok(detail.length <= 400, "stderr is clipped, the log stays one line");
+	});
+
+	test("the learner closes its own space, even if pi dies first", () => {
+		const launcher = {
+			argv: ["/tmp/pisandbox", "--", "pi", "-p", "Read and execute /tmp/q.md"],
+			kind: "headless" as const,
+			cwd: join(homedir(), ".pi"),
+		};
+		const wrapped = withSelfClose(launcher, "learn-1200");
+		assert.equal(wrapped.argv[0], "sh");
+		const script = wrapped.argv[2];
+		assert.match(script, /agent-pane\.sh' 'close' 'learn-1200'/);
+		assert.match(script, /; rc=\$\?;/, "the close runs whatever pi's exit status was");
+		assert.equal(wrapped.cwd, launcher.cwd);
+		// A pane learner closes its own space itself; do not wrap it twice.
+		const pane = { argv: ["/tmp/agent-pane.sh", "spawn", "s", "/tmp/q.md"], kind: "pane" as const, cwd: REPO };
+		assert.equal(withSelfClose(pane, "learn-1200"), pane);
+	});
+});
+
 describe("wiring", () => {
 	// One shared clock, moved forward per test: the run log debounces across
 	// sessions, so a test that spawned a learner must not block the next one.
 	let clock = NOW;
+
+	/** Every line of the audit trail this test run wrote. */
+	async function readRuns(): Promise<any[]> {
+		try {
+			return (await readFile(join(scratch, "proposals", "runs.jsonl"), "utf8"))
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line));
+		} catch {
+			return [];
+		}
+	}
+
+	/** Let a previous test's background launch finish writing its run row. */
+	const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+
+	/** Poll the audit trail: the launch is verified in the background. */
+	async function waitForRun(predicate: (row: any, index: number) => boolean): Promise<any> {
+		for (let i = 0; i < 200; i++) {
+			const row = (await readRuns()).find(predicate);
+			if (row) return row;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		throw new Error("timed out waiting for a run-log row");
+	}
+
 	function setup(deps: Record<string, unknown> = {}) {
 		clock += 20 * minutes(1);
 		const base = clock;
@@ -146,12 +223,16 @@ describe("wiring", () => {
 		const learn = { calls: 0 };
 		const fake = createFakePi();
 		const api = selfLearn(fake.pi, {
-			start: (launcher: any, env: NodeJS.ProcessEnv) => started.push({ launcher, env }),
+			launch: (launcher: any, env: NodeJS.ProcessEnv) => {
+				started.push({ launcher, env });
+				return { ok: true, status: 0 };
+			},
 			countNotes: async () => {
 				learn.calls += 1;
 				return 0;
 			},
 			has: () => false,
+			exists: () => true,
 			now: () => base,
 			...deps,
 		});
@@ -161,6 +242,12 @@ describe("wiring", () => {
 
 	const boom = { isError: true, toolName: "bash", content: "command not found: zizmor" };
 
+	/** Two identical failures: the shortest path to a tripped gate. */
+	async function trip(emit: (n: string, e?: any, c?: any) => Promise<any[]>, ctx: any) {
+		await emit("tool_result", boom, ctx);
+		await emit("tool_result", boom, ctx);
+	}
+
 	test("a quiet compaction starts nothing", async () => {
 		const { emit, ctx, started } = setup();
 		await emit("session_compact", { reason: "threshold" }, ctx);
@@ -168,14 +255,14 @@ describe("wiring", () => {
 	});
 
 	test("the same failure twice starts exactly one learner, in another process", async () => {
-		const { emit, ctx, started, notices } = setup();
+		const { emit, ctx, started } = setup();
 		await emit("tool_result", boom, ctx);
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		assert.equal(started.length, 0, "one failure is not a pattern");
 
 		await emit("tool_result", boom, ctx);
 		await emit("session_compact", { reason: "threshold" }, ctx);
-		assert.equal(started.length, 1);
+		await waitFor(() => started.length === 1);
 		assert.equal(started[0].env.PI_SELF_LEARN, "1", "the child must not spawn a learner");
 
 		// Counters reset: the same evidence cannot spawn again.
@@ -183,17 +270,73 @@ describe("wiring", () => {
 		assert.equal(started.length, 1);
 	});
 
+	test("the cwd handed to the launch is the repo, not the queue directory", async () => {
+		const { emit, ctx, started } = setup();
+		await trip(emit, ctx);
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		await waitFor(() => started.length === 1);
+		assert.equal(started[0].launcher.cwd, join(homedir(), ".pi"));
+		assert.match(started[0].env.PI_SELF_LEARN_SLUG, /^learn-\d{2}-\d{2}$/);
+	});
+
+	test("a pane launch that exits 0 without a space fails, and headless takes over", async () => {
+		// The reported bug: agent-pane.sh exits 0 without creating a herdr space,
+		// and the old code wrote a `spawned` row for a learner that never existed.
+		const attempts: string[] = [];
+		const { emit, ctx } = setup({
+			has: () => true,
+			launch: (launcher: any) => {
+				attempts.push(launcher.kind);
+				if (launcher.kind === "pane") return { ok: false, status: 0, detail: "exited 0 without a herdr space" };
+				return { ok: true, status: null };
+			},
+		});
+		await trip(emit, ctx);
+		await settle();
+		const before = (await readRuns()).length;
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		await waitFor(() => attempts.length === 2);
+		assert.deepEqual(attempts, ["pane", "headless"], "the pane is tried first, headless is the fallback");
+
+		const runs = (await readRuns()).slice(before);
+		const failed = runs.filter((row) => row.kind === "spawn-failed" && row.launcher === "pane");
+		assert.equal(failed.length, 1, "a pane that made no space is logged as a failure");
+		assert.equal(failed[0].status, 0, "the exit status is recorded, not just the fact of failure");
+		assert.match(failed[0].stderr, /without a herdr space/);
+		const spawned = runs.filter((row) => row.kind === "spawned");
+		assert.equal(spawned.length, 1);
+		assert.equal(spawned[0].launcher, "headless", "the log names the launcher that actually ran");
+	});
+
+	test("the learner is told to hand the PR to big-boss-pi and to close its own space", async () => {
+		const { emit, ctx } = setup();
+		await trip(emit, ctx);
+		await settle();
+		const before = (await readRuns()).length;
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		const run = await waitForRun((row, index) => index >= before && row.kind === "spawned");
+		const body = await readFile(run.queue, "utf8");
+		assert.match(body, /big-boss-pi\/bin\/pi-bare/, "the spec names the bare agent that publishes");
+		assert.match(body, /agent-pane\.sh close/, "the spec tells the learner to close its own space");
+		assert.match(body, /learn-\d{2}-\d{2}/, "the slug it must close is in the file");
+		assert.match(body, /worktree add/, "the boss's checkout must not be switched");
+
+		// The prompt file itself, not only the generated queue file.
+		const spec = await readFile(new URL("../../prompts/learn.md", import.meta.url), "utf8");
+		assert.match(spec, /big-boss-pi\/bin\/pi-bare/);
+		assert.match(spec, /agent-pane\.sh close/);
+		assert.match(spec, /review tier/i);
+	});
+
 	test("the learner runs in ten minutes, not on every compaction", async () => {
 		const base = clock + 20 * minutes(1);
 		let at = base;
 		const { emit, ctx, started } = setup({ now: () => at });
-		await emit("tool_result", boom, ctx);
-		await emit("tool_result", boom, ctx);
+		await trip(emit, ctx);
 		await emit("session_compact", { reason: "threshold" }, ctx);
-		assert.equal(started.length, 1);
+		await waitFor(() => started.length === 1);
 
-		await emit("tool_result", boom, ctx);
-		await emit("tool_result", boom, ctx);
+		await trip(emit, ctx);
 		at = clock + minutes(2);
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		assert.equal(started.length, 1, "too soon after the last learner");
@@ -202,19 +345,30 @@ describe("wiring", () => {
 	test("a /suggest note trips the gate on its own", async () => {
 		const { emit, ctx, started } = setup({ countNotes: async () => 1 });
 		await emit("session_compact", { reason: "manual" }, ctx);
-		assert.equal(started.length, 1);
+		await waitFor(() => started.length === 1);
 	});
 
-	test("a failed spawn does not throw and does not count", async () => {
-		const { emit, ctx, started } = setup({
-			start: () => {
-				throw new Error("no herdr today");
+	test("a failed spawn does not throw and does not count as a learner", async () => {
+		const attempts: string[] = [];
+		const { emit, ctx, notices } = setup({
+			has: () => true,
+			launch: (launcher: any) => {
+				attempts.push(launcher.kind);
+				return { ok: false, status: 127, detail: "no herdr today" };
 			},
 		});
-		await emit("tool_result", boom, ctx);
-		await emit("tool_result", boom, ctx);
+		await trip(emit, ctx);
+		await settle();
+		const before = (await readRuns()).length;
 		await emit("session_compact", { reason: "threshold" }, ctx);
-		assert.equal(started.length, 0);
+		await waitFor(() => attempts.length === 2);
+		const runs = (await readRuns()).slice(before);
+		assert.equal(runs.filter((row) => row.kind === "spawned").length, 0, "no learner, no spawned row");
+		assert.equal(runs.filter((row) => row.kind === "spawn-failed").length, 2);
+		assert.ok(
+			notices.some((notice) => notice.level === "warning" && /could not start/.test(notice.message)),
+			"the person is told, in the session, that no learner started",
+		);
 	});
 
 	test("session_start forgets the previous session's evidence", async () => {
@@ -233,13 +387,12 @@ describe("wiring", () => {
 		const branch: any[] = [{ type: "message", id: "m1", message: { role: "user", content: "hi" } }];
 		ctx.sessionManager = { getBranch: () => branch };
 		await emit("session_start", { reason: "startup" }, ctx);
-		await emit("tool_result", boom, ctx);
-		await emit("tool_result", boom, ctx);
+		await trip(emit, ctx);
 
 		branch.push({ type: "compaction", id: "c-om-1", summary: "s", firstKeptEntryId: "m1", tokensBefore: 120_000 });
 		await emit("turn_start", { type: "turn_start" }, ctx);
 		assert.equal(learn.calls, 1, "the committed entry reached the gate without session_compact");
-		assert.equal(started.length, 1);
+		await waitFor(() => started.length === 1);
 
 		// The same entry, via the other boundary signal and the next turn: once.
 		await emit("before_agent_start", { type: "before_agent_start" }, ctx);
@@ -258,12 +411,11 @@ describe("wiring", () => {
 		const branch: any[] = [];
 		ctx.sessionManager = { getBranch: () => branch };
 		await emit("session_start", { reason: "startup" }, ctx);
-		await emit("tool_result", boom, ctx);
-		await emit("tool_result", boom, ctx);
+		await trip(emit, ctx);
 		// pi appends the entry, then emits session_compact for it.
 		branch.push({ type: "compaction", id: "c-pi-1", summary: "s", firstKeptEntryId: "m1", tokensBefore: 90_000 });
 		await emit("session_compact", { reason: "threshold" }, ctx);
-		assert.equal(started.length, 1);
+		await waitFor(() => started.length === 1);
 
 		await emit("turn_start", { type: "turn_start" }, ctx);
 		assert.equal(learn.calls, 1, "already handled by session_compact, not re-evaluated");
@@ -285,5 +437,6 @@ describe("wiring", () => {
 		assert.match(body, /Failed tool calls since the last compaction/);
 		assert.match(body, /zizmor/, "the learner needs to recognise the failure, not a bare hash");
 		assert.match(body, /\| bash \| 2 \|/, "tool and count are in the table");
-		assert.ok(!body.includes("abc123def456ghi"), "a credential in the error text is redacted");	});
+		assert.ok(!body.includes("abc123def456ghi"), "a credential in the error text is redacted");
+	});
 });
