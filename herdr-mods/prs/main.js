@@ -2,9 +2,15 @@
  * prs — pull requests on the left, the diff on the right, and the actions you
  * take on one: review it, or hand the work to the big-boss-pi agent.
  *
- * Left: open pull requests grouped by repository, review requests first. Click
- * one and the right side shows its diff — file headers with +/− counts, hunk
- * headers, line numbers, a green/red sign gutter.
+ * Left: open pull requests grouped by repository, review requests first, every
+ * repository folded until you open it — and the ones you open stay open, in
+ * appHome()/prs-collapsed.json. Click one and the right side shows its diff —
+ * file headers with +/− counts, hunk headers, line numbers, a green/red sign
+ * gutter.
+ *
+ * The list of what exists comes from the GitHub search index, which is minutes
+ * behind on everything else. Checks, mergeability and the last update are asked
+ * straight from the pull request itself, 25 to a GraphQL request, every 30s.
  *
  * Right, below the diff: a note field with Approve / Request changes / Comment,
  * and four buttons that each start a brand-new agent — review the PR, fix the
@@ -31,14 +37,34 @@
  */
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle, Scrollbar, Textarea, TextareaState } from "gpui-base";
-import { appHome, exec, home, nextCommand, props, run, settings, spaces, theme, writeTextFile } from "herdr";
+import { appHome, exec, home, nextCommand, props, readTextFile, run, settings, spaces, theme, writeTextFile } from "herdr";
 
+/**
+ * The search answers one question only: which open pull requests exist. Its index
+ * is minutes behind on checks and mergeability, so status never comes from here.
+ */
 const FRAGMENT = `fragment PR on PullRequest {
-  number title url isDraft reviewDecision mergeable updatedAt headRefName
+  number title url isDraft headRefName
   author { login }
   repository { nameWithOwner defaultBranchRef { name } }
-  commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
 }`;
+
+/** What only a direct look at the pull request can say, and it says it now. */
+const STATUS_FIELDS = `reviewDecision mergeable updatedAt
+    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }`;
+
+/** One aliased repository lookup per pull request, 25 to a request. */
+const STATUS_BATCH = 25;
+
+function statusQuery(prs) {
+	const parts = prs
+		.map((pr, i) => {
+			const [owner, name] = pr.repo.split("/");
+			return `q${i}: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) { pullRequest(number: ${pr.number}) { ${STATUS_FIELDS} } }`;
+		})
+		.join("\n  ");
+	return `query {\n  ${parts}\n}`;
+}
 
 /** Two searches per owner we can see, so every repository with an open pull request shows up. */
 function searchQuery(owners) {
@@ -209,9 +235,13 @@ export default class PullRequests extends View {
 		this.busy = "";
 		this.folders = {};
 		this.line = null;
-		this.collapsed = new Set();
+		// Every repository starts folded; only the ones the person opened are listed here.
+		this.expanded = new Set();
 		this.tmp = `${appHome()}/review-note.json`;
 		this.tmpLast = null;
+		this.folded = `${appHome()}/prs-collapsed.json`;
+		this.foldedLast = null;
+		this.liveBusy = false;
 		// Enter is a newline in both boxes: posting is only ever a button.
 		this.note = TextareaState.new({ placeholder: "Review note — Enter starts a new line", rows: 1 });
 		this.note.set_auto_grow(1, REVIEW_ROWS);
@@ -221,10 +251,17 @@ export default class PullRequests extends View {
 		this.lineNote.set_auto_grow(1, LINE_ROWS);
 		this.lineNote.set_soft_wrap(true);
 
-		this.refresh(cx);
+		cx.spawn(async (cx) => {
+			await this.loadExpanded();
+			cx.notify();
+		});
+		// A search is a list; its statuses arrive right after it, from the live query.
+		this.full(cx);
 		const start = props()?.open;
 		if (start) cx.timer.after(1200, (cx) => this.select(start, cx));
-		cx.timer.every(120000, (cx) => this.refresh(cx));
+		// Two clocks on purpose: statuses every 30s, the list of what exists every 120s.
+		cx.timer.every(30000, (cx) => this.livePass(cx));
+		cx.timer.every(120000, (cx) => this.full(cx));
 		cx.spawn(async (cx) => {
 			for (;;) {
 				const command = await nextCommand();
@@ -252,6 +289,49 @@ export default class PullRequests extends View {
 			.sort((a, b) => (a.asked === b.asked ? a.repo.localeCompare(b.repo) : a.asked ? -1 : 1));
 	}
 
+	/** The repositories the person opened, from appHome; anything unreadable means all folded. */
+	async loadExpanded() {
+		// null is "there is no file yet", which is not the same as a file holding nothing.
+		let text = null;
+		try {
+			text = (await readTextFile(this.folded)) ?? "";
+		} catch {
+			text = null;
+		}
+		this.foldedLast = text;
+		try {
+			const list = JSON.parse(text ?? "");
+			this.expanded = new Set(Array.isArray(list) ? list.filter((repo) => typeof repo === "string") : []);
+		} catch {
+			this.expanded = new Set();
+		}
+	}
+
+	/** Write the expanded set back, expected-text and all, so a stale write cannot win. */
+	async saveExpanded() {
+		const text = JSON.stringify([...this.expanded].sort());
+		const write = async (expected) => {
+			try {
+				await writeTextFile(this.folded, text, expected);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		let written = await write(this.foldedLast);
+		if (!written) {
+			// The file moved under us: read what is there and write our set over it once.
+			let current = null;
+			try {
+				current = (await readTextFile(this.folded)) ?? "";
+			} catch {
+				current = null;
+			}
+			if (current !== this.foldedLast) written = await write(current);
+		}
+		if (written) this.foldedLast = text;
+	}
+
 	/** The owners to search: me, and every organisation I am in. */
 	async owners() {
 		if (this.ownerList) return this.ownerList;
@@ -276,23 +356,30 @@ export default class PullRequests extends View {
 				try {
 					const data = JSON.parse(result.stdout).data;
 					this.me = data.viewer.login;
-					const shape = (n, review) => ({
-						key: `${n.repository.nameWithOwner}#${n.number}`,
-						repo: n.repository.nameWithOwner,
-						number: n.number,
-						title: n.title,
-						url: n.url,
-						branch: n.headRefName,
-						base: n.repository.defaultBranchRef?.name ?? "",
-						author: n.author?.login ?? "",
-						review,
-						draft: n.isDraft,
-						decision: n.reviewDecision,
-						mergeable: n.mergeable,
-						checks: n.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? "",
-						updated: ago(n.updatedAt),
-						updatedMs: Date.parse(n.updatedAt) || 0,
-					});
+					const before = new Map(this.prs.map((pr) => [pr.key, pr]));
+					const shape = (n, review) => {
+						const key = `${n.repository.nameWithOwner}#${n.number}`;
+						// The search no longer carries status, so a row that is already here keeps
+						// what the live query last saw instead of falling back to nothing.
+						const seen = before.get(key);
+						return {
+							key,
+							repo: n.repository.nameWithOwner,
+							number: n.number,
+							title: n.title,
+							url: n.url,
+							branch: n.headRefName,
+							base: n.repository.defaultBranchRef?.name ?? "",
+							author: n.author?.login ?? "",
+							review,
+							draft: n.isDraft,
+							decision: seen?.decision ?? null,
+							mergeable: seen?.mergeable ?? null,
+							checks: seen?.checks ?? "",
+							updated: seen?.updated ?? "",
+							updatedMs: seen?.updatedMs ?? 0,
+						};
+					};
 					const asked = (data.asked?.nodes ?? []).filter((n) => n?.number).map((n) => shape(n, true));
 					const askedKeys = new Set(asked.map((pr) => pr.key));
 					const seen = new Set(askedKeys);
@@ -325,6 +412,65 @@ export default class PullRequests extends View {
 		});
 	}
 
+	/** A full refresh: the search, then a live pass so the new rows have statuses too. */
+	full(cx) {
+		this.refresh(cx, () => this.livePass(cx));
+	}
+
+	/**
+	 * Status for every row, straight from the pull request instead of the search index:
+	 * at most 25 per request, merged into the rows already on screen by key.
+	 */
+	livePass(cx) {
+		if (this.liveBusy || !this.prs.length) return;
+		this.liveBusy = true;
+		cx.spawn(async (cx) => {
+			try {
+				await this.liveStatuses();
+			} catch (e) {
+				this.error = `live status failed: ${e}`;
+			} finally {
+				// A pass that threw must not silence every pass after it.
+				this.liveBusy = false;
+			}
+			cx.notify();
+		});
+	}
+
+	async liveStatuses() {
+		const rows = this.prs.filter((pr) => pr.repo && pr.number);
+		for (let at = 0; at < rows.length; at += STATUS_BATCH) {
+			const batch = rows.slice(at, at + STATUS_BATCH);
+			const result = await gh(["api", "graphql", "-f", `query=${statusQuery(batch)}`], 60000);
+			if (result.code !== 0) {
+				this.error = (result.stderr || "gh api graphql failed").trim().split("\n")[0];
+				continue;
+			}
+			let data;
+			try {
+				data = JSON.parse(result.stdout).data;
+			} catch (e) {
+				this.error = `could not read live status: ${e}`;
+				continue;
+			}
+			for (const [i, asked] of batch.entries()) {
+				const node = data?.[`q${i}`]?.pullRequest;
+				// Deleted or transferred: no answer is not an answer, so the row stays as it was.
+				if (!node) continue;
+				const pr = this.prs.find((row) => row.key === asked.key);
+				if (!pr) continue;
+				if (node.reviewDecision !== undefined) pr.decision = node.reviewDecision;
+				// GitHub says UNKNOWN while it works out mergeability; a known value stays.
+				if (node.mergeable && node.mergeable !== "UNKNOWN") pr.mergeable = node.mergeable;
+				pr.checks = node.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? "";
+				if (node.updatedAt) {
+					pr.updated = ago(node.updatedAt);
+					pr.updatedMs = Date.parse(node.updatedAt) || 0;
+				}
+			}
+		}
+	}
+
 	loadDiff(pr, cx) {
 		if (!pr) return;
 		this.diff = { rows: [], width: 600, key: pr.key, loading: true };
@@ -346,7 +492,7 @@ export default class PullRequests extends View {
 		const rows = [];
 		for (const group of this.groups) {
 			rows.push({ type: "group", repo: group.repo, count: group.list.length, asked: group.asked });
-			if (this.collapsed.has(group.repo)) continue;
+			if (!this.expanded.has(group.repo)) continue;
 			for (const pr of group.list) rows.push({ type: "pr", pr });
 		}
 		return rows;
@@ -683,7 +829,7 @@ export default class PullRequests extends View {
 		const k = event.key;
 		if ((k === "down" || k === "j") && !this.reviewAction) this.move(1, cx);
 		else if ((k === "up" || k === "k") && !this.reviewAction) this.move(-1, cx);
-		else if (k === "r") this.refresh(cx);
+		else if (k === "r") this.full(cx);
 		else if (k === "escape") {
 			this.pending = "";
 			this.reviewAction = "";
@@ -847,7 +993,7 @@ export default class PullRequests extends View {
 	}
 
 	groupHeader(group, t, cx) {
-		const collapsed = this.collapsed.has(group.repo);
+		const collapsed = !this.expanded.has(group.repo);
 		return h_flex()
 			.id(`repo-${group.repo}`)
 			.px(8)
@@ -858,9 +1004,10 @@ export default class PullRequests extends View {
 			.rounded(6)
 			.hover((s) => s.bg(t.hover))
 			.on_click((_e, cx) => {
-				if (collapsed) this.collapsed.delete(group.repo);
-				else this.collapsed.add(group.repo);
+				if (collapsed) this.expanded.add(group.repo);
+				else this.expanded.delete(group.repo);
 				cx.notify();
+				cx.spawn(async () => this.saveExpanded());
 			})
 			.child(div().w(10).flex_none().text_size(9).text_color(t.dim).child(collapsed ? "▸" : "▾"))
 			.child(div().flex_1().min_w(0).truncate().text_size(10.5).text_color(group.asked ? t.accent : t.dim).child(group.repo))
