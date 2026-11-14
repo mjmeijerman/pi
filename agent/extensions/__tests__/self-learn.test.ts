@@ -8,7 +8,7 @@
  * so it cannot spawn a learner of its own.
  */
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -22,7 +22,7 @@ delete process.env.PI_SELF_LEARN;
 
 const mod = await import("../self-learn.ts");
 const selfLearn = mod.default;
-const { decideLearner, signatureOf, redact, pickLauncher, paneTerminal, withSelfClose, clipDetail } = mod;
+const { decideLearner, signatureOf, redact, pickLauncher, paneTerminal, withSelfClose, clipDetail, turnSession } = mod;
 const REPO = join(homedir(), ".pi");
 
 after(async () => {
@@ -185,6 +185,72 @@ describe("launch verification", () => {
 	});
 });
 
+describe("turn confirmation", () => {
+	let sessions = 0;
+
+	/** A pi session file as this machine writes one: header, then the first turn. */
+	async function sessionFile(root: string, cwd: string, firstTurn: string): Promise<string> {
+		const dir = join(root, `--${cwd.replace(/^\/+/, "").replace(/\//g, "-")}--`);
+		await mkdir(dir, { recursive: true });
+		const path = join(dir, `s${++sessions}.jsonl`);
+		const header = { type: "session", version: 3, id: "s1", timestamp: new Date().toISOString(), cwd };
+		const system = { type: "message", message: { role: "system", content: [{ type: "text", text: "be brief" }] } };
+		const user = { type: "message", message: { role: "user", content: [{ type: "text", text: firstTurn }] } };
+		await writeFile(path, `${[header, system, user].map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
+		return path;
+	}
+
+	const cwd = join(tmpdir(), "learner-cwd");
+	const queue = join(cwd, "queue", "2026-11-14T19-02-56-300Z.md");
+
+	test("a session whose first turn names the queue file is a learner", async () => {
+		const root = await mkdtemp(join(tmpdir(), "self-learn-sessions-"));
+		try {
+			const path = await sessionFile(root, cwd, `Read ${queue} and do it`);
+			assert.equal(await turnSession(root, { cwd, queuePath: queue, since: Date.now() - 60_000 }), path);
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a booting pi with no user turn is not a learner", async () => {
+		const root = await mkdtemp(join(tmpdir(), "self-learn-sessions-"));
+		try {
+			// The six-of-seven failure: the process started, the session exists, and the
+			// prompt was never consumed.
+			const dir = join(root, "--tmp-learner-cwd--");
+			await mkdir(dir, { recursive: true });
+			await writeFile(
+				join(dir, "boot.jsonl"),
+				`${JSON.stringify({ type: "session", version: 3, id: "s2", cwd })}\n`,
+				"utf8",
+			);
+			assert.equal(await turnSession(root, { cwd, queuePath: queue, since: Date.now() - 60_000 }), null);
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("another prompt in the same cwd, a session from before the launch, or another cwd: no", async () => {
+		const root = await mkdtemp(join(tmpdir(), "self-learn-sessions-"));
+		try {
+			await sessionFile(root, cwd, "Read /tmp/some/other/spec.md and do it");
+			const old = await sessionFile(root, cwd, `Read ${queue} and do it`);
+			// The launch happened after this session was written.
+			assert.equal(await turnSession(root, { cwd, queuePath: queue, since: Date.now() + 60_000 }), null);
+			// A worker in a child directory of the repo is not the learner either.
+			const elsewhere = await mkdtemp(join(tmpdir(), "self-learn-other-"));
+			const other = await sessionFile(elsewhere, join(cwd, "queue"), `Read ${queue} and do it`);
+			assert.ok(other.endsWith(".jsonl"));
+			assert.equal(await turnSession(root, { cwd, queuePath: queue, since: Date.now() - 60_000 }), old);
+			assert.equal(await turnSession(elsewhere, { cwd, queuePath: queue, since: Date.now() - 60_000 }), null);
+			await rm(elsewhere, { recursive: true, force: true });
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("wiring", () => {
 	// One shared clock, moved forward per test: the run log debounces across
 	// sessions, so a test that spawned a learner must not block the next one.
@@ -234,6 +300,10 @@ describe("wiring", () => {
 			has: () => false,
 			exists: () => true,
 			now: () => base,
+			// A launch that confirms in a test must not read ~/.pi/agent/sessions, and a
+			// failure path must not touch the real agent-panes state file.
+			confirm: async () => ({ ok: true, source: "session" }),
+			closeSpace: async () => {},
 			...deps,
 		});
 		const { ctx, notices } = createFakeCtx({ mode: "tui", hasUI: true });
@@ -308,6 +378,87 @@ describe("wiring", () => {
 		assert.equal(spawned[0].launcher, "headless", "the log names the launcher that actually ran");
 	});
 
+	test("a space whose agent never takes a turn is a failure, not a learner", async () => {
+		// The six-of-seven bug: agent-pane.sh exited 0, the space existed, and no pi
+		// session ever read the queue file. The space alone was logged as success.
+		const attempts: string[] = [];
+		const closed: string[] = [];
+		const { emit, ctx, notices } = setup({
+			has: () => true,
+			launch: (launcher: any) => {
+				attempts.push(launcher.kind);
+				// Both launchers report success; neither produces a turn.
+				return launcher.kind === "pane" ? { ok: true, status: 0, detail: "t7" } : { ok: true, status: null };
+			},
+			confirm: async () => ({ ok: false, detail: "no session took the prompt within 90000ms" }),
+			closeSpace: async (slug: string) => {
+				closed.push(slug);
+			},
+		});
+		await trip(emit, ctx);
+		await settle();
+		const before = (await readRuns()).length;
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		await waitFor(() => attempts.length === 2);
+		const last = await waitForRun((row, index) => index >= before && row.launcher === "headless");
+		const written = (await readRuns()).slice(before);
+		assert.deepEqual(attempts, ["pane", "headless"], "the pane is tried, then the headless retry");
+		assert.equal(written.filter((row) => row.kind === "spawned").length, 0, "no turn, no spawned row");
+		const failed = written.filter((row) => row.kind === "spawn-failed");
+		assert.deepEqual(failed.map((row) => row.launcher), ["pane", "headless"]);
+		assert.equal(failed[0].status, 0, "the pane's own exit status is recorded");
+		assert.match(failed[0].stderr, /no session took the prompt/);
+		assert.deepEqual(closed, [last.slug, last.slug], "the space that never ran a learner is killed");
+		assert.ok(
+			notices.some((notice) => notice.level === "warning" && /no learner took the turn/.test(notice.message)),
+			"the person is told, in the session, that no learner started",
+		);
+	});
+
+	test("the headless retry that does take a turn logs spawned, launcher headless", async () => {
+		const attempts: string[] = [];
+		let confirmations = 0;
+		const { emit, ctx } = setup({
+			has: () => true,
+			launch: (launcher: any) => {
+				attempts.push(launcher.kind);
+				return launcher.kind === "pane" ? { ok: true, status: 0, detail: "t7" } : { ok: true, status: null };
+			},
+			confirm: async () =>
+				++confirmations === 1
+					? { ok: false, detail: "no session took the prompt within 90000ms" }
+					: { ok: true, source: "session" as const, detail: "/tmp/session.jsonl" },
+		});
+		await trip(emit, ctx);
+		await settle();
+		const before = (await readRuns()).length;
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		const spawned = await waitForRun((row, index) => index >= before && row.kind === "spawned");
+		const written = (await readRuns()).slice(before);
+		assert.deepEqual(attempts, ["pane", "headless"]);
+		assert.equal(written.filter((row) => row.kind === "spawn-failed").length, 1, "only the pane lied");
+		assert.equal(spawned.launcher, "headless", "the log names the launcher that really ran");
+		assert.equal(spawned.confirmed, "session", "and how the turn was proven");
+	});
+
+	test("one confirmed launch writes exactly one row", async () => {
+		const { emit, ctx, notices } = setup({ has: () => false });
+		await trip(emit, ctx);
+		await settle();
+		const before = (await readRuns()).length;
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		const spawned = await waitForRun((row, index) => index >= before && row.kind === "spawned");
+		await settle();
+		const written = (await readRuns()).slice(before);
+		assert.equal(written.length, 1, "one learner, one row");
+		assert.equal(spawned.launcher, "headless");
+		assert.equal(spawned.confirmed, "session");
+		assert.ok(
+			notices.some((notice) => notice.level === "info" && /learner started/.test(notice.message)),
+			"the person is told a learner really started",
+		);
+	});
+
 	test("the learner is told to hand the PR to big-boss-pi and to close its own space", async () => {
 		const { emit, ctx } = setup();
 		await trip(emit, ctx);
@@ -366,7 +517,7 @@ describe("wiring", () => {
 		assert.equal(runs.filter((row) => row.kind === "spawned").length, 0, "no learner, no spawned row");
 		assert.equal(runs.filter((row) => row.kind === "spawn-failed").length, 2);
 		assert.ok(
-			notices.some((notice) => notice.level === "warning" && /could not start/.test(notice.message)),
+			notices.some((notice) => notice.level === "warning" && /no learner took the turn/.test(notice.message)),
 			"the person is told, in the session, that no learner started",
 		);
 	});
