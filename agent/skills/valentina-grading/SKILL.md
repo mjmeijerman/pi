@@ -57,7 +57,7 @@ python3 maak-a0-pdf.py --patroon-json patroon.json
 python3 controleer-svg.py --patroon-json patroon.json            # RESULTAAT: OK
 python3 verifieer-rechtdraad.py --patroon-json patroon.json      # angle + arrow per size
 python3 verifieer-splinepunten.py                                # cut points on their curve
-python3 valideer-tegen-vlt.py                                    # only if the .vlt is current
+python3 valideer-tegen-vlt.py                                    # OK, or INDICATIEF (exit 0) when the .vlt is stale
 ```
 
 Step 0 is never skipped: never grade, generate or edit a pattern until the
@@ -316,14 +316,24 @@ anchor side, band pairs).
   the `value` attribute, byte for byte. `@rl` often carries a trailing
   newline entity (`value="450&#10;"`); dropping it silently changes the file.
 
-## Pitfall: a stale `.vlt` produces false FAILs
+## Pitfall: a stale `.vlt` — INDICATIEF, never OK
 
-The `.vlt` is one export of one size at one moment. Changing `@rl` 500 → 450
-made the checker report `FAIL: contour wijkt af` by 24.534 mm (achterpand) and
-11.449 mm (voorpand) and keeps off by 20.273 mm — the 50 mm length difference,
-not a bug. Declare it: `feit.vlt_past_bij_vit: false` turns those into printed
-diagnoses with the numbers intact, and the `.vlt` becomes an indicative
-comparison with a generous sanity limit plus a bbox-height cross-check. Set it
+The `.vlt` is one export of one size at one moment, so it has two roles: it is
+always a valid source for the **grainline points**, and it is a source for the
+**contour** only while it belongs to the current `.vit` files. Changing `@rl`
+500 → 450 made the checker report 24.534 mm (achterpand), 11.449 mm (voorpand)
+and keeps off by 20.273 mm — the 50 mm length difference, not a bug.
+
+Declare it with `feit.vlt_past_bij_vit: false`. Both tools then print
+`INDICATIEF` with the numbers intact and exit 0 — and, crucially, they first
+**prove** the staleness instead of excusing it: `zoek_bron_delta()` fits the
+pattern measures actually referenced by the `.val` (coarse 20 mm, fine 1 mm,
+at most two measures) and reports the residual. On this skirt `@rl` 450 → 500
+brings the contour from 24.534 mm to 0.049 mm, i.e. the export is the
+pre-change state beyond doubt. A `.vlt` that cannot be reproduced this way
+stays **FOUT** (residual > half the measured deviation), because then it is not
+merely old. Guard: a run with the flag `false` can never print `RESULTAAT: OK`
+for the contours — `controleer-svg.py` FAILs if that ever happens. Set the flag
 back to `true` only after a fresh export.
 
 `valideer-tegen-vlt.py` normalizes bounding boxes, so a uniform scale error is
