@@ -199,7 +199,10 @@ else
 fi
 
 # The menu row itself is app config, not harness config: install the file when
-# Herdr has none, and never overwrite a programs.json someone edited.
+# Herdr has none, and never overwrite a programs.json someone edited. The entry
+# names pi-bare by absolute path on purpose: Herdr's holder keeps the argv to
+# restart a lost program, and its PATH has no ~/.local/share/pnpm/bin, so a bare
+# name came back as a plain shell, not a pi session.
 if [ -f "$SOURCE_DIR/sandbox/herdr-programs.json" ] && [ -d "$HOME/.config/herdr-app" ]; then
 	if [ -f "$HOME/.config/herdr-app/programs.json" ]; then
 		echo "== herdr programs.json exists — add the pi-bare entry from sandbox/herdr-programs.json by hand"

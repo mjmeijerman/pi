@@ -4,7 +4,7 @@
       "name": "Pi (bare)",
       "icon": "icons/pi.svg",
       "tile": "#8d6e63",
-      "run": ["pi-bare"]
+      "run": ["/home/mark/.local/bin/pi-bare"]
     }
   }
 }
