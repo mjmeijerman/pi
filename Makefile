@@ -78,17 +78,19 @@ pr-check:
 # stops the target with its own exit code, and the echo above each suite names it
 # in the CI log.
 #
-# The bash suite runs with AGENT_SLUG and PI_AGENT_SLUG cleared: the hook those
-# tests exercise stamps whatever slug it is handed, so an inherited slug (a worker
-# shell, a delegate) turns the human-commit case red for the wrong reason. The
-# suite sets the slug it wants case by case; the runner hands it no default.
+# The runner hands the suite the environment it was started in, inherited slug and
+# all. Each bash test owns its own environment instead: the provenance test clears
+# AGENT_SLUG and PI_AGENT_SLUG in the cases that assert on a human commit and sets
+# the slug it wants in the cases that assert on the hook. Clearing it here would
+# hide the same coupling in the next bash test, and would put the reason in a file
+# that does not own the behaviour.
 scripts-test:
 	@echo "== scripts-test: node --test scripts/tests/*.test.mjs"
 	@node --test scripts/tests/*.test.mjs
 	@for t in scripts/tests/*.test.sh; do \
 		[ -e "$$t" ] || continue; \
 		echo "== scripts-test: bash $$t"; \
-		env -u AGENT_SLUG -u PI_AGENT_SLUG bash "$$t" || { status=$$?; echo "== scripts-test: FAILED $$t (exit $$status)" >&2; exit $$status; }; \
+		bash "$$t" || { status=$$?; echo "== scripts-test: FAILED $$t (exit $$status)" >&2; exit $$status; }; \
 	done
 	@echo "== scripts-test: every suite passed"
 
