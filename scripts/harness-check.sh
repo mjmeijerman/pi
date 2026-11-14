@@ -20,9 +20,10 @@
 #   scripts/harness-check.sh --json       # same checks, one JSON document
 #   scripts/harness-check.sh --root DIR   # check DIR instead of this repo
 #   scripts/harness-check.sh --verify-release-age
-#                                         # only the npm quarantine gate; run it
-#                                         # bare (npm's config is masked in the
-#                                         # sandbox, and the check then FAILs)
+#                                         # only the npm quarantine gate. The
+#                                         # sandbox forwards the setting as
+#                                         # NPM_CONFIG_MIN_RELEASE_AGE; a bare run
+#                                         # is the fallback when it cannot
 #   scripts/harness-check.sh --help
 #
 # Exit 0 when nothing FAILs (a baselined violation reports WARN), 1 on any FAIL.
@@ -173,35 +174,82 @@ check_skill_lines() {
 # half of the check, and the effective setting is the other half (blip 99, blip 42).
 # The unit is days — measured, not assumed: --min-release-age=2 refused a package
 # published today and accepted one published two days ago (blip 99).
+#
+# A stale /usr/bin/npm shadowing ~/.local/bin/npm is a PATH-order problem, not a
+# missing quarantine: the newest readable npm is used and the shadowing is one
+# WARN, so a real FAIL is not buried under an environment accident (blip 99,
+# blip 29 harness quality evaluation).
+npm_version_at() { # npm binary -> version, or nothing when it cannot be read
+	[ -n "$1" ] && [ -x "$1" ] || return 1
+	"$1" --version 2>/dev/null | tr -d '[:space:]' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+' || return 1
+}
+
+npm_newer() { # a b -> true when b sorts above a (11.20.0 beats 10.9.9)
+	[ "$1" != "$2" ] || return 1
+	[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$2" ]
+}
+
 check_release_age() {
-	local version value
+	local path_npm path_version best_npm best_version candidate candidate_version value source
 	if ! command -v npm >/dev/null 2>&1; then
 		verdict npm-min-release-age - 0 "npm not installed"
 		return
 	fi
-	version=$(npm --version 2>/dev/null | tr -d '[:space:]')
-	case "$version" in
+	path_npm=$(command -v npm)
+	path_version=$(npm --version 2>/dev/null | tr -d '[:space:]')
+	case "$path_version" in
 	'' | undefined | null)
 		verdict npm-min-release-age - 0 "cannot read the npm version — npm's config is masked inside the sandbox, so run this bare: bash scripts/harness-check.sh --verify-release-age"
 		return
 		;;
 	[0-9]*.[0-9]*.[0-9]*) ;;
 	*)
-		verdict npm-min-release-age - 0 "unreadable npm version: $version"
+		verdict npm-min-release-age - 0 "unreadable npm version: $path_version"
 		return
 		;;
 	esac
-	if [ "${version%%.*}" -lt 11 ]; then
-		verdict npm-min-release-age - 0 "npm $version ignores min-release-age (needs npm ≥ 11) — install one: npm i -g --prefix ~/.local npm@11"
+	# The newest readable npm wins: whatever PATH resolves, then setup.sh's install
+	# target and the system prefix. The list is overridable so a test can control
+	# the machine's other npm installs instead of hoping they are absent.
+	best_npm=$path_npm
+	best_version=$path_version
+	for candidate in $(printf '%s' "${PI_NPM_CANDIDATES-$HOME/.local/bin/npm:/usr/local/bin/npm}" | tr ':' ' '); do
+		[ -n "$candidate" ] || continue
+		[ "$candidate" = "$path_npm" ] && continue
+		candidate_version=$(npm_version_at "$candidate") || continue
+		if npm_newer "$best_version" "$candidate_version"; then
+			best_npm=$candidate
+			best_version=$candidate_version
+		fi
+	done
+	if [ "${path_version%%.*}" -lt 11 ] && [ "${best_version%%.*}" -ge 11 ]; then
+		record WARN npm-min-release-age-path "$path_npm" \
+			"PATH npm $path_version shadows $best_npm $best_version — put $(dirname "$best_npm") first on PATH"
+	fi
+	if [ "${best_version%%.*}" -lt 11 ]; then
+		verdict npm-min-release-age - 0 "npm $best_version ignores min-release-age (needs npm ≥ 11) — install one: npm i -g --prefix ~/.local npm@11"
 		return
 	fi
-	# Inside the sandbox npm's config file is bound to /dev/null, so the read comes
-	# back empty even when the host is set. That is unverifiable, not a pass: say
-	# FAIL and name the bare command that does read it.
-	value=$(npm config get min-release-age 2>/dev/null | tr -d '[:space:]')
+	# Inside the sandbox npm's config file is bound to /dev/null, so the launcher
+	# forwards the one number that matters as NPM_CONFIG_MIN_RELEASE_AGE. npm gives
+	# the environment variable the last word anyway, so it is read first; the
+	# config file is only consulted when it is absent or not a number of days.
+	# Nothing readable is still unverifiable, not a pass: FAIL and name the bare
+	# command that does read it (blip 99, blip 1 agent sandboxing).
+	value=${NPM_CONFIG_MIN_RELEASE_AGE:-}
+	source="from NPM_CONFIG_MIN_RELEASE_AGE"
+	case "$value" in
+	'' | *[!0-9]*)
+		value=""
+		source="from npm config"
+		;;
+	esac
+	if [ -z "$value" ]; then
+		value=$("$best_npm" config get min-release-age 2>/dev/null | tr -d '[:space:]')
+	fi
 	case "$value" in
 	'' | undefined | null)
-		verdict npm-min-release-age - 0 "npm $version cannot read min-release-age${PI_SANDBOX_MODE:+ (masked by the sandbox — run this bare)} — verify with: bash scripts/harness-check.sh --verify-release-age ; set with: npm config set min-release-age $MIN_RELEASE_AGE"
+		verdict npm-min-release-age - 0 "npm $best_version cannot read min-release-age${PI_SANDBOX_MODE:+ (masked by the sandbox and NPM_CONFIG_MIN_RELEASE_AGE was not forwarded — run this bare)} — verify with: bash scripts/harness-check.sh --verify-release-age ; set with: npm config set min-release-age $MIN_RELEASE_AGE"
 		return
 		;;
 	esac
@@ -212,9 +260,9 @@ check_release_age() {
 		;;
 	esac
 	if [ "$value" -ge "$MIN_RELEASE_AGE" ]; then
-		verdict npm-min-release-age - 1 "npm $version, effective min-release-age=$value days ≥ $MIN_RELEASE_AGE days"
+		verdict npm-min-release-age - 1 "npm $best_version, effective min-release-age=$value days ≥ $MIN_RELEASE_AGE days ($source)"
 	else
-		verdict npm-min-release-age - 0 "npm $version, effective min-release-age=$value days < $MIN_RELEASE_AGE days — run: npm config set min-release-age $MIN_RELEASE_AGE"
+		verdict npm-min-release-age - 0 "npm $best_version, effective min-release-age=$value days < $MIN_RELEASE_AGE days — run: npm config set min-release-age $MIN_RELEASE_AGE"
 	fi
 }
 
