@@ -25,6 +25,11 @@ agent/.stryker-tmp/
 agent/deepseek.key
 agent/suggestions.jsonl
 agent/retro/
+# eval run state: `make evals` writes these, harness-check.sh reads last-run.txt.
+# Local on purpose — a fresh clone reports "no eval run recorded" instead of
+# inheriting someone else's pass count.
+agent/evals/last-run.txt
+agent/evals/.last-run.json
 # Learner output: a proposal is a review artefact, not harness code.
 agent/proposals/
 scripts/.agent-panes.json

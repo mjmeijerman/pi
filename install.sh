@@ -389,6 +389,34 @@ else
 	echo "!! $BOSS_UNIT_SRC not found — skipped the big-boss-pi guard unit"
 fi
 
+# --- 5e. weekly eval timer ---------------------------------------------------
+# Same shape as the guard unit above: the tracked unit is the source of truth, %h is
+# expanded into the installed copy, and the timer is enabled once. It runs `make evals`
+# (agent/evals/, promptfoo over agent/AGENTS.md and the skills) every Monday, because
+# the grader is the ollama model on this machine and a GitHub runner has none.
+EVALS_TIMER="pi-evals.timer"
+if [ -f "$SOURCE_DIR/systemd/pi-evals.service" ] && [ -f "$SOURCE_DIR/systemd/$EVALS_TIMER" ]; then
+	mkdir -p "$SYSTEMD_USER_DIR"
+	for unit in pi-evals.service "$EVALS_TIMER"; do
+		sed "s|%h|$HOME|g" "$SOURCE_DIR/systemd/$unit" >"$SYSTEMD_USER_DIR/$unit"
+		echo "== $unit -> $SYSTEMD_USER_DIR/$unit"
+	done
+	if [ "${PI_SKIP_SYSTEMD:-}" = 1 ]; then
+		echo "== PI_SKIP_SYSTEMD=1 — not enabling $EVALS_TIMER"
+	elif command -v systemctl >/dev/null 2>&1 && [ -d "/run/user/$(id -u)" ]; then
+		systemctl --user daemon-reload || echo "!! systemctl --user daemon-reload failed"
+		if systemctl --user enable --now "$EVALS_TIMER"; then
+			echo "== weekly harness evals enabled ($EVALS_TIMER, Monday 06:17, writes agent/evals/last-run.txt)"
+		else
+			echo "!! could not enable $EVALS_TIMER — run: systemctl --user enable --now $EVALS_TIMER"
+		fi
+	else
+		echo "!! no systemd user session — units copied, enable later: systemctl --user enable --now $EVALS_TIMER"
+	fi
+else
+	echo "!! $SOURCE_DIR/systemd/pi-evals.service not found — skipped the eval timer"
+fi
+
 echo
 echo "Done. Restart pi (or run /reload) to load the extensions."
 echo
@@ -403,9 +431,12 @@ echo "   pi-bare --version                                   # unsandboxed, for 
 echo "   herdr-app --version                                 # Herdr desktop app"
 echo "   jev count \"split this task\"                          # delegation workspace on PATH"
 echo "   systemctl --user status big-boss-pi-guard.service    # workspace guard running"
+echo "   systemctl --user list-timers pi-evals.timer           # weekly harness evals scheduled"
+echo "   cat ~/.pi/agent/evals/last-run.txt                    # last eval run and pass count"
 echo "   bash scripts/harness-check.sh                        # harness budgets as checks"
 echo
 echo "Reminder if you ever forget the hooks: just run this script again."
 echo
 echo "To turn the workspace guard off:"
+echo "   systemctl --user disable --now pi-evals.timer         # stop the weekly evals"
 echo "   systemctl --user disable --now big-boss-pi-guard.service"

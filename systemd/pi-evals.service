@@ -1,0 +1,34 @@
+# Weekly harness evals: `make evals` — the promptfoo suite in agent/evals/ that grades
+# the model against agent/AGENTS.md and the skills (Radar Vol. 35 blip 29 and blip 110).
+#
+# Copied into ~/.config/systemd/user/ and enabled by ~/.pi/install.sh (or
+# `make evals-install`). Edit here, then reinstall; the installed copy is generated, so
+# hand edits to it are lost.
+#
+# Why here and not GitHub Actions: the grader is `qwen3.8:27b` in ollama on this
+# machine. A GitHub runner has no ollama and no GPU, so a scheduled workflow would grade
+# something else and prove nothing about the harness that runs here. The timer is a
+# user unit for the same reason the guard is: it needs the machine, not a push.
+#
+# The run is advisory. Its exit status and the pass count land in
+# agent/evals/last-run.txt, and scripts/harness-check.sh warns when that record is more
+# than 14 days old — a suite nobody runs is the failure mode this unit exists for.
+[Unit]
+Description=pi harness evals — weekly make evals (promptfoo over agent/AGENTS.md and the skills)
+Documentation=file://%h/.pi/agent/evals/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.pi
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:%h/.local/share/pnpm/bin:/usr/local/bin:/usr/bin:/bin
+# ollama is not a unit this service can order on (it may be a user unit or a plain
+# daemon); the run reports provider errors into last-run.txt instead of hanging here.
+ExecStart=/usr/bin/make evals
+Nice=10
+IOSchedulingClass=idle
+# npx fetches the pinned promptfoo, so the first run of a new version is slow. 45 min
+# is generous and still bounded; a hung grader must not hold the timer's next slot.
+TimeoutStartSec=2700
