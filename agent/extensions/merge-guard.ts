@@ -176,7 +176,6 @@ export function mergeReason(command: string): string | null {
 	return null;
 }
 
-/** The branch HEAD points at, or null outside a repository / detached HEAD. */
 /** `git stash` subcommands that read or restore, never park or delete. */
 const STASH_SAFE = new Set(["list", "show", "pop", "apply", "branch"]);
 
