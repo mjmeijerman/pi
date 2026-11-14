@@ -358,10 +358,17 @@ gate_test_change() {
 
 	# Any recognised test suffix counts, not just the one this repo happens to
 	# use today: a .test.mjs is as much a test as a .test.ts, and a gate that
-	# cannot see a test cannot ask for its reason.
+	# cannot see a test cannot ask for its reason. `.test.sh` is here because
+	# this repo's own gate tests are shell (scripts/tests/*.test.sh, run by
+	# `make scripts-test`); without it a PR that edited a bash test beside the
+	# script it covers was told "no test file changed", so the rule that asks
+	# for the reason looked at nothing (blips 29, 42).
+	#
+	# Each suffix is anchored by the whole-match glob: the pattern needs the
+	# literal `.test.` segment, so `contest.sh` is source, not a test.
 	for path in "${CHANGED[@]}"; do
 		case "$path" in
-		*.test.ts | *.test.tsx | *.test.js | *.test.mjs | *.test.cjs | *.test.py) tests+=("$path") ;;
+		*.test.ts | *.test.tsx | *.test.js | *.test.mjs | *.test.cjs | *.test.py | *.test.sh) tests+=("$path") ;;
 		*.ts | *.tsx | *.js | *.mjs | *.cjs | *.sh | *.py) source+=("$path") ;;
 		esac
 	done

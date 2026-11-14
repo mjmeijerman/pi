@@ -317,6 +317,33 @@ test("BASE_SHA/HEAD_SHA from the environment decide the diff, as in CI", () => {
 	assert.match(r.out, new RegExp(`diff: ${base}\\.\\.\\.${head}`), r.out);
 });
 
+test("test change: a bash gate test beside its script needs a reason too", () => {
+	// This repo's own gate tests are shell, not TypeScript: before the suffix
+	// list carried `.test.sh`, a PR like this one was judged "tests changed: 0;
+	// source changed: 1 - nothing to justify" and the reason rule checked
+	// nothing at all.
+	const paths = ["scripts/pr-gate.sh", "scripts/tests/something.test.sh"];
+
+	const red = gate({ body: `${MISSION}\n\nReview tier: High\n`, paths, gateName: "test-change" });
+	assert.equal(red.status, 1, red.out);
+	assert.match(red.out, /Test change: <reason>/);
+	assert.match(red.out, /tests changed: 1; source changed: 1/, red.out);
+	assert.match(red.out, /something\.test\.sh/);
+
+	const ok = gate({
+		body: `${MISSION}\n\nReview tier: High\n\nTest change: the gate test now covers the bash suffix.\n`,
+		paths,
+		gateName: "test-change",
+	});
+	assert.equal(ok.status, 0, ok.out);
+
+	// The suffix is anchored on the `.test.` segment, so a file whose name only
+	// ends in `.sh` stays source: a source-only diff asks for no reason line.
+	const contest = gate({ body: `${MISSION}\n\nReview tier: High\n`, paths: ["scripts/pr-gate.sh", "scripts/contest.sh"], gateName: "test-change" });
+	assert.equal(contest.status, 0, contest.out);
+	assert.match(contest.out, /tests changed: 0; source changed: 2/, contest.out);
+});
+
 // ------------------------------------------------------------------ workflow --
 
 test("the workflow calls the shared script and keeps no copy of the gates", () => {
