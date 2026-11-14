@@ -14,4 +14,13 @@
 # wrapper. `install.sh` symlinks this into ~/.local/bin so the menu finds it.
 set -uo pipefail
 
+# `pi` is a pnpm-installed binary in ~/.local/share/pnpm/bin, which is on an
+# interactive shell's PATH but not on the one Herdr's terminal holder restarts a
+# lost program with. Resolve it here so the menu row launches, not just the
+# absolute path to this script.
+case ":$PATH:" in
+*":$HOME/.local/share/pnpm/bin:"*) ;;
+*) PATH="$HOME/.local/share/pnpm/bin:$PATH" ;;
+esac
+
 exec env PI_BARE=1 pi "$@"
