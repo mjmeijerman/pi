@@ -96,6 +96,127 @@ jobs:
           path: agent/reports/stryker/
           if-no-files-found: warn
 
+  # A pull request may not ship a surviving mutant. The weekly `mutation` job
+  # above is the score of record; this one asks only about the diff: do the
+  # mutants in these files die? Scoped --mutate keeps it to minutes, break 100
+  # makes one survivor fail the PR, and --incremental false means the verdict
+  # never comes from a cached run. Radar Vol. 35, blip 2 (Adopt).
+  mutation-changed:
+    name: mutation on changed files (stryker)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    # A slow run must not hold the queue: a per-PR budget, not a hang.
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # Full history: origin/trunk has to exist for the diff, and both
+          # endpoints are then already in the clone, so no token and no fetch.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - name: changed TypeScript under agent/extensions
+        id: changed
+        run: |
+          set -euo pipefail
+          base=origin/trunk
+          if ! git rev-parse --verify --quiet "$base" >/dev/null; then
+            echo "::error::$base is missing; this job needs fetch-depth: 0 to diff against trunk"
+            exit 1
+          fi
+
+          # `:/agent/...` is root-relative, so this step works whatever the
+          # job's working-directory is; git's `**/` also matches zero directories.
+          mapfile -t all < <(git diff --name-only "$base"...HEAD -- ':/agent/extensions/**/*.ts')
+          files=()
+          for path in "${all[@]}"; do
+            case "$path" in
+              *.test.ts) continue ;;  # mutating a test proves nothing about a test
+            esac
+            # Stryker runs with working-directory agent, so drop the agent/ prefix.
+            files+=("${path#agent/}")
+          done
+
+          echo "changed source files: ${#files[@]}"
+          if (( ${#files[@]} > 0 )); then printf '  %s\n' "${files[@]}"; fi
+
+          if (( ${#files[@]} == 0 )); then
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            {
+              echo "### mutation on changed files: skipped"
+              echo ""
+              echo 'No TypeScript source changed under `agent/extensions` in this pull request.'
+              echo 'Nothing to mutate, so the job is green on purpose; the weekly'
+              echo '`mutation` job stays the score of record.'
+            } >>"$GITHUB_STEP_SUMMARY"
+            echo "no TypeScript source changed under agent/extensions - nothing to mutate, skipping green"
+            exit 0
+          fi
+
+          echo "skip=false" >>"$GITHUB_OUTPUT"
+          {
+            echo "files<<MUTATE_EOF"
+            printf '%s\n' "${files[@]}"
+            echo "MUTATE_EOF"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: install
+        if: steps.changed.outputs.skip != 'true'
+        run: npm ci
+
+      # stryker 10's CLI has no --thresholds flag (it rejects
+      # --thresholds.break) and no --incremental=false, so the PR verdict is
+      # built from the weekly config with two keys changed: incremental off, so
+      # a PR never inherits a cached run, and break 100, so one surviving
+      # mutant fails the job. Derived, not copied: the two configs cannot drift.
+      - name: pr mutation config (break 100, no incremental)
+        if: steps.changed.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { readFileSync, writeFileSync } from "node:fs";
+            const base = JSON.parse(readFileSync("stryker.conf.json", "utf8"));
+            writeFileSync("stryker.pr.conf.json", JSON.stringify({
+              ...base,
+              incremental: false,
+              thresholds: { ...base.thresholds, break: 100 },
+              htmlReporter: { fileName: "reports/stryker-pr/mutation.html" },
+              jsonReporter: { fileName: "reports/stryker-pr/mutation.json" },
+            }, null, 2) + "\n");
+          '
+
+      - name: stryker on exactly the changed files
+        if: steps.changed.outputs.skip != 'true'
+        env:
+          # Passed through env, never expanded into the script: file names are
+          # untrusted input (injection, blip 38).
+          MUTATE_FILES: ${{ steps.changed.outputs.files }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r file; do
+            if [[ -n $file ]]; then args+=(--mutate "$file"); fi
+          done <<<"$MUTATE_FILES"
+          printf 'mutating: %s\n' "${args[*]}"
+          npx stryker run stryker.pr.conf.json "${args[@]}"
+
+      - name: keep the report
+        if: always() && steps.changed.outputs.skip != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stryker-report-changed
+          path: |
+            agent/reports/stryker/
+            agent/reports/stryker-pr/
+          if-no-files-found: warn
+
   shell:
     name: shell scripts
     runs-on: ubuntu-latest
