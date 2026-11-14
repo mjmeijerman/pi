@@ -69,10 +69,27 @@ pr-check:
 		$(if $(PATHS),--paths "$(PATHS)")
 
 # The gates' own tests, next to the scripts they test (blip 29 harness quality
-# evaluation): a gate whose passing case was never run is a gate that can go
-# dead quietly. Same runner as the extensions, no dependencies.
+# evaluation, blip 38 CI hardening): a gate whose passing case was never run is a
+# gate that can go dead quietly. Two suites, and both are globbed so a new test
+# file needs no edit here: the node tests (same runner as the extensions, no
+# dependencies), then every plain-bash *.test.sh run through bash, since a fresh
+# clone has no executable bit on them. Fail-fast: the first suite that goes red
+# stops the target with its own exit code, and the echo above each suite names it
+# in the CI log.
+#
+# The bash suite runs with AGENT_SLUG and PI_AGENT_SLUG cleared: the hook those
+# tests exercise stamps whatever slug it is handed, so an inherited slug (a worker
+# shell, a delegate) turns the human-commit case red for the wrong reason. The
+# suite sets the slug it wants case by case; the runner hands it no default.
 scripts-test:
+	@echo "== scripts-test: node --test scripts/tests/*.test.mjs"
 	@node --test scripts/tests/*.test.mjs
+	@for t in scripts/tests/*.test.sh; do \
+		[ -e "$$t" ] || continue; \
+		echo "== scripts-test: bash $$t"; \
+		env -u AGENT_SLUG -u PI_AGENT_SLUG bash "$$t" || { status=$$?; echo "== scripts-test: FAILED $$t (exit $$status)" >&2; exit $$status; }; \
+	done
+	@echo "== scripts-test: every suite passed"
 
 update:
 	@git pull --ff-only
