@@ -68,6 +68,14 @@ jobs:
       - name: scripts tests (make scripts-test)
         run: make scripts-test
 
+      # The offline gate tests: the skill pin in agent/skills.lock and the
+      # hidden-codepoint scan in the pre-commit hook. Both build their own temp
+      # repos and their own git config, so they need no network and nothing from
+      # the runner (blip 29 harness quality evaluation, blip 72 agent package
+      # manager). Same script as `make offline-test`, and no action to pin.
+      - name: offline gate tests (scripts/ci-offline.sh)
+        run: bash scripts/ci-offline.sh
+
       - name: harness-check (json, for the log)
         if: always()
         run: bash scripts/harness-check.sh --json | python3 -m json.tool >/dev/null

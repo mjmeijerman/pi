@@ -8,7 +8,9 @@ core modules / coreutils, and none of them deletes anything.
 | --- | --- |
 | `session-report.mjs` | Read-only report: tokens, cost, cache hit rate, context fill, disk per project + most expensive sessions + stale sessions. |
 | `prune-sessions.sh` | Moves old session logs into `./archive/`. Dry-run unless `--apply`. |
-| `harness-check.sh` | Read-only `PASS`/`WARN`/`FAIL` checks for the playbook's rules: budgets, install state, ownership. |
+| `harness-check.sh` | Read-only `PASS`/`WARN`/`FAIL` checks for the playbook's rules: budgets, install state, ownership, and the skill pin. `--write-skills-lock` is its one writing mode: it regenerates `agent/skills.lock`. |
+| `ci-offline.sh` | Runs every `test-*.sh` next to it: the gate tests that build their own temp repos and need no network. `make offline-test` runs the same thing CI does. |
+| `test-*.sh` | One suite per gate behaviour, plain bash. `test-skills-lock.sh` covers `agent/skills.lock`, `test-unicode-guard.sh` covers the hidden-codepoint scan in the pre-commit hook. |
 | `pr-gate.sh` | The PR body gates (mission, review tier, test change) CI runs, runnable locally before the push. |
 | `harness-baseline.txt` | The ratchet `harness-check.sh` reads: known violations report `WARN`, not `FAIL`. |
 | `pisandbox` | `~/.pi/sandbox/pi-sandbox.sh` without typing the path. |

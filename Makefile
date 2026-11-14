@@ -1,7 +1,7 @@
 # pi agent setup — one-command install for a new machine.
 # Usage:  make setup   (or just: make)
 
-.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit evals evals-install pr-check scripts-test
+.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit evals evals-install pr-check scripts-test offline-test
 
 # Full provisioning on a new machine: config, hooks, system packages, API key,
 # pi packages, optional local model / dictation venv, then verification.
@@ -93,6 +93,15 @@ scripts-test:
 		bash "$$t" || { status=$$?; echo "== scripts-test: FAILED $$t (exit $$status)" >&2; exit $$status; }; \
 	done
 	@echo "== scripts-test: every suite passed"
+
+# The gate tests that need no network: the skill pin (agent/skills.lock) and the
+# hidden-codepoint scan in the pre-commit hook. Each suite builds its own temp
+# repos and its own git config, so this runs on a plane and in a runner that has
+# never seen this machine (blip 29 harness quality evaluation, blip 72 agent
+# package manager). scripts/ci-offline.sh is the same command harness-check.yml
+# runs, so a local green and a CI green cannot disagree.
+offline-test:
+	@bash $(CURDIR)/scripts/ci-offline.sh
 
 update:
 	@git pull --ff-only

@@ -12,7 +12,9 @@
 # docs/radar-blips.tsv, so a fabricated number fails instead of reading well.
 #
 # The rule this file enforces on itself: anything a script can check must not
-# be a paragraph in AGENTS.md. Read-only — no writes, no network.
+# be a paragraph in AGENTS.md. Read-only — no writes, no network — with one
+# exception, named so it cannot hide: --write-skills-lock regenerates
+# agent/skills.lock and touches nothing else.
 #
 # Usage:
 #   scripts/harness-check.sh              # every check, one line each
@@ -24,6 +26,11 @@
 #                                         # sandbox forwards the setting as
 #                                         # NPM_CONFIG_MIN_RELEASE_AGE; a bare run
 #                                         # is the fallback when it cannot
+#   scripts/harness-check.sh --write-skills-lock
+#                                         # regenerate agent/skills.lock — the
+#                                         # only mode here that writes
+#   scripts/harness-check.sh --verify-skills-lock
+#                                         # only the skill pin check, for tests
 #   scripts/harness-check.sh --help
 #
 # Exit 0 when nothing FAILs (a baselined violation reports WARN), 1 on any FAIL.
@@ -34,6 +41,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JSON=0
 QUICK=0
 VERIFY_RELEASE_AGE=0
+WRITE_SKILLS_LOCK=0
+VERIFY_SKILLS_LOCK=0
 
 PASS_N=0
 WARN_N=0
@@ -54,7 +63,7 @@ MIN_RELEASE_AGE=2
 # days is a WARN, not a FAIL, because the run is advisory (blip 29, blip 110).
 EVAL_MAX_AGE_DAYS=14
 
-usage() { sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() {
 	printf 'harness-check: %s\n' "$*" >&2
 	exit 2
@@ -165,6 +174,145 @@ check_skill_lines() {
 			"$([ "$lines" -le "$SKILL_LINES_LIMIT" ] && echo 1 || echo 0)" \
 			"$lines lines / $SKILL_LINES_LIMIT"
 	done
+}
+
+# -------------------------------------------------------------- skills lock --
+# A skill arrives from somewhere else — a marketplace, a copy-paste, another
+# agent's output — and until now nothing pinned it: the file could change under
+# the harness and no diff would say so (blip #72 agent package manager, blip #7
+# plugin marketplace). agent/skills.lock is the pin: one line per file a skill
+# loads, the sha256 of its content, and the commit that last touched it.
+#
+# The hash is the gate; the commit column is provenance for the reader. Checking
+# the commit too would turn a rebase or a squash merge red for a file whose bytes
+# never changed, which teaches people to regenerate without reading.
+SKILLS_LOCK_REL="agent/skills.lock"
+LOCK_REGEN="bash scripts/harness-check.sh --write-skills-lock"
+
+sha256_of() { # path -> hex digest
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+last_commit_of() { # repo-relative path -> 12-char commit, or '-' outside git
+	local sha
+	sha=$(git -C "$ROOT" log -1 --format=%H -- "$1" 2>/dev/null | head -1)
+	if [ -z "$sha" ]; then
+		printf '%s' '-'
+	else
+		printf '%s' "${sha:0:12}"
+	fi
+}
+
+skills_lock_target() { # every file a skill loads, repo-relative, one per line
+	local skill dir token raw rel
+	shopt -s nullglob
+	for skill in "$ROOT"/agent/skills/*/SKILL.md; do
+		rel="${skill#"$ROOT"/}"
+		printf '%s\n' "$rel"
+		dir=$(dirname "$skill")
+		# A reference is any token in SKILL.md that names a real file in the
+		# skill's own directory: `references/sources.md` as a path, or
+		# `clubs-achterhoek.tsv` as a bare name. Tokens that resolve to nothing —
+		# URLs, WORK/repo, prose like tests/lint — are not references, so no list
+		# of references has to be maintained by hand, and a newly referenced file
+		# is locked by the next regenerate instead of being forgotten.
+		while IFS= read -r raw; do
+			[ -n "$raw" ] || continue
+			# A token at the end of a sentence carries the full stop with it
+			# (`clubs.tsv.`); the file name does not.
+			token=$(printf '%s' "$raw" | sed 's/[.-]*$//')
+			[ -n "$token" ] || continue
+			[ -f "$dir/$token" ] || continue
+			printf '%s\n' "${dir#"$ROOT"/}/$token"
+		done < <(grep -oE '[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*' "$skill" | sort -u)
+	done
+	shopt -u nullglob
+}
+
+write_skills_lock() {
+	local lock="$ROOT/$SKILLS_LOCK_REL" tmp rel count
+	if [ ! -d "$ROOT/agent/skills" ]; then
+		die "no agent/skills directory in $ROOT — nothing to lock"
+	fi
+	mkdir -p "$(dirname "$lock")" || die "cannot create $(dirname "$lock")"
+	tmp=$(mktemp) || die "cannot create a temporary file"
+	{
+		printf '%s\n' \
+			'# agent/skills.lock — what each skill loads, pinned by content.' \
+			'# Generated, never hand-edited: bash scripts/harness-check.sh --write-skills-lock' \
+			'# Verified by: bash scripts/harness-check.sh (FAIL on a changed sha256, on a' \
+			'# skill file with no entry, and on an entry whose file is gone).' \
+			'# Fields, tab-separated: sha256, commit that last touched the file' \
+			'# (provenance only, - outside git), path. Radar: #72 agent package manager,' \
+			'# #7 plugin marketplace — a skill from elsewhere is pinned like a dependency.'
+		while IFS= read -r rel; do
+			[ -n "$rel" ] || continue
+			printf '%s\t%s\t%s\n' "$(sha256_of "$ROOT/$rel")" "$(last_commit_of "$rel")" "$rel"
+		done < <(skills_lock_target | sort -u)
+	} >"$tmp"
+	mv "$tmp" "$lock"
+	count=$(grep -v '^#' "$lock" | wc -l | tr -d '[:space:]')
+	printf '%s: %s entries written\n' "$SKILLS_LOCK_REL" "$count"
+	if [ -d "$ROOT/agent/skills" ] && [ "$count" -eq 0 ]; then
+		printf 'harness-check: no files under agent/skills were locked — is this a harness checkout?\n' >&2
+		return 1
+	fi
+	return 0
+}
+
+check_skills_lock() {
+	local lock="$ROOT/$SKILLS_LOCK_REL" digest commit path rel count=0 bad=0 actual
+	declare -A LOCKED=()
+	if [ ! -d "$ROOT/agent/skills" ]; then
+		verdict skills-lock - 1 "no skills directory (not a harness checkout)"
+		return 0
+	fi
+	if [ ! -f "$lock" ]; then
+		verdict skills-lock "$SKILLS_LOCK_REL" 0 \
+			"missing — skills are unpinned; generate it: $LOCK_REGEN"
+		return 0
+	fi
+	# Entries first: a changed hash or a deleted file is the loud case, and the
+	# message carries the exact command that fixes it.
+	while IFS=$'\t' read -r digest commit path; do
+		case "$path" in '' | '#'*) continue ;; esac
+		LOCKED["$path"]=$digest
+		count=$((count + 1))
+		if [ ! -f "$ROOT/$path" ]; then
+			verdict skills-lock "$path" 0 \
+				"locked file is gone (locked as ${digest:0:12}…, commit ${commit}) — restore it or regenerate: $LOCK_REGEN"
+			bad=$((bad + 1))
+			continue
+		fi
+		actual=$(sha256_of "$ROOT/$path")
+		if [ "$actual" != "$digest" ]; then
+			verdict skills-lock "$path" 0 \
+				"sha256 ${actual:0:12}… on disk, ${digest:0:12}… in the lock — read the diff first, then regenerate: $LOCK_REGEN"
+			bad=$((bad + 1))
+		fi
+	done <"$lock"
+	if [ "$count" -eq 0 ]; then
+		verdict skills-lock "$SKILLS_LOCK_REL" 0 "holds no entries — regenerate: $LOCK_REGEN"
+		return 0
+	fi
+	# A skill file with no entry is the same failure from the other side: nothing
+	# pins it, so a change to it would never be compared against anything.
+	while IFS= read -r rel; do
+		[ -n "$rel" ] || continue
+		if [ -z "${LOCKED[$rel]:-}" ]; then
+			verdict skills-lock "$rel" 0 \
+				"no lock entry — a skill file nothing pins; regenerate: $LOCK_REGEN"
+			bad=$((bad + 1))
+		fi
+	done < <(skills_lock_target | sort -u)
+	if [ "$bad" -eq 0 ]; then
+		verdict skills-lock "$SKILLS_LOCK_REL" 1 "$count file(s) match their locked sha256"
+	fi
+	return 0
 }
 
 # ------------------------------------------------------------------- config --
@@ -578,6 +726,8 @@ while [ $# -gt 0 ]; do
 	--json) JSON=1 ;;
 	--quick) QUICK=1 ;;
 	--verify-release-age) VERIFY_RELEASE_AGE=1 ;;
+	--write-skills-lock) WRITE_SKILLS_LOCK=1 ;;
+	--verify-skills-lock) VERIFY_SKILLS_LOCK=1 ;;
 	--root)
 		[ $# -ge 2 ] || die "--root needs a directory"
 		ROOT="$2"
@@ -594,6 +744,27 @@ while [ $# -gt 0 ]; do
 done
 ROOT="$(cd "$ROOT" 2>/dev/null && pwd)" || die "no such directory"
 load_baseline
+
+# The only writing mode in this file, and it writes exactly one path.
+if [ "$WRITE_SKILLS_LOCK" = 1 ]; then
+	write_skills_lock || exit 1
+	exit 0
+fi
+
+# The skill pin check on its own, so a test can assert on it without the whole
+# report: the exit status is the answer.
+if [ "$VERIFY_SKILLS_LOCK" = 1 ]; then
+	section "skills — pinned content (blip #72)"
+	check_skills_lock
+	if [ "$JSON" = 1 ]; then
+		printf '{"pass":%d,"warn":%d,"fail":%d,"results":[%s]}\n' \
+			"$PASS_N" "$WARN_N" "$FAIL_N" "${JSON_ITEMS[*]}"
+	else
+		printf '\n%d passed, %d warn, %d failed\n' "$PASS_N" "$WARN_N" "$FAIL_N"
+	fi
+	[ "$FAIL_N" -eq 0 ]
+	exit $?
+fi
 
 # One check, on demand, for a bare-mode run: the whole report is the release-age
 # verdict, and its exit status is the answer.
@@ -613,6 +784,10 @@ fi
 section "budgets — files that load on every turn"
 check_agents_md
 check_skill_lines
+# Cheap (a sha256 per skill file) and part of the hook's --quick run on purpose:
+# editing a skill and not regenerating the lock fails at commit time, while the
+# edit is still one fix away.
+check_skills_lock
 
 if [ "$QUICK" = 0 ]; then
 	section "config — things an install step sets"

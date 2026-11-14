@@ -67,10 +67,15 @@ if [ -x "\$REPO_HOOK" ] && [ "\$REPO_HOOK" != "\$0" ]; then
 fi
 case "\$HOOK_NAME" in
 pre-commit)
-	# Harness budgets first (milliseconds), then the secret scan, which must
-	# still run and still be the thing that decides the commit's fate.
+	# Harness budgets first (milliseconds), then the hidden-codepoint scan,
+	# then the secret scan, which must still run and still be the thing that
+	# decides the commit's fate. A skill or a prompt arrives from elsewhere, so
+	# its bytes are scanned before they are read as instruction (blip #72, blip #7).
 	if [ -x "\$HOOKS_HOME/harness-pre-commit" ]; then
 		"\$HOOKS_HOME/harness-pre-commit" "\$@" || exit \$?
+	fi
+	if [ -x "\$HOOKS_HOME/scan-unicode.sh" ]; then
+		"\$HOOKS_HOME/scan-unicode.sh" "\$@" || exit \$?
 	fi
 	exec "\$HOOKS_HOME/scan-secrets.sh"
 	;;
@@ -102,4 +107,4 @@ fi
 write_wrappers "$DIR"
 git config --global core.hooksPath "$DIR"
 printf 'secret-guard: global core.hooksPath set to %s\n' "$DIR"
-printf 'secret-guard: pre-commit (harness budgets + secret scan), commit-msg and pre-push active for all repos\n'
+printf 'secret-guard: pre-commit (harness budgets + hidden-codepoint scan + secret scan), commit-msg and pre-push active for all repos\n'
