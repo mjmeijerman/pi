@@ -1,0 +1,41 @@
+# herdr-resume: bring the pi sessions back after a reboot (Radar Vol. 35 blip 95).
+#
+# herdr-core recovers a kept terminal after a core or host restart by replacing
+# the lost program with a plain shell in the same tab and folder; it never
+# re-runs the program (`hc --skill`, `hc keep`). `agent/extensions/herdr-resume-map.ts`
+# records, per hc terminal, the session file and the argv that reproduces it;
+# `scripts/herdr-resume.mjs` types `exec <argv> --session <file>` into each
+# terminal that came back as that shell.
+#
+# Copied into ~/.config/systemd/user/ and enabled by ~/.pi/install.sh. The
+# installed copy is generated (`%h` is expanded), so edit this file and reinstall.
+#
+# Why a oneshot at login instead of ordering on the core: on this machine the app
+# starts the core (XDG autostart), not systemd, so there is no unit to order on.
+# The script waits for `hc server status` to answer — up to two minutes — and then
+# waits for each recovered shell, which appears a moment after the core does.
+# It exits 0 when there is nothing to restore, so a machine that never ran pi in
+# an hc terminal never shows a failed unit.
+#
+# Nothing here touches terminal output: no screen capture, no pane history. The
+# only state written is the resume map in ~/.pi/agent/herdr-resume/.
+[Unit]
+Description=pi session resume after reboot (herdr-core terminals)
+Documentation=file://%h/.pi/README.md
+After=default.target
+# The window (and the core it starts) may come up after the login shell.
+Wants=default.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.pi
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:%h/.local/share/pnpm/bin:%h/big-boss-pi/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.pi/scripts/herdr-resume.sh
+# Bounded: the core wait is 120 s and each terminal gets 20 s, so a stuck core
+# logs instead of holding the login session's start-up for a quarter of an hour.
+TimeoutStartSec=180
+Nice=10
+
+[Install]
+WantedBy=default.target

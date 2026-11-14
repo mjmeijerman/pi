@@ -417,6 +417,35 @@ else
 	echo "!! $SOURCE_DIR/systemd/pi-evals.service not found — skipped the eval timer"
 fi
 
+# --- 5f. pi session resume after a reboot ------------------------------------
+# One oneshot per login: scripts/herdr-resume.mjs reads the map that
+# agent/extensions/herdr-resume-map.ts writes and types the resume line into each
+# hc terminal that the core recovered as a plain shell. It waits for the core
+# itself, so there is no unit to order on: herdr-app starts the core, not systemd.
+RESUME_UNIT="herdr-resume.service"
+if [ -f "$SOURCE_DIR/systemd/$RESUME_UNIT" ] && [ -f "$SOURCE_DIR/scripts/herdr-resume.sh" ]; then
+	mkdir -p "$SYSTEMD_USER_DIR"
+	sed "s|%h|$HOME|g" "$SOURCE_DIR/systemd/$RESUME_UNIT" >"$SYSTEMD_USER_DIR/$RESUME_UNIT"
+	# The unit execs the installed copy, not the checkout: the bit has to be on
+	# $HOME/.pi/scripts/herdr-resume.sh whatever the source dir was.
+	chmod +x "$HOME/.pi/scripts/herdr-resume.sh" "$SOURCE_DIR/scripts/herdr-resume.sh" 2>/dev/null || true
+	echo "== $RESUME_UNIT -> $SYSTEMD_USER_DIR/$RESUME_UNIT"
+	if [ "${PI_SKIP_SYSTEMD:-}" = 1 ]; then
+		echo "== PI_SKIP_SYSTEMD=1 — not enabling $RESUME_UNIT"
+	elif command -v systemctl >/dev/null 2>&1 && [ -d "/run/user/$(id -u)" ]; then
+		systemctl --user daemon-reload || echo "!! systemctl --user daemon-reload failed"
+		if systemctl --user enable "$RESUME_UNIT"; then
+			echo "== pi sessions resume after a reboot ($RESUME_UNIT, oneshot at login)"
+		else
+			echo "!! could not enable $RESUME_UNIT — run: systemctl --user enable $RESUME_UNIT"
+		fi
+	else
+		echo "!! no systemd user session — unit copied, enable later: systemctl --user enable $RESUME_UNIT"
+	fi
+else
+	echo "!! systemd/$RESUME_UNIT or scripts/herdr-resume.sh missing — skipped the resume unit"
+fi
+
 echo
 echo "Done. Restart pi (or run /reload) to load the extensions."
 echo
@@ -432,6 +461,7 @@ echo "   herdr-app --version                                 # Herdr desktop app
 echo "   jev count \"split this task\"                          # delegation workspace on PATH"
 echo "   systemctl --user status big-boss-pi-guard.service    # workspace guard running"
 echo "   systemctl --user list-timers pi-evals.timer           # weekly harness evals scheduled"
+echo "   systemctl --user status herdr-resume.service          # pi sessions resume after a reboot"
 echo "   cat ~/.pi/agent/evals/last-run.txt                    # last eval run and pass count"
 echo "   bash scripts/harness-check.sh                        # harness budgets as checks"
 echo
@@ -439,4 +469,5 @@ echo "Reminder if you ever forget the hooks: just run this script again."
 echo
 echo "To turn the workspace guard off:"
 echo "   systemctl --user disable --now pi-evals.timer         # stop the weekly evals"
+echo "   systemctl --user disable --now herdr-resume.service   # stop resuming pi after a reboot"
 echo "   systemctl --user disable --now big-boss-pi-guard.service"

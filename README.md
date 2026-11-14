@@ -7,7 +7,7 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 | Path | What |
 |---|---|
 | `agent/skills/` | 8 pi skills: `achterhoek-agenda`, `cost-optimizer`, `ethical-hacker`, `gh-repo-scan`, `github-workflow`, `questionnaire`, `secret-guard`, `ui-ux` |
-| `agent/extensions/` | 13 always-on extensions: `cost-optimizer`, `desktop-notify`, `dictation`, `feedback-flywheel`, `herdr-agent-state` (installed by herdr), `local-llm`, `merge-guard`, `om-autostart`, `sandbox-badge`, `secret-guard`, `self-learn`, `session-nudge`, `usage-footer` |
+| `agent/extensions/` | 14 always-on extensions: `cost-optimizer`, `desktop-notify`, `dictation`, `feedback-flywheel`, `herdr-agent-state` (installed by herdr), `herdr-resume-map`, `local-llm`, `merge-guard`, `om-autostart`, `sandbox-badge`, `secret-guard`, `self-learn`, `session-nudge`, `usage-footer` |
 | `agent/prompts/` | prompt templates: `/grill` (interview the plan before coding, blip 13) |
 | `git-hooks/` | global secret-scan hooks (`pre-commit`, `commit-msg`, `pre-push`) + installer |
 | `git-vuln-scan` | pre-push agent vulnerability scan (GitHub pushes) |
@@ -143,6 +143,46 @@ it an ancestor — and only after checking it pointed at exactly what was pushed
 upstream. Uncommitted changes, local commits, or a default branch that is not a
 fast-forward are reported in the sentence at the top instead of being forced.
 
+### Pi sessions come back after a reboot
+
+A reboot used to end every open pi session. Herdr keeps the terminals, but on
+purpose it replaces a lost program with a plain shell in the same tab and folder
+and never re-runs it (`hc --skill`, `hc keep`) — so the conversation was on disk
+and the tab was empty. Two pieces close that gap, and nothing else:
+
+1. `agent/extensions/herdr-resume-map.ts` writes one small JSON file per hc
+   terminal, in `agent/herdr-resume/`: the session file, the command line that
+   reproduces the launch (wrapper, flags, model), the folder, and the space/tab
+   labels. It rewrites it on a session switch, and does nothing at all outside a
+   Herdr terminal (`$HC_TERMINAL_ID` unset).
+2. `systemd/herdr-resume.service` runs `scripts/herdr-resume.mjs` once per login.
+   It waits for the core, then for each terminal that came back as a *shell* it
+   types `exec <the recorded command> --session <the recorded file>` into that
+   terminal. Same tab, same folder, same conversation; pi starts idle, waiting
+   for you.
+
+What it refuses to do: resume a terminal something is already running in (never
+two pi in one tab), resume when the session file is gone, resume a launch it
+cannot rebuild (`mode: unknown` rather than a guess — a sandboxed worker must not
+come back unsandboxed), or touch a terminal that never held pi. Every decision is
+one timestamped line in `agent/herdr-resume/restore.log`, and a second run in the
+same boot types nothing.
+
+No terminal output is ever written to disk: no screen capture, no scrollback, no
+pane history. The map holds paths and arguments, not screen text.
+
+Two things worth knowing:
+
+- A first-run shell prompt can eat the first character of the pasted line (zsh's
+  new-user menu does exactly that). The script checks that the command actually
+  started and, if nothing did, types the line once more; if that also fails it
+  says so in the log and leaves the entry unmarked instead of pretending.
+- The launch mode is read from the markers the wrappers export (`PI_BARE`,
+  `PI_SANDBOX_MODE`, `PI_SANDBOX_NET`, `PI_WORKER`). Those markers are inherited
+  by children, so a pi started *inside* another pi's environment is recorded with
+  the environment it inherited. Starting Herdr from a plain login shell is the
+  normal case and the only one that is guaranteed.
+
 ### What is not in git, and why
 
 | Not tracked | Why | How it comes back |
@@ -150,6 +190,7 @@ fast-forward are reported in the sentence at the top instead of being forced.
 | `agent/deepseek.key` | Secret | Prompted by `setup.sh`, written mode 600 |
 | `agent/auth.json`, `models-store.json` | Provider tokens | `pi auth` |
 | `agent/sessions/` | Conversation history | Not restored; starts empty |
+| `agent/herdr-resume/` | One file per Herdr terminal: what to type to bring that pi session back | Rewritten by `herdr-resume-map` as sessions run |
 | `agent/bin/` | `fd`/`rg` extracted by pi | Re-extracted on first run |
 | `agent/dictation/venv/` | 2.5 GB of wheels | `--with-dictation` |
 | `agent/npm/`, `agent/git/` | Installed packages | `pi update --extensions` |
