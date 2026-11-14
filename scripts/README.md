@@ -162,14 +162,23 @@ and the CI verdict cannot disagree. Read-only: it prints a verdict, it never
 edits a PR.
 
 ```bash
-make pr-check BODY=pr.md                        # origin/trunk..HEAD
+make pr-check BODY=pr.md                        # merge base of origin/trunk and HEAD
 make pr-check BODY=pr.md BASE=origin/trunk HEAD=HEAD
 make pr-check BODY=pr.md PATHS=changed.txt      # explicit changed paths
 bash scripts/pr-gate.sh --body pr.md --gate mission   # one gate, like CI
 ```
 
-Exit 0 green, 1 a body CI would reject, 2 bad usage. The output is the CI
-verdict verbatim, including which harness path forced High:
+A body file is the only required input: with no `PATHS` the script derives the
+changed files from `git diff` (the merge base of `origin/trunk` and `HEAD`, or
+`BASE_SHA`/`HEAD_SHA` from the environment as CI passes them). Green means
+checked — a run given no file list, or one whose diff cannot be resolved (no
+`origin/trunk`, a shallow clone), fails and names what it could not check
+instead of passing. Passing an empty `PATHS` file is a gate handed nothing and
+fails the same way.
+
+Exit 0 green, 1 a body CI would reject or a gate that had nothing to check,
+2 bad usage or a diff that cannot be resolved. The output is the CI verdict
+verbatim, including which harness path forced High and which diff was read:
 
 ```text
 tier: medium

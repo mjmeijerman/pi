@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,10 +23,50 @@ const WORKFLOW = join(ROOT, ".github/workflows/pr-tier.yml");
 
 const tmp = mkdtempSync(join(tmpdir(), "pr-gate-"));
 
+// A test's own git repo, and its own git identity: the no-PATHS cases need a
+// real diff, and the host's git config must not decide what that diff is.
+const GIT_ENV = {
+	...process.env,
+	GIT_AUTHOR_NAME: "pr-gate test",
+	GIT_AUTHOR_EMAIL: "gate@example.invalid",
+	GIT_COMMITTER_NAME: "pr-gate test",
+	GIT_COMMITTER_EMAIL: "gate@example.invalid",
+	GIT_CONFIG_GLOBAL: "/dev/null",
+	GIT_CONFIG_SYSTEM: "/dev/null",
+	GIT_CONFIG_NOSYSTEM: "1",
+};
+
+function git(cwd, ...args) {
+	const run = spawnSync("git", args, { cwd, encoding: "utf8", env: GIT_ENV });
+	assert.equal(run.status, 0, `git ${args.join(" ")} failed: ${run.stderr}`);
+	return run.stdout.trim();
+}
+
+// `main`, not `trunk`: a local trunk would make the derivation resolve, and the
+// unresolvable case has to be unresolvable.
+function makeRepo(name, branch = "main") {
+	const dir = join(tmp, name);
+	mkdirSync(dir, { recursive: true });
+	git(dir, "init", "-q", "-b", branch);
+	return dir;
+}
+
+function commit(cwd, files, message) {
+	for (const [path, content] of Object.entries(files)) {
+		mkdirSync(dirname(join(cwd, path)), { recursive: true });
+		writeFileSync(join(cwd, path), content);
+	}
+	git(cwd, "add", "-A");
+	git(cwd, "commit", "-q", "--no-gpg-sign", "-m", message);
+	return git(cwd, "rev-parse", "HEAD");
+}
+
 let n = 0;
 // Run the gate exactly the way `make pr-check` and CI do: a body file, plus
-// either an explicit changed-path list or the diff.
-function gate({ body, paths, gateName }) {
+// either an explicit changed-path list, the diff, or nothing at all. `cwd`
+// defaults to a non-repository so a test that gives no file list cannot pick up
+// the diff of the checkout it is running in.
+function gate({ body, paths, gateName, cwd = tmp, env: extraEnv = {} }) {
 	const bodyFile = join(tmp, `body-${n++}.md`);
 	writeFileSync(bodyFile, body);
 	const args = [GATE, "--body", bodyFile];
@@ -36,10 +76,14 @@ function gate({ body, paths, gateName }) {
 		args.push("--paths", pathsFile);
 	}
 	if (gateName) args.push("--gate", gateName);
-	// A step summary must not leak into the test's own stdout.
+	// A step summary must not leak into the test's own stdout, and CI's shas in
+	// the ambient environment would decide a diff this test did not ask for.
 	const env = { ...process.env };
 	delete env.GITHUB_STEP_SUMMARY;
-	const run = spawnSync("bash", args, { encoding: "utf8", env });
+	delete env.BASE_SHA;
+	delete env.HEAD_SHA;
+	Object.assign(env, extraEnv);
+	const run = spawnSync("bash", args, { encoding: "utf8", cwd, env });
 	return { status: run.status, out: `${run.stdout}${run.stderr}` };
 }
 
@@ -153,10 +197,13 @@ test("tier: a body with no tier line is red whatever the diff", () => {
 	assert.match(r.out, /states no review tier/);
 });
 
-test("tier: without a diff the harness rule is reported, not guessed", () => {
+test("tier: without a diff the run is red, never green (PR 67)", () => {
+	// No --paths, no --base/--head, and no repository: the gate cannot know what
+	// changed, so it must not claim the harness-path rule held.
 	const r = gate({ body: `${MISSION}\n\nReview tier: Medium\n`, gateName: "tier" });
-	assert.equal(r.status, 0, r.out);
-	assert.match(r.out, /no diff given/);
+	assert.notEqual(r.status, 0, r.out);
+	assert.match(r.out, /origin\/trunk/);
+	assert.doesNotMatch(r.out, /pr-gate: green/);
 });
 
 // --------------------------------------------------------------- test change --
@@ -192,6 +239,82 @@ test("test change: a test beside its source needs a reason in the body", () => {
 	// A test alone, or source alone, is not this gate.
 	const testOnly = gate({ body: `${MISSION}\n`, paths: ["agent/prompts/x.test.ts"], gateName: "test-change" });
 	assert.equal(testOnly.status, 0, testOnly.out);
+});
+
+// ------------------------------------------------------- deriving the file list --
+// PR 67: `make pr-check BODY=pr.md` with no PATHS was handed zero files, read
+// that as "no test changed", and printed `pr-gate: green (all)` for a body the
+// same commit failed in CI. These three cases are that bug, its fix, and the
+// explicit-list path that has to keep working.
+
+test("no PATHS: the changed files come from git, so a test beside source is red", () => {
+	const dir = makeRepo("derive-resolvable");
+	const base = commit(dir, { "install.sh": "#!/bin/sh\necho base\n", "agent/prompts/x.test.ts": "export {};\n" }, "base");
+	// What a clone has: a remote-tracking trunk to diff the branch against.
+	git(dir, "update-ref", "refs/remotes/origin/trunk", base);
+	git(dir, "switch", "-q", "-c", "feature");
+	commit(dir, { "install.sh": "#!/bin/sh\necho branch\n", "agent/prompts/x.test.ts": "export const x = 1;\n" }, "source and its test move together");
+
+	// No --paths and no --base/--head: the script has to find the diff itself.
+	const red = gate({ body: `${MISSION}\n\nReview tier: High\n`, cwd: dir });
+	assert.equal(red.status, 1, red.out);
+	assert.match(red.out, /tests changed: 1; source changed: 1/, red.out);
+	assert.match(red.out, /merge base of origin\/trunk and HEAD/, red.out);
+	assert.match(red.out, /Test change: <reason>/, red.out);
+	assert.doesNotMatch(red.out, /pr-gate: green/);
+
+	// The same derived diff with the reason in the body is green, so the red
+	// above is the rule and not the derivation.
+	const ok = gate({
+		body: `${MISSION}\n\nReview tier: High\n\nTest change: the assertion moved to the new entry point.\n`,
+		cwd: dir,
+	});
+	assert.equal(ok.status, 0, ok.out);
+	assert.match(ok.out, /pr-gate: green/, ok.out);
+});
+
+test("no PATHS: a diff that cannot be resolved is a loud error, not a green verdict", () => {
+	// No origin/trunk and no local trunk: nothing to diff HEAD against.
+	const dir = makeRepo("derive-unresolvable");
+	commit(dir, { "install.sh": "#!/bin/sh\necho alone\n" }, "base");
+
+	const r = gate({ body: `${MISSION}\n\nReview tier: High\n\nTest change: a reason that would pass.\n`, cwd: dir });
+	assert.notEqual(r.status, 0, r.out);
+	assert.match(r.out, /no origin\/trunk/, r.out);
+	assert.doesNotMatch(r.out, /pr-gate: green/, r.out);
+});
+
+test("an empty paths file is a gate handed nothing: it says what it could not check", () => {
+	// The exact shape of the bug: zero files in, "nothing to justify" out.
+	const r = gate({ body: `${MISSION}\n\nReview tier: High\n`, paths: [] });
+	assert.equal(r.status, 1, r.out);
+	assert.match(r.out, /lists no files/, r.out);
+	assert.match(r.out, /not checked/, r.out);
+	assert.doesNotMatch(r.out, /pr-gate: green/);
+});
+
+test("an explicit PATHS list still decides the diff, whatever git would say", () => {
+	// The repo's own diff touches a harness path; the caller says it does not.
+	const dir = makeRepo("explicit-wins");
+	const base = commit(dir, { "install.sh": "#!/bin/sh\necho base\n" }, "base");
+	git(dir, "update-ref", "refs/remotes/origin/trunk", base);
+	commit(dir, { "agent/extensions/secret-guard.ts": "export const x = 2;\n" }, "harness path");
+
+	const r = gate({ body: `${MISSION}\n\nReview tier: Medium\n`, paths: [DOC], cwd: dir, gateName: "tier" });
+	assert.equal(r.status, 0, r.out);
+	assert.match(r.out, /paths file .*\(1 changed files\)/, r.out);
+});
+
+test("BASE_SHA/HEAD_SHA from the environment decide the diff, as in CI", () => {
+	const dir = makeRepo("ci-shas");
+	const base = commit(dir, { "install.sh": "#!/bin/sh\necho base\n" }, "base");
+	const head = commit(dir, { ".github/workflows/pr-tier.yml": "# changed\n" }, "workflow change");
+
+	// No flags at all: this is the shape CI's jobs take.
+	const r = gate({ body: `${MISSION}\n\nReview tier: Low\n`, cwd: dir, gateName: "tier", env: { BASE_SHA: base, HEAD_SHA: head } });
+	assert.equal(r.status, 1, r.out);
+	assert.match(r.out, /tier must be High/, r.out);
+	assert.match(r.out, new RegExp(`diff: ${base}\\.\\.\\.${head}`), r.out);
 });
 
 // ------------------------------------------------------------------ workflow --

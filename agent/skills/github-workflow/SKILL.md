@@ -67,7 +67,9 @@ Body template:
 
 `.github/workflows/pr-tier.yml` runs `scripts/pr-gate.sh`, and so does
 `make pr-check BODY=<file>`. Same script, so the local verdict is the CI
-verdict — run it before handing the PR over, not after a red check.
+verdict — run it before handing the PR over, not after a red check. No `PATHS`
+needed: the script diffs the merge base of `origin/trunk` and `HEAD` itself,
+and a run that cannot see a diff fails loudly rather than printing green.
 
 - `Mission: <line>` — a literal line, **not** a `## Mission` heading; 20+
   characters after the colon. A heading is markup and no gate reads it.
