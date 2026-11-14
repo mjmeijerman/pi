@@ -10,6 +10,16 @@
  * NOTE: every secret sample is assembled at runtime. Written as literals they
  * would trip the very guard under test (and the guard that protects this
  * repository).
+ *
+ * Second pass (`make mutate-full`, 94.41 percent): the survivors that are left
+ * are equivalent mutants, not missed branches. Each was checked by patching the
+ * module at the reported location and diffing its behaviour against the
+ * original over the sample tables below — including the `""` guards on empty
+ * regex matches (no pattern in the table can match an empty string), the
+ * `?? ""` seeds in the write/edit scan (they cannot carry a secret), and the
+ * `SECRET_FILE_RE` prefix class (the `^` alternative already matches any bare
+ * name). Assertions here pin the *condition*, so they would still kill a real
+ * regression in those lines.
  */
 import "./helpers/hooks.ts";
 import assert from "node:assert/strict";
@@ -181,6 +191,52 @@ describe("assignment key names: bare values", () => {
 		const { result } = await call("write", { path: "config/app.yml", content: `password = ${BARE}` });
 		assert.equal(result?.block, true);
 	});
+});
+
+/**
+ * The redaction has to replace the *whole* assignment, key name included.
+ *
+ * Every key name below is also reachable through the standalone `secret` /
+ * `password` alternative, so a pattern that loses one of its own alternatives
+ * still matches — one word later — and leaves `client` or `db_` in front of the
+ * marker. Asserting the marker alone (`match(/\[REDACTED:...\]/)`) hides that;
+ * these assert the exact replacement text.
+ */
+describe("redaction replaces the whole assignment, not just the value", () => {
+	const MASKED = ["apisecret", "api_secret", "clientsecret", "client_secret", "dbpassword", "db_password"];
+
+	for (const key of MASKED) {
+		test(`a quoted ${key} assignment is redacted in full`, async () => {
+			for (const separator of [" = ", "="]) {
+				const result = await redact(`${key}${separator}${JSON.stringify(V)}`);
+				assert.equal(result.action, "transform");
+				assert.equal(result.text, "[REDACTED:secret-assignment]", `expected \`${key}\` to be replaced whole`);
+			}
+		});
+	}
+
+	// The closing quote belongs to the match: a pattern that stops one character
+	// short leaves it dangling after the marker.
+	test("the quotes around a value are redacted with it", async () => {
+		for (const separator of [" = ", "="]) {
+			const result = await redact(`password${separator}${JSON.stringify(V)}`);
+			assert.equal(result.text, "[REDACTED:secret-assignment]");
+		}
+	});
+
+	// Same for the bare-value pattern, which has no `api_secret` alternative:
+	// these key names must still be replaced from their first character.
+	const BARE_KEYS = ["clientsecret", "client_secret", "dbpassword", "db_password"];
+
+	for (const key of BARE_KEYS) {
+		test(`a bare ${key} assignment is redacted in full`, async () => {
+			for (const separator of [": ", "=", " = "]) {
+				const result = await redact(`${key}${separator}${BARE}`);
+				assert.equal(result.action, "transform");
+				assert.equal(result.text, "[REDACTED:secret-assignment]", `expected \`${key}\` to be replaced whole`);
+			}
+		});
+	}
 });
 
 describe("secret file names: every alternative", () => {
@@ -378,6 +434,13 @@ describe("write and edit text scanning", () => {
 
 	test("an edit with no edits is allowed", async () => {
 		const { result } = await call("edit", { path: "src/app.ts", edits: undefined });
+		assert.equal(result, undefined);
+	});
+
+	test("the write/edit guard does not fire for a tool it does not own", async () => {
+		// `read` and `bash` have their own branches; any other tool name must not
+		// be reported as a write attempt, even when it names a secret file.
+		const { result } = await call("list", { path: "auth.json" });
 		assert.equal(result, undefined);
 	});
 
