@@ -42,7 +42,7 @@ Status values:
 | 8. Agent-maintained knowledge bases | partial | `agent/extensions/om-autostart.ts` + `pi-observational-memory` | Memory is per-session transcript compaction; nothing survives as a curated, cross-project base the agent maintains. |
 | 9. Anchoring coding agents to a reference application | n/a | — | No reference application exists — the harness is the only codebase, and its conventions live in `AGENTS.md` and the skills. |
 | 10. Coding harness for general-purpose agents | partial | `agent/skills/achterhoek-agenda/` runs research, not code | No non-coding workflow: research and writing inherit branch/PR/test rules that do not apply to them. |
-| 11. Feedback flywheel | done | `agent/extensions/feedback-flywheel.ts` (`/suggest`, `/retro`) and `agent/extensions/self-learn.ts`: every compaction is judged by a separate pi session, which writes a proposal to `~/.pi/agent/proposals/` | The remove half still needs a human: the learner can propose a deletion, but the review is what lands it. |
+| 11. Feedback flywheel | done | `agent/extensions/feedback-flywheel.ts` (`/suggest`, `/retro`, headless by `make retro` on `systemd/pi-retro.timer`) and `agent/extensions/self-learn.ts`: every compaction is judged by a separate pi session, which writes a proposal to `~/.pi/agent/proposals/` | The remove half still needs a human: the learner can propose a deletion, but the review is what lands it. |
 | 12. Graph-grounded codebase reasoning | missing | — | Navigation is `rg` and whole-file reads; no code graph or AST index. |
 | 13. Grilling | done | `/grill` → `agent/prompts/grill.md`; `agent/extensions/session-nudge.ts` nudges once per session after 4 distinct edited files with no `/grill` | The nudge is advice, not a gate: a session that ignores it still edits. |
 | 14. Interactive visual plans with agents | n/a | — | Single-user, small changes; text plans suffice. |
@@ -78,7 +78,7 @@ Status values:
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
 | 24. Agent pipeline responsibility | partial | `agent/extensions/merge-guard.ts` forces an explicit human yes per landing | Owner, reviewer and approver are the same person; nothing records who accepted an agent-built change beyond that yes. |
-| 25. Agent suggestion box | done | `/suggest` → `agent/suggestions.jsonl` (207 entries, measured 2026-11-13), `/retro` dedupes | Nothing reviews the box on a schedule. |
+| 25. Agent suggestion box | done | `/suggest` → `agent/suggestions.jsonl` (207 entries, measured 2026-11-13), `/retro` dedupes by signature, and `make retro` runs headless every Monday from `systemd/pi-retro.timer`: digest to `agent/retro/<date>.md`, record in `agent/retro/last-run.txt`, and `scripts/harness-check.sh` warns (`retro-freshness`) when that record is older than 14 days | The digest is still read by a person: nothing acts on the top signatures automatically. |
 | 26. Context profiling | done | `scripts/session-report.mjs` (cost, cache hit, context fill per project) | Profiling is after-the-fact; no per-turn attribution. |
 | 27. Enterprise harness | n/a | — | One user; the "harness" is this repo. |
 | 28. Foundation models for structured data | n/a | — | No tabular or warehouse workload; `local_llm` `extract` pulls fields out of prose, which is not the modelling this blip describes. |
