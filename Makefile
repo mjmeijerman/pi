@@ -1,7 +1,7 @@
 # pi agent setup — one-command install for a new machine.
 # Usage:  make setup   (or just: make)
 
-.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit evals evals-install
+.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit evals evals-install pr-check
 
 # Full provisioning on a new machine: config, hooks, system packages, API key,
 # pi packages, optional local model / dictation venv, then verification.
@@ -53,6 +53,20 @@ evals:
 		status=$$?; \
 		node $(CURDIR)/agent/evals/record-run.mjs $(CURDIR)/agent/evals/.last-run.json; \
 		exit $$status
+
+# The PR body gates, before the push instead of after the red check. This is
+# the same scripts/pr-gate.sh CI runs, so a local verdict and the CI verdict
+# cannot disagree. Give it the body file; BASE/HEAD default to origin/trunk..HEAD
+# so the harness-path rule is checked against the real diff. PATHS=<file> checks
+# an explicit changed-path list instead (a branch you have not pushed yet).
+#
+#   make pr-check BODY=pr.md
+#   make pr-check BODY=pr.md PATHS=changed.txt
+#   make pr-check BODY=pr.md BASE=origin/trunk HEAD=HEAD
+pr-check:
+	@bash $(CURDIR)/scripts/pr-gate.sh --body "$(BODY)" \
+		--base "$(or $(BASE),origin/trunk)" --head "$(or $(HEAD),HEAD)" \
+		$(if $(PATHS),--paths "$(PATHS)")
 
 update:
 	@git pull --ff-only

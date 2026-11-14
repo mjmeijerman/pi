@@ -9,6 +9,7 @@ core modules / coreutils, and none of them deletes anything.
 | `session-report.mjs` | Read-only report: tokens, cost, cache hit rate, context fill, disk per project + most expensive sessions + stale sessions. |
 | `prune-sessions.sh` | Moves old session logs into `./archive/`. Dry-run unless `--apply`. |
 | `harness-check.sh` | Read-only `PASS`/`WARN`/`FAIL` checks for the playbook's rules: budgets, install state, ownership. |
+| `pr-gate.sh` | The PR body gates (mission, review tier, test change) CI runs, runnable locally before the push. |
 | `harness-baseline.txt` | The ratchet `harness-check.sh` reads: known violations report `WARN`, not `FAIL`. |
 | `pisandbox` | `~/.pi/sandbox/pi-sandbox.sh` without typing the path. |
 | `archive/` | Created on first `--apply`. Holds moved sessions, same project layout. |
@@ -151,6 +152,35 @@ Two hooks call this: the global pre-commit wrapper runs `harness-pre-commit`
 the full check on every PR and weekly on a schedule. The schedule is the
 automated version of "delete a rule monthly / re-audit quarterly" — a check that
 nobody runs is a paragraph with extra steps.
+
+## pr-gate.sh
+
+The three body gates `.github/workflows/pr-tier.yml` enforces — mission line,
+review tier (with the harness-path rule), test change justified — in one place.
+The workflow calls this script and so does `make pr-check`, so a local verdict
+and the CI verdict cannot disagree. Read-only: it prints a verdict, it never
+edits a PR.
+
+```bash
+make pr-check BODY=pr.md                        # origin/trunk..HEAD
+make pr-check BODY=pr.md BASE=origin/trunk HEAD=HEAD
+make pr-check BODY=pr.md PATHS=changed.txt      # explicit changed paths
+bash scripts/pr-gate.sh --body pr.md --gate mission   # one gate, like CI
+```
+
+Exit 0 green, 1 a body CI would reject, 2 bad usage. The output is the CI
+verdict verbatim, including which harness path forced High:
+
+```text
+tier: medium
+Harness paths in the diff (tier must be High):
+
+- `agent/extensions/__tests__/secret-guard-branches.test.ts`
+::error::harness paths changed; tier must be High (blips 17, 42) — offending paths: agent/extensions/__tests__/secret-guard-branches.test.ts
+```
+
+In CI the markdown block goes to `$GITHUB_STEP_SUMMARY`; locally it goes to
+stdout. `.github/pull_request_template.md` carries every line a gate reads.
 
 ## harness-baseline.txt
 
