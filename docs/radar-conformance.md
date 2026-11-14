@@ -59,7 +59,7 @@ Status values:
 | 74. Beads | missing | — | Task state lives in `/tmp` spec files and PR bodies; nothing survives the session as a queryable backlog. |
 | 84. Pi | done | This repository: pi 1.5.2, 15 extensions, 503 tests in 59 suites, `/home/mark/.pi` | Pinned to 1.5.2; the extension API is exercised but an upgrade is untested until it happens. |
 | 23. Unattended overnight agentic builds | missing | — | Blocked by the same three prerequisites the blip names: default sandboxing, spec-up-front, sensors that validate without line-by-line review. |
-| 110. Promptfoo | partial | `agent/evals/` — 11 behaviour cases over `agent/AGENTS.md` and the skills, `make evals` (promptfoo 0.125.1, local `qwen3.8:27b`, ~2 min, zero cost) | Trial ring, manual monthly run only: no red-team or adversarial cases, no scheduled run, and the grader is a 27B local model whose verdicts vary run to run. |
+| 110. Promptfoo | partial | `agent/evals/` — 17 behaviour cases (11 harness, 6 adversarial) over `agent/AGENTS.md`, the skills and `agent/prompts/grill.md`; `make evals` (promptfoo 0.125.1, local `qwen3.8:27b`, zero cost) runs weekly from `systemd/pi-evals.timer`, writes `agent/evals/last-run.txt`, and `scripts/harness-check.sh` warns (`eval-freshness`) when that record is older than 14 days | Trial ring, and the grader is a 27B local model whose verdicts vary run to run — a red case is read, not obeyed. The adversarial set covers the fetched-page and hostile-skill paths (`docs/threat-model.md` §2.1, §2.4) but not the supply-chain path (§2.2), and there are no hook or red-team cases yet. |
 | 75. Chaos Mesh | n/a | — | Fault injection as Kubernetes custom resources; there is no cluster. The failure surface is one workstation, and `scripts/harness-check.sh` covers it deterministically rather than by scheduled chaos. |
 | 76. Cube Core | n/a | — | A semantic layer over an analytics warehouse; this repo has no warehouse, no metric definitions and no BI consumers. |
 | 77. Figma Code Connect | n/a | — | No design system and no Figma file: the artefacts here are markdown skills and TypeScript extensions, not UI components built from frames. |
@@ -82,7 +82,7 @@ Status values:
 | 26. Context profiling | done | `scripts/session-report.mjs` (cost, cache hit, context fill per project) | Profiling is after-the-fact; no per-turn attribution. |
 | 27. Enterprise harness | n/a | — | One user; the "harness" is this repo. |
 | 28. Foundation models for structured data | n/a | — | No tabular or warehouse workload; `local_llm` `extract` pulls fields out of prose, which is not the modelling this blip describes. |
-| 29. Harness quality evaluation | partial | 503 tests in 59 suites (`cd agent && env -u PI_WORKER node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh`, 11 prompt evals in `agent/evals/` (`make evals`, measured 10/11) | The instruction half is now sampled, not proven: evals are manual, model-dependent, and cover behaviour on 11 fixed prompts only; hooks still have no nondeterministic evaluation. |
+| 29. Harness quality evaluation | partial | 503 tests in 59 suites (`cd agent && env -u PI_WORKER node --test "extensions/__tests__/*.test.ts"`), shell checks in `scripts/harness-check.sh`, 17 prompt evals in `agent/evals/` (`make evals`, weekly from `systemd/pi-evals.timer`, record in `agent/evals/last-run.txt`) | The instruction half is sampled, not proven: the prompts are fixed and the grader is a 27B local model, so a verdict varies run to run; hooks still have no nondeterministic evaluation. |
 | 30. Local coding models | done | `agent/extensions/local-llm.ts`, `/local` health check | Route is manual, chosen by the model's own judgement. |
 | 31. MITRE ATLAS | done | `docs/threat-model.md` §2 groups attacker paths by ATLAS tactic (prompt injection, Execution, Persistence, Defense Evasion, Exfiltration) and names `AML.T0051` for the fetched-page path | Tactic names only, no per-technique ID mapping and no ATLAS-driven detection: the taxonomy shapes the document, not a test. |
 | 32. Production-aware coding agents | n/a | — | Nothing in production; project work is local. |
@@ -132,11 +132,12 @@ Status values:
    exists now; the 193 survivors are concentrated in one file (69.77%), mostly branch
    conditions the tests do not distinguish. Fix: read `agent/reports/stryker/mutation.html`,
    kill the survivors that map to a real branch. Cost: 2 hours.
-2. **The eval suite is thin and manual** (blips 29 and 110, both partial). `make evals`
-   exists (11 prompts, local grader) but runs only when someone remembers it, fails one case
-   ("first line is the action"), and has no red-team, adversarial or hook cases. Fix: schedule
-   it, then add an adversarial set and the failing-case fix. Cost: 1 hour to schedule and fix
-   the case, 3 hours for the adversarial set.
+2. **The supply-chain path has no sensor** (blip 29, partial). The eval suite is no longer
+   thin or manual: 17 cases, six of them adversarial, on a weekly `pi-evals.timer`, with a
+   `eval-freshness` warning when the run record goes stale. What remains is the one attacker
+   path nothing tests: a package install (`docs/threat-model.md` §2.2) — no lock file, no
+   provenance check, no hidden-Unicode scan. Fix: start with the scan, since it needs no
+   trust model. Cost: 1 hour for the scan, an afternoon for the lock file.
 
 Closed since the previous audit: the threat model (blips 6 and 31,
 `docs/threat-model.md` — assets, attacker paths by ATLAS tactic, the real binds and masks,
@@ -148,11 +149,11 @@ shell wrapper), the mutation score (blip 2, 74.47% from a reproducible `make mut
 prompt evals (blip 110, `agent/evals/` plus `make evals`) and workflow linting (blip 103,
 `.github/workflows/zizmor.yml`, 0 findings).
 
-The threat model re-scoped what remains, and both listed gaps inherit one of its paths.
-The fetched-page and malicious-skill paths (`docs/threat-model.md` §2.1 and §2.4) are what
-an adversarial eval set exists to catch, which is the second gap. The supply-chain path
-(§2.2, package installs) has no test at all: no lock file, no provenance check, no
-hidden-Unicode scan — the audit trail blip 72's row records as missing.
+The threat model re-scoped what remains, and the leftover gap inherits one of its paths.
+The fetched-page and malicious-skill paths (`docs/threat-model.md` §2.1 and §2.4) now have
+an adversarial case each (12a, 12b), which is what closed the second gap. The supply-chain
+path (§2.2, package installs) still has no test at all: no lock file, no provenance check,
+no hidden-Unicode scan — the audit trail blip 72's row records as missing.
 
 Enforced by `scripts/harness-check.sh` on every commit and in CI: a cited blip must exist in
 `docs/radar-blips.tsv` (no invented blip numbers), a stale `Review:` date fails the check

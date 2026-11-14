@@ -48,6 +48,10 @@ SKILL_LINES_LIMIT=150
 # `<days>`. 2 days = the playbook's 48-hour quarantine. 1440 here would mean
 # four years (blip 99).
 MIN_RELEASE_AGE=2
+# Promptfoo grades the model, not the files, so nothing else notices when the suite
+# stops running. `make evals` writes agent/evals/last-run.txt; older than this many
+# days is a WARN, not a FAIL, because the run is advisory (blip 29, blip 110).
+EVAL_MAX_AGE_DAYS=14
 
 usage() { sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() {
@@ -437,6 +441,38 @@ check_model_route() {
 	fi
 }
 
+# ------------------------------------------------------------ eval freshness --
+# The one check here that cannot be answered by reading a file: the eval suite grades a
+# model. It runs weekly from systemd/pi-evals.timer, and an advisory suite that nobody
+# notices going quiet is the failure this catches. `make evals` writes the record.
+check_eval_freshness() {
+	local rec="agent/evals/last-run.txt" ran now age ran_at summary
+	if [ ! -f "$ROOT/$rec" ]; then
+		record WARN eval-freshness "$rec" \
+			"no eval run recorded — the suite grades a model and has never run here; run: make evals"
+		return
+	fi
+	ran=$(sed -n 's/^ran_epoch=//p' "$ROOT/$rec" | head -1)
+	ran_at=$(sed -n 's/^ran_at=//p' "$ROOT/$rec" | head -1)
+	summary=$(sed -n 's/^note=//p' "$ROOT/$rec" | head -1)
+	case "$ran" in
+	'' | *[!0-9]*)
+		record WARN eval-freshness "$rec" \
+			"ran_epoch missing or not a number — rerun make evals so the record is honest"
+		return
+		;;
+	esac
+	now=$(date +%s)
+	age=$(((now - ran) / 86400))
+	if [ "$age" -gt "$EVAL_MAX_AGE_DAYS" ]; then
+		record WARN eval-freshness "$rec" \
+			"last run $age days ago (${ran_at:-unknown}, ${summary:-no counts}) — older than ${EVAL_MAX_AGE_DAYS} days; run: make evals"
+	else
+		verdict eval-freshness "$rec" 1 \
+			"last run $age day(s) ago (${ran_at:-unknown}, ${summary:-no counts}) — inside the ${EVAL_MAX_AGE_DAYS}-day window"
+	fi
+}
+
 # ----------------------------------------------------------- sandbox marker --
 # A sandbox nobody can see becomes a sandbox nobody checks: once `install.sh`
 # wraps `pi`, the contained session and the one launched with PI_BARE=1 look
@@ -537,6 +573,9 @@ if [ "$QUICK" = 0 ]; then
 	check_model_route
 	check_sandbox_marker
 	check_self_learn
+
+	section "evals — a model graded against the harness's own rules"
+	check_eval_freshness
 
 	section "metadata — ownership and provenance"
 	check_doc_metadata

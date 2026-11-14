@@ -28,3 +28,7 @@ Then, and only then, emit a numbered plan:
 Close by stating the review tier from `AGENTS.md` (high / medium / low) for the paths the plan touches, and what that tier demands of me before merge.
 
 If I cannot answer question 3, say so and stop: we are not ready to code. If I cannot answer question 4, say the task is an epic and propose a split.
+
+If the answers leave the spec ambiguous — two readings that would produce different code — stop and reply
+`DECISION NEEDED: <the one question that settles it>`. Picking a reading and calling it the obvious one is
+the failure this mode exists to prevent; a wrong guess costs more than a question.

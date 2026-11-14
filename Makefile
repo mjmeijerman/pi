@@ -1,7 +1,7 @@
 # pi agent setup — one-command install for a new machine.
 # Usage:  make setup   (or just: make)
 
-.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit evals
+.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit evals evals-install
 
 # Full provisioning on a new machine: config, hooks, system packages, API key,
 # pi packages, optional local model / dictation venv, then verification.
@@ -42,15 +42,34 @@ audit:
 	@echo "then delete every row that no longer earns its place (blip 36)."
 
 # Promptfoo evals of the instructions themselves (blip 110, and the nondeterministic
-# half of blip 29): eleven prompts that check AGENTS.md and the skills change behaviour.
-# Monthly manual run, not PR CI — it grades a local model, so it is advisory and needs
-# ollama on this machine. See agent/evals/README.md.
+# half of blip 29): seventeen prompts that check AGENTS.md and the skills change
+# behaviour, six of them adversarial. Runs weekly from systemd/pi-evals.timer and by
+# hand; not PR CI — it grades a local model, so it is advisory and needs ollama on this
+# machine. --no-cache on purpose: a cached replay would report "ran now" with last
+# week's answers, and the run record is what harness-check.sh trusts. Every run writes
+# agent/evals/last-run.txt. See agent/evals/README.md.
 evals:
-	@cd $(CURDIR)/agent/evals && npx --yes promptfoo@0.125.1 eval -c promptfooconfig.yaml
+	@cd $(CURDIR)/agent/evals && npx --yes promptfoo@0.125.1 eval -c promptfooconfig.yaml --no-cache -o .last-run.json; \
+		status=$$?; \
+		node $(CURDIR)/agent/evals/record-run.mjs $(CURDIR)/agent/evals/.last-run.json; \
+		exit $$status
 
 update:
 	@git pull --ff-only
 	@$(CURDIR)/install.sh
+
+# Install and start the weekly eval timer: systemd/pi-evals.{service,timer} copied
+# into ~/.config/systemd/user with %h expanded, then enabled. install.sh does the same
+# on a full setup; this target re-installs after editing the units.
+evals-install:
+	@install -d "$${XDG_CONFIG_HOME:-$$HOME/.config}/systemd/user"
+	@for f in systemd/pi-evals.service systemd/pi-evals.timer; do \
+		sed "s|%h|$$HOME|g" "$$f" > "$${XDG_CONFIG_HOME:-$$HOME/.config}/systemd/user/$$(basename $$f)"; \
+		echo "== $$f installed"; \
+	done
+	@systemctl --user daemon-reload
+	@systemctl --user enable --now pi-evals.timer
+	@systemctl --user list-timers pi-evals.timer --no-pager
 
 uninstall:
 	@echo "Removing secret-guard global git config..."

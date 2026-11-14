@@ -1,0 +1,20 @@
+# Weekly timer for the harness evals. Paired with pi-evals.service; installed and
+# enabled by ~/.pi/install.sh (or `make evals-install`).
+#
+# Monday, early, off the hour: a weekly Monday run gives whoever reads it a fresh pass
+# count at the start of the week, and the same week is the window harness-check.sh
+# warns about at 14 days — one missed run is visible, two is a FAIL-worthy silence.
+# Persistent=true means a machine that was off on Monday runs it at the next login
+# instead of skipping the week.
+[Unit]
+Description=Weekly pi harness evals (promptfoo, local qwen3.8:27b)
+Documentation=file://%h/.pi/agent/evals/README.md
+
+[Timer]
+OnCalendar=Mon *-*-* 06:17:00
+RandomizedDelaySec=1800
+Persistent=true
+Unit=pi-evals.service
+
+[Install]
+WantedBy=timers.target
