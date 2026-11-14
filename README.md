@@ -228,7 +228,7 @@ Notes: the worker models are configured separately from the chat model (`deepsee
 
 ## Protection layers
 
-1. **Secret-guard extension** — secrets never reach the model: user-input redaction, tool-call blocking (`.env`, keys, credentials), tool-output redaction, always-on system-prompt rules, audit log at `~/.pi/agent/secret-guard.log` (pattern names only, never values).
+1. **Secret-guard extension** — secrets never reach the model: user-input redaction, tool-call blocking (`.env`, keys, credentials), tool-output redaction, always-on system-prompt rules, a per-turn flow ledger that refuses an off-machine send once a secret-shaped file was touched in the same turn, audit log at `~/.pi/agent/secret-guard.log` (pattern names only, never values).
 2. **Cost-optimizer extension** — token-minimal responses, same professional quality (always active).
 3. **Git `pre-commit`** — blocks staging secret files or values (name + content scan).
 4. **Git `commit-msg`** — blocks secret commit messages.
