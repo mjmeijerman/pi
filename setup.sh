@@ -220,11 +220,10 @@ check_pkg gh gh                   # PR workflow, merge-guard
 if [ "${#NEED_PKGS[@]}" -eq 0 ]; then
 	note "all required packages present"
 else
-	uniq_pkgs=$(printf '%s\n' "${NEED_PKGS[@]}" | sort -u | tr '\n' ' ')
-	note "install with: sudo apt-get install -y $uniq_pkgs"
+	mapfile -t uniq_pkgs < <(printf '%s\n' "${NEED_PKGS[@]}" | sort -u)
+	note "install with: sudo apt-get install -y ${uniq_pkgs[*]}"
 	if [ "$DO_APT" = 1 ] && have apt-get && ask "install them now with sudo apt-get?"; then
-		# shellcheck disable=SC2086  # word splitting is the point here
-		run sudo apt-get install -y $uniq_pkgs || warn "apt-get failed; install them by hand"
+		run sudo apt-get install -y "${uniq_pkgs[@]}" || warn "apt-get failed; install them by hand"
 	else
 		note "skipped — re-run with sudo, or with --no-apt to keep it quiet"
 	fi

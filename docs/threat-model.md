@@ -22,8 +22,9 @@ Ranked by what a single successful exfiltration buys the attacker.
 | Asset | Path | Why it matters | Contained? |
 | --- | --- | --- | --- |
 | SSH private keys | `~/.ssh/` (`id_*`, `known_hosts`) | Write access to every git remote the user can reach, including this repo's `origin` | masked (`--tmpfs`) |
-| GitHub CLI token | `~/.config/gh/hosts.yml` | Same as above, over HTTPS, with `repo` scope and PR-merge rights | masked (`--tmpfs`) |
+| GitHub CLI token | `~/.config/gh/` (`hosts.yml`) | Same as above, over HTTPS, with `repo` scope and PR-merge rights | masked (`--tmpfs`) |
 | Provider credentials | `~/.pi/agent/auth.json` | Billing on the model account; the key is the wallet | rewritten in flight to the allowed providers only |
+| npm and netrc credentials | `~/.npmrc`, `~/.netrc` | An `_authToken` in `.npmrc` can publish to every package the user owns, and `.netrc` holds git and API passwords in clear text | masked (`--ro-bind /dev/null`) |
 | Cloud and vault credentials | `~/.aws/`, `~/.kube/`, `~/.config/1Password/`, `~/.gnupg/`, `~/.docker/` | Infrastructure takeover, or the vault that holds everything else | masked (`--tmpfs`) |
 | The harness itself | `~/.pi` — read-write in every sandboxed session | `agent/AGENTS.md`, `agent/extensions/*.ts`, `agent/skills/*`, `git-hooks/*`: whoever writes here sets the rules for every later session | **not protected** — by design, the agent must edit its own harness |
 | Git remotes | `git@github.com:mjmeijerman/pi.git`, project remotes | Ability to push, i.e. to turn any of the above into code that runs on the next checkout | not mounted inside the sandbox (`~/.ssh` masked); reachable from bare sessions |
@@ -121,8 +122,8 @@ Read-write binds: `~/.pi`; `~/.gitconfig` and `~/.gitignore_global`; then, for a
 `~/projects`, `~/agent-office`, `~/achterhoek-uitagenda`, `~/pi-projects` that exist;
 every `--rw DIR`; and the current directory when nothing above already covers it. The
 launcher refuses to start when the cwd or a `--rw` target is too broad — `/`, `/home`,
-`/root`, `/tmp`, `/var`, `/run`, `/dev`, `/proc`, `/sys`, `$HOME` itself, or any of
-`~/.local`, `~/.config`, `~/.cache`, `~/.docker`, `~/.ssh`, `~/.gnupg`, `~/.aws`,
+`/root`, `/tmp`, `/var`, `/var/tmp`, `/run`, `/dev`, `/proc`, `/sys`, `$HOME` itself, or
+any of `~/.local`, `~/.config`, `~/.cache`, `~/.docker`, `~/.ssh`, `~/.gnupg`, `~/.aws`,
 `~/.kube`, and any ancestor of `$HOME`.
 
 Masks, applied last: `--tmpfs` over `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.kube`,
@@ -200,4 +201,7 @@ Ranked by residual risk per hour of work.
    second without having said so.
 7. **Re-measure at the next review.** Confirm the mask list in §3 still matches
    `sandbox/pi-sandbox.sh` (the script wins), and re-run `bash scripts/harness-check.sh`.
-   Cost: 15 minutes.
+   Cost: 15 minutes. The two lists are held together by
+   `agent/extensions/__tests__/sandbox-binds.test.ts`, which fails when a path is masked
+   in the script and not in this doc, or the other way round — so the re-measure is a
+   reading task, not a diffing one.
