@@ -95,6 +95,29 @@ CLI flags still work next to the manifest: `--val --vlt --draw --vit --pieces
   header. Column width comes from the widest text in the column (`CHAR_W`), so
   values sit under their own header and headers never overlap the next column.
   Abbreviations (`tw / hw / hh / rl`) on the sheet are the old bug.
+- **Every header cell sits on its column's alignment edge.** The values are
+  `text-anchor="end"` at `kolom_x[i] + breedtes[i]`, so each header is drawn the
+  same way, at that same right edge. Drawing a header at `kolom_x[i]` with the
+  default start anchor
+  made it hang ~50 mm (about one column gap, `KOLOM_GAT_MM = 7`) left of its
+  own numbers — the eye followed the header and landed in the wrong column.
+  Checker 9e asserts `|header_right - column_value_right| <= 0.1 mm` per column
+  and names the column when it fails.
+- **The table is ruled like a table, under the text.** `tabel_lijnen()` in
+  `maak-alle-maten-svg.py` computes: one rule under the header row, one under
+  every size row, one vertical separator per column gap (mid-gap, never in a
+  cell) and a closed box around the whole table. Stroke `0.2 mm` `#bbbbbb`
+  (`TABEL_LIJN`, `TABEL_LIJN_DIKTE`) so the rules never compete with the 1:1
+  pattern lines, every one tagged `data-role="maattabel-lijn"`, appended
+  before the table text so they render underneath. `TABEL_OPKOM = 0.9` and
+  `TABEL_NEERKOM = 0.25` (per font size) place every rule **between** two text
+  bands: the header rule clears the descenders of `heuphoogte`, the row rules
+  sit in the free 3.5 mm strip between 8 mm rows of 5 mm text. The box's bottom
+  edge is the last row rule, so the table closes under its last row instead of
+  leaving a 2.5 mm strip below it. Checker 9e asserts the rules exist inside
+  the legend box, that the box stays clear of the 5 × 5 cm block, and that no
+  text bbox crosses a rule or the box (`FAIL` names the rule coordinate and the
+  text).
 - **One term per thing**: the grainline reads `recht van draad` both on the
   line and in the legend row (`GRAIN_LABEL`). Two terms for the same line
   ("rechtdraad - alle maten" next to a legend row saying something else) is a
@@ -111,7 +134,9 @@ on 2 sheets for the skirt, 5 on 2 for the spijkerrok. Unusable for a plotter.
 - **A unit is one thing that must stay whole**: every spec of one piece across
   all six sizes (`data_piece`) plus that piece's label, the header (`kop`),
   and the legend block (`legenda`) — the legend carries the 5 × 5 cm block and
-  the measurement table. The red note block is gone from the sheet: those
+  the measurement table. The legend rect carries `data-role="legenda-kader"`,
+  which is how checker 9e proves the table's rules stay inside the legend. The
+  red note block is gone from the sheet: those
   notes live in the `note` blocks of `patroon.json` and in the markdown docs.
 - Pack with first-fit shelves inside the frame, `GAP = 12 mm`, after trying
   both orientations and three orders (`kop`-then-height, reading order, all by
@@ -257,7 +282,12 @@ anchor side, band pairs).
   reads exactly `recht van draad`, the legend row keeps its explanation, no
   `#a33` remains in the element tree *or* in the SVG source, the table header
   carries the `.vit` full names (uniform across sizes), `(mm)` appears once, and
-  each size row's cells sit inside their own column and do not overlap. This is
+  each size row's cells sit inside their own column and do not overlap. Section
+  9e adds the table itself: per header cell its right edge equals its column's
+  value edge within 0.1 mm, the 1 header rule + 6 row rules + 4 column
+  separators + closed box exist inside the legend and clear of the 5 × 5 cm
+  block, they are 0.2 mm light grey, and no text bbox crosses a rule or the box.
+  This is
   what caught the generator reading the skirt's `.vit` for the spijkerrok
   (`@hh` 215 instead of 210 in size 42): take the `.vit` template from the
   manifest (`ctx.pad("maattabel")`), not from the default constant.
