@@ -13,9 +13,12 @@
  *    process (a Herdr pane when Herdr is up, otherwise a headless sandboxed
  *    run), so a slow or talkative reflection cannot stall, pollute or lengthen
  *    the conversation that triggered it. The child gets `PI_SELF_LEARN=1` and
- *    therefore never spawns a learner of its own. A launch is *verified*: a pane
- *    that exits 0 without creating a herdr space is a failure, and the headless
- *    launcher takes over.
+ *    therefore never spawns a learner of its own. A launch is *verified* twice:
+ *    a pane that exits 0 without creating a herdr space is a failure, and a space
+ *    whose agent never consumes the prompt is a failure too — six of the seven
+ *    launches on 2026-11-14 made a space and took no turn, and each one was
+ *    logged as a success until the turn itself became the evidence. The headless
+ *    launcher takes over, and it is checked the same way.
  * 2. **Most compactions do nothing.** A gate runs first, with no model call: two
  *    or more of the same failed tool signature, or one `/suggest` note, in the
  *    window since the last compaction. Everything else is silence — a reflection
@@ -40,7 +43,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -50,6 +53,8 @@ const QUEUE_DIR = join(PROPOSAL_DIR, "queue");
 const LOG = join(PROPOSAL_DIR, "runs.jsonl");
 const SUGGESTIONS = join(DIR, "suggestions.jsonl");
 const REPO = join(homedir(), ".pi");
+/** pi's session files: one directory per cwd, the audit trail a learner leaves. */
+const SESSIONS = join(DIR, "sessions");
 const SPEC = join(REPO, "agent", "prompts", "learn.md");
 const PANE_SCRIPT = join(REPO, "scripts", "agent-pane.sh");
 /** The boss publishes; the learner hands it the branch, the sha and the proposal. */
@@ -243,8 +248,23 @@ export interface LaunchResult {
 export const PANE_TIMEOUT_MS = 45_000;
 /** A headless learner that is still alive after this has started. */
 export const HEADLESS_GRACE_MS = 2_000;
+/**
+ * How long a launched learner gets to prove it took the turn.
+ *
+ * The one launch that ever worked wrote its proposal in 45 s, and a session file
+ * appears within seconds of the prompt being consumed, so 90 s is generous by a
+ * factor of two. It costs nothing to wait: the check runs after the host session
+ * has moved on.
+ */
+export const CONFIRM_TIMEOUT_MS = 90_000;
+export const CONFIRM_POLL_MS = 1_000;
 const MAX_DETAIL = 400;
 const MAX_CAPTURE = 64 * 1024;
+/** Clock slack: a session file may be stamped a moment before we read `now`. */
+const CONFIRM_SLACK_MS = 5_000;
+/** Read this far into a session file looking for its first user turn. */
+const MAX_SESSION_SCAN = 4 * 1024 * 1024;
+const SESSION_CHUNK = 64 * 1024;
 
 /** One line, secrets removed, clipped: stderr goes into runs.jsonl verbatim. */
 export function clipDetail(text: string): string {
@@ -346,9 +366,246 @@ export function verifyLaunch(
 	});
 }
 
+/** What a launch attempt is being asked to prove. */
+export interface ConfirmInput {
+	/** Where the learner was told to work; its session header records the same cwd. */
+	cwd: string;
+	/** The queue file the prompt names. Only a consumed prompt writes it to a session. */
+	queuePath: string;
+	/** Wall-clock start of the attempt, in ms: earlier sessions do not count. */
+	since: number;
+	/** The pane's terminal, when the launcher made one; the echo is evidence too. */
+	terminal?: string | null;
+	timeoutMs?: number;
+	pollMs?: number;
+}
+
+/** Whether, and how, the learner proved it took the turn. */
+export interface TurnEvidence {
+	ok: boolean;
+	/** "session" is a pi session that consumed the prompt; "terminal" is the echo. */
+	source?: "session" | "terminal";
+	detail?: string;
+}
+
+/**
+ * The first user turn of a pi session file, with the cwd from its header.
+ *
+ * A booting pi writes its header immediately, so the existence of a session file
+ * proves only that pi started. The first *user* message is the proof the prompt
+ * was handed over and consumed, which is exactly the difference the run log was
+ * missing. Read in chunks and stop at the first user turn: a long-lived session
+ * file can be tens of megabytes.
+ */
+export async function readSessionTurn(path: string): Promise<{ cwd: string | null; text: string } | null> {
+	let handle;
+	try {
+		handle = await open(path, "r");
+	} catch {
+		return null;
+	}
+	try {
+		const buffer = Buffer.alloc(SESSION_CHUNK);
+		let position = 0;
+		let pending = "";
+		let cwd: string | null = null;
+		const take = (line: string): { cwd: string | null; text: string } | null => {
+			if (!line.trim()) return null;
+			if (line.startsWith('{"type":"session"')) {
+				try {
+					const header = JSON.parse(line) as { cwd?: unknown };
+					if (typeof header.cwd === "string") cwd = header.cwd;
+				} catch {
+					// A torn header is not evidence either way.
+				}
+				return null;
+			}
+			if (!line.includes('"role":"user"')) return null;
+			try {
+				const entry = JSON.parse(line) as { type?: string; message?: { role?: string; content?: unknown } };
+				if (entry.type !== "message" || entry.message?.role !== "user") return null;
+				const content = entry.message.content;
+				const text = typeof content === "string" ? content : JSON.stringify(content ?? "");
+				return { cwd, text };
+			} catch {
+				return null;
+			}
+		};
+		while (position < MAX_SESSION_SCAN) {
+			const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+			if (!bytesRead) break;
+			position += bytesRead;
+			pending += buffer.subarray(0, bytesRead).toString("utf8");
+			const lines = pending.split("\n");
+			pending = lines.pop() ?? "";
+			for (const line of lines) {
+				const turn = take(line);
+				if (turn) return turn;
+			}
+		}
+		return null;
+	} catch {
+		return null;
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
+}
+
+/**
+ * A session file written after `since`, in the learner's cwd, whose first user
+ * turn names `queuePath`. That combination is the learner, and nothing else is.
+ */
+export async function turnSession(
+	sessionsRoot: string,
+	input: { cwd: string; queuePath: string; since: number },
+): Promise<string | null> {
+	const encoded = `--${input.cwd.replace(/^\/+/, "").replace(/\//g, "-")}`;
+	let dirs;
+	try {
+		dirs = await readdir(sessionsRoot, { withFileTypes: true });
+	} catch {
+		return null;
+	}
+	for (const dir of dirs) {
+		// The directory name encodes the cwd, but loosely (a child directory of the
+		// repo matches the same prefix), so the header is what decides.
+		if (!dir.isDirectory() || !dir.name.startsWith(encoded)) continue;
+		const full = join(sessionsRoot, dir.name);
+		let files: string[];
+		try {
+			files = await readdir(full);
+		} catch {
+			continue;
+		}
+		for (const file of files) {
+			if (!file.endsWith(".jsonl")) continue;
+			const path = join(full, file);
+			try {
+				const info = await stat(path);
+				if (info.mtimeMs < input.since - CONFIRM_SLACK_MS) continue;
+				const turn = await readSessionTurn(path);
+				if (!turn) continue;
+				if (turn.cwd !== null && turn.cwd !== input.cwd) continue;
+				if (turn.text.includes(input.queuePath)) return path;
+			} catch {
+				// An unreadable session is not evidence; keep looking.
+			}
+		}
+	}
+	return null;
+}
+
+/** What the pane's screen shows, for the case where the session file is slow. */
+function readTerminal(terminal: string): Promise<string> {
+	return new Promise<string>((resolve) => {
+		let out = "";
+		let done = false;
+		const finish = () => {
+			if (done) return;
+			done = true;
+			resolve(out);
+		};
+		let child: any;
+		try {
+			child = spawn("hc", ["read", terminal], { stdio: ["ignore", "pipe", "ignore"] });
+		} catch {
+			finish();
+			return;
+		}
+		child.stdout?.on("data", (chunk: unknown) => {
+			out = (out + String(chunk ?? "")).slice(-MAX_CAPTURE);
+		});
+		child.on("error", finish);
+		child.on("exit", finish);
+		const timer = setTimeout(() => {
+			try {
+				child.kill("SIGTERM");
+			} catch {
+				// Already gone.
+			}
+			finish();
+		}, 5_000);
+		timer.unref?.();
+	});
+}
+
+/**
+ * Wait, bounded, for the learner to consume its prompt.
+ *
+ * Two acceptable proofs, cheapest first: a pi session in the learner's cwd whose
+ * first user turn names the queue file, or a pane whose screen shows the prompt.
+ * The session is the strong one — a booting pi writes its header before it can
+ * swallow a send — so every `spawned` row records which proof it stood on
+ * (`confirmed: "session"` or `"terminal"`). A run of terminal-only rows with no
+ * proposal file behind them is the next thing to tighten; until then the log
+ * says which it was instead of pretending both are equal.
+ *
+ * A space with neither proof is the six-of-seven failure this check exists for.
+ */
+export async function confirmTurn(input: ConfirmInput): Promise<TurnEvidence> {
+	const timeoutMs = input.timeoutMs ?? CONFIRM_TIMEOUT_MS;
+	const pollMs = input.pollMs ?? CONFIRM_POLL_MS;
+	const deadline = Date.now() + timeoutMs;
+	let seen = "";
+	for (;;) {
+		try {
+			const session = await turnSession(SESSIONS, input);
+			if (session) return { ok: true, source: "session", detail: session };
+		} catch {
+			// Keep polling: a half-written session file is not a verdict.
+		}
+		if (input.terminal) {
+			const screen = await readTerminal(input.terminal);
+			if (screen.includes(input.queuePath)) return { ok: true, source: "terminal", detail: input.terminal };
+			if (screen.trim()) seen = clipDetail(screen);
+		}
+		if (Date.now() >= deadline) break;
+		// Not unref'd on purpose: this timer is the only thing keeping a short-lived
+		// process alive long enough to finish the check, and an unref'd poll makes the
+		// promise never settle.
+		await new Promise<void>((resolve) => setTimeout(resolve, pollMs));
+	}
+	const tail = seen ? `; terminal showed: ${seen.slice(0, 120)}` : "";
+	return { ok: false, detail: `no session took the prompt within ${timeoutMs}ms${tail}` };
+}
+
+/** Close whatever the launch may have made, quietly. Never throws. */
+function closeSpace(slug: string): Promise<void> {
+	return new Promise<void>((resolve) => {
+		let done = false;
+		const finish = () => {
+			if (done) return;
+			done = true;
+			resolve();
+		};
+		let child: any;
+		try {
+			child = spawn(PANE_SCRIPT, ["close", slug], { stdio: "ignore", detached: true });
+		} catch {
+			finish();
+			return;
+		}
+		child.on("error", finish);
+		child.on("exit", finish);
+		const timer = setTimeout(() => {
+			try {
+				child.kill("SIGTERM");
+			} catch {
+				// Already gone.
+			}
+			finish();
+		}, 10_000);
+		timer.unref?.();
+	});
+}
+
 export interface SelfLearnDeps {
 	/** Start the learner; the default verifies that one actually exists. */
 	launch?: (launcher: Launcher, env: NodeJS.ProcessEnv) => LaunchResult | Promise<LaunchResult>;
+	/** Prove the learner took the turn; the default reads sessions and the pane. */
+	confirm?: (input: ConfirmInput) => TurnEvidence | Promise<TurnEvidence>;
+	/** Kill a space that produced no learner. */
+	closeSpace?: (slug: string) => void | Promise<void>;
 	/** `/suggest` notes written since `sinceIso`. */
 	countNotes?: (sinceIso: string | null) => Promise<number>;
 	/** Command availability probe, for the launcher choice. */
@@ -360,6 +617,8 @@ export interface SelfLearnDeps {
 
 export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 	const launch = deps.launch ?? verifyLaunch;
+	const confirm = deps.confirm ?? confirmTurn;
+	const close = deps.closeSpace ?? closeSpace;
 	const has = deps.has ?? ((cmd: string) => existsSync(`/home/mark/.local/bin/${cmd}`));
 	const fileExists = deps.exists ?? existsSync;
 	const now = deps.now ?? (() => Date.now());
@@ -460,9 +719,15 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 	};
 
 	/**
-	 * Start the learner, verify it exists, fall back to headless, and log which
-	 * one actually ran. Runs after `learn()` has returned: agent-pane.sh waits up
-	 * to 40 s for pi's banner, and the session that just compacted must not.
+	 * Start the learner, prove it took the turn, fall back to headless, and log the
+	 * launcher that really ran. Runs after `learn()` has returned: agent-pane.sh
+	 * waits up to 40 s for pi's banner, the turn takes as long again, and the
+	 * session that just compacted must not.
+	 *
+	 * The old check asked whether a space existed. Six of seven launches on
+	 * 2026-11-14 made a space and took no turn, and each was logged as `spawned`:
+	 * a space is not a learner. Every attempt now has to produce a consumed
+	 * prompt, or it is a `spawn-failed` with the launcher's own exit status.
 	 */
 	async function launchLearner(plan: {
 		at: number;
@@ -479,37 +744,65 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			PI_SELF_LEARN_SLUG: plan.slug,
 			PI_SELF_LEARN_PROPOSAL: plan.proposalPath,
 		};
-		const attempt = async (candidate: Launcher) => launch(candidate, env);
 
-		let launcher = withSelfClose(pickLauncher(has, plan.slug, plan.queuePath, fileExists), plan.slug);
-		let result = await attempt(launcher);
-		if (!result.ok && launcher.kind === "pane") {
-			// The pane is what lied: record the exit status and the clipped stderr
-			// before trying the launcher that does not need herdr.
-			await record({
-				ts,
-				kind: "spawn-failed",
-				slug: plan.slug,
-				launcher: "pane",
-				status: result.status ?? null,
-				stderr: clipDetail(result.detail ?? ""),
-				reason: plan.decision.reason,
-			});
-			launcher = withSelfClose(pickLauncher(has, plan.slug, plan.queuePath, fileExists, REPO, false), plan.slug);
-			result = await attempt(launcher);
+		interface Attempt {
+			launcher: Launcher;
+			space: LaunchResult;
+			turn: TurnEvidence | null;
 		}
-		if (!result.ok) {
+		/** Why an attempt failed, as one clipped line for the run log. */
+		const whyFailed = (attempt: Attempt): string => {
+			if (!attempt.space.ok) return attempt.space.detail ?? "launcher failed";
+			return attempt.turn?.detail ?? "a space appeared but no agent took the turn";
+		};
+		const started = (attempt: Attempt): boolean => attempt.space.ok && attempt.turn?.ok === true;
+
+		const attempt = async (candidate: Launcher): Promise<Attempt> => {
+			const since = Date.now();
+			const space = await launch(candidate, env);
+			if (!space.ok) return { launcher: candidate, space, turn: null };
+			// A space, or a living pi, is the pre-condition. The turn is the proof.
+			const turn = await confirm({
+				cwd: candidate.cwd,
+				queuePath: plan.queuePath,
+				since,
+				terminal: candidate.kind === "pane" ? (space.detail ?? null) : null,
+			});
+			return { launcher: candidate, space, turn };
+		};
+
+		const fail = async (failure: Attempt): Promise<void> => {
 			await record({
 				ts,
 				kind: "spawn-failed",
 				slug: plan.slug,
-				launcher: launcher.kind,
-				status: result.status ?? null,
-				stderr: clipDetail(result.detail ?? ""),
+				launcher: failure.launcher.kind,
+				status: failure.space.status ?? null,
+				stderr: clipDetail(whyFailed(failure)),
 				reason: plan.decision.reason,
 			});
-			notify(plan.ctx, `learner could not start (${launcher.kind}): ${clipDetail(result.detail ?? "no output")}`, "warning");
-			return;
+			// A space that no agent entered is still a space, and it costs a terminal.
+			if (failure.space.ok) await close(plan.slug);
+		};
+
+		let ran = await attempt(withSelfClose(pickLauncher(has, plan.slug, plan.queuePath, fileExists), plan.slug));
+		if (!started(ran)) {
+			// Record what this launcher said before trying the next one: the exit
+			// status is the part a reader cannot reconstruct afterwards.
+			await fail(ran);
+			if (ran.launcher.kind !== "pane") {
+				notify(plan.ctx, `no learner took the turn (${ran.launcher.kind}): ${clipDetail(whyFailed(ran))}`, "warning");
+				return;
+			}
+			// The pane is what lied. Retry once without herdr, and check it the same way.
+			ran = await attempt(
+				withSelfClose(pickLauncher(has, plan.slug, plan.queuePath, fileExists, REPO, false), plan.slug),
+			);
+			if (!started(ran)) {
+				await fail(ran);
+				notify(plan.ctx, `no learner took the turn (${ran.launcher.kind}): ${clipDetail(whyFailed(ran))}`, "warning");
+				return;
+			}
 		}
 
 		errors = new Map();
@@ -517,13 +810,15 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			ts,
 			kind: "spawned",
 			trigger: plan.trigger,
-			launcher: launcher.kind,
+			launcher: ran.launcher.kind,
 			slug: plan.slug,
 			queue: plan.queuePath,
 			proposal: plan.proposalPath,
 			reason: plan.decision.reason,
+			/** How the turn was confirmed: a session file or the pane's screen. */
+			confirmed: ran.turn?.source ?? "unknown",
 		});
-		notify(plan.ctx, `learner started in a separate pi session (${launcher.kind}): ${plan.decision.reason}`, "info");
+		notify(plan.ctx, `learner started in a separate pi session (${ran.launcher.kind}): ${plan.decision.reason}`, "info");
 	}
 
 	async function learn(trigger: "compact" | "manual", ctx: any): Promise<Decision> {
