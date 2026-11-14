@@ -77,8 +77,9 @@ headers with `+n −n` counts, hunk headers, line numbers, a filled green/red si
 gutter, tinted added and removed lines, horizontal scroll.
 
 Right, below the diff: a note field with `approve`, `request changes` and
-`comment`, then four buttons that open **a new space** with a pi agent already
-told what to do:
+`comment`, then four buttons that each start **a new agent** — a new tab in the
+`big-boss-pi` space, with the job as its first message (the space is made when
+it is missing, and never a second time):
 
 | button | the agent is asked to |
 | --- | --- |
@@ -87,10 +88,11 @@ told what to do:
 | `3 fix merge conflicts` | merge the base branch in, keep both intents, run the tests, push |
 | `4 fix review comments` | address each comment, reply where it disagrees, push |
 
-The space starts in the repository's local clone when one can be found (a few
-usual roots are probed for a matching `origin`), otherwise in `$HOME` with an
-instruction to clone it first. Every task says: never merge, never push to
-trunk.
+The new agent starts in `/home/mark/big-boss-pi`, where that workspace's
+`AGENTS.md` makes it hand the job to a worker in the repository's local clone
+when one can be found (a few usual roots are probed for a matching `origin`),
+and to clone it first when there is none. Every task says: never merge, never
+push to trunk. No button ever types into an agent that is already running.
 
 | key | does |
 | --- | --- |
@@ -112,14 +114,19 @@ bottom is the note that goes with the whole-PR review.
 
 A line note goes out as a one-comment review (`POST /pulls/<n>/reviews` with
 `event: COMMENT`), so added and context lines use `side: RIGHT` with the new
-line number and removed lines `LEFT` with the old one. Then a new space gets an
-agent told which file and line the note is on, what it says, and to reply to the
-comment once it is fixed.
+line number and removed lines `LEFT` with the old one. Then a new agent in the
+`big-boss-pi` space is told which file and line the note is on, what it says,
+and to reply to the comment once it is fixed.
 
 It lives in the `Apps` space, `Pull requests` tab. Rebuild on a new machine:
 `install.sh` copies the folder into `$HOME/.config/herdr-app/mods/` when the app
 is installed, and never overwrites a folder that already exists (you may have
-edited the mod in place). Then:
+edited the mod in place). An existing copy is updated by copying the file over
+it:
+```bash
+cp ~/.pi/herdr-mods/prs/main.js ~/.config/herdr-app/mods/prs/main.js
+```
+The app picks the new file up on its own. Then, first time only:
 ```bash
 herdr-app do space.new --name Apps --folder "$HOME"
 herdr-app do tab.new --space <space-id> --name "Pull requests" --mod prs
