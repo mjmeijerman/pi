@@ -11,6 +11,20 @@
 #
 # Everything from the PR body arrives through `env` and is only ever matched in
 # bash, never interpolated into a command line (injection, blip 38).
+#
+# The mission line in the PR body, enforced instead of assumed.
+#
+# Radar basis: #41 coding throughput as a metric (Hold), #17 risk-tiered human
+# oversight (Trial), #3 path-to-production mapping (Adopt).
+#
+# `docs/kent-beck-craft-harness.md` says every change opens with who is better
+# off and how we would see it, and that LOC, PR count and token spend are effort,
+# which is definitionally not mission. That was a rule nobody checked: a body
+# could carry a tier and say nothing about why anyone gains. This job fails the
+# PR unless the body has a `Mission:` line of at least 20 characters after the
+# prefix, so "Mission: fix" does not pass as a mission. Measured the way the
+# Radar blip is measured: the share of PRs with a mission line, which is the
+# check itself — red on a body without one, red on a one-word mission.
 name: pr-tier
 
 on:
@@ -182,4 +196,75 @@ jobs:
             echo "## Test change: justified"
             echo ""
             echo "${reason}"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  # A pull request has to say who is better off. Tier says how much review the
+  # change needs; mission says why the change is worth reviewing at all, and the
+  # difference is the whole point of blip 41: a busy PR list is not a better
+  # harness. Accepted: a `Mission:` line, bold or not, case-insensitive, with at
+  # least 20 characters after the prefix. Measurement: red on a body with no
+  # mission line, red on one that says less than a sentence.
+  mission-stated:
+    name: mission stated
+    runs-on: ubuntu-latest
+    steps:
+      # No checkout: this gate reads the PR body and nothing else, so no branch
+      # content is fetched or executed to decide it.
+      - name: mission line in the PR body, and long enough to mean something
+        env:
+          # Untrusted input: quoted, and only ever matched in bash below.
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          shopt -s nocasematch
+
+          # Emphasis is stripped first, the way the test-change gate does it, so
+          # `**Mission:** ...` counts as a mission line.
+          flat="${PR_BODY//\*/}"
+
+          found=0
+          mission=""
+          while IFS= read -r line; do
+            # Leading whitespace and space around the colon are tolerated; the
+            # line is what matters, not its punctuation.
+            if [[ $line =~ ^[[:space:]]*mission[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+              found=1
+              mission="${BASH_REMATCH[1]}"
+              break
+            fi
+          done <<<"$flat"
+
+          if (( found == 0 )); then
+            echo "::error::the PR body states no mission (blip 41: effort is not mission). Add a line: Mission: <who is better off, and how you would see it>"
+            {
+              echo "## Mission: missing"
+              echo ""
+              echo "No \`Mission:\` line in the PR body."
+              echo "Define it as \`docs/kent-beck-craft-harness.md\` does: who is better off,"
+              echo "and the observation that shows the gain. Effort is not mission."
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # Trailing whitespace would make a short mission look long enough.
+          mission="$(printf '%s' "$mission" | sed -e 's/[[:space:]]*$//')"
+          echo "mission: ${mission:-<empty>}"
+
+          if (( ${#mission} < 20 )); then
+            echo "::error::the Mission line is ${#mission} characters after the prefix; a mission names who gains and how we would see it, at least 20 characters"
+            {
+              echo "## Mission: too short"
+              echo ""
+              echo "\`Mission:\` is filled in, but only with \`${mission:-<empty>}\`."
+              echo "A mission names the person or system that gains and the observation that shows it."
+              echo "Example: \`Mission: a reviewer sees which gate failed without opening the logs.\`"
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          echo "::notice::mission stated: ${mission}"
+          {
+            echo "## Mission: stated"
+            echo ""
+            echo "${mission}"
           } >>"$GITHUB_STEP_SUMMARY"
