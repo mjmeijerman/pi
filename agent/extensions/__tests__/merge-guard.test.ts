@@ -16,7 +16,7 @@ import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
 
 const mod = await import("../merge-guard.ts");
 const mergeGuard = mod.default;
-const { mergeReason, trunkCommitReason, currentBranch, gitSegments } = mod;
+const { mergeReason, trunkCommitReason, currentBranch, gitSegments, parkReason } = mod;
 
 /** A throwaway repo whose HEAD is on `branch`, for the branch-dependent rules. */
 function repoOn(branch: string): string {
@@ -160,7 +160,57 @@ describe("merge-guard: branch rules", () => {
 	});
 });
 
+describe("merge-guard: stash rules", () => {
+	const blocked = [
+		["git stash", "a bare stash saves"],
+		["git stash -u", "push is the default verb"],
+		["git stash push -u -m 'boss: unblock worker spawn'", "the form delegate suggests"],
+		["git -C /home/mark/.pi stash -u", "the exact command delegate prints"],
+		["cd /home/mark/.pi && git stash push", "a cd before the stash"],
+		["git stash save 'wip'", "the deprecated verb still parks"],
+		["git stash drop stash@{0}", "dropping a stash deletes work"],
+		["git stash clear", "clearing deletes every stash"],
+	];
+
+	for (const [command, why] of blocked) {
+		test(`blocks \`${command}\` (${why})`, () => {
+			assert.ok(parkReason(command), `expected a reason for: ${command}`);
+		});
+	}
+
+	const allowed = [
+		"git stash list",
+		"git stash show -p stash@{0}",
+		"git stash pop",
+		"git stash apply stash@{0}",
+		"git stash branch recover stash@{0}",
+		"git stash --help",
+		`echo "git stash -u"`,
+		"git status --short",
+	];
+
+	for (const command of allowed) {
+		test(`allows \`${command}\``, () => {
+			assert.equal(parkReason(command), null, `unexpected block: ${command}`);
+		});
+	}
+});
+
 describe("merge-guard: handler", () => {
+	test("a stash is blocked, and the reason names the worktree instead", async () => {
+		const result = await run("git -C /home/mark/.pi stash -u");
+		assert.equal(result?.block, true);
+		assert.match(String(result?.reason), /worktree add/);
+	});
+
+	test("/mergeguard allow unlocks one stash, and the pop after it stays free", async () => {
+		const { emit, ctx, commands } = setup();
+		await commands.get("mergeguard").handler("allow", ctx);
+		const [allowed] = await emit("tool_call", { toolName: "bash", input: { command: "git stash -u" } }, ctx);
+		assert.equal(allowed, undefined);
+		const [popped] = await emit("tool_call", { toolName: "bash", input: { command: "git stash pop" } }, ctx);
+		assert.equal(popped, undefined);
+	});
 	test("a merge command is blocked, not run", async () => {
 		const result = await run("gh pr merge 1 --squash");
 		assert.equal(result?.block, true);
