@@ -90,7 +90,9 @@ msg="$WORK/human"
 printf 'feat(x): a human wrote this\n\nThe body a human wrote.\n' >"$msg"
 printf 'a\n' >"$REPO/a"
 git -C "$REPO" add -A >/dev/null
-if git -C "$REPO" commit -q -F "$msg" >"$WORK/out" 2>"$WORK/err"; then
+# Cleared on the way in, not by the runner: a worker or delegate shell exports a
+# slug, and this case is about what the hook does when nobody claims one.
+if env -u AGENT_SLUG -u PI_AGENT_SLUG git -C "$REPO" commit -q -F "$msg" >"$WORK/out" 2>"$WORK/err"; then
 	expect_eq "message is byte-identical" \
 		"$(printf 'feat(x): a human wrote this\n\nThe body a human wrote.')" "$(commit_msg)"
 	if commit_msg | grep -q '^Agent-Slug:'; then
