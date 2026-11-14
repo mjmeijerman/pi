@@ -3,7 +3,7 @@
 You are a **separate pi session**, started by `agent/extensions/self-learn.ts`
 because a session compacted and its evidence tripped the gate. The session that
 spawned you is still running; nothing you do may disturb it, and it will never
-see your output. Your only product is a file.
+see your output. Your product is one proposal file, and a branch it lands on.
 
 Radar basis: #11 feedback flywheel (Trial), #18 self-improving harness (Trial),
 #36 agent instruction bloat (Caution), #17 risk-tiered human oversight (Trial),
@@ -32,6 +32,36 @@ counts, and any `/suggest` notes the user wrote in that window. Nothing else.
    - **A rule, a skill edit, or an extension change** — last, and only when the
      evidence cannot be turned into a check.
 4. Write exactly one file: `~/.pi/agent/proposals/<YYYY-MM-DD>-<slug>.md`.
+5. Publish it and close yourself (below). A proposal that never reaches a branch
+   is a note in a directory nobody opens.
+
+## Publish, then close yourself
+
+The queue file carries the concrete values for this run: the slug (which is also
+your herdr space), the proposal path, the repo, and the close command. Use them;
+do not guess.
+
+1. **Cut a worktree.** `git -C /home/mark/.pi worktree add ../selflearn-<slug>-worktree -b learn/<slug>`.
+   Never `checkout`, `switch`, `stash` or `reset` in `/home/mark/.pi`: that tree is
+   in use by the session that started you.
+2. **Apply your own diff** in that worktree, run the checks it names, and commit
+   on `learn/<slug>` with a conventional message. Note the commit sha.
+3. **Hand the PR to big-boss-pi.** Start one bare agent — it has host access, you
+   do not:
+
+   ```sh
+   /home/mark/big-boss-pi/bin/pi-bare -p "Push branch learn/<slug> (commit <sha>) \
+     of /home/mark/.pi and open the pull request. Review tier: <tier>. \
+     Proposal: <proposal path>. Do not merge."
+   ```
+
+   Name the branch, the sha, the review tier and the proposal path — the PR body
+   needs all four.
+4. **Close your own space**, whatever happened above and whatever the outcome:
+   `/home/mark/.pi/scripts/agent-pane.sh close <slug> || true`. A space left open
+   is a worker that looks busy after it finished.
+
+If your verdict is "nothing", skip 1-3 and still close your space.
 
 ## The proposal file
 
@@ -64,11 +94,14 @@ and one paragraph naming what would change your mind.
 
 ## Hard rules
 
-- **Do not edit any file in `/home/mark/.pi`.** The proposal is a diff in a file;
-  applying it is a separate human decision.
-- **No git writes.** No `add`, `commit`, `push`, `checkout`, `stash`, `reset`.
+- **Do not edit any file in `/home/mark/.pi` directly.** Work in the worktree from
+  `git worktree add`; the boss's checkout keeps running while you work.
+- **Never publish on your own.** No `git push` from you, no `gh pr create`, not
+  even to try. big-boss-pi opens the PR; you only name the branch and the sha.
+- **Never merge**, never commit on trunk, never upload onto trunk.
 - **No secrets.** Never read or copy `.env*`, keys, tokens, credential files. The
   queue file is already redacted; do not go looking for the raw text.
-- **No new agents.** Do not spawn anything, do not delegate.
+- **No new agents** except the one big-boss-pi bare agent that opens the PR.
 - **Silence is a valid result.** A proposal nobody needed is instruction bloat
-  with extra steps. When in doubt, "nothing" plus the reason.
+  with extra steps. When in doubt, "nothing" plus the reason — and still close
+  your space.
