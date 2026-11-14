@@ -132,6 +132,8 @@ bash scripts/harness-check.sh            # everything, one line per check
 bash scripts/harness-check.sh --quick    # budgets only, <1 s (the git hook runs this)
 bash scripts/harness-check.sh --json     # one JSON document, same exit code
 bash scripts/harness-check.sh --root DIR # check another checkout
+bash scripts/harness-check.sh --verify-config  # only the config-file shapes
+bash scripts/harness-check.sh --verify-release-age  # only the npm quarantine
 ```
 
 Exit 0 when nothing `FAIL`s, 1 on any `FAIL`. What it checks:
@@ -144,6 +146,7 @@ Exit 0 when nothing `FAIL`s, 1 on any `FAIL`. What it checks:
 | `review-freshness` | no doc or skill past its own `Review:` date. |
 | `extension-radar-basis` | every `agent/extensions/*.ts` header cites its Radar blips. |
 | `npm-min-release-age` | npm refuses versions younger than 2 days — the value is in days, not minutes (blip 99). |
+| `config-schema` | `agent/settings.json` and `agent/models.json` match the shapes in `agent/config/schema.mjs`; an unknown key `FAIL`s with a one-edit suggestion, and `agent/keys.json` is checked by shape only, never by value (blip 102). |
 | `git-hooks-path` | global `core.hooksPath` is `~/.pi/git-hooks`. |
 | `git-hooks-templates` | `~/.git-templates/hooks` is populated (the `git init` layer). |
 
