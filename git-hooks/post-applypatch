@@ -17,7 +17,12 @@ pre-commit)
 	fi
 	exec "$HOOKS_HOME/scan-secrets.sh"
 	;;
-commit-msg) exec "$HOOKS_HOME/scan-commitmsg.sh" "$1" ;;
+commit-msg)
+	# Secret scan first — it decides whether the commit happens at all — then
+	# the provenance trailers, appended while the message is still a file.
+	"$HOOKS_HOME/scan-commitmsg.sh" "$1" || exit $?
+	exec "$HOOKS_HOME/add-provenance.sh" "$1"
+	;;
 pre-push) exec "$HOOKS_HOME/scan-prepush.sh" ;;
 esac
 exit 0
