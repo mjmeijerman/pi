@@ -101,3 +101,85 @@ jobs:
           fi
 
           echo "tier check passed: $tier"
+
+  # A test change and a source change in the same pull request have to explain
+  # themselves. Editing `x.test.ts` beside `x.ts` is how an assertion gets bent
+  # to fit the code instead of the other way round, so the body must say why the
+  # test moved. Accepted: a `Test change: <reason>` line with an actual reason,
+  # not a placeholder. Measurement: red on a source+test diff without that line.
+  test-change-reason:
+    name: test change justified
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # Both endpoints are already in the clone: no network, no token.
+          fetch-depth: 0
+
+      - name: a changed test needs its reason in the PR body
+        env:
+          # Untrusted input: quoted, only ever matched in bash below.
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          shopt -s nocasematch
+
+          mapfile -t changed < <(git diff --name-only "${BASE_SHA}...${HEAD_SHA}")
+
+          tests=(); source=()
+          for path in "${changed[@]}"; do
+            case "$path" in
+              *.test.ts) tests+=("$path") ;;
+              *.ts|*.tsx|*.js|*.mjs|*.cjs|*.sh|*.py) source+=("$path") ;;
+            esac
+          done
+
+          echo "tests changed: ${#tests[@]}; source changed: ${#source[@]}"
+
+          if (( ${#tests[@]} == 0 )); then
+            echo "no test file changed; nothing to justify"
+            exit 0
+          fi
+          if (( ${#source[@]} == 0 )); then
+            echo "tests changed without source beside them; not this gate"
+            exit 0
+          fi
+
+          # `Test change: the retry needed a fake clock` and `**Test change:** ...`
+          # both count: emphasis is stripped first, and `.` stops at the end of
+          # the line, so the reason is one line, not the rest of the body.
+          flat="${PR_BODY//\*/}"
+          reason=""
+          if [[ $flat =~ test[[:space:]]+change[[:space:]]*:[[:space:]]*(.+) ]]; then
+            reason="${BASH_REMATCH[1]}"
+          fi
+          # Trailing whitespace would make an empty reason look long enough.
+          reason="$(printf '%s' "$reason" | sed -e 's/[[:space:]]*$//')"
+          echo "reason: ${reason:-<none>}"
+
+          if (( ${#reason} < 10 )); then
+            {
+              echo "## Test change: reason missing"
+              echo ""
+              echo "This pull request changes a test file next to source:"
+              echo ""
+              printf -- '- test: `%s`\n' "${tests[@]}"
+              printf -- '- source: `%s`\n' "${source[@]}"
+              echo ""
+              echo "Add a line to the PR body:"
+              echo ""
+              echo '`Test change: <why the test had to change>`'
+            } >>"$GITHUB_STEP_SUMMARY"
+            echo "::error::a test file and its source changed together; the PR body needs a 'Test change: <reason>' line"
+            exit 1
+          fi
+
+          echo "::notice::test change justified: ${reason}"
+          {
+            echo "## Test change: justified"
+            echo ""
+            echo "${reason}"
+          } >>"$GITHUB_STEP_SUMMARY"
