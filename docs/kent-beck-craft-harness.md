@@ -1,5 +1,8 @@
 # Kent Beck — "Software Engineering in the Age of AI" (Prodacity 2026, Rise8)
 
+Owner: Mark Meijerman (`mjmeijerman`)
+Review: 2027-02-13 — quarterly, alongside the Radar audit (`docs/radar-conformance.md` §6).
+
 Action points for this harness. Source: talk transcript, fetched 2026-11-13 with yt-dlp
 (`F8fBgDCf2Y4`, 51:52, 6365 words). Plan: implement tomorrow.
 
