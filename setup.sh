@@ -303,6 +303,15 @@ fi
 if ! have npm; then
 	warn "npm not found — min-release-age not set (blip 99); install node+npm, then re-run"
 elif [ "$(npm_major)" -lt 11 ]; then
+	# An attempt that could not unpack leaves the shim without its target: npm
+	# writes $HOME/.local/bin/npm first, then fails under a read-only or masked
+	# ~/.local. The dangling link makes every later retry look half-done, and
+	# the install refuses to replace it — so clear it, or the retry cannot take
+	# (blip 99).
+	if [ -L "$HOME/.local/bin/npm" ] && [ ! -e "$HOME/.local/bin/npm" ]; then
+		note "removing a dangling $HOME/.local/bin/npm left by an earlier attempt"
+		rm -f "$HOME/.local/bin/npm"
+	fi
 	note "npm $(npm --version) ignores min-release-age (needs npm >= 11) — installing npm@11 into $HOME/.local"
 	if run npm install -g --prefix "$HOME/.local" npm@11; then
 		hash -r 2>/dev/null || true # PATH lookup still points at the old npm
