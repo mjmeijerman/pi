@@ -24,6 +24,8 @@
 #                                         # sandbox forwards the setting as
 #                                         # NPM_CONFIG_MIN_RELEASE_AGE; a bare run
 #                                         # is the fallback when it cannot
+#   scripts/harness-check.sh --verify-config
+#                                         # only the config-file shapes (blip 102)
 #   scripts/harness-check.sh --help
 #
 # Exit 0 when nothing FAILs (a baselined violation reports WARN), 1 on any FAIL.
@@ -31,9 +33,13 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The checkout this script runs from, kept apart from $ROOT: a --root DIR run
+# checks DIR's config files, but the shapes still come from here.
+HARNESS_ROOT="$ROOT"
 JSON=0
 QUICK=0
 VERIFY_RELEASE_AGE=0
+VERIFY_CONFIG=0
 
 PASS_N=0
 WARN_N=0
@@ -59,7 +65,7 @@ EVAL_MAX_AGE_DAYS=14
 # is a WARN, same as the evals, because the digest is advisory.
 RETRO_MAX_AGE_DAYS=14
 
-usage() { sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() {
 	printf 'harness-check: %s\n' "$*" >&2
 	exit 2
@@ -561,6 +567,40 @@ check_retro_freshness() {
 	fi
 }
 
+# ------------------------------------------------------------ config shapes --
+# Radar blip 102 (Varlock: validate config, do not hope). pi reads settings.json
+# and models.json before any extension is asked anything and ignores a key it
+# does not know, so a typo is a silent fallback: the route works until it does
+# not. agent/config/schema.mjs holds the shapes; this check turns them into FAIL
+# lines that carry the file, the path inside it and what was expected.
+#
+# Agent-owned settings blocks (observational-memory) are typed there too, so a
+# typo inside a package's block is caught by the same line. keys.json is checked
+# by shape and presence only — schema.mjs never formats a value.
+check_config_schema() {
+	local status where message schema="$ROOT/agent/config/schema.mjs"
+	if [ ! -f "$schema" ]; then
+		schema="$HARNESS_ROOT/agent/config/schema.mjs"
+	fi
+	if [ ! -f "$schema" ]; then
+		verdict config-schema agent/config/schema.mjs 0 \
+			"missing — nothing defines the config shapes any more (blip 102)"
+		return
+	fi
+	if ! command -v node >/dev/null 2>&1; then
+		record WARN config-schema agent/config/schema.mjs \
+			"node absent — the config files were not validated (jq is not assumed)"
+		return
+	fi
+	while IFS=$'\t' read -r status where message; do
+		[ -n "$status" ] || continue
+		case "$status" in
+		PASS) verdict config-schema "$where" 1 "$message" ;;
+		FAIL) verdict config-schema "$where" 0 "$message" ;;
+		esac
+	done < <(node "$schema" --root "$ROOT" 2>/dev/null)
+}
+
 # ----------------------------------------------------------- sandbox marker --
 # A sandbox nobody can see becomes a sandbox nobody checks: once `install.sh`
 # wraps `pi`, the contained session and the one launched with PI_BARE=1 look
@@ -618,6 +658,7 @@ while [ $# -gt 0 ]; do
 	--json) JSON=1 ;;
 	--quick) QUICK=1 ;;
 	--verify-release-age) VERIFY_RELEASE_AGE=1 ;;
+	--verify-config) VERIFY_CONFIG=1 ;;
 	--root)
 		[ $# -ge 2 ] || die "--root needs a directory"
 		ROOT="$2"
@@ -650,6 +691,22 @@ if [ "$VERIFY_RELEASE_AGE" = 1 ]; then
 	exit $?
 fi
 
+# One check, on demand, for the config shapes alone: the whole report is the
+# schema verdict and its exit status is the answer, so a broken file can be
+# shown to someone without the other twenty lines in the way (blip 102).
+if [ "$VERIFY_CONFIG" = 1 ]; then
+	section "config — file shapes (blip 102)"
+	check_config_schema
+	if [ "$JSON" = 1 ]; then
+		printf '{"pass":%d,"warn":%d,"fail":%d,"results":[%s]}\n' \
+			"$PASS_N" "$WARN_N" "$FAIL_N" "${JSON_ITEMS[*]}"
+	else
+		printf '\n%d passed, %d warn, %d failed\n' "$PASS_N" "$WARN_N" "$FAIL_N"
+	fi
+	[ "$FAIL_N" -eq 0 ]
+	exit $?
+fi
+
 section "budgets — files that load on every turn"
 check_agents_md
 check_skill_lines
@@ -657,6 +714,7 @@ check_skill_lines
 if [ "$QUICK" = 0 ]; then
 	section "config — things an install step sets"
 	check_release_age
+	check_config_schema
 	check_git_hooks
 	check_model_route
 	check_sandbox_marker
