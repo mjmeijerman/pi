@@ -510,7 +510,7 @@ describe("wiring", () => {
 		);
 	});
 
-	test("the learner is told to hand the PR to big-boss-pi and to close its own space", async () => {
+	test("the learner is told how to publish its branch and to close its own space", async () => {
 		const { emit, ctx } = setup();
 		await trip(emit, ctx);
 		await settle();
@@ -525,7 +525,10 @@ describe("wiring", () => {
 
 		// The prompt file itself, not only the generated queue file.
 		const spec = await readFile(new URL("../../prompts/learn.md", import.meta.url), "utf8");
-		assert.match(spec, /big-boss-pi\/bin\/pi-bare/);
+		// The spec publishes through the script that verifies a PR exists: naming
+		// the bare agent in prose is what let three branches sit unpublished.
+		assert.match(spec, /scripts\/learn-publish\.sh/, "the spec publishes through the verifying script");
+		assert.match(spec, /Exit 1 means it does/);
 		assert.match(spec, /agent-pane\.sh close/);
 		assert.match(spec, /review tier/i);
 	});
