@@ -3,7 +3,7 @@
   "_comment": "Mutation testing (Thoughtworks Radar Vol. 35, blip 2, Adopt). Proves the extension assertions actually bite. First pass is scoped to the non-TUI modules so a run finishes in minutes; `command` runs the same `npm test` the CI job runs.",
   "testRunner": "command",
   "commandRunner": {
-    "command": "npm test"
+    "command": "node --test \"extensions/__tests__/*.test.ts\""
   },
   "mutate": [
     "extensions/lib/**/*.ts",
