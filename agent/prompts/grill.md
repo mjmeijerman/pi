@@ -32,3 +32,5 @@ If I cannot answer question 3, say so and stop: we are not ready to code. If I c
 If the answers leave the spec ambiguous — two readings that would produce different code — stop and reply
 `DECISION NEEDED: <the one question that settles it>`. Picking a reading and calling it the obvious one is
 the failure this mode exists to prevent; a wrong guess costs more than a question.
+
+Before you write the spec, run make grill-check and paste its output; the gate refuses a spec without it.
