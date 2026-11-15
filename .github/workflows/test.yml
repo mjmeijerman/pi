@@ -235,3 +235,148 @@ jobs:
           set -euo pipefail
           mapfile -t files < <(git ls-files '*.sh')
           shellcheck --severity=error "${files[@]}"
+
+  # Radar Vol. 35 blip 89 (Deepsec: a scanner in the pipeline) and blip 6 (threat
+  # modelling — docs/threat-model.md is the scope statement this job checks that
+  # code still lives up to). semgrep and trivy were installed on this machine and
+  # ran in nothing: a scan nobody can point at is a habit, not a gate. One job,
+  # one verdict — any finding fails the run — and the summary names every file
+  # and package that was read, so green means "scanned and clean" rather than
+  # "the step existed".
+  security-scan:
+    name: security scan (semgrep, trivy)
+    runs-on: ubuntu-latest
+    # A gate that makes a pull request wait ten minutes is a gate people turn
+    # off. Cold, this is two pinned downloads plus a scan of ~60 files and one
+    # lockfile; five minutes is the ceiling, not the target.
+    timeout-minutes: 5
+    env:
+      SEMGREP_VERSION: 1.185.0
+      TRIVY_VERSION: 0.76.2
+      # `p/bash` is not a registry pack (semgrep.dev/c/p/bash is a 404), so the
+      # shell ruleset is pinned by commit instead of by name: the same rule text
+      # on every run, and a rule change is a reviewable edit to this line.
+      SEMGREP_RULES_SHA: a5ad1714f00c9f7fde980cab0ea1d6dc6d414fd2
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          # Nothing worth caching: uvx resolves one pinned package in seconds,
+          # and a cache keyed on a sdist is one more thing to poison.
+          enable-cache: false
+
+      - name: install scanners (pinned)
+        run: |
+          set -euo pipefail
+          # trivy: release tarball checked against the checksum the release
+          # publishes. A version pin alone does not survive a replaced asset.
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          asset="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfL "$base/$asset" -o "$RUNNER_TEMP/$asset"
+          curl -sSfL "$base/trivy_${TRIVY_VERSION}_checksums.txt" -o "$RUNNER_TEMP/checksums.txt"
+          grep -F " $asset" "$RUNNER_TEMP/checksums.txt" >"$RUNNER_TEMP/asset.sha256"
+          ( cd "$RUNNER_TEMP" && sha256sum --check --strict asset.sha256 )
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP" trivy
+
+          # The shell ruleset, pinned by the commit it came from.
+          curl -sSfL "https://github.com/semgrep/semgrep-rules/archive/${SEMGREP_RULES_SHA}.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP"
+          rules="$RUNNER_TEMP/semgrep-rules-${SEMGREP_RULES_SHA}"
+
+          {
+            echo "TRIVY_BIN=$RUNNER_TEMP/trivy"
+            echo "SEMGREP_RULES=$rules"
+          } >>"$GITHUB_ENV"
+
+          "$RUNNER_TEMP/trivy" --version | sed -n '1p'
+          printf 'semgrep-rules bash set: %s file(s) at %s\n' \
+            "$(find "$rules/bash" -name '*.yaml' | wc -l)" "$SEMGREP_RULES_SHA"
+
+      - name: semgrep (p/default, p/typescript, pinned bash rules)
+        id: semgrep
+        # A finding must not stop the other scanner from reporting: the verdict
+        # step below is what fails the job, and the summary is most useful when
+        # every scanner has spoken.
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # Tracked source only, and as an explicit list: a green run can be
+          # compared against `git ls-files`, so a file that stopped being
+          # scanned shows up as a smaller number instead of as a pass.
+          mapfile -t targets < <(git ls-files '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs' '*.sh')
+          printf 'semgrep targets: %d file(s)\n' "${#targets[@]}"
+          # Registry packs need the network, which CI has; --json-output keeps the
+          # JSON report next to the human one. --error is the gate: semgrep exits 0
+          # on findings by default, so without it this job would be green on a
+          # finding — measured, not assumed (1.185.0 returns 1 with --error and 0
+          # without, on the same file).
+          uvx --from "semgrep==${SEMGREP_VERSION}" semgrep scan \
+            --config p/default \
+            --config p/typescript \
+            --config "${SEMGREP_RULES}/bash" \
+            --metrics=off \
+            --disable-version-check \
+            --error \
+            --json-output "$RUNNER_TEMP/semgrep.json" \
+            "${targets[@]}"
+
+      - name: trivy (dependencies, secrets, configuration)
+        id: trivy
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          status=0
+          # --include-dev-deps on purpose: stryker and the test toolchain run in
+          # this workflow, so a vulnerable dev dependency is a reachable one here.
+          "$TRIVY_BIN" fs \
+            --scanners vuln \
+            --include-dev-deps \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --format json \
+            --output "$RUNNER_TEMP/trivy-vuln.json" \
+            . || status=1
+          # Secrets and configuration: any finding fails, at any severity — a
+          # leaked key in a tracked file is not a low-priority one.
+          "$TRIVY_BIN" fs \
+            --scanners secret,misconfig \
+            --exit-code 1 \
+            --format json \
+            --output "$RUNNER_TEMP/trivy-rest.json" \
+            . || status=1
+          exit "$status"
+
+      # always(): a red scan is exactly when the reader needs to know what was
+      # read and which rule fired. A scanner that wrote no report says so instead
+      # of counting as zero findings.
+      - name: report what was scanned
+        if: always()
+        run: |
+          set -euo pipefail
+          export SCANNED_FILES="$(git ls-files | wc -l)"
+          node .github/scripts/security-summary.mjs \
+            "$RUNNER_TEMP/semgrep.json" \
+            "$RUNNER_TEMP/trivy-vuln.json" \
+            "$RUNNER_TEMP/trivy-rest.json" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The one verdict. Both scan steps are continue-on-error so that a finding
+      # in the first cannot hide the second scanner's report, and this step reads
+      # their outcomes rather than trusting the job's colour: `success` is the
+      # only value that means "ran and found nothing".
+      - name: verdict
+        if: always()
+        env:
+          # Through env, never expanded into the script.
+          SEMGREP_OUTCOME: ${{ steps.semgrep.outcome }}
+          TRIVY_OUTCOME: ${{ steps.trivy.outcome }}
+        run: |
+          set -euo pipefail
+          printf 'semgrep: %s\ntrivy: %s\n' "$SEMGREP_OUTCOME" "$TRIVY_OUTCOME"
+          if [ "$SEMGREP_OUTCOME" != success ] || [ "$TRIVY_OUTCOME" != success ]; then
+            echo "::error::a scanner found something or did not finish - the summary above names what it read and what it found"
+            exit 1
+          fi
+          echo "security scan clean: every scanner ran and reported nothing"
