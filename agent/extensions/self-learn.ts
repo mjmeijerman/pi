@@ -62,8 +62,13 @@ const REPO = join(homedir(), ".pi");
 const SESSIONS = join(DIR, "sessions");
 const SPEC = join(REPO, "agent", "prompts", "learn.md");
 const PANE_SCRIPT = join(REPO, "scripts", "agent-pane.sh");
-/** The boss publishes; the learner hands it the branch, the sha and the proposal. */
-const BBP_BARE = join(homedir(), "big-boss-pi", "bin", "pi-bare");
+/**
+ * The hand-off. The learner runs sandboxed and has no `gh` login and no git
+ * credential, so it cannot publish and neither can a bare `pi` it starts. This
+ * script spawns a big-boss-pi agent space on the host, where the key lives, and
+ * that agent pushes and opens the PR.
+ */
+const PUBLISH_SCRIPT = join(REPO, "scripts", "learn-publish.sh");
 
 /** Two occurrences of one failure is a pattern; one is an accident. */
 export const MIN_REPEATS = 2;
@@ -1862,23 +1867,36 @@ function evidenceMarkdown(input: {
 		"redacted and capped at five, and every source that could not be read is listed under",
 		"Warnings rather than reported as \"none\".",
 		"",
-		"## Publish and close: do this last, every time",
+		"## Hand the branch over, then close: do this last, every time",
 		"",
-		"You publish your own change; nobody else will. Concrete values for this run:",
+		"You cannot publish from here, and neither can a bare `pi` started from here.",
+		"This session runs sandboxed: there is no `gh` login and no git credential on",
+		"this side of the sandbox (`gh auth status` says hosts.yml is missing), so a push",
+		"or a `gh pr create` fails no matter which binary runs it. Publishing is a",
+		"hand-off to a big-boss-pi agent space, which runs on the host where the key",
+		"lives. Concrete values for this run:",
 		"",
-		`- slug / herdr space: \`${slug}\``,
-		`- repo (never switch this checkout): \`${REPO}\``,
-		`- proposal: \`${proposalPath}\``,
-		`- big-boss-pi bare agent: \`${BBP_BARE}\``,
+		`- slug / herdr space: ${slug}`,
+		`- repo (never switch this checkout): ${REPO}`,
+		`- proposal: ${proposalPath}`,
+		`- hand-off: ${PUBLISH_SCRIPT} ${slug} --proposal ${proposalPath}`,
 		"",
-		`1. Cut a worktree: \`git -C ${REPO} worktree add ../selflearn-${slug}-worktree -b learn/${slug}\``,
+		`1. Cut a worktree: git -C ${REPO} worktree add ../selflearn-${slug}-worktree -b learn/${slug}`,
 		"2. Apply your diff there, run the checks it names, commit on that branch.",
-		"3. Hand the branch to big-boss-pi:",
+		"3. Hand the branch over:",
 		"",
 		"```sh",
-		`${BBP_BARE} -p "Push branch learn/${slug} (commit <sha>) of ${REPO}, review tier <tier>, proposal ${proposalPath}. Open the PR."`,
+		`${PUBLISH_SCRIPT} ${slug} --proposal ${proposalPath}`,
 		"```",
 		"",
+		`   It starts the agent space ${slug}-pr with ${PANE_SCRIPT} spawn and a spec`,
+		"   naming the branch, the commit sha, the review tier and the proposal. That agent",
+		"   pushes, opens the pull request, appends the row to",
+		"   agent/proposals/publish-log.jsonl, and closes its own space.",
+		"   Exit 0 = a PR exists. Exit 1 = none yet, and the row is already written.",
+		"   Exit 2 = GitHub could not be asked from here: unverified, not unpublished —",
+		"   say that in the proposal instead of claiming a PR or claiming none.",
+		"   --check re-asks without spawning; --dry-run prints the hand-off.",
 		"4. Close your own space, whatever the outcome:",
 		"",
 		"```sh",

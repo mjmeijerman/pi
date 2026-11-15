@@ -519,19 +519,31 @@ describe("wiring", () => {
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		const run = await waitForRun((row, index) => index >= before && row.kind === "spawned");
 		const body = await readFile(run.queue, "utf8");
-		assert.match(body, /big-boss-pi\/bin\/pi-bare/, "the spec names the bare agent that publishes");
+		assert.match(
+			body,
+			/scripts\/learn-publish\.sh learn-\d{2}-\d{2} --proposal/,
+			"the spec hands the branch over with the verifying script",
+		);
 		assert.match(body, /agent-pane\.sh close/, "the spec tells the learner to close its own space");
 		assert.match(body, /learn-\d{2}-\d{2}/, "the slug it must close is in the file");
 		assert.match(body, /worktree add/, "the boss's checkout must not be switched");
+		assert.match(body, /big-boss-pi agent space/, "the agent that publishes runs on the host");
+		assert.match(body, /sandboxed/, "and the learner is told why it cannot push");
+		// The bug this test guards: a bare pi started from the sandbox has no
+		// credentials either, so telling the learner to run one only lost turns.
+		assert.doesNotMatch(body, /pi-bare/, "no bare agent: it cannot authenticate from the sandbox");
 
 		// The prompt file itself, not only the generated queue file.
 		const spec = await readFile(new URL("../../prompts/learn.md", import.meta.url), "utf8");
-		// The spec publishes through the script that verifies a PR exists: naming
-		// the bare agent in prose is what let three branches sit unpublished.
+		// The spec publishes through the script that hands the branch over and
+		// verifies a PR exists: naming a bare agent in prose is what let three
+		// branches sit unpublished.
 		assert.match(spec, /scripts\/learn-publish\.sh/, "the spec publishes through the verifying script");
-		assert.match(spec, /Exit 1 means it does/);
+		assert.match(spec, /\*\*Exit 1\*\* means/, "the spec says what a missing PR verdict means");
+		assert.match(spec, /Exit 2/, "and says what 'cannot ask GitHub' means");
 		assert.match(spec, /agent-pane\.sh close/);
 		assert.match(spec, /review tier/i);
+		assert.doesNotMatch(spec, /pi-bare/, "the prompt never sends the learner to a bare agent");
 	});
 
 	test("the learner runs in ten minutes, not on every compaction", async () => {
