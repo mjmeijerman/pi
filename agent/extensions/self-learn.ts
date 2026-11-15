@@ -255,6 +255,42 @@ export function decideLearner(input: Evidence): Decision {
 	return { spawn: true, reason: parts.join("; ") };
 }
 
+/**
+ * The newest proposal file on disk: a learner that wrote one has judged that
+ * window. `null` when the directory is missing or holds nothing yet.
+ */
+export async function newestProposalAt(dir: string = PROPOSAL_DIR): Promise<number | null> {
+	try {
+		const names = (await readdir(dir)).filter((name) => name.endsWith(".md"));
+		const stamps = await Promise.all(
+			names.map(async (name) => {
+				try {
+					return (await stat(join(dir, name))).mtimeMs;
+				} catch {
+					return Number.NaN;
+				}
+			}),
+		);
+		const known = stamps.filter((value) => Number.isFinite(value));
+		return known.length ? Math.max(...known) : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Where the `/suggest` window starts. A note counts until a learner has written
+ * a proposal after it: without that, the whole notes file is re-read in every
+ * session, and one old note starts a learner after every compaction, forever.
+ * The proposals directory is already the durable record of "this window was
+ * judged", so the boundary needs no state file of its own.
+ */
+export function noteBaseline(lastCompactIso: string | null, newestProposalMs: number | null): string | null {
+	const compact = lastCompactIso ? Date.parse(lastCompactIso) : Number.NaN;
+	const known = [compact, newestProposalMs].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+	return known.length ? new Date(Math.max(...known)).toISOString() : null;
+}
+
 /** Byte-stable signature for a failure: the message, minus ids and numbers. */
 export function signatureOf(tool: string, message: string): string {
 	const normal = message
@@ -1592,11 +1628,14 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 
 	async function learn(trigger: "compact" | "manual", ctx: any): Promise<Decision> {
 		const at = now();
+		// The newest proposal closes the /suggest window: one note that has
+		// already produced a proposal must not start a learner again.
+		const noteSince = noteBaseline(lastCompactIso, await newestProposalAt());
 		// The four outside sources run in parallel and none of them may throw: a
 		// sandboxed gh and an absent workspace are normal, and both are reported
 		// as warnings in the evidence file instead of as silence.
 		const [notes, machineLast, external] = await Promise.all([
-			countNotes(lastCompactIso),
+			countNotes(noteSince),
 			lastSpawnAnywhere(),
 			externalEvidence(at, ctx),
 		]);
