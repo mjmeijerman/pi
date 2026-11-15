@@ -15,7 +15,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,7 +56,13 @@ esac
 // first and the tools the script needs behind it. PI_NPM_CANDIDATES pins the
 // other installs the gate may look at, so the machine's /usr/local/bin/npm
 // cannot change the verdict of a test.
-function check({ pathNpm, candidates = "", age, home = join(tmp, `home-${n++}`) }) {
+function check({
+	pathNpm,
+	candidates = "",
+	age,
+	sandbox,
+	home = join(tmp, `home-${n++}`),
+}) {
 	const bin = dirname(pathNpm);
 	const env = {
 		HOME: home,
@@ -58,6 +70,7 @@ function check({ pathNpm, candidates = "", age, home = join(tmp, `home-${n++}`) 
 		PI_NPM_CANDIDATES: candidates,
 	};
 	if (age !== undefined) env.NPM_CONFIG_MIN_RELEASE_AGE = age;
+	if (sandbox !== undefined) env.PI_SANDBOX_MODE = sandbox;
 	const res = spawnSync("bash", [CHECK, "--verify-release-age"], {
 		env,
 		encoding: "utf8",
@@ -109,6 +122,40 @@ test("no reachable npm 11 is still a FAIL — the gate is not dead", () => {
 	assert.equal(status, 1, out);
 	assert.match(line(out, "npm-min-release-age"), /FAIL/);
 	assert.match(line(out, "npm-min-release-age"), /needs npm ≥ 11/);
+});
+
+test("a sandboxed FAIL asks the host, and never names a global install", () => {
+	// Inside bwrap a global npm install writes into masked or read-only paths:
+	// the agent spends a turn, the shim survives half-written, and the same
+	// FAIL comes back. The message has to point at the host instead.
+	const { status, out } = check({
+		pathNpm: stubNpm("10.9.9", "2"),
+		sandbox: "bwrap",
+	});
+	assert.equal(status, 1, out);
+	const fail = line(out, "npm-min-release-age");
+	assert.match(fail, /needs npm ≥ 11/);
+	assert.match(fail, /host shell/);
+	assert.doesNotMatch(fail, /npm i -g/);
+});
+
+test("a dangling ~/.local/bin/npm is named, with the removal command", () => {
+	// The half-finished install that keeps the FAIL alive: the candidate scan
+	// needs an executable, so a broken shim is skipped and the old npm wins on
+	// every later run. Naming it is what turns a repeat into a repair.
+	const home = join(tmp, `home-${n++}`);
+	mkdirSync(join(home, ".local/bin"), { recursive: true });
+	const shim = join(home, ".local/bin/npm");
+	symlinkSync(join(home, ".local/lib/node_modules/npm/bin/npm-cli.js"), shim);
+	const { status, out } = check({
+		pathNpm: stubNpm("10.9.9", "2"),
+		candidates: shim,
+		home,
+	});
+	assert.equal(status, 1, out);
+	const fail = line(out, "npm-min-release-age");
+	assert.match(fail, /dangling symlink/);
+	assert.match(fail, new RegExp(`rm ${shim}`));
 });
 
 test("an unreadable config with no forwarded value is a FAIL, not a pass", () => {

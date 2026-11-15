@@ -392,7 +392,26 @@ check_release_age() {
 			"PATH npm $path_version shadows $best_npm $best_version — put $(dirname "$best_npm") first on PATH"
 	fi
 	if [ "${best_version%%.*}" -lt 11 ]; then
-		verdict npm-min-release-age - 0 "npm $best_version ignores min-release-age (needs npm ≥ 11) — install one: npm i -g --prefix ~/.local npm@11"
+		# A dangling ~/.local/bin/npm is the fingerprint of an install that could
+		# not finish: the shim is written, the target is not, and because the
+		# candidate scan needs an executable it is skipped on every later run —
+		# the FAIL survives the very install that was supposed to end it. Name
+		# the removal, so the next attempt is not the same attempt (blip 99,
+		# blip 1 agent sandboxing).
+		local dangling=""
+		for candidate in $(printf '%s' "${PI_NPM_CANDIDATES-$HOME/.local/bin/npm:/usr/local/bin/npm}" | tr ':' ' '); do
+			[ -n "$candidate" ] && [ -L "$candidate" ] && [ ! -e "$candidate" ] || continue
+			dangling=" — $candidate is a dangling symlink; remove it: rm $candidate"
+			break
+		done
+		# Inside the sandbox a global install writes into masked or read-only
+		# paths, so telling an agent to run it costs a turn and leaves a shim
+		# behind. The host can do it; the sandbox can only ask for it.
+		if [ -n "${PI_SANDBOX_MODE:-}" ]; then
+			verdict npm-min-release-age - 0 "npm $best_version ignores min-release-age (needs npm ≥ 11) — the sandbox cannot install a global npm; from a host shell run: bash $ROOT/setup.sh$dangling"
+		else
+			verdict npm-min-release-age - 0 "npm $best_version ignores min-release-age (needs npm ≥ 11) — install one: npm i -g --prefix ~/.local npm@11$dangling"
+		fi
 		return
 	fi
 	# Inside the sandbox npm's config file is bound to /dev/null, so the launcher
