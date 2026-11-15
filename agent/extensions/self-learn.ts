@@ -319,6 +319,33 @@ export function noteBaseline(lastCompactIso: string | null, newestProposalMs: nu
 	return known.length ? new Date(Math.max(...known)).toISOString() : null;
 }
 
+/**
+ * One name for a run's queue file and its proposal: `2026-11-15-10-07-10-876Z`.
+ *
+ * It used to be two. The queue file kept the ISO `T` (`…T10-07-10-876Z.md`) and
+ * the proposal name replaced it with a dash (`…-10-07-10-876Z.md`), both printed
+ * in the same evidence file: "write your proposal to `/…/2026-11-15-10-07-10-876Z.md`"
+ * under a queue named `/…/queue/2026-11-15T10-07-10-876Z.md`. The 2026-11-15
+ * learner copied the name it could see, wrote a real proposal, and
+ * `diedLearnersFrom` read the empty hyphenated path as a death — which raised
+ * the died-learner signal and started another learner (blip 11, blip 36).
+ */
+export function runStamp(at: number): string {
+	return new Date(at).toISOString().replace(/[:.]/g, "-").replace("T", "-");
+}
+
+/**
+ * Both spellings of one run's proposal path, so a file written under the other
+ * name still counts as written. Rows and proposals from before `runStamp` keep
+ * the `T` form; without this they read as deaths forever.
+ */
+export function proposalAliases(path: string): string[] {
+	const match = /^((?:.*\/)?)(\d{4}-\d{2}-\d{2})[T-](\d{2}-\d{2}-\d{2}-\d{3}Z)\.md$/.exec(path);
+	if (!match) return [];
+	const [, dir, day, rest] = match;
+	return [`${dir}${day}-${rest}.md`, `${dir}${day}T${rest}.md`].filter((name) => name !== path);
+}
+
 /** Byte-stable signature for a failure: the message, minus ids and numbers. */
 export function signatureOf(tool: string, message: string): string {
 	const normal = message
@@ -583,6 +610,10 @@ export function diedLearnersFrom(
 	rows: unknown[],
 	options: { exists: (path: string) => boolean; now: number; graceMs?: number; since?: number | null },
 ): DiedLearner[] {
+	// A proposal counts under either name it has ever had: the `T` spelling rows
+	// recorded before `runStamp` are the same file as the dash spelling.
+	const wrote = (path: string): boolean =>
+		options.exists(path) || proposalAliases(path).some((alias) => options.exists(alias));
 	const graceMs = options.graceMs ?? DEATH_GRACE_MS;
 	const since = typeof options.since === "number" && Number.isFinite(options.since) ? options.since : null;
 	const out: DiedLearner[] = [];
@@ -610,7 +641,7 @@ export function diedLearnersFrom(
 		// A spawned row with no proposal path proves nothing either way.
 		if (entry.kind === "spawned" && !proposal) continue;
 		if (entry.kind === "spawned" && options.now - at < graceMs) continue;
-		if (proposal && options.exists(proposal)) continue;
+		if (proposal && wrote(proposal)) continue;
 		seen.add(entry.slug);
 		out.push({
 			slug: entry.slug,
@@ -1748,10 +1779,10 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		});
 		if (!decision.spawn) return decision;
 
-		const stamp = new Date(at).toISOString().replace(/[:.]/g, "-");
+		const stamp = runStamp(at);
 		const slug = `learn-${stamp.slice(11, 16)}`;
 		const queuePath = join(QUEUE_DIR, `${stamp}.md`);
-		const proposalPath = join(PROPOSAL_DIR, `${new Date(at).toISOString().slice(0, 10)}-${stamp.slice(11)}.md`);
+		const proposalPath = join(PROPOSAL_DIR, `${stamp}.md`);
 		await mkdir(QUEUE_DIR, { recursive: true });
 		await writeFile(
 			queuePath,

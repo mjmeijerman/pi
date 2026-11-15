@@ -122,6 +122,10 @@ test("no reachable npm 11 is still a FAIL — the gate is not dead", () => {
 	assert.equal(status, 1, out);
 	assert.match(line(out, "npm-min-release-age"), /FAIL/);
 	assert.match(line(out, "npm-min-release-age"), /needs npm ≥ 11/);
+	// Twelve workers copied the old hint — `npm i -g --prefix ~/.local npm@11` —
+	// into their reports and none could run it: the sandbox mounts ~/.local
+	// read-only. The FAIL has to name the step that works from where it is read.
+	assert.match(line(out, "npm-min-release-age"), /run make setup on the host/);
 });
 
 test("a sandboxed FAIL asks the host, and never names a global install", () => {

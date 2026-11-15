@@ -35,6 +35,8 @@ const {
 	workerFailuresFrom,
 	decisionRows,
 	diedLearnersFrom,
+	proposalAliases,
+	runStamp,
 	frustrationQuotes,
 	watchOutcome,
 	proposalSpellings,
@@ -956,6 +958,25 @@ describe("learners that died", () => {
 		assert.equal(wrote.length, 0);
 		const noPath = diedLearnersFrom([row({ kind: "spawned", slug: "s3" })], { exists: () => false, now: NOW });
 		assert.equal(noPath.length, 0, "an old row with no proposal path proves nothing either way");
+	});
+
+	test("a proposal written under the run's other name is not a death", () => {
+		// 2026-11-15T10:07Z: the queue file was `…T10-07-10-876Z.md`, the row
+		// expected `…-10-07-10-876Z.md`, and the learner copied the name it could
+		// see. A real submission read as a death and started another learner.
+		const at = Date.parse("2026-11-15T10:07:10.876Z");
+		const dash = join("/p", `${runStamp(at)}.md`);
+		assert.equal(dash, "/p/2026-11-15-10-07-10-876Z.md", "one run, one name");
+		assert.equal(dash.includes("T"), false, "the queue and the proposal must not differ by a T");
+		const iso = join("/p", "2026-11-15T10-07-10-876Z.md");
+		assert.deepEqual(proposalAliases(dash), [iso]);
+		assert.deepEqual(proposalAliases(iso), [dash]);
+		assert.deepEqual(proposalAliases("/p/notes.md"), [], "anything else has no twin");
+		const died = diedLearnersFrom([row({ kind: "spawned", slug: "learn-10-07", proposal: dash })], {
+			exists: (path: string) => path === iso,
+			now: NOW,
+		});
+		assert.deepEqual(died, [], "the learner wrote it, under the name it was shown");
 	});
 
 	test("a runs.jsonl fixture with a proposal-less launch reads as a death", () => {
