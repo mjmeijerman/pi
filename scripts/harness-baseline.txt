@@ -12,3 +12,11 @@
 # the 150-line cap. Committed as WARN so the ratchet does not block the commit; trim it to 150
 # lines (or split it) and delete this line.
 agent/skills/valentina-grading/SKILL.md:skill-lines
+
+# Pre-existing, 2026-11-15: three learner branches carry a commit and no pull request. Each
+# line is a real unfinished run — publish it (`scripts/learn-publish.sh <slug>`) or delete
+# the branch, then delete its line. A learn branch that goes stale after this check
+# exists FAILs instead, which is the point: the lesson was learned and nothing landed.
+learn/learn-11-19:learn-branch-published
+learn/learn-11-51:learn-branch-published
+learn/learn-12-07:learn-branch-published

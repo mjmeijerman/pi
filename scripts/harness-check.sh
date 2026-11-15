@@ -73,6 +73,12 @@ EVAL_MAX_AGE_DAYS=14
 # agent/retro/last-run.txt weekly from systemd/pi-retro.timer; older than this many days
 # is a WARN, same as the evals, because the digest is advisory.
 RETRO_MAX_AGE_DAYS=14
+# `agent/prompts/learn.md` ends with a hard rule: a `learn/*` branch with no pull
+# request is an unfinished run. Nothing read that rule, so on 2026-11-15 three
+# branches (learn/learn-11-19, learn/learn-11-51, learn/learn-12-07) sat with one
+# commit each and no PR while every learner reported a green harness check. The
+# grace period keeps a learner's own fresh branch out of its own run (blip 11).
+LEARN_BRANCH_GRACE_MIN="${PI_LEARN_BRANCH_GRACE_MIN:-60}"
 
 usage() { sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() {
@@ -774,6 +780,65 @@ check_self_learn() {
 		"after a compaction, a separate pi session judges the harness; proposals land in ~/.pi/agent/proposals/"
 }
 
+# -------------------------------------------------- learn branch published --
+check_learn_branch_published() {
+	local check=learn-branch-published
+	local log="$ROOT/agent/proposals/publish-log.jsonl"
+	local now branch ts age proposal line compact attempted published seen=0 missing=0
+	local common main
+	git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || {
+		verdict "$check" . 1 "not a git checkout — no branches to publish"
+		return
+	}
+	# `agent/proposals/` is gitignored, so a learner's worktree has no publish log of
+	# its own while the shared git dir does: read the log of the repo that owns it,
+	# or every branch with a recorded PR would read as unpublished from a worktree.
+	common=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=""
+	if [ -n "$common" ] && [ -d "$common" ]; then
+		main="$(dirname "$common")/agent/proposals/publish-log.jsonl"
+		[ -f "$main" ] && log="$main"
+	fi
+	now=$(date +%s)
+	while IFS= read -r branch; do
+		[ -n "$branch" ] || continue
+		seen=$((seen + 1))
+		# Already trunk's history: the lesson landed, the leftover branch is litter.
+		git -C "$ROOT" merge-base --is-ancestor "refs/heads/$branch" trunk 2>/dev/null && continue
+		ts=$(git -C "$ROOT" log -1 --format=%ct "refs/heads/$branch" 2>/dev/null) || continue
+		[ -n "$ts" ] || continue
+		age=$(((now - ts) / 60))
+		# A learner still working on its own branch is not an unfinished run.
+		[ "$age" -lt "$LEARN_BRANCH_GRACE_MIN" ] && continue
+		proposal=$(git -C "$ROOT" log -1 --format=%B "refs/heads/$branch" 2>/dev/null \
+			| grep -o 'agent/proposals/[A-Za-z0-9._/-]*\.md' | head -1)
+		attempted=0
+		published=0
+		if [ -f "$log" ]; then
+			while IFS= read -r line; do
+				compact=${line// /}
+				case "$compact" in *"\"branch\":\"$branch\""*) ;; *) continue ;; esac
+				attempted=1
+				case "$compact" in *'"pr":null'*) ;; *'"pr":'[0-9]*) published=1 ;; esac
+			done <"$log"
+		fi
+		[ "$published" = 1 ] && continue
+		missing=$((missing + 1))
+		if [ "$attempted" = 1 ]; then
+			verdict "$check" "$branch" 0 \
+				"${age} min old, and agent/proposals/publish-log.jsonl has an attempt for it with no PR — re-ask from the host: scripts/learn-publish.sh ${branch#learn/} --check"
+		else
+			verdict "$check" "$branch" 0 \
+				"${age} min old with no row in agent/proposals/publish-log.jsonl — publish it: scripts/learn-publish.sh ${branch#learn/}${proposal:+ --proposal $proposal} (or delete the branch if its lesson is dead)"
+		fi
+	done < <(git -C "$ROOT" for-each-ref --format='%(refname:short)' 'refs/heads/learn/' 2>/dev/null)
+	[ "$missing" -gt 0 ] && return 0
+	if [ "$seen" -eq 0 ]; then
+		verdict "$check" . 1 "no learn/* branches — every lesson learned here has landed or been dropped"
+	else
+		verdict "$check" . 1 "$seen learn/* branch(es): merged, younger than ${LEARN_BRANCH_GRACE_MIN} min, or carrying a PR in publish-log.jsonl"
+	fi
+}
+
 check_sandbox_marker() {
 	local launcher="sandbox/pi-sandbox.sh" badge="agent/extensions/sandbox-badge.ts"
 	if [ ! -f "$ROOT/$launcher" ]; then
@@ -894,6 +959,7 @@ if [ "$QUICK" = 0 ]; then
 	check_model_route
 	check_sandbox_marker
 	check_self_learn
+	check_learn_branch_published
 
 	section "evals — a model graded against the harness's own rules"
 	check_eval_freshness
