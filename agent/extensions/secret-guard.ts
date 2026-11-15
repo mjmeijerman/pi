@@ -61,17 +61,26 @@ const SAFE_RE = /example|sample|template|fixture|mock|dummy|placeholder|changeme
 /** Assignment values that point at the environment instead of embedding a secret. */
 const ENV_REF_RE = /^(?:process\.env|os\.environ|import\.meta\.env|Deno\.env|env\.|getenv\()/;
 
-/** Tools that print or transfer file content (i.e. that would leak content to the model or network). */
+/**
+ * Tools that print or transfer file content (i.e. that would leak content to
+ * the model or network). A verb reached through a path is still the verb —
+ * `/usr/bin/cat`, `/bin/cat` and `./rg` read exactly like `cat`, `cat` and
+ * `rg` — and a backslash escape (`\cat`, the usual alias bypass) is the same
+ * verb again, so a path separator separates as well as a space or a shell
+ * operator.
+ */
 const READER_RE =
-	/(^|[;&|()\s])(cat|bat|sed|head|tail|base64|xxd|od|strings|diff|expand|awk|grep|rg|scp|rsync|curl|wget)\b|git\s+(show|cat-file|checkout|diff|restore)\b/i;
+	/(^|[;&|()\s\/\\])(cat|bat|sed|head|tail|base64|xxd|od|strings|diff|expand|awk|grep|rg|scp|rsync|curl|wget)\b|git\s+(show|cat-file|checkout|diff|restore)\b/i;
 
 /**
  * Verbs that can move file *content*, for the ledger. Wider than READER_RE:
  * `cp`, `tar` and `node` are the copy steps a flow uses to dodge a blocked read.
  * A verb-less command (`ls dir`, `git status`) can name a path without touching it.
+ * The prefix widens with READER_RE, or `/usr/bin/cp config/prod.env /tmp/loot`
+ * would copy a credential file and leave no trace for the send that follows.
  */
 const TOUCH_RE =
-	/(^|[;&|()\s])(cat|bat|sed|head|tail|base64|xxd|od|strings|diff|expand|awk|grep|rg|cp|mv|ln|tar|zip|unzip|gzip|gunzip|dd|install|tee|split|openssl|node|python3?|perl|ruby|php|jq|sort|uniq|wc|less|more|vi|vim|nano|source|sh|bash|sqlite3|xargs|find)\b|git\s+(add|show|cat-file|checkout|diff|restore|stash)\b/i;
+	/(^|[;&|()\s\/\\])(cat|bat|sed|head|tail|base64|xxd|od|strings|diff|expand|awk|grep|rg|cp|mv|ln|tar|zip|unzip|gzip|gunzip|dd|install|tee|split|openssl|node|python3?|perl|ruby|php|jq|sort|uniq|wc|less|more|vi|vim|nano|source|sh|bash|sqlite3|xargs|find)\b|git\s+(add|show|cat-file|checkout|diff|restore|stash)\b/i;
 
 /** A word shaped like a path (`$HOME/.ssh/id_rsa`, `".env"`, `certs/x.pem`) rather than prose. */
 function looksLikePath(word: string): boolean {

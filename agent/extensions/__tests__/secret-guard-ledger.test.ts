@@ -127,6 +127,28 @@ describe("what counts as touching a secret file", () => {
 		const blocked = await step("read", { path: "/tmp/.pem" });
 		assert.equal(blocked?.block, true);
 	});
+
+	// A read through an absolute path is refused, so it never reaches the ledger —
+	// but the copy verbs a flow uses instead are reached through a path too, and
+	// a copy that leaves no trace is a send that is never attributed.
+	test("a copy reached through a path still touches a secret file", async () => {
+		for (const command of ["/usr/bin/cp prod.env /tmp/loot", "./cp prod.env /tmp/loot", "\\cp prod.env /tmp/loot"]) {
+			assert.equal(
+				await blockedAfter(async ({ bash }) => {
+					assert.equal(await bash(command), undefined, `${command} alone is allowed`);
+				}),
+				refusal(1, command, "prod.env"),
+			);
+		}
+	});
+
+	test("a path that only ends in a verb touches nothing", async () => {
+		for (const command of ["/usr/bin/xcp prod.env /tmp/loot", "/srv/bin/xcat prod.env /tmp/loot", "/usr/bin/ls -l prod.env"]) {
+			await allowedAfter(async ({ bash }) => {
+				assert.equal(await bash(command), undefined, `${command} must be allowed`);
+			});
+		}
+	});
 });
 
 describe("comments and quotes", () => {

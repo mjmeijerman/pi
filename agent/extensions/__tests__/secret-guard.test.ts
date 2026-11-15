@@ -379,6 +379,56 @@ describe("bash tool calls", () => {
 			assert.equal(result, undefined, `expected \`${command}\` to be allowed`);
 		}
 	});
+
+	// A verb reached through a path is still the verb: `/usr/bin/cat` prints a
+	// file exactly like `cat`, and `\cat` is the same command with the alias
+	// lookup skipped. Both were allowed before this widening, and a read that is
+	// allowed is a read that leaves no trace in the ledger.
+	const PATH_READERS = [
+		"/usr/bin/cat config/prod.env",
+		"/bin/cat db.key",
+		"/usr/local/bin/head certs/notes.pem",
+		"/usr/bin/rg PASSWORD config/prod.env",
+		"./rg PASSWORD config/prod.env",
+		"\\cat .env",
+	];
+
+	test("a reader reached through a path is refused", async () => {
+		const { emit, ctx } = setup();
+		for (const command of PATH_READERS) {
+			const [result] = await emit("tool_call", { toolName: "bash", input: { command } }, ctx);
+			assert.equal(result?.block, true, `expected \`${command}\` to be refused`);
+			assert.match(result.reason, /reads a secret file/);
+		}
+	});
+
+	test("a reader reached through a path to an ordinary file is allowed", async () => {
+		const { emit, ctx } = setup();
+		for (const command of [
+			"/usr/bin/cat readme.md",
+			"/bin/cat src/index.ts",
+			"/usr/local/bin/head README.md",
+		"/usr/bin/cat .env.example",
+			"/usr/bin/ls -la certs",
+			"echo 'the cat sat on the mat'",
+		]) {
+			const [result] = await emit("tool_call", { toolName: "bash", input: { command } }, ctx);
+			assert.equal(result, undefined, `expected \`${command}\` to be allowed`);
+		}
+	});
+
+	test("a word that only ends in a verb still reads nothing, path or not", async () => {
+		const { emit, ctx } = setup();
+		for (const command of [
+			"concatenate .env notes.txt",
+			"headline .env",
+			"xcopy .env /tmp/",
+			"/usr/bin/xcat .env /tmp/loot",
+		]) {
+			const [result] = await emit("tool_call", { toolName: "bash", input: { command } }, ctx);
+			assert.equal(result, undefined, `expected \`${command}\` to be allowed`);
+		}
+	});
 });
 
 describe("tool_result redaction", () => {
