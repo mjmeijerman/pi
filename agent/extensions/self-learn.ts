@@ -111,6 +111,12 @@ export interface Evidence {
 export interface Decision {
 	spawn: boolean;
 	reason: string;
+	/**
+	 * Died learners this reason names, so the row it writes can mark them judged
+	 * and the next run stops counting them (blip 11: a flywheel that re-reads
+	 * evidence it already acted on keeps turning on the same stale line).
+	 */
+	judged?: string[];
 }
 
 /** A failing CI check: one name, two or more branches or worker reports. */
@@ -257,7 +263,8 @@ export function decideLearner(input: Evidence): Decision {
 	const parts = fired.slice(0, MAX_NAMED_SIGNALS).map(describeSignal);
 	if (fired.length > MAX_NAMED_SIGNALS) parts.push(`+${fired.length - MAX_NAMED_SIGNALS} more signals`);
 	if (notes >= 1) parts.push(`${notes} /suggest note${notes === 1 ? "" : "s"}`);
-	return { spawn: true, reason: parts.join("; ") };
+	const judged = (input.diedLearners ?? []).map((learner) => learner.slug);
+	return judged.length > 0 ? { spawn: true, reason: parts.join("; "), judged } : { spawn: true, reason: parts.join("; ") };
 }
 
 /**
@@ -603,6 +610,8 @@ export function parseRuns(raw: string): unknown[] {
  * learner stop, and a `spawned` row whose proposal file never appeared. The
  * second is only judged after `DEATH_GRACE_MS`, because a learner still working
  * has no proposal yet and calling it dead would be the same lie in reverse.
+ * A third shape silences: a row carrying `judged`, which the spawn of a learner
+ * that named this death writes, so one death trips the gate once.
  * The 2026-11-14 learner took a turn, wrote nothing, and left nothing in the
  * log — this is the read half of the fix that makes it visible next time.
  */
@@ -618,6 +627,16 @@ export function diedLearnersFrom(
 	const since = typeof options.since === "number" && Number.isFinite(options.since) ? options.since : null;
 	const out: DiedLearner[] = [];
 	const seen = new Set<string>();
+	// A death a learner's spawn reason already named has been looked at: counting
+	// it again is how learn-11-19 and learn-11-51 came to carry the identical
+	// reason 32 minutes apart. Marked once, silent until a new run dies (a new
+	// slug), which still trips the gate on its own (blip 11, blip 42).
+	const judged = new Set<string>();
+	for (const row of rows) {
+		const entry = row as { judged?: unknown } | null;
+		if (!entry || !Array.isArray(entry.judged)) continue;
+		for (const slug of entry.judged) if (typeof slug === "string") judged.add(slug);
+	}
 	for (const row of rows) {
 		if (!row || typeof row !== "object") continue;
 		const entry = row as {
@@ -641,6 +660,9 @@ export function diedLearnersFrom(
 		// A spawned row with no proposal path proves nothing either way.
 		if (entry.kind === "spawned" && !proposal) continue;
 		if (entry.kind === "spawned" && options.now - at < graceMs) continue;
+		// Both skip rules hold: a slug a spawn reason already named is judged,
+		// and a proposal written under either spelling is not a death.
+		if (judged.has(entry.slug)) continue;
 		if (proposal && wrote(proposal)) continue;
 		seen.add(entry.slug);
 		out.push({
@@ -1685,6 +1707,8 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			queue: plan.queuePath,
 			proposal: plan.proposalPath,
 			reason: plan.decision.reason,
+			/** Died learners this reason named: dead evidence is judged once. */
+			judged: plan.decision.judged ?? [],
 			/** How the turn was confirmed: a session file or the pane's screen. */
 			confirmed: ran.turn?.source ?? "unknown",
 		});

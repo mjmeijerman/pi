@@ -1042,6 +1042,35 @@ describe("learners that died", () => {
 		assert.ok(rows[0].elapsedMs >= 0);
 	});
 
+	test("a death its learner already named is judged once, not every 30 minutes", () => {
+		const death = row({ kind: "spawned", slug: "learn-2015", launcher: "pane", queue: "/q/b.md", proposal: "/p/gone.md" });
+		const fresh = diedLearnersFrom([death], { exists: () => false, now: NOW });
+		assert.deepEqual(fresh.map((learner) => learner.slug), ["learn-2015"], "before the learner ran it is evidence");
+
+		const judgedRow = row({ kind: "spawned", slug: "learn-2051", proposal: "/p/2051.md", judged: ["learn-2015"] });
+		const after = diedLearnersFrom([death, judgedRow], { exists: () => false, now: NOW });
+		assert.deepEqual(after.map((learner) => learner.slug), ["learn-2051"], "the judged death stops counting; the learner that named it is its own case");
+		assert.equal(decideLearner(evidence({ diedLearners: after })).spawn, false, "one death alone does not trip the gate a second time");
+
+		const fresh2 = row({ kind: "spawned", slug: "learn-2130", proposal: "/p/2130.md" });
+		const again = diedLearnersFrom([death, judgedRow, fresh2], { exists: () => false, now: NOW });
+		assert.deepEqual(again.map((learner) => learner.slug), ["learn-2051", "learn-2130"], "a new dead learner still trips it");
+	});
+
+	test("the decision carries the slugs it judged, so the spawn row can mark them", () => {
+		const two = diedLearnersFrom(
+			[
+				row({ kind: "died", slug: "learn-1936" }),
+				row({ kind: "died", slug: "learn-2015" }),
+			],
+			{ exists: () => false, now: NOW },
+		);
+		assert.deepEqual(decideLearner(evidence({ diedLearners: two })).judged, ["learn-1936", "learn-2015"]);
+		const silent = decideLearner(evidence({ notes: 1 }));
+		assert.equal(silent.spawn, true);
+		assert.equal(silent.judged, undefined, "a /suggest note judged nothing");
+	});
+
 	test("a written proposal, or a watch window that closes, is not a death", async () => {
 		const rows: any[] = [];
 		const wrote = await watchOutcome({
