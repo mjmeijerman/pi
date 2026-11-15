@@ -20,10 +20,30 @@
  * rewrite reads as "the test needs this sentence", not as a mystery.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
-const source = (path: string) => readFileSync(new URL(`../../../${path}`, import.meta.url), "utf8");
+// The harness root is found, not assumed. `make mutate-full` copies only `agent/` into
+// `.stryker-tmp/sandbox-*`, so a fixed `../../../` lands above the copy and this file
+// throws ENOENT before a single assertion runs. The search climbs from this file and
+// stops at the first ancestor holding both sources; when there is none it fails here,
+// by name, instead of reading whatever the depth happened to point at.
+const harnessRoot = (() => {
+	let dir = dirname(fileURLToPath(import.meta.url));
+	for (;;) {
+		if (existsSync(join(dir, "sandbox/pi-sandbox.sh")) && existsSync(join(dir, "docs/threat-model.md"))) return dir;
+		const up = resolve(dir, "..");
+		if (up === dir)
+			throw new Error(
+				"sandbox-binds: no ancestor of this test holds both sandbox/pi-sandbox.sh and docs/threat-model.md",
+			);
+		dir = up;
+	}
+})();
+
+const source = (path: string) => readFileSync(join(harnessRoot, path), "utf8");
 const script = source("sandbox/pi-sandbox.sh");
 const doc = source("docs/threat-model.md");
 
