@@ -9,7 +9,7 @@ import "./helpers/hooks.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
@@ -55,6 +55,9 @@ describe("merge-guard: decision", () => {
 		["git push --force-with-lease origin master", "trunk"],
 		["gh api -X PUT repos/o/r/pulls/4/merge", "merge API"],
 		["gh api repos/o/r/pulls/4/merges -X POST", "merge API"],
+		["gh  api -X PUT repos/o/r/pulls/4/merge", "merge API, however spaced"],
+		// A quoted fragment glued to a word is a separator, not glue.
+		[`gh"x"pr merge 4`, "gh pr merge"],
 	];
 
 	for (const [command, why] of blocked) {
@@ -80,6 +83,12 @@ describe("merge-guard: decision", () => {
 		`echo "gh pr merge 4"`,
 		`git commit -m 'never git push origin trunk'`,
 		"npm test",
+		// A quoted mention is text, in either quote style and however many spaces
+		// the segment splitter has to look past.
+		`echo 'gh pr merge 4'`,
+		`echo 'a && git push origin trunk'`,
+		"git push origin 'trunk'",
+		"gh api repos/o/r/pulls/4",
 		// The regression that blocked a real push: the PR body below is stdin.
 		["git push -u origin feat/x && gh pr create --base trunk --body-file - <<'EOF'",
 			"## What",
@@ -87,6 +96,10 @@ describe("merge-guard: decision", () => {
 			"EOF"].join("\n"),
 		["git commit -F - <<'EOF'", "feat(x): y", "", "gh pr merge 3", "trunk", "EOF"].join("\n"),
 		["cat <<EOF", "git push origin trunk", "EOF"].join("\n"),
+		// An indented closing delimiter with trailing spaces still ends the body.
+		["cat <<EOF", "git push origin trunk", "  EOF  "].join("\n"),
+		// A space between << and the delimiter is allowed.
+		["cat << EOF", "git push origin trunk", "EOF"].join("\n"),
 	];
 
 	for (const command of allowed) {
@@ -128,6 +141,26 @@ describe("merge-guard: branch rules", () => {
 		});
 	}
 
+	test("a global git flag never becomes the subcommand", () => {
+		// Each flag takes a separate argument, so the token after it is not the verb.
+		for (const command of [
+			"git -c user.name=x commit -m y",
+			"git --git-dir /tmp/x/.git commit -m y",
+			"git --work-tree /tmp/x commit -m y",
+			"git --namespace ns commit -m y",
+			"git --exec-path /tmp/x commit -m y",
+			"git --no-pager commit -m y",
+			"git  commit -m y",
+		]) {
+			assert.match(trunkCommitReason(command, "trunk") ?? "", /a commit on trunk/, command);
+		}
+	});
+
+	test("a git command with no subcommand is not a commit", () => {
+		assert.equal(mergeReason("git -c user.name=x"), null);
+		assert.equal(trunkCommitReason("git -c user.name=x", "trunk"), null);
+	});
+
 	test("a commit on a feature branch is free", () => {
 		assert.equal(trunkCommitReason('git commit -m "x"', "feat/x"), null);
 		assert.equal(trunkCommitReason("git merge trunk", "feat/x"), null);
@@ -137,6 +170,11 @@ describe("merge-guard: branch rules", () => {
 		assert.match(trunkCommitReason("git push", "trunk"), /push from trunk/);
 		assert.match(trunkCommitReason("git push -u origin", "main"), /push from main/);
 		assert.match(trunkCommitReason("git push origin HEAD", "master"), /push from master/);
+	});
+
+	test("a refspec list that includes trunk is not a branch push", () => {
+		assert.match(trunkCommitReason("git push origin trunk feat/x", "trunk") ?? "", /push from trunk/);
+		assert.match(trunkCommitReason("git push origin feat/x trunk", "main") ?? "", /push from main/);
 	});
 
 	test("pushing another branch while on trunk is free", () => {
@@ -161,6 +199,14 @@ describe("merge-guard: branch rules", () => {
 });
 
 describe("merge-guard: stash rules", () => {
+	test("the reason names the verb it would run", () => {
+		assert.equal(parkReason("git stash"), "a `git stash`");
+		assert.equal(parkReason("git stash -u"), "a `git stash`");
+		assert.equal(parkReason("git stash drop"), "a `git stash drop`");
+		// A token that ends with a dash is a verb, not a flag.
+		assert.equal(parkReason("git stash drop-"), "a `git stash drop-`");
+	});
+
 	const blocked = [
 		["git stash", "a bare stash saves"],
 		["git stash -u", "push is the default verb"],
@@ -198,9 +244,27 @@ describe("merge-guard: stash rules", () => {
 
 describe("merge-guard: handler", () => {
 	test("a stash is blocked, and the reason names the worktree instead", async () => {
-		const result = await run("git -C /home/mark/.pi stash -u");
+		const { emit, ctx, notices } = setup();
+		const [result] = await emit("tool_call", { toolName: "bash", input: { command: "git -C /home/mark/.pi stash -u" } }, ctx);
 		assert.equal(result?.block, true);
-		assert.match(String(result?.reason), /worktree add/);
+		assert.equal(notices.at(-1)?.message, "merge-guard: blocked a stash — the checkout is in use");
+		assert.equal(notices.at(-1)?.level, "warning");
+		const reason = String(result?.reason);
+		assert.match(reason, /parks uncommitted work in a checkout/);
+		assert.match(reason, /cut a worktree from origin\/trunk instead/);
+		assert.match(reason, /worktree add/);
+		assert.match(reason, /\/mergeguard allow and retry/);
+	});
+
+	test("a one-shot stash allowance is spent by that stash", async () => {
+		const { emit, ctx, commands, notices } = setup();
+		await commands.get("mergeguard").handler("allow", ctx);
+		const [stashed] = await emit("tool_call", { toolName: "bash", input: { command: "git stash -u" } }, ctx);
+		assert.equal(stashed, undefined);
+		assert.equal(notices.at(-1)?.message, "merge-guard: allowed once, as you approved");
+		assert.equal(notices.at(-1)?.level, "info");
+		const [again] = await emit("tool_call", { toolName: "bash", input: { command: "git stash -u" } }, ctx);
+		assert.equal(again?.block, true, "the allowance must not survive the stash it approved");
 	});
 
 	test("/mergeguard allow unlocks one stash, and the pop after it stays free", async () => {
@@ -212,9 +276,44 @@ describe("merge-guard: handler", () => {
 		assert.equal(popped, undefined);
 	});
 	test("a merge command is blocked, not run", async () => {
-		const result = await run("gh pr merge 1 --squash");
+		const { emit, ctx, notices } = setup();
+		const [result] = await emit("tool_call", { toolName: "bash", input: { command: "gh pr merge 1 --squash" } }, ctx);
 		assert.equal(result?.block, true);
 		assert.match(result.reason, /user's explicit go-ahead/);
+		assert.match(result.reason, /protected branch/);
+		assert.equal(notices.at(-1)?.message, "merge-guard: blocked a merge — ask the user first");
+		assert.equal(notices.at(-1)?.level, "warning");
+	});
+
+	test("an allowed merge says so once", async () => {
+		const { emit, ctx, commands, notices } = setup();
+		await commands.get("mergeguard").handler("allow", ctx);
+		const [allowed] = await emit("tool_call", { toolName: "bash", input: { command: "gh pr merge 1" } }, ctx);
+		assert.equal(allowed, undefined);
+		assert.equal(notices.at(-1)?.message, "merge-guard: allowed once, as you approved");
+		assert.equal(notices.at(-1)?.level, "info");
+	});
+
+	test("the command's own words are what the user sees", async () => {
+		const { ctx, commands, notices } = setup();
+		const command = commands.get("mergeguard");
+		assert.equal(
+			command.description,
+			"Show merge-guard state, or allow the next merge/trunk commit: /mergeguard allow",
+		);
+		await command.handler("allow", ctx);
+		assert.equal(notices.at(-1)?.message, "merge-guard: the next merge, trunk push or trunk commit will run once");
+		await command.handler("banana", ctx);
+		assert.equal(notices.at(-1)?.message, "usage: /mergeguard [status|allow]");
+		assert.equal(notices.at(-1)?.level, "warning");
+	});
+
+	test("the command argument is trimmed and case-folded", async () => {
+		const { ctx, commands, notices } = setup();
+		await commands.get("mergeguard").handler("  ALLOW  ", ctx);
+		assert.equal(notices.at(-1)?.message, "merge-guard: the next merge, trunk push or trunk commit will run once");
+		await commands.get("mergeguard").handler(" STATUS ", ctx);
+		assert.equal(notices.at(-1)?.message, "merge-guard: one landing allowed");
 	});
 
 	test("an ordinary command passes through untouched", async () => {
@@ -231,7 +330,7 @@ describe("merge-guard: handler", () => {
 		await command.handler("allow", ctx);
 		assert.match(notices.at(-1).message, /will run once/);
 
-		assert.equal(await emit("tool_call", { toolName: "bash", input: { command: "gh pr merge 1" } }, ctx)[0], undefined);
+		assert.equal((await emit("tool_call", { toolName: "bash", input: { command: "gh pr merge 1" } }, ctx))[0], undefined);
 		assert.equal((await emit("tool_call", { toolName: "bash", input: { command: "gh pr merge 1" } }, ctx))[0]?.block, true);
 	});
 
@@ -241,7 +340,7 @@ describe("merge-guard: handler", () => {
 		await emit("tool_call", { toolName: "bash", input: { command: "git status" } }, ctx);
 		await emit("tool_call", { toolName: "bash", input: { command: "git push -u origin feat/x" } }, ctx);
 		// still allowed: the approval was for the merge, not for these
-		assert.equal(await emit("tool_call", { toolName: "bash", input: { command: "git push origin trunk" } }, ctx)[0], undefined);
+		assert.equal((await emit("tool_call", { toolName: "bash", input: { command: "git push origin trunk" } }, ctx))[0], undefined);
 		// and now it is gone
 		assert.equal((await emit("tool_call", { toolName: "bash", input: { command: "gh pr merge 1" } }, ctx))[0]?.block, true);
 	});
@@ -258,8 +357,10 @@ describe("merge-guard: handler", () => {
 		await commands.get("mergeguard").handler("", ctx);
 		assert.match(notices.at(-1).message, /landing blocked/);
 		await commands.get("mergeguard").handler("allow", ctx);
+		assert.equal(notices.at(-1)?.level, "info");
 		await commands.get("mergeguard").handler("status", ctx);
-		assert.match(notices.at(-1).message, /one landing allowed/);
+		assert.equal(notices.at(-1)?.message, "merge-guard: one landing allowed");
+		assert.equal(notices.at(-1)?.level, "info");
 	});
 
 	test("a commit on trunk is blocked through the handler", async () => {
@@ -361,6 +462,51 @@ describe("merge-guard: the repository the command targets", () => {
 		assert.deepEqual(gitSegments("git status").map((s) => s.dir), [null]);
 		// `-c` is a git config flag, not a directory.
 		assert.deepEqual(gitSegments("git -c user.name=x commit -m y").map((s) => s.dir), [null]);
+		// No space between the flag and its path is still a path.
+		assert.deepEqual(gitSegments(`git -C${trunkDir} commit -m x`).map((s) => s.dir), [trunkDir]);
+	});
+
+	test("cd takes its path however it is spaced, and after --", () => {
+		assert.match(
+			trunkCommitReason(`cd  ${trunkDir} && git commit -m x`, resolver, session) ?? "",
+			/a commit on trunk/,
+		);
+		assert.match(
+			trunkCommitReason(`cd -- ${trunkDir} && git commit -m x`, resolver, session) ?? "",
+			/a commit on trunk/,
+		);
+		assert.match(
+			trunkCommitReason(`cd --  ${trunkDir} && git commit -m x`, resolver, session) ?? "",
+			/a commit on trunk/,
+		);
+	});
+
+	test("an indented cd on its own line still carries over", () => {
+		const command = ["git status", `  cd ${trunkDir} && git commit -m x`].join("\n");
+		assert.match(trunkCommitReason(command, { [trunkDir]: "trunk", [session]: "feat/x" }, session) ?? "", /a commit on trunk/);
+	});
+
+	test("a relative path is resolved against the session cwd", () => {
+		assert.match(trunkCommitReason("git -C sub commit -m x", { [`${session}/sub`]: "trunk" }, session) ?? "", /a commit on trunk/);
+		// With no cwd to resolve against, the token is used as written.
+		assert.match(trunkCommitReason("git -C relative commit -m x", { relative: "trunk" }) ?? "", /a commit on trunk/);
+	});
+
+	test("a ~ path is expanded before the lookup", () => {
+		assert.match(
+			trunkCommitReason("git -C ~/repo commit -m x", { [`${homedir()}/repo`]: "trunk" }) ?? "",
+			/a commit on trunk/,
+		);
+	});
+
+	test("a bare branch name is only consulted for the session cwd", () => {
+		// The map with no directory named falls back to the empty key.
+		assert.equal(trunkCommitReason("git commit -m x", { "": "feat/x" }), null);
+		assert.match(trunkCommitReason("git commit -m x", { "": "trunk" }) ?? "", /a commit on trunk/);
+	});
+
+	test("currentBranch reports null on a detached HEAD", () => {
+		assert.equal(currentBranch(detachedDir), null);
 	});
 
 	test("through the handler: a commit in another repo on a feature branch runs", async () => {
