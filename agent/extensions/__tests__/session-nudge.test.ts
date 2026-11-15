@@ -6,16 +6,46 @@
  * twice, and never in a session without a UI.
  */
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { describe, test } from "node:test";
 import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
 
 const mod = await import("../session-nudge.ts");
 const sessionNudge = mod.default;
-const { decideNudge, decideGrillNudge, isNonProjectDir, editedPathOf, GRILL_FILE_THRESHOLD } = mod;
+const {
+	decideNudge,
+	decideGrillNudge,
+	decideRetroNudge,
+	parseRetroWindowDays,
+	retroAgeDays,
+	isNonProjectDir,
+	editedPathOf,
+	GRILL_FILE_THRESHOLD,
+	RETRO_MAX_AGE_DAYS_FALLBACK,
+} = mod;
 
 const HOME = process.env.HOME ?? "/home/mark";
 const REPO = `${HOME}/worktrees/pi-automation`;
 const NEAR = 120_000;
+
+/** Fixed clock, in epoch seconds: every retro test reads the same "now". */
+const NOW = 1_800_000_000;
+const DAY = 86_400;
+
+function recordAt(ranEpoch: number): string {
+	return [
+		`ran_at=${new Date(ranEpoch * 1000).toISOString()}`,
+		`ran_epoch=${ranEpoch}`,
+		"note=12 entries seen, 3 new",
+		"digest=agent/retro/2027-01-01.md",
+		"",
+	].join("\n");
+}
+
+/** A record one day old: the default, so the non-retro tests stay silent. */
+function freshRetro() {
+	return { record: recordAt(NOW - DAY), maxAgeDays: 14, now: NOW };
+}
 
 function setup(
 	options: {
@@ -25,12 +55,13 @@ function setup(
 		trusted?: boolean;
 		compactAt?: number;
 		hasUI?: boolean;
+		retro?: { record: string | null; maxAgeDays: number; now: number } | null;
 	} = {},
 ) {
 	const fake = createFakePi({
 		getSettings: () => ({ "observational-memory": { compactAtContextTokens: options.compactAt ?? NEAR } }),
 	});
-	sessionNudge(fake.pi);
+	sessionNudge(fake.pi, { readRetro: () => options.retro ?? freshRetro() });
 	const { ctx, notices } = createFakeCtx({
 		cwd: options.cwd ?? REPO,
 		hasUI: options.hasUI ?? true,
@@ -137,6 +168,96 @@ describe("session-nudge: grill nudge (blip 13)", () => {
 		const fake = setup({ hasUI: false });
 		for (const name of ["a", "b", "c", "d"]) await write(fake, fake.ctx, `/repo/${name}.ts`);
 		assert.equal(fake.notices.length, 0);
+	});
+});
+
+describe("session-nudge: retro due (blips 11 and 25)", () => {
+	test("a missing record is never-run, not zero days", () => {
+		const nudge = decideRetroNudge({ retro: { record: null, maxAgeDays: 14, now: NOW } });
+		assert.equal(nudge?.kind, "retro");
+		assert.match(nudge.message, /never been aggregated here/);
+		assert.match(nudge.message, /run: make retro/);
+	});
+
+	test("a record without a numeric ran_epoch is due, not silently fresh", () => {
+		assert.equal(retroAgeDays("ran_at=whenever\nnote=no epoch\n", NOW), null);
+		const nudge = decideRetroNudge({ retro: { record: "ran_epoch=yesterday\n", maxAgeDays: 14, now: NOW } });
+		assert.match(nudge?.message ?? "", /no usable ran_epoch/);
+	});
+
+	test("fresh and exactly at the window: silent", () => {
+		assert.equal(decideRetroNudge({ retro: { record: recordAt(NOW - DAY), maxAgeDays: 14, now: NOW } }), null);
+		assert.equal(decideRetroNudge({ retro: { record: recordAt(NOW - 14 * DAY), maxAgeDays: 14, now: NOW } }), null);
+	});
+
+	test("one day past the window: the line names the age and the command", () => {
+		const nudge = decideRetroNudge({ retro: { record: recordAt(NOW - 15 * DAY), maxAgeDays: 14, now: NOW } });
+		assert.equal(nudge?.kind, "retro");
+		assert.equal(nudge.message, "retro is due — the suggestion box has not been aggregated in 15 days; run: make retro");
+	});
+
+	test("older than a year still names the real age", () => {
+		const nudge = decideRetroNudge({ retro: { record: recordAt(NOW - 400 * DAY), maxAgeDays: 14, now: NOW } });
+		assert.match(nudge?.message ?? "", /in 400 days/);
+	});
+
+	test("the window is read from scripts/harness-check.sh, and the fallback agrees", async () => {
+		const script = await readFile(new URL("../../../scripts/harness-check.sh", import.meta.url), "utf8");
+		assert.equal(parseRetroWindowDays(script), RETRO_MAX_AGE_DAYS_FALLBACK);
+		assert.equal(parseRetroWindowDays("RETRO_MAX_AGE_DAYS=21\n"), 21);
+		assert.equal(parseRetroWindowDays("# RETRO_MAX_AGE_DAYS=21\n"), null);
+	});
+
+	test("cwd outranks retro, retro outranks compaction", () => {
+		const due = { record: null, maxAgeDays: 14, now: NOW };
+		const base = { home: HOME, trusted: true, retro: due, contextTokens: 118_000, compactAtContextTokens: NEAR };
+		assert.equal(decideNudge({ ...base, cwd: HOME, reason: "resume" })?.kind, "cwd");
+		assert.equal(decideNudge({ ...base, cwd: REPO, reason: "resume" })?.kind, "retro");
+		assert.equal(decideNudge({ ...base, cwd: REPO, reason: "startup" })?.kind, "retro");
+		assert.equal(
+			decideNudge({ ...base, retro: freshRetro(), cwd: REPO, reason: "resume" })?.kind,
+			"compaction",
+		);
+	});
+
+	test("wiring: a due retro renders at session start, once, and not on tool_result", async () => {
+		const fake = setup({ retro: { record: recordAt(NOW - 21 * DAY), maxAgeDays: 14, now: NOW } });
+		await fake.emit("session_start", { reason: "startup" }, fake.ctx);
+		assert.equal(fake.notices.length, 1);
+		assert.match(fake.notices[0].message, /in 21 days/);
+		assert.match(fake.notices[0].message, /run: make retro/);
+
+		await fake.emit("session_start", { reason: "resume" }, fake.ctx);
+		await fake.emit("tool_result", { toolName: "write", input: { path: "/repo/a.ts" }, isError: false }, fake.ctx);
+		assert.equal(fake.notices.length, 1, "one line per session");
+	});
+
+	test("wiring: the record is read once per session", async () => {
+		let reads = 0;
+		const fake = createFakePi({ getSettings: () => ({}) });
+		sessionNudge(fake.pi, {
+			readRetro: () => {
+				reads++;
+				return freshRetro();
+			},
+		});
+		const { ctx } = createFakeCtx({ cwd: REPO });
+		await fake.emit("session_start", { reason: "startup" }, ctx);
+		await fake.emit("session_start", { reason: "resume" }, ctx);
+		assert.equal(reads, 1);
+	});
+
+	test("wiring: an unreadable record does not cost the cwd nudge", async () => {
+		const fake = createFakePi({});
+		sessionNudge(fake.pi, {
+			readRetro: () => {
+				throw new Error("no such file");
+			},
+		});
+		const { ctx, notices } = createFakeCtx({ cwd: HOME });
+		await assert.doesNotReject(() => fake.emit("session_start", { reason: "startup" }, ctx));
+		assert.equal(notices.length, 1);
+		assert.match(notices[0].message, /start in the repo/);
 	});
 });
 
