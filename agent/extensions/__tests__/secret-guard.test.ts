@@ -118,6 +118,12 @@ describe("read tool calls", () => {
 		"/home/someone/.git-credentials",
 		"/home/someone/.aws/credentials",
 		"/home/someone/.kube/config",
+		// The name may be glued to the extension: a file called `prod.env` is a
+		// dotenv file, not a file that merely mentions one.
+		"prod.env",
+		"notes.pem",
+		"db.key",
+		"config/prod.env",
 	];
 
 	for (const path of BLOCKED_PATHS) {
@@ -129,7 +135,18 @@ describe("read tool calls", () => {
 		});
 	}
 
-	const ALLOWED_PATHS = ["src/index.ts", "README.md", ".env.example", "config/sample.pem", "assets/logo.png"];
+	const ALLOWED_PATHS = [
+		"src/index.ts",
+		"README.md",
+		".env.example",
+		"config/sample.pem",
+		"assets/logo.png",
+		// Names that start like a credential file and are not one: the terminator
+		// after the extension, not the prefix, is what keeps these readable.
+		"my.environment",
+		"readme.envoy",
+		"production.pem.md",
+	];
 
 	for (const path of ALLOWED_PATHS) {
 		test(`allows read of ${path}`, async () => {
@@ -146,6 +163,23 @@ describe("write/edit tool calls", () => {
 		const [result] = await emit("tool_call", { toolName: "write", input: { path: ".env", content: "A=1" } }, ctx);
 		assert.equal(result?.block, true);
 		assert.match(result.reason, /secret files stay out of the working tree/);
+	});
+
+	test("blocks writing to a credential file whose name is glued to the extension", async () => {
+		const { emit, ctx } = setup();
+		for (const path of ["prod.env", "notes.pem", "db.key"]) {
+			const [result] = await emit("tool_call", { toolName: "write", input: { path, content: "A=1" } }, ctx);
+			assert.equal(result?.block, true, `expected a write to ${path} to be refused`);
+			assert.match(result.reason, /secret files stay out of the working tree/);
+		}
+	});
+
+	test("allows writing to a file that only starts like one", async () => {
+		const { emit, ctx } = setup();
+		for (const path of ["my.environment", "readme.envoy", "production.pem.md"]) {
+			const [result] = await emit("tool_call", { toolName: "write", input: { path, content: "notes" } }, ctx);
+			assert.equal(result, undefined, `expected a write to ${path} to be allowed`);
+		}
 	});
 
 	test("blocks writing a secret value into a normal file", async () => {
@@ -327,6 +361,23 @@ describe("bash tool calls", () => {
 			ctx,
 		);
 		assert.equal(result, undefined);
+	});
+
+	test("a reader handed a glued credential name is refused", async () => {
+		const { emit, ctx } = setup();
+		for (const command of ["cat prod.env", "head certs/notes.pem", "base64 db.key", "rg DB_PASSWORD config/prod.env"]) {
+			const [result] = await emit("tool_call", { toolName: "bash", input: { command } }, ctx);
+			assert.equal(result?.block, true, `expected \`${command}\` to be refused`);
+			assert.match(result.reason, /reads a secret file/);
+		}
+	});
+
+	test("a reader handed a file that only starts like a credential name is allowed", async () => {
+		const { emit, ctx } = setup();
+		for (const command of ["cat my.environment", "head readme.envoy", "cat production.pem.md"]) {
+			const [result] = await emit("tool_call", { toolName: "bash", input: { command } }, ctx);
+			assert.equal(result, undefined, `expected \`${command}\` to be allowed`);
+		}
 	});
 });
 
