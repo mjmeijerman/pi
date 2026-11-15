@@ -250,6 +250,7 @@ gh pr checks <n>
 ls ~/.pi/agent/proposals/              # learner output: a diff, or a recorded "nothing"
 scripts/harness-check.sh               # skill/AGENTS.md budget check (automation PR)
 make mutate                            # mutation tests, incremental (blip 2)
+make mutate-full                       # same, cache thrown away; stryker 10 calls that --force
 /secretguard status        # session secret-guard state
 /mergeguard allow          # one merge, only after an explicit yes
 

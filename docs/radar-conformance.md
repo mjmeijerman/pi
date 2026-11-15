@@ -2,13 +2,17 @@
 
 Owner: Mark Meijerman (`mjmeijerman`)
 Review: 2027-11-15 — yearly, see §6 below.
-Re-measured 2026-11-15: `cd agent && npm test` → 679 tests in 77 suites (600 of them
-from `extensions/__tests__/*.test.ts`, 79 from `scripts/tests/*.test.mjs`, plus the
-provenance hook script's 10 cases), 17 extensions, 10 skills, `agent/AGENTS.md` 3065 bytes
-against the 3072-byte budget, 598 entries in `~/.pi/agent/suggestions.jsonl` (it only grows — a floor), and a fresh
-`make mutate-full` at 79.15% (927 killed, 249 survived, 18 timeout, 0 no-coverage).
+Re-measured 2026-11-15: `cd agent && npm test` → 741 tests in 82 suites (648 of them
+from `extensions/__tests__/*.test.ts` in 76 suites, 93 from `scripts/tests/*.test.mjs` in 6,
+plus the provenance hook script's 10 cases and 30 assertions), 17 extensions, 10 skills,
+`agent/AGENTS.md` 3065 bytes against the 3072-byte budget, 646 lines in
+`~/.pi/agent/suggestions.jsonl` (gitignored, so a floor), a fresh `make mutate-full` at
+83.84% (983 killed, 193 survived, 18 timeout, 0 no-coverage), and
+`bash scripts/harness-check.sh` → 60 passed, 3 warn, 1 failed (the sandbox's npm 10.9.9).
+Every number above was re-run today; anything that was not is marked **not re-verified**
+with the date it last was. How to re-measure: the commands are step 0 of §6.
 
-Audit date: 2026-11-14; threat-model pass 2026-11-13. Source: `werken-met-ai.pdf` (Radar Vol. 35, November 2026).
+Audit date: 2026-11-15; threat-model pass 2026-11-13. Source: `werken-met-ai.pdf` (Radar Vol. 35, November 2026).
 Scope: the 85 rows below, out of the 117 in `docs/radar-blips.tsv` — every Technique
 (1–45), the three Platforms that touch a coding harness (57, 58, 62), all 36 Tools
 (68–103, each with an explicit verdict, `n/a` included), and Promptfoo (110). The other 32
@@ -27,7 +31,7 @@ Status values:
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
 | 1. Agent sandboxing | done | `install.sh` §4b installs a managed `pi()` shell function into `~/.bashrc` and `~/.zshrc` → `scripts/pisandbox` → `sandbox/pi-sandbox.sh` (bubblewrap); `PI_BARE=1 pi` bypasses, `pisandbox --no-net -- pi` adds isolation. `scripts/pi-bare` (symlinked into `~/.local/bin`, listed as "Pi (bare)" in Herdr's new-agent menu via `sandbox/herdr-programs.json`) is the sanctioned exit, so the choice is made before the session starts. `sandbox/pi-sandbox.sh` mounts `~/.local/bin`, `~/.local/share/pipx` and `~/.local/share/uv` read-only so `gh`, `uvx`, `gitleaks`, `semgrep`, `trivy` and `hc` exist inside, while `~/.config/gh` and the other credential directories stay masked — `gh` there reports "not logged in", which is the point. The launcher's `PI_SANDBOX_MODE`/`PI_SANDBOX_NET` markers show as the words `sandbox`/`bare` in front of the title (`agent/extensions/sandbox-badge.ts`) and in the footer status, so a contained session and a bare one are told apart at a glance (blip 42) | The wrapper is a shell function, so a launcher that skips the rc file (`env -i`, an IDE, cron) still gets the bare binary. Fallback prints one stderr line when `bwrap` is absent. |
-| 2. Mutation testing | done | `agent/stryker.conf.json`, `make mutate-full` → **79.15%** (927 killed, 249 survived, 18 timeout, 0 no-coverage) on 2026-11-15 over three files: `extensions/lib/usage-format.ts` 88.75%, `extensions/merge-guard.ts` 78.59%, `extensions/secret-guard.ts` 78.40%. `.github/workflows/test.yml` runs `npx stryker run` weekly, and `mutation-changed` per pull request on a `stryker.pr.conf.json` derived from the same config with `break: 100` | The weekly run reports, it does not gate (`break: null` in `stryker.conf.json`). 167 of the 249 survivors are in `secret-guard.ts` and 73 in `merge-guard.ts`, mostly branch conditions the tests do not distinguish. The score covers the extension tests only: the `command` runner copies `agent/` into `.stryker-tmp/`, so the runner command is the extension glob and not `npm test` (`scripts/tests/commit-msg-provenance.test.sh` is not in the copy), and `sandbox-binds.test.ts` finds the harness root by walking up instead of by fixed depth so it still runs there. |
+| 2. Mutation testing | done | `agent/stryker.conf.json`, `make mutate-full` → **83.84%** (983 killed, 193 survived, 18 timeout, 0 no-coverage) on 2026-11-15 over three files: `extensions/lib/usage-format.ts` 87.50%, `extensions/merge-guard.ts` 95.01%, `extensions/secret-guard.ts` 78.53%. A full score means throwing the cache away, not passing a flag: `make mutate-full` deletes `agent/reports/stryker/stryker-incremental.json` and runs `npx stryker run` unchanged. Stryker 10.1.1 spells "ignore the cached file" `--force`; `--incremental false` is eaten as a config path and dies with `ConfigReaderError: Invalid config file "false"`. `.github/workflows/test.yml` runs `npx stryker run` weekly, and `mutation-changed` per pull request on a `stryker.pr.conf.json` derived from the same config with `break: 100` | The weekly run reports, it does not gate (`break: null` in `stryker.conf.json`). 166 of the 193 survivors are in `secret-guard.ts`, 17 in `merge-guard.ts` and 10 in `usage-format.ts`, mostly branch conditions the tests do not distinguish. The score covers the extension tests only: the `command` runner copies `agent/` into `.stryker-tmp/`, so the runner command is the extension glob and not `npm test` (`scripts/tests/commit-msg-provenance.test.sh` is not in the copy), and `sandbox-binds.test.ts` finds the harness root by walking up instead of by fixed depth so it still runs there. |
 | 3. Path-to-production mapping | partial | `.github/workflows/{test,secret-scan}.yml`, PR-per-change | The path exists in CI config, not as a reviewed map. Review capacity per day is unmeasured. |
 | 4. Post-quantum cryptography | n/a | — | Nothing here holds a long-lived key: model traffic terminates at the provider's TLS, and the only secrets in scope are API tokens rotated by the providers. Revisit if the harness ever stores keys it must keep for years. |
 | 5. Progressive context disclosure | done | 10 skills load on demand; `agent/AGENTS.md` is 3065 bytes under the 3072-byte budget in `scripts/harness-check.sh` | — |
@@ -59,7 +63,7 @@ Status values:
 | 71. Act | done | `scripts/pr-gate.sh` is the single copy of the body gates: `make pr-check BODY=<file>` runs the tier, mission and test-change checks locally against a chosen base and head, and `.github/workflows/pr-tier.yml` runs the same script in CI. `make scripts-test`, `npm test` and `make mutate` run the rest of the suite locally | The local call is a habit, not a hook: nothing forces `make pr-check` before a push, so a bad body is still found by CI when the habit lapses. |
 | 73. ast-grep | missing | — | Structural search is `rg` and regex; conventions that are syntactic (import order, hook shape) are checked by hand. |
 | 74. Beads | missing | — | Task state lives in `/tmp` spec files and PR bodies; nothing survives the session as a queryable backlog. |
-| 84. Pi | done | This repository: pi 1.5.2, 17 extensions, 600 tests in 71 suites (`cd agent && npm test`), `/home/mark/.pi` | Pinned to 1.5.2; the extension API is exercised but an upgrade is untested until it happens. |
+| 84. Pi | done | This repository: pi 1.5.2, 17 extensions, 648 tests in 76 suites (`cd agent && npm test`), `/home/mark/.pi` | Pinned to 1.5.2; the extension API is exercised but an upgrade is untested until it happens. |
 | 23. Unattended overnight agentic builds | missing | — | Blocked by the same three prerequisites the blip names: default sandboxing, spec-up-front, sensors that validate without line-by-line review. |
 | 110. Promptfoo | partial | `agent/evals/` — 17 behaviour cases (11 harness, 6 adversarial) over `agent/AGENTS.md`, the skills and `agent/prompts/grill.md`; `make evals` (promptfoo 0.125.1, local `qwen3.8:27b`, zero cost) runs weekly from `systemd/pi-evals.timer`, writes `agent/evals/last-run.txt` (last record 2026-11-14: 16 passed, 1 failed), and `scripts/harness-check.sh` warns (`eval-freshness`) when that record is older than 14 days | Trial ring, and the grader is a 27B local model whose verdicts vary run to run — a red case is read, not obeyed. The adversarial set covers the fetched-page and hostile-skill paths (`docs/threat-model.md` §2.1, §2.4) but not the supply-chain path (§2.2), and there are no hook or red-team cases yet. |
 | 75. Chaos Mesh | n/a | — | Fault injection as Kubernetes custom resources; there is no cluster. The failure surface is one workstation, and `scripts/harness-check.sh` covers it deterministically rather than by scheduled chaos. |
@@ -80,16 +84,16 @@ Status values:
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
 | 24. Agent pipeline responsibility | partial | `agent/extensions/merge-guard.ts` forces an explicit human yes per landing | Owner, reviewer and approver are the same person; nothing records who accepted an agent-built change beyond that yes. |
-| 25. Agent suggestion box | done | `/suggest` → `agent/suggestions.jsonl` (598 entries counted 2026-11-15; the file only grows, so this is a floor), `/retro` dedupes by signature, and `make retro` runs headless every Monday from `systemd/pi-retro.timer`: digest to `agent/retro/<date>.md`, record in `agent/retro/last-run.txt`, and `scripts/harness-check.sh` warns (`retro-freshness`) when that record is older than 14 days | The digest is still read by a person: nothing acts on the top signatures automatically. |
+| 25. Agent suggestion box | done | `/suggest` → `agent/suggestions.jsonl` (646 lines from `wc -l` on the host copy, counted 2026-11-15; a gitignored file that only grows, so this is a floor), `/retro` dedupes by signature, and `make retro` runs headless from `systemd/pi-retro.timer`: digest to `agent/retro/<date>.md`, record in `agent/retro/last-run.txt`, and `scripts/harness-check.sh` warns (`retro-freshness`) when that record is older than 14 days | The timer half is **not re-verified**: `agent/retro/last-run.txt` does not exist on this host, so `bash scripts/harness-check.sh` reports `WARN retro-freshness … no retro run recorded` — the units and the target shipped (pi#76), a weekly run has no record. The digest is still read by a person: nothing acts on the top signatures automatically. |
 | 26. Context profiling | done | `scripts/session-report.mjs` (cost, cache hit, context fill per project) | Profiling is after-the-fact; no per-turn attribution. |
 | 27. Enterprise harness | n/a | — | One user; the "harness" is this repo. |
 | 28. Foundation models for structured data | n/a | — | No tabular or warehouse workload; `local_llm` `extract` pulls fields out of prose, which is not the modelling this blip describes. |
-| 29. Harness quality evaluation | partial | 679 tests in 77 suites (`cd agent && npm test`: 600 extension in 71 suites, 79 script in 6), shell checks in `scripts/harness-check.sh` (59 passed, 3 warn — one baselined skill length and two advisory freshness warnings — and 1 pre-existing npm FAIL on 2026-11-15, the sandbox's npm 10.9.9), offline hook tests in `scripts/ci-offline.sh` (2 suites, 56 assertions), 17 prompt evals in `agent/evals/` (`make evals`, weekly from `systemd/pi-evals.timer`, record in `agent/evals/last-run.txt`: 16 of 17 passed on 2026-11-14) | The instruction half is sampled, not proven: the prompts are fixed and the grader is a 27B local model, so a verdict varies run to run; hooks still have no nondeterministic evaluation. |
+| 29. Harness quality evaluation | partial | 741 tests in 82 suites (`cd agent && npm test`: 648 extension in 76 suites, 93 script in 6, plus the provenance hook script's 10 cases), shell checks in `scripts/harness-check.sh` (60 passed, 3 warn — one baselined skill length and two advisory freshness warnings — and 1 pre-existing npm FAIL on 2026-11-15, the sandbox's npm 10.9.9), offline hook tests in `scripts/ci-offline.sh` (2 suites, 56 assertions), 17 prompt evals in `agent/evals/` (`make evals`, weekly from `systemd/pi-evals.timer`, record in `agent/evals/last-run.txt`: 16 of 17 passed on 2026-11-14) | The instruction half is sampled, not proven: the prompts are fixed and the grader is a 27B local model, so a verdict varies run to run; hooks still have no nondeterministic evaluation. The eval record is gitignored (`.gitignore:31`), so a fresh clone or a worktree always reads "no eval run recorded" and WARNs: the file proves a run on the machine that wrote it, never in the repo. |
 | 30. Local coding models | done | `agent/extensions/local-llm.ts`, `/local` health check | Route is manual, chosen by the model's own judgement. |
 | 31. MITRE ATLAS | done | `docs/threat-model.md` §2 groups attacker paths by ATLAS tactic (prompt injection, Execution, Persistence, Defense Evasion, Exfiltration) and names `AML.T0051` for the fetched-page path | Tactic names only, no per-technique ID mapping and no ATLAS-driven detection: the taxonomy shapes the document, not a test. |
 | 32. Production-aware coding agents | n/a | — | Nothing in production; project work is local. |
 | 33. Programmatic tool calling | done | `codemode` available in every session (default `+codemode`) | — |
-| 34. Semantic review of AI-edited prose | missing | — | Plans, ADRs and `AGENTS.md` diffs are reviewed as text diffs. |
+| 34. Semantic review of AI-edited prose | done | `.github/workflows/prose-review.yml` plus `.github/scripts/prose-review.mjs` (pi#78) review the prose a behaviour change arrives in: a pull request that touches `agent/AGENTS.md`, `agent/prompts/**/*.md` or `agent/skills/**/SKILL.md` gets one comment answering five fixed questions, one line per question, each citing `file:line` or the words "no finding"; a re-run edits that comment instead of stacking another, and a diff over 400 changed lines is refused before any request is made (exit 3 → a warning annotation). Prompt, token cap and parsing live in the script, so `--dry-run` prints the exact request offline and `scripts/tests/prose-review.test.mjs` checks it with no network and no secret | It reviews nothing today: no `PROSE_REVIEW_API_KEY` repository secret is configured (`printenv PROSE_REVIEW_API_KEY` is empty on this machine), and the job's exit-4 path annotates that — a green check there means "nothing to review with", not "the prose passed". It is also narrow: `README.md` and `docs/` prose is still read by a human or nobody. |
 | 35. Tests as data over tests as code | missing | — | Tests are TypeScript only. |
 | 62. Decision models | done | `/home/mark/big-boss-pi/bin/jev` (local `qwen3.8:27b`, 0 = yes, 1 = no, 3 = unsure) and `agent/skills/jev/SKILL.md`, which says when to ask it: route, worker count, sandbox mode, permission requests | A decision model answering as prose is still a guess with a quote around it: no record of what it decided, and no scoring of its answers against the human's. |
 | 57. Agent Client Protocol | n/a | — | No IDE integration wanted. |
@@ -102,11 +106,11 @@ Status values:
 | 96. Hunk | missing | — | Agent diffs are read via `gh pr diff`. |
 | 97. nono.sh | done (equivalent) | `sandbox/pi-sandbox.sh` via bubblewrap | Same class of tool: OS-level isolation, no VM or daemon. |
 | 94. Habit Hooks | done (equivalent) | `git-hooks/pre-commit` runs the budget, skill-length, skills-lock, secret and hidden-codepoint checks (`--quick`); `scripts/harness-check.sh` is the same ruleset on demand | Hooks fire on commit only, so an edit-and-never-commit session is unchecked. |
-| 99. Safe Chain | done | `bash scripts/harness-check.sh --verify-release-age` → `PASS … npm 11.21.2, effective min-release-age=2 days ≥ 2 days`, measured bare on the host | The check reads the npm version *and* the effective value, and FAILs when either cannot be read: npm < 11 echoes the key from `.npmrc` without honouring it, and the sandbox masks the config, so neither passes silently. Unit: npm 11 reads a bare number as **days** (`<days>` in @npmcli/config, `Date.now() - 86400000 * value`), measured on npm 11.21.2 — `--min-release-age=2` refused a package published today and accepted one published two days ago, while `=2880` cut off at 2018 — so the value is 2 days (the playbook's 48 hours), not 1440 minutes. |
+| 99. Safe Chain | done | `bash scripts/harness-check.sh --verify-release-age` → `PASS … npm 11.21.2, effective min-release-age=2 days ≥ 2 days`, measured bare on the host — **not re-verified 2026-11-15**: the same command inside a sandbox FAILs (`npm-min-release-age — npm 10.9.9 ignores min-release-age (needs npm ≥ 11)`), so the PASS still rests on the bare-host run | The check reads the npm version *and* the effective value, and FAILs when either cannot be read: npm < 11 echoes the key from `.npmrc` without honouring it, and the sandbox masks the config, so neither passes silently. Unit: npm 11 reads a bare number as **days** (`<days>` in @npmcli/config, `Date.now() - 86400000 * value`), measured on npm 11.21.2 — `--min-release-age=2` refused a package published today and accepted one published two days ago, while `=2880` cut off at 2018 — so the value is 2 days (the playbook's 48 hours), not 1440 minutes. |
 | 102. Varlock | done (equivalent) | `agent/config/schema.mjs` + `bash scripts/harness-check.sh --verify-config` → `PASS config-schema agent/settings.json shape ok`, and `agent/extensions/config-guard.ts` prints the same sentence at session start | Config files only: `settings.json`, `models.json` and `keys.json` are shape-checked, unknown keys FAIL with a one-edit suggestion, and a key value is never printed. The shell rc blocks stay unvalidated, and `keys.json` is validated by shape, never by value. |
-| 103. zizmor | done | `.github/workflows/zizmor.yml` runs `uvx --from zizmor==1.32.0 zizmor --pedantic .` on PRs, trunk pushes and weekly → 0 findings (1 justified ignore, 2026-11-13: 4 low cleared); every action pinned by full SHA with `persist-credentials: false`. Not re-run 2026-11-14: `uvx` has no network path from the sandbox, so this row still rests on the 2026-11-13 run | The gate fails the job on any finding, so a pin cannot drift back to a tag unnoticed. |
+| 103. zizmor | done | `.github/workflows/zizmor.yml` runs `uvx --from zizmor==1.32.0 zizmor --pedantic .` on PRs, trunk pushes and weekly → 0 findings (1 justified ignore, 2026-11-13: 4 low cleared); every action pinned by full SHA with `persist-credentials: false`. Not re-run 2026-11-15, and not on 2026-11-14 either: `uvx` has no network path from the sandbox, so this row still rests on the 2026-11-13 run | The gate fails the job on any finding, so a pin cannot drift back to a tag unnoticed. |
 | 88. Apple container | n/a | — | macOS-only lightweight VMs on Apple silicon; the host is Linux x86_64 and process isolation is bubblewrap (blip 97). |
-| 89. Deepsec | missing | — | The only code scanner wired into CI is gitleaks in `.github/workflows/secret-scan.yml`. Nothing does architecture-first, agent-driven vulnerability review; `semgrep` and `trivy` are mounted into the sandbox (blip 1) but no workflow or `harness-check` rule runs them. |
+| 89. Deepsec | partial | `.github/workflows/test.yml`: job `security scan (semgrep, trivy)` (pi#77) runs semgrep 1.185.0 with the shell ruleset pinned by commit (`SEMGREP_RULES_SHA`) and trivy 0.76.2 unpacked only after its release checksum verifies; any finding fails the run, and `tools/gitleaks`-class secret scanning stays in `.github/workflows/secret-scan.yml`. The sandboxed `semgrep`/`trivy` (blip 1) are no longer the only copy | Pattern, rule and CVE scanners, not the architecture-first, agent-driven review the blip describes: nobody asks whether the design is attackable, and a scan cannot see a logic flaw no rule names. |
 | 91. Entire CLI | missing | — | Sessions stay in `~/.pi` JSONL and are read locally by `scripts/session-report.mjs`; nothing writes a session into the repo next to its commit, so a session cannot be replayed from the branch it produced. |
 | 92. FreeToken | n/a | — | An inference engine for MoE models larger than consumer GPU memory; the local model is `qwen3.8:27b` served by Ollama on the host, which fits. |
 | 98. OpenResearch CLI (orx) | n/a | — | Runs parallel research experiments in isolated git worktrees with one pinned run command. There is no experiment workload here; the worktree discipline it automates is done by hand per worker. |
@@ -131,9 +135,8 @@ Status values:
 ## 5. Gaps ranked by cost of leaving them open
 
 1. **Mutation survivors in `secret-guard.ts` and `merge-guard.ts`** (blip 2, Adopt, done
-   at 79.15%). 167 of the 249 survivors sit in `secret-guard.ts` (78.40%) and 73 in
-   `merge-guard.ts` (78.59%), the two weakest of the three files — `usage-format.ts` is at
-   88.75%. They are mostly branch conditions the tests do not distinguish. The per-PR job
+   at 83.84%). 166 of the 193 survivors sit in `secret-guard.ts` (78.53%), 17 in
+   `merge-guard.ts` (95.01%) and 10 in `usage-format.ts` (87.50%), the two weakest first. They are mostly branch conditions the tests do not distinguish. The per-PR job
    (`break: 100`) already fails a changed file that keeps a survivor, so the weekly number
    is a backlog rather than a regression risk. Fix: read
    `agent/reports/stryker/mutation.html`, kill the survivors that map to a real branch.
@@ -160,7 +163,11 @@ prompt evals (blip 110, `agent/evals/` plus `make evals`) and workflow linting (
 (blip 79, partial at line level), optional config shapes validated instead of hoped for
 (blip 102, `agent/config/schema.mjs` plus `scripts/harness-check.sh --verify-config`), and
 skills pinned by content with hidden codepoints refused at commit (blips 72 and 7,
-`agent/skills.lock` and `git-hooks/scan-unicode.sh`, both with offline tests).
+`agent/skills.lock` and `git-hooks/scan-unicode.sh`, both with offline tests). Since this
+pass: a second reader for the instruction files themselves (blip 34,
+`.github/workflows/prose-review.yml`, pi#78 — it reports "not configured" until the
+`PROSE_REVIEW_API_KEY` secret exists) and semgrep plus trivy as one CI scan job that any
+finding fails (blip 89, `.github/workflows/test.yml`, pi#77).
 
 The threat model re-scoped what remains, and the leftover gap inherits one of its paths.
 The fetched-page and malicious-skill paths (`docs/threat-model.md` §2.1 and §2.4) now have
@@ -173,13 +180,18 @@ Enforced by `scripts/harness-check.sh` on every commit and in CI: a cited blip m
 (blips 36, 39), and a flagship `defaultModel` fails (blip 40). `make audit` runs the whole
 set for the quarterly pass.
 
-Then, in order: Hunk or a `gh pr diff` review habit for agent-authored PRs (blip 96),
-semantic review of `AGENTS.md` and plan edits (blip 34). Skipped deliberately: subagents
+Then, in order: Hunk or a `gh pr diff` review habit for agent-authored PRs (blip 96). Skipped deliberately: subagents
 (blip 21) conflict with Pi's design — parallel sessions cover most of the need; and
 unattended overnight builds (blip 23) stay blocked until the gaps listed above are closed.
 
 ## 6. Re-running this audit
 
+0. Re-measure before editing a row: `cd agent && npm test` (the `# tests` / `# suites`
+   lines), `bash scripts/harness-check.sh` (the `N passed, M warn, K failed` line), `make
+   mutate-full` (the per-file table — it throws the incremental cache away; `--force` is
+   Stryker 10's own switch for the same thing), `ls agent/skills`, `wc -c agent/AGENTS.md`,
+   `wc -l ~/.pi/agent/suggestions.jsonl`, `bash scripts/ci-offline.sh`. A number you did not
+   run this way goes in as **not re-verified**, with the date it last was.
 1. Copy the blip list: `awk -F'\t' 'NR>1{print $1"\t"$4}' docs/radar-blips.tsv`.
 2. For each harness-relevant blip, name the file that implements it. No file, no credit.
 3. Any row that was `missing` and is now `done` should point at a commit, not at an intention.

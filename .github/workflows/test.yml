@@ -99,8 +99,11 @@ jobs:
   # A pull request may not ship a surviving mutant. The weekly `mutation` job
   # above is the score of record; this one asks only about the diff: do the
   # mutants in these files die? Scoped --mutate keeps it to minutes, break 100
-  # makes one survivor fail the PR, and --incremental false means the verdict
-  # never comes from a cached run. Radar Vol. 35, blip 2 (Adopt).
+  # makes one survivor fail the PR, and the verdict never comes from a cached
+  # run: stryker 10.1.1 spells "ignore the incremental file" `--force`
+  # (`--incremental false` is not a flag — it is read as a config path and dies
+  # with `ConfigReaderError: Invalid config file "false"`), and the derived
+  # config below sets `incremental: false` outright. Radar Vol. 35, blip 2.
   mutation-changed:
     name: mutation on changed files (stryker)
     runs-on: ubuntu-latest
@@ -172,10 +175,13 @@ jobs:
         run: npm ci
 
       # stryker 10's CLI has no --thresholds flag (it rejects
-      # --thresholds.break) and no --incremental=false, so the PR verdict is
-      # built from the weekly config with two keys changed: incremental off, so
-      # a PR never inherits a cached run, and break 100, so one surviving
-      # mutant fails the job. Derived, not copied: the two configs cannot drift.
+      # --thresholds.break) and no boolean `--incremental` value to switch off
+      # (10.1.1 reads `--incremental false` as a config path and exits with
+      # `Invalid config file "false"`; `--force` skips the cached file but
+      # cannot express break 100), so the PR verdict is built from the weekly
+      # config with two keys changed: incremental off, so a PR never inherits a
+      # cached run, and break 100, so one surviving mutant fails the job.
+      # Derived, not copied: the two configs cannot drift.
       - name: pr mutation config (break 100, no incremental)
         if: steps.changed.outputs.skip != 'true'
         run: |
