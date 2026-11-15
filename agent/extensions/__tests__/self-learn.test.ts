@@ -8,7 +8,7 @@
  * so it cannot spawn a learner of its own.
  */
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -42,6 +42,7 @@ const {
 	readWorkspace,
 	failureLines,
 	MAX_FRUSTRATION,
+	noteBaseline,
 } = mod;
 const REPO = join(homedir(), ".pi");
 
@@ -551,6 +552,32 @@ describe("wiring", () => {
 		const { emit, ctx, started } = setup({ countNotes: async () => 1 });
 		await emit("session_compact", { reason: "manual" }, ctx);
 		await waitFor(() => started.length === 1);
+	});
+
+	test("a /suggest note counts only until a proposal is written after it", () => {
+		const note = "2026-11-13T09:55:09.787Z";
+		const proposal = Date.parse("2026-11-14T19:00:00.000Z");
+		assert.equal(noteBaseline(note, proposal), new Date(proposal).toISOString(), "the proposal closes the window");
+		assert.equal(noteBaseline(note, null), note, "no proposal: the note still counts");
+		assert.equal(noteBaseline(note, Date.parse("2026-11-12T00:00:00.000Z")), note, "an older proposal leaves it open");
+		assert.equal(noteBaseline(null, null), null, "nothing known: every note counts");
+	});
+
+	test("the notes window starts at the newest proposal on disk", async () => {
+		const seen: (string | null)[] = [];
+		const { emit, ctx } = setup({
+			countNotes: async (since: string | null) => {
+				seen.push(since);
+				return 0;
+			},
+		});
+		const dir = join(scratch, "proposals");
+		await mkdir(dir, { recursive: true });
+		const judged = join(dir, "2026-11-14-a-verdict.md");
+		await writeFile(judged, "# judged\n", "utf8");
+		await utimes(judged, 1_800_000_000, 1_800_000_000);
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		assert.deepEqual(seen, [new Date(1_800_000_000_000).toISOString()]);
 	});
 
 	test("a failed spawn does not throw and does not count as a learner", async () => {
