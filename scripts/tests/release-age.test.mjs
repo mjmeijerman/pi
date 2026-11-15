@@ -122,10 +122,25 @@ test("no reachable npm 11 is still a FAIL — the gate is not dead", () => {
 	assert.equal(status, 1, out);
 	assert.match(line(out, "npm-min-release-age"), /FAIL/);
 	assert.match(line(out, "npm-min-release-age"), /needs npm ≥ 11/);
-	// Twelve workers copied the old hint — `npm i -g --prefix ~/.local npm@11` —
-	// into their reports and none could run it: the sandbox mounts ~/.local
-	// read-only. The FAIL has to name the step that works from where it is read.
-	assert.match(line(out, "npm-min-release-age"), /run make setup on the host/);
+});
+
+test("a dangling ~/.local/bin/npm is named, with the removal command", () => {
+	// The half-finished install that keeps the FAIL alive: the candidate scan
+	// needs an executable, so a broken shim is skipped and the old npm wins on
+	// every later run. Naming it is what turns a repeat into a repair.
+	const home = join(tmp, `home-${n++}`);
+	mkdirSync(join(home, ".local/bin"), { recursive: true });
+	const shim = join(home, ".local/bin/npm");
+	symlinkSync(join(home, ".local/lib/node_modules/npm/bin/npm-cli.js"), shim);
+	const { status, out } = check({
+		pathNpm: stubNpm("10.9.9", "2"),
+		candidates: shim,
+		home,
+	});
+	assert.equal(status, 1, out);
+	const fail = line(out, "npm-min-release-age");
+	assert.match(fail, /dangling symlink/);
+	assert.match(fail, new RegExp(`rm ${shim}`));
 });
 
 test("a sandboxed FAIL asks the host, and never names a global install", () => {
