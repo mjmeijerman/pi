@@ -132,20 +132,40 @@ function waitForCore() {
 
 /**
  * The recovered shell appears a moment after the core answers (`hc keep` has a
- * short grace delay), so ask again instead of concluding too early. A live
- * terminal that is already running something else is an answer, not a wait.
+ * short grace delay), so ask again instead of concluding too early.
+ *
+ * A terminal that has only just come back is reported `state: "live"` *before*
+ * the recovered shell has replaced the lost program, and then its foreground
+ * carries no `argv` (often no `pid` either). That is "not attached yet", not
+ * "busy": the answer here is to wait, exactly as one waits for a foreground that
+ * is not a shell yet. Only two things answer straight away — the terminal is no
+ * longer live, or a real program that is not a shell is running in it.
  */
 function waitForTerminal(terminal, deadline) {
+	let facts = null;
 	for (;;) {
-		const facts = hcJson(["get", terminal, "--json"]);
-		if (facts) {
-			const shell = isShellArgv(facts.foreground?.argv);
-			const answer = facts.state !== "live" || shell || programAlive(facts);
-			if (answer) return facts;
+		const next = hcJson(["get", terminal, "--json"]);
+		if (next) {
+			facts = next;
+			if (facts.state !== "live") return facts;
+			if (isShellArgv(facts.foreground?.argv)) return facts;
+			if (runningProgram(facts)) return facts;
 		}
-		if (Date.now() >= deadline) return facts ?? null;
+		if (Date.now() >= deadline) return facts;
 		sleep(500);
 	}
+}
+
+/**
+ * Is a real program in the foreground, alive enough to keep us out? A foreground
+ * with no `argv` or no `pid` is a terminal that has not attached yet: nothing to
+ * measure, so nothing to conclude.
+ */
+function runningProgram(facts) {
+	const foreground = facts?.foreground;
+	if (!Array.isArray(foreground?.argv) || foreground.argv.length === 0) return false;
+	if (typeof foreground.pid !== "number") return false;
+	return programAlive(facts);
 }
 
 /**
@@ -260,8 +280,15 @@ function main() {
 			continue;
 		}
 		if (!isShellArgv(facts.foreground?.argv)) {
+			if (!Array.isArray(facts.foreground?.argv) || facts.foreground.argv.length === 0) {
+				// The deadline passed and still nothing is attached: hc says `live`
+				// but the recovered shell never showed up. This is not a busy
+				// terminal — typing into it would land in no program at all.
+				log(`skip ${where}: terminal never became a shell within ${entryMs} ms (foreground has no program)`);
+				continue;
+			}
 			// Something is running there — a person, or pi itself. Never a second pi.
-			const running = (facts.foreground?.argv ?? []).join(" ") || "no program";
+			const running = facts.foreground.argv.join(" ");
 			log(`skip ${where}: terminal is busy (${running})`);
 			continue;
 		}
