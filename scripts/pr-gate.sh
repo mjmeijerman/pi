@@ -20,6 +20,9 @@
 #   scripts/pr-gate.sh --body FILE --base REV --head REV
 #       all gates; changed paths come from `git diff --name-only REV...REV`.
 #       BASE_SHA/HEAD_SHA in the environment, as CI sets them, do the same.
+#   scripts/pr-gate.sh --body FILE --branch REV [--base REV]
+#       all gates for another branch without switching this checkout: changed
+#       paths come from the merge base of --base (default origin/trunk) and REV.
 #   scripts/pr-gate.sh --body FILE --paths FILE
 #       all gates; changed paths are read from FILE, one per line. An empty
 #       FILE is a gate handed nothing, so the diff gates fail, not pass.
@@ -27,11 +30,18 @@
 #       one gate only, the way each CI job runs it. Mission needs no diff;
 #       tier and test-change fail when they cannot see one.
 #
-#   make pr-check BODY=pr.md [BASE=origin/trunk] [HEAD=HEAD] [PATHS=paths.txt]
+#   make pr-check BODY=pr.md [BRANCH=my-branch] [BASE=origin/trunk] [HEAD=HEAD]
+#                  [PATHS=paths.txt]
+#
+# An empty diff is never a pass: when BASE and HEAD (or the merge base and HEAD)
+# resolve to the same commit, the run says `unverifiable: no changed files` and
+# names the command that shows the real diff. That is the gap PR 88 fell
+# through - a checkout sitting on trunk diffed trunk against trunk, the rules
+# saw nothing, and a green local verdict hid the red CI one.
 #
 # Exit codes: 0 every gate that ran passed, 1 a gate failed or was handed no
-# file list it needs (CI would be red), 2 bad usage, unreadable input, or a diff
-# that cannot be resolved. Output is the CI verdict verbatim: the
+# file list it needs (CI would be red), 2 bad usage, unreadable input, a diff
+# that cannot be resolved, or an empty diff (nothing was checked). Output is the CI verdict verbatim: the
 # `::error::` / `::notice::` annotations, plus the markdown summary block.
 # In CI the block goes to $GITHUB_STEP_SUMMARY; anywhere else it goes to stdout.
 # ============================================================================
@@ -45,6 +55,7 @@ BODY_FILE=""
 PATHS_FILE=""
 BASE_REV=""
 HEAD_REV=""
+BRANCH_REV=""
 GATES="all"
 
 # DIFF_CHECKED is the point of this file: green means checked. A gate that
@@ -52,6 +63,7 @@ GATES="all"
 # handed zero files, called that "nothing to justify", and printed green for a
 # body the same CI run rejected).
 CHANGED=()
+TRUNK_HINT="origin/trunk"
 DIFF_CHECKED=0
 DIFF_WHY="no changed-file list and no diff range were given"
 FAILED=0
@@ -94,6 +106,10 @@ while [ $# -gt 0 ]; do
 	--head)
 		shift
 		HEAD_REV="${1:-}"
+		;;
+	--branch)
+		shift
+		BRANCH_REV="${1:-}"
 		;;
 	--gate)
 		shift
@@ -152,8 +168,43 @@ diff_range() {
   'git diff --name-only BASE..HEAD', or '--base REV --head REV'."
 	fi
 	mapfile -t CHANGED < <(printf '%s\n' "$out" | awk 'NF')
+	# A diff that resolves to no commits is the PR 88 gap: a checkout sitting on
+	# trunk diffs trunk against itself, every rule sees nothing, and the old
+	# version printed green over it. Zero files is 'unverifiable', never a pass.
+	if ((${#CHANGED[@]} == 0)); then
+		die "unverifiable: no changed files between ${base_rev} and ${head_rev} (git diff --name-only ${base_rev}...${head_rev} is empty)
+  Nothing was checked, so this is not a green verdict: ${base_rev} and ${head_rev}
+  are the same commit, or the commit you meant to check is not in this tree.
+  Show the real diff of a branch without leaving this checkout:
+    git diff --name-only ${TRUNK_HINT}...<branch>
+  and check it with:
+    make pr-check BRANCH=<branch> BODY=${BODY_FILE}"
+	fi
 	DIFF_CHECKED=1
 	DIFF_WHY="${base_rev}...${head_rev} (${#CHANGED[@]} changed files)"
+}
+
+# Another branch, from a checkout that stays where it is: the boss's tree sits
+# on trunk and keeps being read, so checking a worker's branch must not mean
+# switching to it (PR 88: the switch never happened, so trunk was diffed
+# against trunk and the gate blessed a body CI rejected).
+branch_diff() {
+	local branch="$1" trunk base
+	git rev-parse --verify --quiet "${branch}^{commit}" >/dev/null 2>&1 ||
+		die "no such branch or commit to check: '${branch}' (git rev-parse --verify ${branch}^{commit} failed)"
+	if [ -n "$BASE_REV" ]; then
+		trunk="$BASE_REV"
+	else
+		trunk="$(resolve_trunk)" || die "no origin/trunk to diff '${branch}' against (and no --base)
+  Run 'git fetch origin trunk', or pass '--base REV --branch ${branch}'."
+	fi
+	if ! base="$(git merge-base "$trunk" "$branch" 2>&1)"; then
+		die "no merge base between ${trunk} and ${branch}: ${base}
+  Fetch the history ('git fetch origin trunk'), or diff explicit commits with
+  '--base REV --head REV'."
+	fi
+	diff_range "$base" "$branch"
+	DIFF_WHY="merge base of ${trunk} and ${branch} (${base}), ${#CHANGED[@]} changed files"
 }
 
 load_changed() {
@@ -169,6 +220,11 @@ load_changed() {
 			DIFF_CHECKED=1
 			DIFF_WHY="paths file ${PATHS_FILE} (${#CHANGED[@]} changed files)"
 		fi
+	elif [ -n "$BRANCH_REV" ]; then
+		if [ -n "$HEAD_REV" ]; then
+			die "--branch names the head itself; drop --head (or use --base REV --head REV)"
+		fi
+		branch_diff "$BRANCH_REV"
 	elif [ -n "$BASE_REV" ] || [ -n "$HEAD_REV" ]; then
 		if [ -z "$BASE_REV" ] || [ -z "$HEAD_REV" ]; then
 			die "--base and --head go together (base='$BASE_REV' head='$HEAD_REV')"
@@ -181,6 +237,7 @@ load_changed() {
 		trunk="$(resolve_trunk)" || die "no origin/trunk to diff HEAD against (and no --base/--head or --paths)
   A gate with no file list cannot check its rule, so it does not pass. Run
   'git fetch origin trunk', or pass '--paths FILE' / '--base REV --head REV'."
+		TRUNK_HINT="$trunk"
 		if ! base="$(git merge-base "$trunk" HEAD 2>&1)"; then
 			die "no merge base between ${trunk} and HEAD: ${base}
   A shallow clone or an unrelated HEAD has nothing to diff; fetch the history
