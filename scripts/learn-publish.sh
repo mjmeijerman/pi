@@ -83,7 +83,7 @@ fi
 [ -n "$PROPOSAL" ] || PROPOSAL="(proposal not named — write it before publishing)"
 
 # The first PR whose head is this branch. Empty array JSON = no PR yet.
-pr_json() { $GH_CMD pr list --head "$BRANCH" --state all --json number,url,state --limit 5 2>/dev/null; }
+pr_json() { "$GH_CMD" pr list --head "$BRANCH" --state all --json number,url,state --limit 5 2>/dev/null; }
 
 # Prints the PR number on success; 1 = no PR; 2 = gh could not be asked.
 pr_number() {
