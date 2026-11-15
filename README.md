@@ -212,7 +212,7 @@ Where this repo came from, in Radar terms:
 | #1 agent sandboxing | Adopt | `sandbox/` bubblewrap launcher |
 | #29 harness quality evaluation | Assess | `agent/extensions/__tests__/` |
 | #30 local coding models | Assess | `local_llm` tool on the local qwen model |
-| #11 feedback flywheel, #25 agent suggestion box | Trial / Assess | `/suggest`, `/retro`, and `make retro` weekly from `systemd/pi-retro.timer` |
+| #11 feedback flywheel, #25 agent suggestion box | Trial / Assess | `/suggest`, `/retro`, and `make retro` weekly from `systemd/pi-retro.timer`; `agent/extensions/self-learn.ts` judges each compaction behind a gate that needs repetition before it spends a model call — two identical failed tool calls, the same CI check red on two branches or in two workers' reports, the same gate or override recorded by two workers, two learners that died without a proposal, two of the user's own "again" lines, or one `/suggest` note — and then starts a separate pi session that writes one proposal |
 | #26 context profiling | Assess | `scripts/session-report.mjs` |
 | #36 agent instruction bloat | Caution | lean `AGENTS.md`, rules replaced by hooks where possible |
 
