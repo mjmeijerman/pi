@@ -50,7 +50,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 const DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const PROPOSAL_DIR = join(DIR, "proposals");
@@ -290,6 +290,29 @@ export async function newestProposalAt(dir: string = PROPOSAL_DIR): Promise<numb
  * The proposals directory is already the durable record of "this window was
  * judged", so the boundary needs no state file of its own.
  */
+/**
+ * Both spellings of one proposal instant.
+ *
+ * The queue file keeps the ISO `T` (`…T10-07-10-876Z.md`); the path the learner
+ * is told to write replaces it with `-` (`…-10-07-10-876Z.md`). `learn-10-07`
+ * wrote the first, and was counted dead for it: it had the branch, a finished
+ * proposal and no PR, and eight learners in a row started on the false signal
+ * "3 learners died without a proposal". Reading both spellings is the fix.
+ */
+export function proposalSpellings(path: string): string[] {
+	const name = basename(path);
+	const alternatives = [
+		name.replace(/^(\d{4}-\d{2}-\d{2})T/, "$1-"),
+		name.replace(/^(\d{4}-\d{2}-\d{2})-/, "$1T"),
+	].filter((candidate) => candidate !== name);
+	return [path, ...alternatives.map((candidate) => join(dirname(path), candidate))];
+}
+
+/** Did the learner write its proposal, under either spelling of the timestamp? */
+export function proposalWritten(path: string, exists: (path: string) => boolean = existsSync): boolean {
+	return proposalSpellings(path).some((candidate) => exists(candidate));
+}
+
 export function noteBaseline(lastCompactIso: string | null, newestProposalMs: number | null): string | null {
 	const compact = lastCompactIso ? Date.parse(lastCompactIso) : Number.NaN;
 	const known = [compact, newestProposalMs].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
@@ -549,9 +572,10 @@ export function parseRuns(raw: string): unknown[] {
  */
 export function diedLearnersFrom(
 	rows: unknown[],
-	options: { exists: (path: string) => boolean; now: number; graceMs?: number },
+	options: { exists: (path: string) => boolean; now: number; graceMs?: number; since?: number | null },
 ): DiedLearner[] {
 	const graceMs = options.graceMs ?? DEATH_GRACE_MS;
+	const since = typeof options.since === "number" && Number.isFinite(options.since) ? options.since : null;
 	const out: DiedLearner[] = [];
 	const seen = new Set<string>();
 	for (const row of rows) {
@@ -569,6 +593,10 @@ export function diedLearnersFrom(
 		if (!entry.slug || seen.has(entry.slug)) continue;
 		const at = Date.parse(entry.ts ?? "");
 		if (!Number.isFinite(at)) continue;
+		// A death a later proposal already judged is history, not evidence: the
+		// launch path it named has been looked at, and re-citing it starts a
+		// learner after every compaction forever.
+		if (since !== null && at < since) continue;
 		const proposal = entry.proposal ?? "";
 		// A spawned row with no proposal path proves nothing either way.
 		if (entry.kind === "spawned" && !proposal) continue;
@@ -1368,7 +1396,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 				return null;
 			}
 		});
-	const proposalExists = deps.proposalExists ?? existsSync;
+	const proposalExists = deps.proposalExists ?? ((path: string) => proposalWritten(path));
 	const now = deps.now ?? (() => Date.now());
 	const countNotes = deps.countNotes ?? (async (sinceIso: string | null) => {
 		try {
@@ -1594,7 +1622,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 	 * read in parallel and a source that fails becomes a warning, so the evidence
 	 * file says "could not look" instead of "none".
 	 */
-	async function externalEvidence(at: number, ctx: any): Promise<ExternalEvidence> {
+	async function externalEvidence(at: number, ctx: any, judgedSince: number | null): Promise<ExternalEvidence> {
 		const warnings: string[] = [];
 		const [ci, space, runsRaw, words] = await Promise.all([
 			ciRuns().catch((error: unknown) => ({
@@ -1624,7 +1652,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		return {
 			ciFailures: ciFailuresFrom(ci.runs, space.reports),
 			workerFailures: workerFailuresFrom(space.reports, space.decisions),
-			diedLearners: diedLearnersFrom(parseRuns(runsRaw), { exists: proposalExists, now: at }),
+			diedLearners: diedLearnersFrom(parseRuns(runsRaw), { exists: proposalExists, now: at, since: judgedSince }),
 			frustration: words.text ? frustrationQuotes(words.text) : [],
 			warnings,
 			workspacePresent: space.present,
@@ -1635,14 +1663,15 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		const at = now();
 		// The newest proposal closes the /suggest window: one note that has
 		// already produced a proposal must not start a learner again.
-		const noteSince = noteBaseline(lastCompactIso, await newestProposalAt());
+		const newestProposal = await newestProposalAt();
+		const noteSince = noteBaseline(lastCompactIso, newestProposal);
 		// The four outside sources run in parallel and none of them may throw: a
 		// sandboxed gh and an absent workspace are normal, and both are reported
 		// as warnings in the evidence file instead of as silence.
 		const [notes, machineLast, external] = await Promise.all([
 			countNotes(noteSince),
 			lastSpawnAnywhere(),
-			externalEvidence(at, ctx),
+			externalEvidence(at, ctx, newestProposal),
 		]);
 		const candidates = [lastSpawnAt, machineLast].filter((value): value is number => typeof value === "number");
 		const lastAnywhere = candidates.length ? Math.max(...candidates) : null;

@@ -37,6 +37,8 @@ const {
 	diedLearnersFrom,
 	frustrationQuotes,
 	watchOutcome,
+	proposalSpellings,
+	proposalWritten,
 	ghCiRuns,
 	parseRuns,
 	readWorkspace,
@@ -898,6 +900,31 @@ describe("learners that died", () => {
 		assert.deepEqual(died.map((learner) => learner.slug), ["learn-1936"]);
 		assert.equal(died[0].launcher, "pane");
 		assert.equal(died[0].elapsedMs, null);
+	});
+
+	test("a proposal written under the queue file's spelling is a proposal, not a death", () => {
+		const told = "/p/2026-11-15-10-07-10-876Z.md";
+		const wrote = "/p/2026-11-15T10-07-10-876Z.md";
+		assert.deepEqual(proposalSpellings(told), [told, wrote]);
+		assert.deepEqual(proposalSpellings(wrote), [wrote, told], "and the other way round");
+		const exists = (path: string) => path === wrote;
+		assert.equal(proposalWritten(told, exists), true);
+		assert.equal(proposalWritten("/p/a.md", () => false), false, "a path with no timestamp has one spelling, and it is absent");
+		const died = diedLearnersFrom([row({ kind: "spawned", slug: "learn-10-07", proposal: told })], {
+			exists: (path: string) => proposalWritten(path, exists),
+			now: NOW,
+		});
+		assert.equal(died.length, 0, "learn-10-07 wrote its proposal one character off and was called dead for it");
+	});
+
+	test("a death a later proposal already judged is history, not evidence", () => {
+		const death = row({ kind: "died", slug: "learn-2015" });
+		const judged = diedLearnersFrom([death], { exists: () => false, now: NOW, since: NOW - minutes(1) });
+		assert.equal(judged.length, 0, "two 2026-11-14 deaths cited eight learner sessions running");
+		const fresh = diedLearnersFrom([death], { exists: () => false, now: NOW, since: NOW - minutes(90) });
+		assert.equal(fresh.length, 1, "a death recorded after the last proposal still counts");
+		const noBaseline = diedLearnersFrom([death], { exists: () => false, now: NOW, since: null });
+		assert.equal(noBaseline.length, 1, "no proposal on disk means nothing has been judged yet");
 	});
 
 	test("the watch writes the row with the slug, the launcher, the queue and the elapsed time", async () => {
