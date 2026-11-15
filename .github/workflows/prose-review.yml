@@ -77,6 +77,10 @@ jobs:
           # Empty on a fork pull request, because fork secrets are not handed
           # out. That is the "not configured" path below, not a crash.
           PROSE_REVIEW_API_KEY: ${{ secrets.PROSE_REVIEW_API_KEY }}
+          # Repository variables, not secrets: they choose which provider is used.
+          # Empty means the script's OpenAI defaults.
+          PROSE_REVIEW_ENDPOINT: ${{ vars.PROSE_REVIEW_ENDPOINT }}
+          PROSE_REVIEW_MODEL: ${{ vars.PROSE_REVIEW_MODEL }}
         run: |
           set -euo pipefail
           diff="$RUNNER_TEMP/prose.diff"
