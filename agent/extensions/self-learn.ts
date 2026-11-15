@@ -383,11 +383,20 @@ export interface ReportText {
 	text: string;
 }
 
-/** One row of `gh run list --status failure --json name,headBranch,conclusion`. */
+/** One row of `gh run list --status failure --json name,headBranch,conclusion,databaseId`. */
 export interface CiRun {
 	name?: string;
 	headBranch?: string;
 	conclusion?: string;
+	/** The id `gh run view` wants, used to ask whether a job ever ran. */
+	databaseId?: number;
+}
+
+/** One job of `gh run view <id> --json jobs`. */
+export interface CiJob {
+	conclusion?: string;
+	/** Every step GitHub executed for this job. */
+	steps?: unknown[];
 }
 
 /** Which line looks like a failure. Grouping is exact, so this can be loose. */
@@ -717,19 +726,73 @@ function runOnce(
  * old gate told.
  */
 export async function ghCiRuns(cwd = REPO, bin = "gh"): Promise<{ runs: CiRun[]; warning: string | null }> {
-	const argv = [bin, "run", "list", "--status", "failure", "--limit", "100", "--json", "name,headBranch,conclusion"];
+	const argv = [bin, "run", "list", "--status", "failure", "--limit", "100", "--json", "name,headBranch,conclusion,databaseId"];
 	const result = await runOnce(argv, cwd, 5_000);
 	if (result.status !== 0) {
 		const why = clipDetail(result.stderr) || `gh exited ${result.status === null ? "with no status" : result.status}`;
 		return { runs: [], warning: `failing CI checks not read: ${why}` };
 	}
+	let parsed: CiRun[];
 	try {
-		const parsed = JSON.parse(result.stdout) as CiRun[];
-		if (!Array.isArray(parsed)) return { runs: [], warning: "failing CI checks not read: gh printed something that is not a list" };
-		return { runs: parsed, warning: null };
+		parsed = JSON.parse(result.stdout) as CiRun[];
 	} catch {
 		return { runs: [], warning: "failing CI checks not read: gh printed something that is not JSON" };
 	}
+	if (!Array.isArray(parsed)) return { runs: [], warning: "failing CI checks not read: gh printed something that is not a list" };
+	const idle = await accountBlocked(parsed, cwd, bin);
+	if (idle) return { runs: [], warning: idle };
+	return { runs: parsed, warning: null };
+}
+
+/**
+ * A run whose failure judged no code: every job that reported a verdict did so
+ * without executing a single step.
+ *
+ * On 2026-11-15 every check on trunk and on nine branches was red within two
+ * seconds with zero steps, because GitHub refused to start the jobs
+ * ("recent account payments have failed or your spending limit needs to be
+ * increased"). The runs still read `conclusion: failure`, so the gate counted
+ * 39 `tests`, 31 `pr-tier` and 28 `harness-check` failures and answered the
+ * next five compactions with a learner that could only guess. A failure with no
+ * steps is a queue refusal, not a verdict on the code.
+ */
+export function noStepRan(jobs: CiJob[]): boolean {
+	const judged = jobs.filter((job) => job?.conclusion === "failure" || job?.conclusion === "success");
+	return judged.length > 0 && judged.every((job) => (job.steps?.length ?? 0) === 0);
+}
+
+/** How many of the newest failing runs are inspected before the source is called blocked. */
+export const CI_PROBE_RUNS = 3;
+
+/** Did the jobs of this run execute anything? `null` when gh could not say. */
+async function ranAStep(id: number, cwd: string, bin: string): Promise<boolean | null> {
+	const result = await runOnce([bin, "run", "view", String(id), "--json", "jobs"], cwd, 5_000);
+	if (result.status !== 0) return null;
+	try {
+		const parsed = JSON.parse(result.stdout) as { jobs?: CiJob[] };
+		if (!Array.isArray(parsed.jobs)) return null;
+		return !noStepRan(parsed.jobs);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The warning that replaces repeated CI failures when the account is the cause.
+ *
+ * Three of the newest failing runs is enough: a billing block is account-wide and
+ * hits every workflow at once, so three refusals in a row are not three broken
+ * checks. Anything short of three (an unreadable probe, a run that did start)
+ * counts normally — the conservative direction is to keep a real failure.
+ */
+async function accountBlocked(runs: CiRun[], cwd: string, bin: string): Promise<string | null> {
+	const probe = runs.filter((run) => typeof run.databaseId === "number").slice(0, CI_PROBE_RUNS);
+	if (probe.length < CI_PROBE_RUNS) return null;
+	const started = await Promise.all(probe.map((run) => ranAStep(run.databaseId as number, cwd, bin)));
+	if (!started.every((ran) => ran === false)) return null;
+	return (
+		`failing CI checks not counted: the ${CI_PROBE_RUNS} newest failing runs ran no step, so GitHub never started the jobs and no code was judged (${runs.length} failing runs; check the repo's Billing & plans — payments failed or the spending limit was reached)`
+	);
 }
 
 /** What the delegation workspace contributes: other workers' written failures. */
@@ -1804,7 +1867,7 @@ function evidenceMarkdown(input: {
 
 	lines.push("## Repeated failing CI checks", "");
 	if (unread("failing CI checks")) {
-		lines.push("Not read (see Warnings). An empty list here is not \"no failures\".");
+		lines.push("Not read or not counted (see Warnings). An empty list here is not \"no failures\".");
 	} else if (external.ciFailures.length === 0) {
 		lines.push("None: no check failed on two branches or in two worker reports.");
 	} else {

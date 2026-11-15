@@ -8,7 +8,7 @@
  * so it cannot spawn a learner of its own.
  */
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile, chmod } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -38,6 +38,7 @@ const {
 	frustrationQuotes,
 	watchOutcome,
 	ghCiRuns,
+	noStepRan,
 	parseRuns,
 	readWorkspace,
 	failureLines,
@@ -696,7 +697,7 @@ describe("wiring", () => {
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		const run = await waitForRun((row, index) => index >= before && row.kind === "spawned");
 		const body = await readFile(run.queue, "utf8");
-		assert.match(body, /Not read \(see Warnings\)/, "an empty table never claims there were no failures");
+		assert.match(body, /Not read or not counted \(see Warnings\)/, "an empty table never claims there were no failures");
 		assert.match(body, /gh is not logged in/, "the evidence says why it could not look");
 	});
 
@@ -790,6 +791,73 @@ describe("repeated failing CI checks", () => {
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
+	});
+
+	// 2026-11-15: every check on trunk and nine branches was red in two seconds with
+	// zero steps, because GitHub would not start the jobs (account payments failed).
+	// Three of the newest failures are inspected for a step, because a billing block
+	// is account-wide and a run that ran nothing judged nothing.
+	const FAILED_RUNS = JSON.stringify([
+		{ name: "tests", headBranch: "trunk", conclusion: "failure", databaseId: 1 },
+		{ name: "pr-tier", headBranch: "trunk", conclusion: "failure", databaseId: 2 },
+		{ name: "harness-check", headBranch: "trunk", conclusion: "failure", databaseId: 3 },
+	]);
+
+	async function fakeGh(dir: string, view: string): Promise<string> {
+		const path = join(dir, "gh");
+		await writeFile(
+			path,
+			`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '${FAILED_RUNS}' ;;\n  view) ${view} ;;\nesac\n`,
+			"utf8",
+		);
+		await chmod(path, 0o755);
+		return path;
+	}
+
+	test("a run whose jobs never started is not a repeated CI failure", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-idle-gh-"));
+		try {
+			const bin = await fakeGh(dir, `printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]},{"conclusion":"skipped","steps":[]}]}'`);
+			const result = await ghCiRuns(dir, bin);
+			assert.deepEqual(result.runs, [], "a queue refusal is not evidence about the code");
+			assert.match(result.warning ?? "", /failing CI checks not counted/);
+			assert.match(result.warning ?? "", /Billing & plans/);
+			const decision = decideLearner(evidence({ ciFailures: ciFailuresFrom(result.runs) }));
+			assert.equal(decision.spawn, false, "no learner is started about runs that judged nothing");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("one job that ran a step keeps the failures, and no warning is written", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-ran-gh-"));
+		try {
+			const bin = await fakeGh(dir, `printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}'`);
+			const result = await ghCiRuns(dir, bin);
+			assert.equal(result.runs.length, 3);
+			assert.equal(result.warning, null);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("an unreadable job probe keeps the failures instead of hiding them", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-probe-gh-"));
+		try {
+			const bin = await fakeGh(dir, "exit 1");
+			const result = await ghCiRuns(dir, bin);
+			assert.equal(result.runs.length, 3, "doubt counts normally");
+			assert.equal(result.warning, null);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("noStepRan reads steps, not conclusions", () => {
+		assert.equal(noStepRan([]), false, "no jobs is not proof of anything");
+		assert.equal(noStepRan([{ conclusion: "failure", steps: [] }]), true);
+		assert.equal(noStepRan([{ conclusion: "failure", steps: [] }, { conclusion: "skipped", steps: [] }]), true);
+		assert.equal(noStepRan([{ conclusion: "failure", steps: [{ name: "Set up job" }] }]), false);
 	});
 });
 
