@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # the \uXXXX escapes are meant literally: printf expands them, the shell must not.
 # Tests for git-hooks/scan-unicode.sh — the pre-commit scan that refuses hidden
 # codepoints in the files the harness reads as instruction.
 #

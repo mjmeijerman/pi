@@ -266,7 +266,7 @@ write_skills_lock() {
 		done < <(skills_lock_target | sort -u)
 	} >"$tmp"
 	mv "$tmp" "$lock"
-	count=$(grep -v '^#' "$lock" | wc -l | tr -d '[:space:]')
+	count=$(grep -vc '^#' "$lock" || true)
 	printf '%s: %s entries written\n' "$SKILLS_LOCK_REL" "$count"
 	if [ -d "$ROOT/agent/skills" ] && [ "$count" -eq 0 ]; then
 		printf 'harness-check: no files under agent/skills were locked — is this a harness checkout?\n' >&2
@@ -496,7 +496,7 @@ check_radar_basis() {
 # so take the leading date token instead of the whole line. Parsing the line
 # whole made every comparison fail silently and the check passed on nothing.
 check_review_freshness() {
-	local files=() file rel review due then today soon seen=0
+	local files=() file rel review due due_at today soon seen=0
 	shopt -s nullglob
 	files=("$ROOT"/docs/*.md)
 	shopt -u nullglob
@@ -518,15 +518,15 @@ check_review_freshness() {
 			verdict review-freshness "$rel" 0 "Review: carries no YYYY-MM-DD date ($review)"
 			continue
 		fi
-		then=$(date -d "$due" +%s 2>/dev/null) || {
+		due_at=$(date -d "$due" +%s 2>/dev/null) || {
 			verdict review-freshness "$rel" 0 "Review: date $due is not a real date"
 			continue
 		}
 		seen=$((seen + 1))
-		if [ "$then" -lt "$today" ]; then
+		if [ "$due_at" -lt "$today" ]; then
 			verdict review-freshness "$rel" 0 \
 				"review overdue since $due — rerun the audit or delete the doc (blips 36 and 39)"
-		elif [ "$then" -le "$soon" ]; then
+		elif [ "$due_at" -le "$soon" ]; then
 			record WARN review-freshness "$rel" "review due $due, inside 14 days — schedule the rerun"
 		else
 			verdict review-freshness "$rel" 1 "review due $due"
