@@ -83,8 +83,14 @@ and, whenever networking is on, egress.
 
 Blip 22's point lands here: each step of a toxic flow is harmless on its own. `curl`
 a page (fine), read a file (fine), `curl` again with the file in the body (exfiltration).
-The sandbox cuts the flow at the third step only when it is `--no-net`; `secret-guard`
-cuts a *value* leaving a tool call, not a flow whose earlier steps were all allowed.
+The sandbox cuts the flow at the third step only when it is `--no-net`. `secret-guard`
+cuts it too: it keeps a per-turn ledger of the secret-shaped paths a step touched and
+refuses a later step in the same turn that sends file content off the machine
+(`curl`/`wget`/`scp`/`rsync`/`git push`/`http`), naming the earlier step and its path
+(`agent/extensions/__tests__/secret-guard-flow.test.ts`). A turn is one agent run, so
+two user prompts never share a ledger: a copy in one prompt and a POST in the next are
+still invisible, and so is a read that goes through a tool other than `bash`
+(`codemode`'s `tools.read`), which the ledger does not watch.
 
 ### 2.4 Malicious agent skills (Persistence → Defense Evasion)
 
