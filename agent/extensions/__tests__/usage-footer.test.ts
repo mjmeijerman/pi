@@ -112,6 +112,23 @@ describe("fmtTokens", () => {
 	// The bug class these all share: the precision was chosen from the raw value,
 	// so the rounded string filled its unit (1000k, 10.0k) or showed a decimal the
 	// next tier does not use.
+	// Two rounding steps happen in fmtTokens: the while loop scales the exact
+	// count down, the for loop only ever divides a value that has already been
+	// rounded to whole units. For counts in the tera range that difference is
+	// visible, so these pin the exact-count scaling rather than a re-rounded one.
+	test("scales the exact count, not a re-rounded one, for tera counts", () => {
+		assert.equal(fmtTokens(1_049_500_000_000), "1.0T", "1.0495T prints as 1.0T");
+		assert.equal(fmtTokens(1_150_100_000_000), "1.2T", "1.1501T prints as 1.2T");
+	});
+
+	// T is the last unit, so there is nothing to promote to: the truthful output
+	// is the whole tera count, never a wrapped index or a dropped precision.
+	test("stops at T with the whole tera count instead of wrapping the unit", () => {
+		assert.equal(fmtTokens(999_500_000_000_000), "1000T");
+		assert.equal(fmtTokens(1_000_000_000_000_000), "1000T");
+		assert.equal(fmtTokens(1e18), "1000000T");
+	});
+
 	test("no boundary value prints a full unit (1000x) or a trailing .0 below ten", () => {
 		for (const n of [999, 9999, 10_000, 999_999, 1_000_000, 9_999_999, 10_000_000, 999_999_999]) {
 			const out = fmtTokens(n);
