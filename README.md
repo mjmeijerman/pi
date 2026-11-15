@@ -194,7 +194,7 @@ Two things worth knowing:
 | `agent/bin/` | `fd`/`rg` extracted by pi | Re-extracted on first run |
 | `agent/dictation/venv/` | 2.5 GB of wheels | `--with-dictation` |
 | `agent/npm/`, `agent/git/` | Installed packages | `pi update --extensions` |
-| `agent/suggestions.jsonl`, `agent/retro/` | Local feedback log | Starts empty |
+| `agent/suggestions.jsonl`, `agent/retro/` | Local feedback log and its weekly digest | Starts empty; `make retro` recreates the digest and `last-run.txt` |
 | Ollama model weights | 17 GB | `--with-ollama` |
 | `werken-met-ai.pdf` | 15 MB third party | Radar site |
 
@@ -212,7 +212,7 @@ Where this repo came from, in Radar terms:
 | #1 agent sandboxing | Adopt | `sandbox/` bubblewrap launcher |
 | #29 harness quality evaluation | Assess | `agent/extensions/__tests__/` |
 | #30 local coding models | Assess | `local_llm` tool on the local qwen model |
-| #11 feedback flywheel, #25 agent suggestion box | Trial / Assess | `/suggest`, `/retro` |
+| #11 feedback flywheel, #25 agent suggestion box | Trial / Assess | `/suggest`, `/retro`, and `make retro` weekly from `systemd/pi-retro.timer` |
 | #26 context profiling | Assess | `scripts/session-report.mjs` |
 | #36 agent instruction bloat | Caution | lean `AGENTS.md`, rules replaced by hooks where possible |
 

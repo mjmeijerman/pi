@@ -53,6 +53,11 @@ MIN_RELEASE_AGE=2
 # stops running. `make evals` writes agent/evals/last-run.txt; older than this many
 # days is a WARN, not a FAIL, because the run is advisory (blip 29, blip 110).
 EVAL_MAX_AGE_DAYS=14
+# The suggestion box is only useful if something reads it. `/retro` ran only when a
+# person typed it, so the log grew unread (blips 25 and 11). `make retro` writes
+# agent/retro/last-run.txt weekly from systemd/pi-retro.timer; older than this many days
+# is a WARN, same as the evals, because the digest is advisory.
+RETRO_MAX_AGE_DAYS=14
 
 usage() { sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() {
@@ -521,6 +526,41 @@ check_eval_freshness() {
 	fi
 }
 
+# ------------------------------------------------------------ retro freshness --
+# Same shape as the eval check above and for the same reason: a scheduled report that
+# quietly stops running leaves the suggestion box unread, which is the state this
+# harness was in before the timer existed. `make retro` writes the record, and it is
+# written even on an empty log, so a missing record means "never ran", not "nothing to
+# say".
+check_retro_freshness() {
+	local rec="agent/retro/last-run.txt" ran now age ran_at summary digest
+	if [ ! -f "$ROOT/$rec" ]; then
+		record WARN retro-freshness "$rec" \
+			"no retro run recorded — the suggestion box has never been aggregated here; run: make retro"
+		return
+	fi
+	ran=$(sed -n 's/^ran_epoch=//p' "$ROOT/$rec" | head -1)
+	ran_at=$(sed -n 's/^ran_at=//p' "$ROOT/$rec" | head -1)
+	summary=$(sed -n 's/^note=//p' "$ROOT/$rec" | head -1)
+	digest=$(sed -n 's/^digest=//p' "$ROOT/$rec" | head -1)
+	case "$ran" in
+	'' | *[!0-9]*)
+		record WARN retro-freshness "$rec" \
+			"ran_epoch missing or not a number — rerun make retro so the record is honest"
+		return
+		;;
+	esac
+	now=$(date +%s)
+	age=$(((now - ran) / 86400))
+	if [ "$age" -gt "$RETRO_MAX_AGE_DAYS" ]; then
+		record WARN retro-freshness "$rec" \
+			"last run $age days ago (${ran_at:-unknown}, ${summary:-no counts}) — older than ${RETRO_MAX_AGE_DAYS} days; run: make retro"
+	else
+		verdict retro-freshness "$rec" 1 \
+			"last run $age day(s) ago (${ran_at:-unknown}, ${summary:-no counts}, digest ${digest:-unknown}) — inside the ${RETRO_MAX_AGE_DAYS}-day window"
+	fi
+}
+
 # ----------------------------------------------------------- sandbox marker --
 # A sandbox nobody can see becomes a sandbox nobody checks: once `install.sh`
 # wraps `pi`, the contained session and the one launched with PI_BARE=1 look
@@ -624,6 +664,9 @@ if [ "$QUICK" = 0 ]; then
 
 	section "evals — a model graded against the harness's own rules"
 	check_eval_freshness
+
+	section "retro — the suggestion box aggregated on a schedule"
+	check_retro_freshness
 
 	section "metadata — ownership and provenance"
 	check_doc_metadata

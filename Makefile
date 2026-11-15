@@ -1,7 +1,7 @@
 # pi agent setup — one-command install for a new machine.
 # Usage:  make setup   (or just: make)
 
-.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit evals evals-install pr-check scripts-test
+.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit evals evals-install retro retro-install pr-check scripts-test
 
 # Full provisioning on a new machine: config, hooks, system packages, API key,
 # pi packages, optional local model / dictation venv, then verification.
@@ -53,6 +53,16 @@ evals:
 		status=$$?; \
 		node $(CURDIR)/agent/evals/record-run.mjs $(CURDIR)/agent/evals/.last-run.json; \
 		exit $$status
+
+# The suggestion box aggregated without a person in the loop. `/retro` in a session
+# does this too, but only when someone types it, so 207 recorded problems sat unread
+# (blips 25 and 11). Headless on purpose: no prompt, no model call, nothing on the network —
+# it reads agent/suggestions.jsonl, writes a dated digest to agent/retro/, and records
+# the run in agent/retro/last-run.txt. It deletes no entry and writes no digest when
+# there is nothing to aggregate. Runs weekly from systemd/pi-retro.timer;
+# scripts/harness-check.sh warns when that record is over 14 days old.
+retro:
+	@node $(CURDIR)/scripts/retro.mjs
 
 # The PR body gates, before the push instead of after the red check. This is
 # the same scripts/pr-gate.sh CI runs, so a local verdict and the CI verdict
@@ -110,6 +120,19 @@ evals-install:
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now pi-evals.timer
 	@systemctl --user list-timers pi-evals.timer --no-pager
+
+# Install and start the weekly retro timer: systemd/pi-retro.{service,timer} copied
+# into ~/.config/systemd/user with %h expanded, then enabled. install.sh does the same
+# on a full setup; this target re-installs after editing the units.
+retro-install:
+	@install -d "$${XDG_CONFIG_HOME:-$$HOME/.config}/systemd/user"
+	@for f in systemd/pi-retro.service systemd/pi-retro.timer; do \
+		sed "s|%h|$$HOME|g" "$$f" > "$${XDG_CONFIG_HOME:-$$HOME/.config}/systemd/user/$$(basename $$f)"; \
+		echo "== $$f installed"; \
+	done
+	@systemctl --user daemon-reload
+	@systemctl --user enable --now pi-retro.timer
+	@systemctl --user list-timers pi-retro.timer --no-pager
 
 uninstall:
 	@echo "Removing secret-guard global git config..."

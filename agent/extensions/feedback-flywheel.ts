@@ -134,8 +134,13 @@ export function aggregate(entries: Suggestion[]): {
 	return [...groups.values()].sort((a, b) => b.count - a.count || b.last.localeCompare(a.last));
 }
 
-function renderReport(groups: ReturnType<typeof aggregate>, total: number): string {
-	const day = new Date().toISOString().slice(0, 10);
+/** The digest body. Exported so the scheduled run in scripts/retro.mjs renders the
+ * same report as `/retro`; two renderers would drift. */
+export function renderReport(
+	groups: ReturnType<typeof aggregate>,
+	total: number,
+	day = new Date().toISOString().slice(0, 10),
+): string {
 	const lines = [
 		`# Harness retro — ${day}`,
 		"",

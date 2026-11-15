@@ -1,0 +1,31 @@
+# Weekly harness retro: `make retro` — the suggestion box aggregated into a dated digest
+# with nobody in the loop (Radar Vol. 35 blips 25 agent suggestion box and 11 feedback flywheel).
+#
+# Copied into ~/.config/systemd/user/ and enabled by ~/.pi/install.sh (or
+# `make retro-install`). Edit here, then reinstall; the installed copy is generated, so
+# hand edits to it are lost.
+#
+# Why here and not GitHub Actions: the log it reads is
+# `%h/.pi/agent/suggestions.jsonl`, which only exists on this machine. A runner would
+# aggregate an empty file and report a healthy week.
+#
+# The run is advisory and cheap: node reads the log, groups by signature, writes
+# `%h/.pi/agent/retro/<date>.md` and the record `%h/.pi/agent/retro/last-run.txt`.
+# No prompt, no model call, no network. scripts/harness-check.sh warns when that record
+# is more than 14 days old — a report nobody schedules is the failure this unit exists
+# for.
+[Unit]
+Description=pi harness retro — weekly make retro (suggestion box aggregated headless)
+Documentation=file://%h/.pi/scripts/retro.mjs
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.pi
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:%h/.local/share/pnpm/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/make retro
+Nice=10
+IOSchedulingClass=idle
+# Nothing here is slow: reading one jsonl, writing two small files. 5 minutes is
+# generous and still bounded, so a stuck filesystem cannot hold the timer's next slot.
+TimeoutStartSec=300

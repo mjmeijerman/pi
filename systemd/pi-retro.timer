@@ -1,0 +1,19 @@
+# Weekly timer for the harness retro. Paired with pi-retro.service; installed and
+# enabled by ~/.pi/install.sh (or `make retro-install`).
+#
+# Monday, after the eval timer (Monday 06:17): the retro reads the suggestion box, not
+# the eval results, so the two do not need to be ordered — but the same Monday slot
+# gives one day of the week where every harness freshness check flips, and the window
+# harness-check.sh warns about at 14 days is two of these. Persistent=true means a
+# machine that was off on Monday runs it at the next login instead of skipping the week.
+[Unit]
+Description=Weekly pi harness retro (suggestion box, headless)
+
+[Timer]
+OnCalendar=Mon *-*-* 07:47:00
+RandomizedDelaySec=1800
+Persistent=true
+Unit=pi-retro.service
+
+[Install]
+WantedBy=timers.target

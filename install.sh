@@ -446,6 +446,34 @@ else
 	echo "!! systemd/$RESUME_UNIT or scripts/herdr-resume.sh missing — skipped the resume unit"
 fi
 
+# --- 5g. weekly retro timer --------------------------------------------------
+# Deliberately the same shape as 5e: the tracked unit is the source of truth, %h is
+# expanded into the installed copy, and the timer is enabled once. It runs `make retro`
+# every Monday, which aggregates %h/.pi/agent/suggestions.jsonl headless — no prompt and
+# no model call — because `/retro` only ever ran when a person typed it (blips 25 and 11).
+RETRO_TIMER="pi-retro.timer"
+if [ -f "$SOURCE_DIR/systemd/pi-retro.service" ] && [ -f "$SOURCE_DIR/systemd/$RETRO_TIMER" ]; then
+	mkdir -p "$SYSTEMD_USER_DIR"
+	for unit in pi-retro.service "$RETRO_TIMER"; do
+		sed "s|%h|$HOME|g" "$SOURCE_DIR/systemd/$unit" >"$SYSTEMD_USER_DIR/$unit"
+		echo "== $unit -> $SYSTEMD_USER_DIR/$unit"
+	done
+	if [ "${PI_SKIP_SYSTEMD:-}" = 1 ]; then
+		echo "== PI_SKIP_SYSTEMD=1 — not enabling $RETRO_TIMER"
+	elif command -v systemctl >/dev/null 2>&1 && [ -d "/run/user/$(id -u)" ]; then
+		systemctl --user daemon-reload || echo "!! systemctl --user daemon-reload failed"
+		if systemctl --user enable --now "$RETRO_TIMER"; then
+			echo "== weekly harness retro enabled ($RETRO_TIMER, Monday 07:47, writes agent/retro/last-run.txt)"
+		else
+			echo "!! could not enable $RETRO_TIMER — run: systemctl --user enable --now $RETRO_TIMER"
+		fi
+	else
+		echo "!! no systemd user session — units copied, enable later: systemctl --user enable --now $RETRO_TIMER"
+	fi
+else
+	echo "!! $SOURCE_DIR/systemd/pi-retro.service not found — skipped the retro timer"
+fi
+
 echo
 echo "Done. Restart pi (or run /reload) to load the extensions."
 echo
@@ -462,6 +490,8 @@ echo "   jev count \"split this task\"                          # delegation wor
 echo "   systemctl --user status big-boss-pi-guard.service    # workspace guard running"
 echo "   systemctl --user list-timers pi-evals.timer           # weekly harness evals scheduled"
 echo "   systemctl --user status herdr-resume.service          # pi sessions resume after a reboot"
+echo "   systemctl --user list-timers pi-retro.timer            # weekly suggestion-box retro scheduled"
+echo "   cat ~/.pi/agent/retro/last-run.txt                     # last retro run and digest path"
 echo "   cat ~/.pi/agent/evals/last-run.txt                    # last eval run and pass count"
 echo "   bash scripts/harness-check.sh                        # harness budgets as checks"
 echo
@@ -470,4 +500,5 @@ echo
 echo "To turn the workspace guard off:"
 echo "   systemctl --user disable --now pi-evals.timer         # stop the weekly evals"
 echo "   systemctl --user disable --now herdr-resume.service   # stop resuming pi after a reboot"
+echo "   systemctl --user disable --now pi-retro.timer         # stop the weekly retro"
 echo "   systemctl --user disable --now big-boss-pi-guard.service"
