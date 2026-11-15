@@ -34,6 +34,9 @@ set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
 MUTABLE_PREFIX='agent/extensions/'
+# stryker runs in agent/, so its --mutate globs are relative to agent/: the
+# derived list keeps the `extensions/` segment and drops only `agent/`.
+STRIP_PREFIX='agent/'
 
 BASE="origin/trunk"
 DIFF_FILE=""
@@ -70,11 +73,11 @@ mutable_files() {
 	changed_paths |
 		tr -d '\r' |
 		sed 's/^[[:space:]]*//; s/[[:space:]]*$//' |
-		awk -v prefix="$MUTABLE_PREFIX" '
+		awk -v prefix="$MUTABLE_PREFIX" -v strip="$STRIP_PREFIX" '
 			$0 == "" { next }
 			index($0, prefix) != 1 { next }
 			/\.test\.ts$/ { next }
-			/\.ts$/ { path = substr($0, length(prefix) + 1); if (!seen[path]++) print path }
+			/\.ts$/ { path = substr($0, length(strip) + 1); if (!seen[path]++) print path }
 		'
 }
 

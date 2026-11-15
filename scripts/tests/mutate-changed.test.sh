@@ -70,7 +70,7 @@ expect_files() {
 case_start "a branch that touches one extension prints that one file"
 printf 'agent/extensions/merge-guard.ts\n' >"$DIFF"
 run --list-only
-expect_files "merge-guard.ts"
+expect_files "extensions/merge-guard.ts"
 
 # ------------------------------------------------------------- mixed diff ---
 case_start "docs, tests and untouched areas are filtered out"
@@ -85,7 +85,7 @@ agent/extensions/cost-optimizer.ts
 scripts/mutate-changed.sh
 EOF
 run --list-only
-expect_files "$(printf 'merge-guard.ts\nlib/tokens.ts\ncost-optimizer.ts')"
+expect_files "$(printf 'extensions/merge-guard.ts\nextensions/lib/tokens.ts\nextensions/cost-optimizer.ts')"
 
 # ---------------------------------------------------------- no .ts in diff ---
 case_start "a nested extension path survives, a test file never does"
@@ -94,7 +94,7 @@ agent/extensions/lib/nested/helper.ts
 agent/extensions/lib/nested/helper.test.ts
 EOF
 run --list-only
-expect_files "lib/nested/helper.ts"
+expect_files "extensions/lib/nested/helper.ts"
 
 # ------------------------------------------------- empty list is refused ---
 case_start "a branch with no mutable file is refused, not widened"
@@ -131,7 +131,7 @@ agent/extensions/config-guard.ts
 agent/extensions/usage-footer.ts
 EOF
 run --list-only
-expect_files "$(printf 'usage-footer.ts\nconfig-guard.ts')"
+expect_files "$(printf 'extensions/usage-footer.ts\nextensions/config-guard.ts')"
 
 printf '\n== mutate-changed: %d case(s), %d ok, %d failed\n' \
 	"$CASE_N" "$PASS_N" "$FAIL_N"
