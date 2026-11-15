@@ -1,0 +1,22 @@
+# agent/skills.lock — what each skill loads, pinned by content.
+# Generated, never hand-edited: bash scripts/harness-check.sh --write-skills-lock
+# Verified by: bash scripts/harness-check.sh (FAIL on a changed sha256, on a
+# skill file with no entry, and on an entry whose file is gone).
+# Fields, tab-separated: sha256, commit that last touched the file
+# (provenance only, - outside git), path. Radar: #72 agent package manager,
+# #7 plugin marketplace — a skill from elsewhere is pinned like a dependency.
+8aa1446ea1425bbf88b0be70a5cb5c30d454afa8c1939e17d2829cc8b58f7cc9	1dd2d1b9fb78	agent/skills/achterhoek-agenda/clubs-achterhoek.tsv
+82e737d82e4adfb4c5b76f47ffc994896063e994b3bb54f89178582664daca4d	10a5e0d80d91	agent/skills/achterhoek-agenda/references/facebook.md
+55f78b845c23edddf41b766d57944e45c87f2e2d22de66f7c48e59420ded6910	10a5e0d80d91	agent/skills/achterhoek-agenda/references/output-format.md
+06620502e63d2f27197d219de5942ba093b8887a1a25fa6677b18c015a013c18	10a5e0d80d91	agent/skills/achterhoek-agenda/references/season.md
+16f176e2b9e2a31728ec3ba552163a9d430f1f4114be08aab79d459fd50e025f	10a5e0d80d91	agent/skills/achterhoek-agenda/references/sources.md
+dbab97386447c2212843d9f353faaf8e9c064665418724da4b76db6bd6734d68	10a5e0d80d91	agent/skills/achterhoek-agenda/SKILL.md
+ae698afba41dc70937e8a2e2e885e063c3433d7156eb830b7c24b6d9df80f224	bf685c54c91f	agent/skills/cost-optimizer/SKILL.md
+7f2a4410588de60ca8cc2348ddc1fb85492c93504af4d870214ff7fab756bd87	dd217e9d25fb	agent/skills/ethical-hacker/SKILL.md
+2372b475d43449e183b25ad0009f38847dd7c2327b7e2ce4b0db921e5b9d971c	1dd2d1b9fb78	agent/skills/gh-repo-scan/SKILL.md
+ea0d1b111c70f90f1a2b409a72cb7e2baf05e946de3b3f1cf558ba4f8d89dcf0	40cd56a9d15b	agent/skills/github-workflow/SKILL.md
+89166a241f28a60358a4c808a7eebc9be2fefbcf133f6838234e89bdc86714d7	406a55513393	agent/skills/jev/SKILL.md
+50709f0ce1a8c9eda3643c7d17d131885ac1a687ac43596bfe106766a0999504	bf685c54c91f	agent/skills/questionnaire/SKILL.md
+e20ca3cbcb93a621ea427dc2c220d49d459c6de12d42215f0f7e01c1119b9a8a	bf685c54c91f	agent/skills/secret-guard/SKILL.md
+3d91b8207a43818429ea81deb56f9a1d177a10ad6ac0bf49f031b01c461dd6ff	dd217e9d25fb	agent/skills/ui-ux/SKILL.md
+72680cef5146c8e1752007b19e6b93124f5c72cc4ad7f8172e6e56d8d194acb4	32547a722c03	agent/skills/valentina-grading/SKILL.md

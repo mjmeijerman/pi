@@ -8,7 +8,9 @@ core modules / coreutils, and none of them deletes anything.
 | --- | --- |
 | `session-report.mjs` | Read-only report: tokens, cost, cache hit rate, context fill, disk per project + most expensive sessions + stale sessions. |
 | `prune-sessions.sh` | Moves old session logs into `./archive/`. Dry-run unless `--apply`. |
-| `harness-check.sh` | Read-only `PASS`/`WARN`/`FAIL` checks for the playbook's rules: budgets, install state, ownership. |
+| `harness-check.sh` | Read-only `PASS`/`WARN`/`FAIL` checks for the playbook's rules: budgets, install state, ownership, and the skill pin. `--write-skills-lock` is its one writing mode: it regenerates `agent/skills.lock`. |
+| `ci-offline.sh` | Runs every `test-*.sh` next to it: the gate tests that build their own temp repos and need no network. `make offline-test` runs the same thing CI does. |
+| `test-*.sh` | One suite per gate behaviour, plain bash. `test-skills-lock.sh` covers `agent/skills.lock`, `test-unicode-guard.sh` covers the hidden-codepoint scan in the pre-commit hook. |
 | `pr-gate.sh` | The PR body gates (mission, review tier, test change) CI runs, runnable locally before the push. |
 | `harness-baseline.txt` | The ratchet `harness-check.sh` reads: known violations report `WARN`, not `FAIL`. |
 | `pisandbox` | `~/.pi/sandbox/pi-sandbox.sh` without typing the path. |
@@ -132,6 +134,8 @@ bash scripts/harness-check.sh            # everything, one line per check
 bash scripts/harness-check.sh --quick    # budgets only, <1 s (the git hook runs this)
 bash scripts/harness-check.sh --json     # one JSON document, same exit code
 bash scripts/harness-check.sh --root DIR # check another checkout
+bash scripts/harness-check.sh --verify-config  # only the config-file shapes
+bash scripts/harness-check.sh --verify-release-age  # only the npm quarantine
 ```
 
 Exit 0 when nothing `FAIL`s, 1 on any `FAIL`. What it checks:
@@ -144,6 +148,7 @@ Exit 0 when nothing `FAIL`s, 1 on any `FAIL`. What it checks:
 | `review-freshness` | no doc or skill past its own `Review:` date. |
 | `extension-radar-basis` | every `agent/extensions/*.ts` header cites its Radar blips. |
 | `npm-min-release-age` | npm refuses versions younger than 2 days — the value is in days, not minutes (blip 99). |
+| `config-schema` | `agent/settings.json` and `agent/models.json` match the shapes in `agent/config/schema.mjs`; an unknown key `FAIL`s with a one-edit suggestion, and `agent/keys.json` is checked by shape only, never by value (blip 102). |
 | `git-hooks-path` | global `core.hooksPath` is `~/.pi/git-hooks`. |
 | `git-hooks-templates` | `~/.git-templates/hooks` is populated (the `git init` layer). |
 

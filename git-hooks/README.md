@@ -5,6 +5,7 @@ Mechanical protection so secrets never end up in git, in any repo you commit to.
 ## What it does
 
 - `pre-commit`: scans **staged** files (names and content) for secrets and blocks the commit (max 10 findings reported, as `pattern name` + `file:line` — never the value).
+- `pre-commit` also runs the **hidden-codepoint scan** (`scan-unicode.sh`) over staged changes to `agent/skills/**`, `agent/prompts/**` and `agent/AGENTS.md`: bidi overrides, zero-width characters and Cyrillic/Greek/Armenian/fullwidth lookalikes are refused, with file, line, column, codepoint and the line rendered with the character made visible. Ordinary non-Latin text is allowed when it sits in a fenced code block or a quoted span — those are data, prose is instruction. Tests: `scripts/test-unicode-guard.sh`.
 - `commit-msg`: scans commit messages for secret values, then appends provenance. When the environment carries a worker slug (`AGENT_SLUG`, or `PI_AGENT_SLUG`; `delegate spawn` exports it), the message ends with `Agent-Slug: <slug>` and `Spec: specs/<slug>.md` — added at commit time, so the trailer is there before anything can refuse the commit for missing it. No slug, no change: a human commit is untouched, existing trailers are never duplicated, and `--no-verify` bypasses it like any hook. Logic: `add-provenance.sh`; tests: `scripts/tests/commit-msg-provenance.test.sh`.
 - `pre-push`: scans every **pushed commit** (file contents, filenames, commit messages) — the last gate before secrets leave your machine. Catches `--no-verify`/`-f` commits, merges, cherry-picks.
 - `pre-push` also **chains to the repo's own hook** (e.g. husky, a team hook), if one exists. The `git-vuln-scan` agent scan was removed from the pre-push path.
@@ -36,7 +37,8 @@ rm -rf ~/.pi/git-hooks ~/.pi/gitignore_global ~/.git-templates ~/.local/bin/git-
 
 ## Overrides (use sparingly — you are the last line of defense)
 
-- `SKIP_SECRET_SCAN=1 git commit ...` — skip the scan for one commit
+- `SKIP_SECRET_SCAN=1 git commit ...` — skip the secret scan for one commit
+- `SKIP_UNICODE_SCAN=1 git commit ...` — skip the hidden-codepoint scan for one commit
 - `AGENT_SLUG=` (empty) `git commit ...` — write a commit without the provenance trailers
 - `git commit --no-verify` — skip all hooks
 - `git add -f .env` — force-stage a file that is gitignored (the pre-commit hook still blocks it)
