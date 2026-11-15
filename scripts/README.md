@@ -169,6 +169,7 @@ edits a PR.
 ```bash
 make pr-check BODY=pr.md                        # merge base of origin/trunk and HEAD
 make pr-check BODY=pr.md BASE=origin/trunk HEAD=HEAD
+make pr-check BODY=pr.md BRANCH=my-branch       # that branch, without switching
 make pr-check BODY=pr.md PATHS=changed.txt      # explicit changed paths
 bash scripts/pr-gate.sh --body pr.md --gate mission   # one gate, like CI
 ```
@@ -179,11 +180,16 @@ changed files from `git diff` (the merge base of `origin/trunk` and `HEAD`, or
 checked — a run given no file list, or one whose diff cannot be resolved (no
 `origin/trunk`, a shallow clone), fails and names what it could not check
 instead of passing. Passing an empty `PATHS` file is a gate handed nothing and
-fails the same way.
+fails the same way, and so is an empty diff: a checkout sitting on trunk diffs
+trunk against trunk, so the run says `unverifiable: no changed files` and
+prints the command that shows the branch's real diff. `BRANCH=<branch>` checks
+another branch from this checkout (merge base of `origin/trunk` and that
+branch), which is how a tree on trunk checks a worker's branch without moving.
 
 Exit 0 green, 1 a body CI would reject or a gate that had nothing to check,
-2 bad usage or a diff that cannot be resolved. The output is the CI verdict
-verbatim, including which harness path forced High and which diff was read:
+2 bad usage, a diff that cannot be resolved, or an empty diff. The output is the
+CI verdict verbatim, including which harness path forced High and which diff was
+read:
 
 ```text
 tier: medium

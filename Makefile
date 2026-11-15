@@ -74,9 +74,15 @@ retro:
 #   make pr-check BODY=pr.md
 #   make pr-check BODY=pr.md PATHS=changed.txt
 #   make pr-check BODY=pr.md BASE=origin/trunk HEAD=HEAD
+#   make pr-check BODY=pr.md BRANCH=my-branch   # a branch, from this checkout
+#
+# BRANCH diffs the merge base of origin/trunk (or BASE) and that branch, so a
+# worker's branch is checkable from a tree that stays on trunk. An empty diff is
+# never green: it says `unverifiable: no changed files` and exits nonzero, so a
+# checkout sitting on trunk cannot bless a body the real branch would fail.
 pr-check:
 	@bash $(CURDIR)/scripts/pr-gate.sh --body "$(BODY)" \
-		$(if $(or $(BASE),$(HEAD)),--base "$(or $(BASE),origin/trunk)" --head "$(or $(HEAD),HEAD)") \
+		$(if $(BRANCH),--branch "$(BRANCH)" $(if $(BASE),--base "$(BASE)"),$(if $(or $(BASE),$(HEAD)),--base "$(or $(BASE),origin/trunk)" --head "$(or $(HEAD),HEAD)")) \
 		$(if $(PATHS),--paths "$(PATHS)")
 
 # The gates' own tests, next to the scripts they test (blip 29 harness quality

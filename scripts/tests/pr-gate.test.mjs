@@ -66,10 +66,11 @@ let n = 0;
 // either an explicit changed-path list, the diff, or nothing at all. `cwd`
 // defaults to a non-repository so a test that gives no file list cannot pick up
 // the diff of the checkout it is running in.
-function gate({ body, paths, gateName, cwd = tmp, env: extraEnv = {} }) {
+function gate({ body, paths, branch, gateName, cwd = tmp, env: extraEnv = {} }) {
 	const bodyFile = join(tmp, `body-${n++}.md`);
 	writeFileSync(bodyFile, body);
 	const args = [GATE, "--body", bodyFile];
+	if (branch) args.push("--branch", branch);
 	if (paths) {
 		const pathsFile = join(tmp, `paths-${n++}.txt`);
 		writeFileSync(pathsFile, `${paths.join("\n")}\n`);
@@ -344,6 +345,73 @@ test("test change: a bash gate test beside its script needs a reason too", () =>
 	assert.match(contest.out, /tests changed: 0; source changed: 2/, contest.out);
 });
 
+test("an empty diff is unverifiable, never green (PR 88)", () => {
+	// The exact shape: the checkout sits on trunk, so the merge base of
+	// origin/trunk and HEAD is HEAD itself and `git diff` is empty. Nothing was
+	// checked, so the run must not print green — it must name the command that
+	// shows the real diff of the branch someone meant to check.
+	const dir = makeRepo("empty-diff", "trunk");
+	const base = commit(dir, { "install.sh": "#!/bin/sh\necho base\n" }, "base");
+	git(dir, "update-ref", "refs/remotes/origin/trunk", base);
+
+	const r = gate({ body: `${MISSION}\n\nReview tier: High\n`, cwd: dir });
+	assert.notEqual(r.status, 0, r.out);
+	assert.match(r.out, /unverifiable: no changed files between/, r.out);
+	assert.match(r.out, /git diff --name-only/, r.out);
+	assert.match(r.out, /BRANCH=/, r.out);
+	assert.doesNotMatch(r.out, /pr-gate: green/, r.out);
+
+	// The same empty range given explicitly behaves the same way: an explicit
+	// diff that resolves to no commits is not a green verdict either.
+	const explicit = gate({ body: `${MISSION}\n\nReview tier: High\n`, cwd: dir, branch: "HEAD" });
+	assert.notEqual(explicit.status, 0, explicit.out);
+	assert.match(explicit.out, /unverifiable: no changed files between/, explicit.out);
+	assert.doesNotMatch(explicit.out, /pr-gate: green/, explicit.out);
+});
+
+test("--branch checks another branch without switching this checkout", () => {
+	// The boss's tree stays on trunk; a worker's branch is checked from it. The
+	// case PR 88 needed: the diff CI sees, computed for a branch nobody switched
+	// to, and a red verdict the local run would previously have called green.
+	const dir = makeRepo("branch-arg", "trunk");
+	const base = commit(dir, {
+		"install.sh": "#!/bin/sh\necho base\n",
+		"agent/prompts/x.test.ts": "export {};\n",
+	}, "base");
+	git(dir, "update-ref", "refs/remotes/origin/trunk", base);
+	git(dir, "switch", "-q", "-c", "worker");
+	commit(dir, {
+		"install.sh": "#!/bin/sh\necho worker\n",
+		"agent/prompts/x.test.ts": "export const x = 1;\n",
+	}, "source and its test move together on the worker branch");
+	git(dir, "switch", "-q", "trunk");
+	assert.equal(git(dir, "rev-parse", "--abbrev-ref", "HEAD"), "trunk");
+	assert.equal(git(dir, "rev-parse", "HEAD"), base, "the checkout moved off trunk");
+
+	const red = gate({ body: `${MISSION}\n\nReview tier: High\n`, cwd: dir, branch: "worker" });
+	assert.equal(red.status, 1, red.out);
+	assert.match(red.out, /merge base of origin\/trunk and worker/, red.out);
+	assert.match(red.out, /tests changed: 1; source changed: 1/, red.out);
+	assert.match(red.out, /Test change: <reason>/, red.out);
+
+	// Same branch, body carrying the reason: green. The red above is the rule.
+	const ok = gate({
+		body: `${MISSION}\n\nReview tier: High\n\nTest change: the assertion moved to the new entry point.\n`,
+		cwd: dir,
+		branch: "worker",
+	});
+	assert.equal(ok.status, 0, ok.out);
+	assert.match(ok.out, /pr-gate: green/, ok.out);
+
+	// The checkout never moved: checking a branch is read-only.
+	assert.equal(git(dir, "rev-parse", "--abbrev-ref", "HEAD"), "trunk");
+
+	// A branch that does not exist is a loud usage error, not an empty diff.
+	const missing = gate({ body: `${MISSION}\n\nReview tier: High\n`, cwd: dir, branch: "nope" });
+	assert.equal(missing.status, 2, missing.out);
+	assert.match(missing.out, /no such branch or commit/, missing.out);
+});
+
 // ------------------------------------------------------------------ workflow --
 
 test("the workflow calls the shared script and keeps no copy of the gates", () => {
@@ -367,4 +435,6 @@ test("make pr-check is the documented local caller of the same script", () => {
 	const makefile = readFileSync(join(ROOT, "Makefile"), "utf8");
 	assert.match(makefile, /^pr-check:/m, "no pr-check target");
 	assert.match(makefile, /scripts\/pr-gate\.sh/);
+	// A branch is checkable from a checkout that stays where it is.
+	assert.match(makefile, /--branch "\$\(BRANCH\)"/, "pr-check has no BRANCH= pass-through");
 });
