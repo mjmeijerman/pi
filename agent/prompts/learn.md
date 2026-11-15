@@ -68,17 +68,19 @@ do not guess.
    in use by the session that started you.
 2. **Apply your own diff** in that worktree, run the checks it names, and commit
    on `learn/<slug>` with a conventional message. Note the commit sha.
-3. **Hand the PR to big-boss-pi.** Start one bare agent — it has host access, you
-   do not:
+3. **Publish, and let the script say whether you did.** The hand-off to
+   big-boss-pi is a script with a verdict, not a paragraph you can skip:
 
    ```sh
-   /home/mark/big-boss-pi/bin/pi-bare -p "Push branch learn/<slug> (commit <sha>) \
-     of /home/mark/.pi and open the pull request. Review tier: <tier>. \
-     Proposal: <proposal path>. Do not merge."
+   /home/mark/.pi/scripts/learn-publish.sh <slug> --proposal <proposal path>
    ```
 
-   Name the branch, the sha, the review tier and the proposal path — the PR body
-   needs all four.
+   It names the branch, the sha, the review tier (read from your proposal) and
+   the proposal path, runs the one bare agent, then asks GitHub for a pull
+   request on `learn/<slug>`. Exit 0 means a PR exists. **Exit 1 means it does
+   not**: write that line into the proposal's *After applying* section, because
+   the next learner reads the proposal and not your scrollback. `--check`
+   re-asks without spawning anything; `--dry-run` prints the hand-off.
 4. **Close your own space**, whatever happened above and whatever the outcome:
    `/home/mark/.pi/scripts/agent-pane.sh close <slug> || true`. A space left open
    is a worker that looks busy after it finished.
@@ -119,7 +121,13 @@ and one paragraph naming what would change your mind.
 - **Do not edit any file in `/home/mark/.pi` directly.** Work in the worktree from
   `git worktree add`; the boss's checkout keeps running while you work.
 - **Never publish on your own.** No `git push` from you, no `gh pr create`, not
-  even to try. big-boss-pi opens the PR; you only name the branch and the sha.
+  even to try. `scripts/learn-publish.sh` runs the one bare agent that opens the
+  PR; you only name the slug and the proposal.
+- **A branch with no PR is an unfinished run.** `scripts/learn-publish.sh <slug>
+  --check` exits 1 and the attempt is appended to
+  `agent/proposals/publish-log.jsonl`. Three `learn/*` branches reached trunk's
+  history with zero PRs before 2026-11-15: a fix nobody can review is a fix
+  nobody has.
 - **Never merge**, never commit on trunk, never upload onto trunk.
 - **No secrets.** Never read or copy `.env*`, keys, tokens, credential files. The
   queue file is already redacted; do not go looking for the raw text.
