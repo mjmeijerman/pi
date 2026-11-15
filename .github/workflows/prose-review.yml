@@ -1,0 +1,145 @@
+# The second reader for the instructions this harness runs on.
+#
+# Radar basis: blip 34. A diff to `agent/AGENTS.md`, `agent/prompts/*.md` or
+# `agent/skills/**/SKILL.md` is prose that changes behaviour — it is the text
+# every agent reads before it works — and until this job the only reader was
+# the human at merge time. The failure mode is not a typo: it is an instruction
+# that cites a command the tree no longer has, or a sentence an earlier one
+# already covers, or a rule a newer paragraph quietly made false.
+#
+# Five fixed questions, one PR comment, one line per question with a file:line
+# citation or the words "no finding". No score and no grade: a review that ends
+# in "looks good" is a review nobody can act on. The questions, the prompt and
+# the parsing all live in `.github/scripts/prose-review.mjs`, so `--dry-run`
+# prints the exact request offline and `scripts/tests/prose-review.test.mjs`
+# checks it without a network or a secret.
+#
+# The job is deliberately narrow and cheap: it only triggers when those paths
+# change, it counts the instruction-file diff itself and refuses over 400
+# changed lines (exit 3 → a warning, no request), and the answer is capped in
+# `max_tokens`. A missing `PROSE_REVIEW_API_KEY` secret is an annotation that
+# says "not configured", never a silent green check.
+name: prose-review
+
+on:
+  pull_request:
+    paths:
+      - agent/AGENTS.md
+      - agent/prompts/**/*.md
+      - agent/skills/**/SKILL.md
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prose-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prose:
+    name: prose review
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # the one comment; nothing else is written
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # Both endpoints of the diff are already in the clone, so the job needs
+          # no token, no API call and no fetch (blip 103, artipacked).
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - name: diff for the instruction files only
+        id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/prose.diff"
+          # `:/agent/...` is root-relative and git's `**/` matches zero
+          # directories, so a skill file directly under agent/skills still lands.
+          git diff --unified=3 "$BASE_SHA...$HEAD_SHA" -- \
+            ':/agent/AGENTS.md' \
+            ':/agent/prompts/**/*.md' \
+            ':/agent/skills/**/*.md' >"$out"
+          echo "diff file: $out"
+          wc -l "$out"
+
+      - name: review, or say why there was none
+        id: review
+        env:
+          # Empty on a fork pull request, because fork secrets are not handed
+          # out. That is the "not configured" path below, not a crash.
+          PROSE_REVIEW_API_KEY: ${{ secrets.PROSE_REVIEW_API_KEY }}
+        run: |
+          set -euo pipefail
+          diff="$RUNNER_TEMP/prose.diff"
+          comment="$RUNNER_TEMP/comment.md"
+          err="$RUNNER_TEMP/prose.err"
+
+          if [ ! -s "$diff" ]; then
+            echo "### prose-review: no instruction-file changes" >>"$GITHUB_STEP_SUMMARY"
+            echo "nothing to review: the diff touches no instruction file"
+            exit 0
+          fi
+
+          set +e
+          node .github/scripts/prose-review.mjs --root . --diff "$diff" >"$comment" 2>"$err"
+          status=$?
+          set -e
+          cat "$err" >&2
+
+          case "$status" in
+            0) ;;
+            3)
+              # Refusal is a guard, not a failure: the review is too big to be
+              # cheap, so it does not happen — loudly, in the PR's annotations.
+              echo "::warning title=prose-review::refused — the instruction diff is over the 400-line cap, so no prose review ran; read it by hand"
+              { echo "### prose-review: refused"; echo; sed 's/^/    /' "$err"; } >>"$GITHUB_STEP_SUMMARY"
+              exit 0
+              ;;
+            4)
+              echo "::warning title=prose-review::not configured — no PROSE_REVIEW_API_KEY repository secret, so no prose review ran"
+              { echo "### prose-review: not configured"; echo; echo '`PROSE_REVIEW_API_KEY` is unset, so nothing was reviewed. The check is green because there is nothing to review with, not because the prose passed.'; } >>"$GITHUB_STEP_SUMMARY"
+              exit 0
+              ;;
+            *)
+              echo "::error title=prose-review::the review failed (exit $status)"
+              exit "$status"
+              ;;
+          esac
+
+          echo "reviewed=true" >>"$GITHUB_OUTPUT"
+          head -5 "$comment"
+
+      - name: one comment, updated in place
+        if: steps.review.outputs.reviewed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # Untrusted input: quoted, only ever used as a path segment in an API URL.
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          comment="$RUNNER_TEMP/comment.md"
+          payload="$RUNNER_TEMP/payload.json"
+          jq -Rs '{body: .}' "$comment" >"$payload"
+
+          # A re-run must not stack comments: find the one this job owns by its
+          # marker and edit that, or post one if it is the first run.
+          id=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq '.[] | select(.body | startswith("<!-- prose-review -->")) | .id' | head -n1)
+
+          if [ -n "$id" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$id" --input "$payload" >/dev/null
+            echo "updated comment $id"
+          else
+            gh api --method POST "repos/$REPO/issues/$PR/comments" --input "$payload" >/dev/null
+            echo "posted a new comment"
+          fi
