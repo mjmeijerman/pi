@@ -62,12 +62,15 @@ jobs:
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/prose.diff"
-          # `:/agent/...` is root-relative and git's `**/` matches zero
-          # directories, so a skill file directly under agent/skills still lands.
+          # `:(glob,top)` = root-relative with glob magic. Without the `glob`
+          # magic git reads `**/` as one ordinary path segment, so it needs at
+          # least one directory and a file directly under agent/prompts —
+          # agent/prompts/grill.md — matched nothing at all. With it, `**/`
+          # matches zero or more directories and both depths land.
           git diff --unified=3 "$BASE_SHA...$HEAD_SHA" -- \
-            ':/agent/AGENTS.md' \
-            ':/agent/prompts/**/*.md' \
-            ':/agent/skills/**/*.md' >"$out"
+            ':(glob,top)agent/AGENTS.md' \
+            ':(glob,top)agent/prompts/**/*.md' \
+            ':(glob,top)agent/skills/**/*.md' >"$out"
           echo "diff file: $out"
           wc -l "$out"
 

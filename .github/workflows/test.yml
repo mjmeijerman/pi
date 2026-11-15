@@ -135,9 +135,12 @@ jobs:
             exit 1
           fi
 
-          # `:/agent/...` is root-relative, so this step works whatever the
-          # job's working-directory is; git's `**/` also matches zero directories.
-          mapfile -t all < <(git diff --name-only "$base"...HEAD -- ':/agent/extensions/**/*.ts')
+          # `:(glob,top)` is root-relative (so this step works whatever the
+          # job's working-directory is) and turns on glob magic, which is what
+          # makes `**/` match zero directories. Without it git reads `**` as one
+          # ordinary segment, so the .ts files sitting directly in
+          # agent/extensions — most of them — never matched.
+          mapfile -t all < <(git diff --name-only "$base"...HEAD -- ':(glob,top)agent/extensions/**/*.ts')
           files=()
           for path in "${all[@]}"; do
             case "$path" in
