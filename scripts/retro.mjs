@@ -4,10 +4,13 @@
 //
 // Why it exists: `/retro` in the pi session does the same aggregation, but only when a
 // person types it. The suggestion box therefore grew to 207 entries nobody read
-// (Radar Vol. 35 blips 25 and 11, harness quality evaluation blip 29). systemd/pi-retro.timer runs this weekly, and
-// scripts/harness-check.sh warns when last-run.txt is more than 14 days old — the same
-// shape as the eval-freshness check, because a report nobody schedules is the failure
-// mode.
+// (Radar Vol. 35 blips 25 and 11, harness quality evaluation blip 29). What runs this
+// is a person: `make retro`, or `systemd/pi-retro.timer` where that unit is installed
+// — this host has no user systemd bus, so no timer here. scripts/harness-check.sh warns
+// when last-run.txt is more than RETRO_MAX_AGE_DAYS old (14), and
+// agent/extensions/session-nudge.ts reads that same line to say at session start when
+// the window has passed, because a machine that is not always on cannot be trusted to
+// fire a schedule.
 //
 // Rules it keeps: it only reads the suggestion log (never deletes or rewrites an
 // entry), it never touches the network, and when there is nothing to aggregate it says
