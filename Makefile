@@ -1,7 +1,7 @@
 # pi agent setup — one-command install for a new machine.
 # Usage:  make setup   (or just: make)
 
-.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-full audit evals evals-install retro retro-install pr-check scripts-test offline-test
+.PHONY: setup bootstrap verify hooks update uninstall mutate mutate-changed mutate-full audit evals evals-install retro retro-install pr-check scripts-test offline-test
 
 # Full provisioning on a new machine: config, hooks, system packages, API key,
 # pi packages, optional local model / dictation venv, then verification.
@@ -22,10 +22,20 @@ verify:
 hooks:
 	@bash $(CURDIR)/git-hooks/install-hooks.sh
 
-# Mutation testing (Radar Vol. 35, blip 2): proves the extension assertions bite.
-# Incremental — only mutants whose source or covering tests changed are re-run.
+# Mutation testing (Radar Vol. 35, blip 2, Adopt): proves the extension assertions bite.
+# Two purposes, two targets. `mutate` is the incremental run over the whole configured
+# scope (agent/stryker.conf.json) — the score of the harness itself, for an audit or a
+# full first pass. `mutate-changed` is the branch check: it derives the mutant list from
+# `git diff --name-only origin/trunk...HEAD`, keeps only the files the config can mutate
+# (agent/extensions/**/*.ts, tests excluded) and passes them as one --mutate list, so a
+# branch that touches one file costs one file's worth of time and prints that file's score.
+# It refuses an empty list instead of letting stryker widen to the whole config.
 mutate:
 	@cd $(CURDIR)/agent && npx stryker run
+
+# Branch-scoped: only the files this branch touched (scripts/mutate-changed.sh).
+mutate-changed:
+	@bash $(CURDIR)/scripts/mutate-changed.sh
 
 # Same, throwing the incremental cache away: a full first-pass score.
 mutate-full:
