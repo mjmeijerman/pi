@@ -47,8 +47,14 @@ const PATTERNS: { name: string; re: RegExp }[] = [
 	{ name: "secret-assignment", re: /(?:password|secret|api[_-]?key|access[_-]?token|secret[_-]?key|client[_-]?secret|auth[_-]?token|aws[_-]?(?:access[_-]?key|secret[_-]?access[_-]?key)|db[_-]?password)\s*[=:]\s*[A-Za-z0-9_\-./+]{16,}\b/gi },
 ];
 
+/**
+ * A credential file, by name. The `.env` branch takes a glued prefix, so
+ * `prod.env` and `config/prod.env` are credential files too; the terminator
+ * after the extension is what keeps the long tail out (`my.environment`,
+ * `readme.envoy` and `production.pem.md` are ordinary files).
+ */
 const SECRET_FILE_RE =
-	/(^|[\/\\'"\s])(\.env(\.[a-zA-Z0-9_-]+)?|\.git-credentials|\.netrc|\.pypirc|\.npmrc|id_rsa|id_ed25519|id_dsa|id_ecdsa|credentials\.(json|ya?ml|toml)|secrets\.(json|ya?ml|toml)|kubeconfig|auth\.json)([\/\\'"\s]|$)|(^|[\/\\'"\s])[^\/\\'"\s]*\.(pem|p12|pfx|jks|keystore|key)([\/\\'"\s]|$)|(^|[\/\\'"\s])(\.aws|\.ssh|\.gnupg|\.kube)([\/\\]|$)|\.config[\/\\]gcloud/gi;
+	/(^|[\/\\'"\s])([^\/\\'"\s]*\.env(\.[a-zA-Z0-9_-]+)?|\.git-credentials|\.netrc|\.pypirc|\.npmrc|id_rsa|id_ed25519|id_dsa|id_ecdsa|credentials\.(json|ya?ml|toml)|secrets\.(json|ya?ml|toml)|kubeconfig|auth\.json)([\/\\'"\s]|$)|(^|[\/\\'"\s])[^\/\\'"\s]*\.(pem|p12|pfx|jks|keystore|key)([\/\\'"\s]|$)|(^|[\/\\'"\s])(\.aws|\.ssh|\.gnupg|\.kube)([\/\\]|$)|\.config[\/\\]gcloud/gi;
 
 const SAFE_RE = /example|sample|template|fixture|mock|dummy|placeholder|changeme/i;
 
@@ -72,8 +78,16 @@ function looksLikePath(word: string): boolean {
 	return /[\/~]|^\.|^\$/.test(word) && !/\s/.test(word);
 }
 
-/** Verbs that hand bytes to another machine. */
-const SEND_RE = /(^|[;&|()\s])(curl|wget|scp|rsync|http|https|nc|netcat|ncat)\b|(^|[;&|()\s])git\s+push\b/i;
+/**
+ * Verbs that hand bytes to another machine. A verb reached through a path is
+ * still the verb — `/usr/bin/curl` and `./rsync` reach the network exactly like
+ * `curl` and `rsync` — so a path slash separates as well as a space or a shell
+ * operator. `http`/`https` stay because they cover a command aimed at another
+ * machine whose verb is not one we know; they are not a verb shape, so they do
+ * not stand in for the widened prefix.
+ */
+const SEND_RE =
+	/(^|[;&|()\s\/\\])(curl|wget|scp|rsync|http|https|nc|netcat|ncat)\b|(^|[;&|()\s\/\\])git\s+push\b/i;
 
 /** An operand that names another host: a URL, `user@host:path`, or a dotted hostname. */
 const NET_TARGET_RE = /[a-z][a-z0-9+.-]*:\/\/|@[a-z0-9._-]+:|(^|\s)[a-z0-9_-]+(\.[a-z0-9_-]+)+([:\/\s]|$)/i;
@@ -286,7 +300,7 @@ function lastOperandIsRemote(command: string): boolean {
 function sendsFileContent(command: string): boolean {
 	const cmd = stripComments(command);
 	// `git push` ships commits, and commits carry files.
-	if (/(^|[;&|()\s])git\s+push\b/i.test(cmd)) return true;
+	if (/(^|[;&|()\s\/\\])git\s+push\b/i.test(cmd)) return true;
 	// An upload flag, or an `@file` body (`-d @f`, `--data-binary @f`, `-F f=@p`).
 	if (UPLOAD_FLAG_RE.test(cmd)) return true;
 	for (const word of shellWords(cmd)) {
@@ -302,7 +316,7 @@ function sendsFileContent(command: string): boolean {
 	const redirect = /<\s*([^\s<&()]+)/.exec(cmd);
 	if (redirect && redirect[1] !== "/dev/null") return true;
 	// scp/rsync whose last operand is the other machine.
-	if (/(^|[;&|()\s])(scp|rsync)\b/i.test(cmd)) return lastOperandIsRemote(cmd);
+	if (/(^|[;&|()\s\/\\])(scp|rsync)\b/i.test(cmd)) return lastOperandIsRemote(cmd);
 	return false;
 }
 
@@ -310,8 +324,8 @@ function sendsFileContent(command: string): boolean {
 function isOutboundSend(command: string): boolean {
 	const cmd = stripComments(command);
 	if (!hasMatch(SEND_RE, cmd)) return false;
-	if (/(^|[;&|()\s])git\s+push\b/i.test(cmd)) return true;
-	if (/(^|[;&|()\s])(scp|rsync)\b/i.test(cmd)) return lastOperandIsRemote(cmd);
+	if (/(^|[;&|()\s\/\\])git\s+push\b/i.test(cmd)) return true;
+	if (/(^|[;&|()\s\/\\])(scp|rsync)\b/i.test(cmd)) return lastOperandIsRemote(cmd);
 	return hasMatch(NET_TARGET_RE, cmd);
 }
 
