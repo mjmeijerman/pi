@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -231,4 +231,142 @@ test("the scratch session never shares a socket with the real core", () => {
 	assert.equal(existsSync(join("/run/user", String(process.getuid()), "herdr-core", `${session}.sock`)), false);
 	void socket;
 	void readFileSync;
+});
+
+/**
+ * The half-second after a reboot that a real core is hard to hold still in: hc
+ * answers `live` while the recovered shell has not attached yet, so the
+ * foreground carries no argv (and often no pid). A fixture-driven `hc` stands in
+ * here, pointed at with PI_HERDR_RESUME_HC, so the exact polling decisions can be
+ * asserted instead of hoped for.
+ */
+const fakeDir = join(root, "fake-resume");
+const fakeHc = join(root, "fake-hc.cjs");
+const fakeState = join(root, "fake-hc-state.json");
+const fakeCalls = join(root, "fake-hc-calls.json");
+writeFileSync(
+	fakeHc,
+	["#!" + process.execPath,
+		'const fs = require("node:fs");',
+		'const args = process.argv.slice(2);',
+		'const logFile = process.env.FAKE_HC_LOG;',
+		'const state = fs.existsSync(process.env.FAKE_HC_STATE) ? JSON.parse(fs.readFileSync(process.env.FAKE_HC_STATE, "utf8")) : {};',
+		'const calls = fs.existsSync(logFile) ? JSON.parse(fs.readFileSync(logFile, "utf8")) : [];',
+		'const sendsBefore = calls.filter((call) => call[0] === "send").length;',
+		"calls.push(args);",
+		"fs.writeFileSync(logFile, JSON.stringify(calls));",
+		'const answer = (value) => { process.stdout.write(JSON.stringify(value)); process.exit(0); };',
+		'if (args[0] === "server" && args[1] === "status") answer({ core: { id: "fixture" }, live: 1 });',
+		'if (args[0] === "send") answer({ sent: true });',
+		'if (args[0] === "get") {',
+		"\tif (state.afterSend && sendsBefore > 0) answer(state.afterSend);",
+		'\tconst seen = calls.filter((call) => call[0] === "get").length - 1;',
+		"\tconst sequence = state.sequence ?? [];",
+		"\tanswer(sequence[Math.min(seen, sequence.length - 1)]);",
+		"}",
+		"process.exit(2);",
+		"",
+	].join("\n"),
+);
+chmodSync(fakeHc, 0o755);
+
+/** hc a moment after a reboot: live, but no program attached in the foreground yet. */
+const notAttached = { address: "t7", name: "worker", argv: ["/usr/bin/zsh"], keep: true, state: "live", foreground: { name: "zsh" } };
+/** The recovered shell, attached. */
+const attachedShell = { ...notAttached, foreground: { argv: ["/usr/bin/zsh"], name: "zsh", pid: process.pid } };
+/** Something a person left running in that tab; never a second pi. */
+const liveProgram = {
+	...notAttached,
+	argv: [process.execPath, "other-program.mjs"],
+	foreground: { argv: [process.execPath, "other-program.mjs"], name: "node", pid: process.pid },
+};
+/** The terminal once the resume line has run: a real program, not a shell. */
+const startedPi = {
+	...attachedShell,
+	argv: [process.execPath, fakePi],
+	foreground: { argv: [process.execPath, fakePi], name: "node", pid: process.pid },
+};
+
+function writeFake(sequence, extra = {}) {
+	rmSync(fakeDir, { recursive: true, force: true });
+	mkdirSync(fakeDir, { recursive: true });
+	writeFileSync(fakeState, JSON.stringify({ sequence, ...extra }));
+	writeFileSync(fakeCalls, "[]");
+	const entry = {
+		version: 1,
+		terminal: "t7",
+		terminal_name: "worker",
+		session_path: sessionPath,
+		cwd: join(root, "sessions", "app"),
+		argv: [process.execPath, fakePi],
+		mode: "plain",
+		restored_boot_id: "an-earlier-boot",
+		labels: {},
+		pid: process.pid,
+		updated_at: new Date().toISOString(),
+	};
+	writeFileSync(join(fakeDir, "t7.json"), JSON.stringify(entry, null, 2) + "\n");
+}
+
+function runFake(env = {}) {
+	return spawnSync(process.execPath, [script], {
+		encoding: "utf8",
+		env: {
+			...scratch,
+			PI_HERDR_RESUME_HC: fakeHc,
+			PI_HERDR_RESUME_DIR: fakeDir,
+			PI_HERDR_RESUME_WAIT_MS: "5000",
+			PI_HERDR_RESUME_ENTRY_MS: "10000",
+			PI_HERDR_RESUME_START_MS: "3000",
+			FAKE_HC_STATE: fakeState,
+			FAKE_HC_LOG: fakeCalls,
+			...env,
+		},
+		timeout: 120_000,
+	});
+}
+
+function fakeCallLog() {
+	return existsSync(fakeCalls) ? JSON.parse(readFileSync(fakeCalls, "utf8")) : [];
+}
+
+test("a live terminal with no foreground argv yet is waited out, not called busy", () => {
+	// Two polls with no program at all, then the recovered shell: exactly the
+	// 2026-11-15 boot, where "busy (no program)" lost both conversations.
+	writeFake([notAttached, notAttached, attachedShell], { afterSend: startedPi });
+
+	const out = runFake();
+	assert.equal(out.status, 0, out.stderr);
+	assert.match(out.stdout, /restored terminal t7: exec /);
+	assert.doesNotMatch(out.stdout, /busy/);
+	assert.doesNotMatch(out.stdout, /never became a shell/);
+	assert.equal(fakeCallLog().filter((call) => call[0] === "send").length, 1, "the line must be typed once");
+	assert.ok(fakeCallLog().filter((call) => call[0] === "get").length >= 3, "the script asked again instead of deciding");
+
+	const restoreLog = readFileSync(join(fakeDir, "restore.log"), "utf8");
+	assert.doesNotMatch(restoreLog, /busy/, "restore.log must not call an unattached terminal busy");
+	assert.match(restoreLog, /restored terminal t7/);
+});
+
+test("a live program in the foreground that is not a shell is still busy", () => {
+	writeFake([notAttached, liveProgram]);
+
+	const out = runFake();
+	assert.equal(out.status, 0, out.stderr);
+	assert.equal(fakeCallLog().filter((call) => call[0] === "send").length, 0, "nothing may be typed");
+	assert.match(out.stdout, /terminal is busy \(/);
+	assert.ok(fakeCallLog().filter((call) => call[0] === "get").length >= 2, "it waited for the attach before deciding");
+	assert.match(readFileSync(join(fakeDir, "restore.log"), "utf8"), /terminal is busy/);
+	assert.equal(JSON.parse(readFileSync(join(fakeDir, "t7.json"), "utf8")).restored_boot_id, "an-earlier-boot");
+});
+
+test("a terminal that never attaches before the deadline is skipped as never-a-shell", () => {
+	writeFake([notAttached]);
+
+	const out = runFake({ PI_HERDR_RESUME_ENTRY_MS: "1200" });
+	assert.equal(out.status, 0, out.stderr);
+	assert.equal(fakeCallLog().filter((call) => call[0] === "send").length, 0, "nothing may be typed");
+	assert.match(out.stdout, /never became a shell within 1200 ms/);
+	assert.doesNotMatch(out.stdout, /busy/, "no program ever appeared: this is not a busy terminal");
+	assert.equal(JSON.parse(readFileSync(join(fakeDir, "t7.json"), "utf8")).restored_at, undefined);
 });
