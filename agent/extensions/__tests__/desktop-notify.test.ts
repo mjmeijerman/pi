@@ -9,7 +9,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { after, beforeEach, describe, test } from "node:test";
-import { createFakeCtx, createFakePi, waitFor } from "./helpers/fake-pi.ts";
+import { createFakeCtx, createFakePi, waitFor, whenChildrenIdle } from "./helpers/fake-pi.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pi-desktop-notify-"));
 const binDir = join(root, "bin");
@@ -18,8 +18,13 @@ const logFile = join(root, "calls.log");
 mkdirSync(binDir, { recursive: true });
 mkdirSync(projectDir, { recursive: true });
 
+// One printf, so one write: `$*` joins the argv with U+001F and the newline goes out
+// with it. A line in the log is therefore always whole — never argv-then-newline.
 const gdbus = join(binDir, "gdbus");
-writeFileSync(gdbus, `#!/bin/sh\nprintf '%s\\037' "$@" >> ${JSON.stringify(logFile)}\nprintf '\\n' >> ${JSON.stringify(logFile)}\n`);
+writeFileSync(
+	gdbus,
+	`#!/bin/sh\nIFS=$(printf '\\037')\nprintf '%s\\n' "$*" >> ${JSON.stringify(logFile)}\n`,
+);
 chmodSync(gdbus, 0o755);
 
 process.env.PATH = binDir;
@@ -45,13 +50,28 @@ function setup() {
 	return { ...fake, ctx };
 }
 
-/** Recorded gdbus invocations, one array of argv per call. */
-async function calls(expected = 1): Promise<string[][]> {
-	await waitFor(() => readFileSync(logFile, "utf8").split("\n").filter(Boolean).length >= expected);
-	return readFileSync(logFile, "utf8")
+/**
+ * Recorded gdbus invocations, one array of argv per call.
+ *
+ * Only newline-terminated lines count. An invocation's last byte is its newline, so
+ * a line without one belongs to a call that is still writing — returning early on it
+ * leaves the tail of that call to land in the next test's log.
+ */
+function recordedCalls(): string[][] {
+	const log = readFileSync(logFile, "utf8");
+	if (!log.endsWith("\n")) return [];
+	return log
+		.slice(0, -1)
 		.split("\n")
 		.filter(Boolean)
-		.map((line) => line.split("\u001f").filter((_, index, all) => index < all.length - 1));
+		.map((line) => line.split("\u001f"));
+}
+
+async function calls(expected = 1): Promise<string[][]> {
+	return await waitFor(() => {
+		const recorded = recordedCalls();
+		return recorded.length >= expected ? recorded : undefined;
+	});
 }
 
 describe("agent_settled", () => {
@@ -83,7 +103,10 @@ describe("agent_settled", () => {
 	test("does not notify when the user pressed Escape", async () => {
 		const { emit, ctx } = setup();
 		await emit("agent_settled", { aborted: true }, ctx);
-		await new Promise((resolve) => setTimeout(resolve, 150));
+		// The handler dispatches synchronously, so anything it started is a live child
+		// process by now. Waiting for children to exit is what makes the empty log
+		// final: no child, no more bytes.
+		await whenChildrenIdle();
 		assert.equal(readFileSync(logFile, "utf8"), "");
 	});
 

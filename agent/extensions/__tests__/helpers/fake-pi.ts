@@ -188,3 +188,18 @@ export async function waitFor<T>(predicate: () => T | undefined | false | null, 
 export async function tick(times = 1): Promise<void> {
 	for (let i = 0; i < times; i++) await new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+/**
+ * Wait until every child process spawned so far has exited.
+ *
+ * A fire-and-forget `execFile` is only over when its process is gone, and a child's
+ * writes are visible before it exits. "No child left" is therefore the honest form of
+ * "nothing more can land in the file it wrote" — a fixed `setTimeout` is only a guess
+ * that happens to be wide enough until the box gets busy.
+ */
+export async function whenChildrenIdle(timeoutMs = 3000): Promise<void> {
+	await waitFor(
+		() => !process.getActiveResourcesInfo().some((name) => name.toLowerCase() === "processwrap"),
+		timeoutMs,
+	);
+}
