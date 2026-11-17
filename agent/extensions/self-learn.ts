@@ -404,6 +404,12 @@ const WORKSPACE = join(homedir(), "big-boss-pi");
 export interface ReportText {
 	path: string;
 	text: string;
+	/**
+	 * When it was written, in epoch ms. Absent on a fixture and on a row whose
+	 * stamp cannot be read: an undated row is always evidence, because "cannot
+	 * tell when" must not become "old enough to ignore" (`judgeOnce`).
+	 */
+	at?: number;
 }
 
 /** One row of `gh run list --status failure --json name,headBranch,conclusion,databaseId`. */
@@ -549,7 +555,13 @@ export function decisionRows(raw: string, path = "state/decisions.jsonl"): Repor
 						.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
 						.join(" ")
 				: whole;
-		out.push({ path: `${path}:${index + 1}`, text: clipSample(redact(words || whole)) });
+		const at =
+			row && typeof row === "object" ? Date.parse(String((row as Record<string, unknown>).ts ?? "")) : Number.NaN;
+		out.push({
+			path: `${path}:${index + 1}`,
+			text: clipSample(redact(words || whole)),
+			...(Number.isFinite(at) ? { at } : {}),
+		});
 	});
 	return out;
 }
@@ -849,7 +861,7 @@ export async function readWorkspace(root = WORKSPACE): Promise<WorkspaceEvidence
 		try {
 			const info = await stat(path);
 			if (info.size > MAX_REPORT_BYTES) continue;
-			out.reports.push({ path, text: await readFile(path, "utf8") });
+			out.reports.push({ path, text: await readFile(path, "utf8"), at: info.mtimeMs });
 		} catch (error) {
 			out.warnings.push(`report not read: ${clipDetail(String(error))}`);
 		}
@@ -861,6 +873,33 @@ export async function readWorkspace(root = WORKSPACE): Promise<WorkspaceEvidence
 		// No decisions log: overrides and refusals simply are not evidence here.
 	}
 	return out;
+}
+
+/**
+ * Drop the evidence a proposal already judged.
+ *
+ * The delegation workspace's `reports/` is static files, so every learner read
+ * all of them, counted the same 12 lines, and wrote the same evidence file: 13
+ * queue files between 2026-11-15T11-19 and 2026-11-17T15-10 name the identical
+ * `FAIL npm-min-release-age` table, and each one started a learner on a finding
+ * that had already been judged and given a branch. The proposals directory is
+ * already the durable record of "this window was judged" — the same boundary
+ * `diedLearnersFrom` uses for a judged death — so a report written before the
+ * newest proposal is history, not evidence.
+ *
+ * Nothing live is silenced: the current state is what this run's own
+ * `bash scripts/harness-check.sh` says, and a row with no timestamp is kept
+ * because an unreadable one is not an old one (blip 11, blip 36).
+ */
+export function judgeOnce(
+	space: Pick<WorkspaceEvidence, "reports" | "decisions">,
+	since: number | null,
+): { reports: ReportText[]; decisions: ReportText[]; stale: number } {
+	if (since === null) return { reports: space.reports, decisions: space.decisions, stale: 0 };
+	const keep = (rows: ReportText[]) => rows.filter((row) => typeof row.at !== "number" || row.at >= since);
+	const reports = keep(space.reports);
+	const decisions = keep(space.decisions);
+	return { reports, decisions, stale: space.reports.length - reports.length + space.decisions.length - decisions.length };
 }
 
 /** The tail of a session transcript, bounded: the recent turns are the evidence. */
@@ -1408,6 +1447,8 @@ export interface ExternalEvidence {
 	frustration: FrustrationQuote[];
 	warnings: string[];
 	workspacePresent: boolean;
+	/** Report lines and decision rows dropped because a proposal already judged them. */
+	judgedStale: number;
 }
 
 export interface SelfLearnDeps {
@@ -1712,9 +1753,11 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		if (ci.warning) warnings.push(ci.warning);
 		warnings.push(...space.warnings);
 		if (words.warning) warnings.push(words.warning);
+		const judged = judgeOnce(space, judgedSince);
 		return {
-			ciFailures: ciFailuresFrom(ci.runs, space.reports),
-			workerFailures: workerFailuresFrom(space.reports, space.decisions),
+			ciFailures: ciFailuresFrom(ci.runs, judged.reports),
+			workerFailures: workerFailuresFrom(judged.reports, judged.decisions),
+			judgedStale: judged.stale,
 			diedLearners: diedLearnersFrom(parseRuns(runsRaw), { exists: proposalExists, now: at, since: judgedSince }),
 			frustration: words.text ? frustrationQuotes(words.text) : [],
 			warnings,
@@ -1921,6 +1964,14 @@ function evidenceMarkdown(input: {
 			lines.push(`| ${worker.count} | ${cell(worker.where.join(", "))} | ${cell(worker.sample)} |`);
 		}
 	}
+	if (external.judgedStale > 0) {
+		lines.push(
+			"",
+			`${external.judgedStale} report line(s) and decision row(s) predate the newest proposal, so they were not`,
+			"counted again: a learner already judged them and the branch is the record. The live state is what this",
+			"run's own `bash scripts/harness-check.sh` says, not what an old report said.",
+		);
+	}
 
 	lines.push("", "## Learners that died without a proposal", "");
 	if (external.diedLearners.length === 0) lines.push("None.");
@@ -1957,7 +2008,8 @@ function evidenceMarkdown(input: {
 		"proposal-less `spawned` rows of `runs.jsonl`, and the user lines of the session",
 		"transcript. Messages are hashed to a signature before they are counted, quotes are",
 		"redacted and capped at five, and every source that could not be read is listed under",
-		"Warnings rather than reported as \"none\".",
+		"Warnings rather than reported as \"none\". A report or decision row written before the",
+		"newest proposal is not counted again — one finding, one learner (`judgeOnce`).",
 		"",
 		"## Hand the branch over, then close: do this last, every time",
 		"",
