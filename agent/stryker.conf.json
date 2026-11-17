@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
-  "_comment": "Mutation testing (Thoughtworks Radar Vol. 35, blip 2, Adopt). Proves the extension assertions actually bite. First pass is scoped to the non-TUI modules so a run finishes in minutes; `command` runs the same `npm test` the CI job runs.",
+  "_comment": "Mutation testing (Thoughtworks Radar Vol. 35, blip 2, Adopt). Proves the extension assertions actually bite. First pass is scoped to the non-TUI modules so a run finishes in minutes; `command` runs the same `npm test` the CI job runs. timeoutMS is measured, not guessed: the whole suite runs in 1.7s on a 4-core host and about 8s on the runner, and stryker adds 1.5x the dry-run time on top of timeoutMS, so 15000 still gives a single mutant about 29s on CI before it is called hung. At the old 60000 a hang cost a full minute: 13 timeouts on PR #106 were 13 minutes of the 25 a job had.",
   "testRunner": "command",
   "commandRunner": {
     "command": "node --test \"extensions/__tests__/*.test.ts\""
@@ -23,7 +23,7 @@
   ],
   "incremental": true,
   "incrementalFile": "reports/stryker/stryker-incremental.json",
-  "timeoutMS": 60000,
+  "timeoutMS": 15000,
   "reporters": [
     "clear-text",
     "progress",
