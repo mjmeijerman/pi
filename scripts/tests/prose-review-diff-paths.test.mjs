@@ -50,7 +50,10 @@ function git(cwd, ...args) {
 // mutation check runs git from the repo root by absolute path.
 function workflowPathspecs(file = WORKFLOW) {
 	const lines = readFileSync(file, "utf8").split("\n");
-	const start = lines.findIndex((line) => /\bgit\b.*\b(diff|ls-files)\b/.test(line));
+	// A comment that quotes a git command is prose, not the command: on a script
+	// the first `git diff` in the file is the usage header's, and starting there
+	// finds no pathspec at all.
+	const start = lines.findIndex((line) => !/^\s*#/.test(line) && /\bgit\b.*\b(diff|ls-files)\b/.test(line));
 	const specs = [];
 	for (const line of lines.slice(start)) {
 		// A pathspec is the quoted argument that starts with `:` (`:/`, `:(glob)`, ...).
