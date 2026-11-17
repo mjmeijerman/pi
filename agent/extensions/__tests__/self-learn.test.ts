@@ -533,6 +533,28 @@ describe("wiring", () => {
 		assert.match(body, /worktree add/, "the boss's checkout must not be switched");
 		assert.match(body, /big-boss-pi agent space/, "the agent that publishes runs on the host");
 		assert.match(body, /sandboxed/, "and the learner is told why it cannot push");
+		// Both of these were literal mutations that survived: the spec's closing
+		// paragraph was never read back, so emptying it changed nothing asserted.
+		assert.match(
+			body,
+			/Warnings rather than reported as "none"/,
+			"an unreadable source is a warning, never a silent zero",
+		);
+		assert.match(
+			body,
+			/one finding, one learner/,
+			"the spec says an already-judged finding is not counted again",
+		);
+		assert.match(
+			body,
+			/## Hand the branch over, then close/,
+			"and names the hand-off as the last thing the learner does",
+		);
+		assert.match(
+			body,
+			/one finding, one learner \(`judgeOnce`\)\.\n\n## Hand the branch over/,
+			"the paragraph ends and the next heading starts: no stray line between them",
+		);
 		// The bug this test guards: a bare pi started from the sandbox has no
 		// credentials either, so telling the learner to run one only lost turns.
 		assert.doesNotMatch(body, /pi-bare/, "no bare agent: it cannot authenticate from the sandbox");
