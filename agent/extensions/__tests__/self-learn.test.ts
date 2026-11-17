@@ -43,6 +43,7 @@ const {
 	noStepRan,
 	parseRuns,
 	readWorkspace,
+	judgeOnce,
 	failureLines,
 	MAX_FRUSTRATION,
 	noteBaseline,
@@ -915,6 +916,66 @@ describe("what workers recorded", () => {
 			assert.deepEqual(space.reports, []);
 			assert.deepEqual(space.decisions, []);
 			assert.deepEqual(space.warnings, [], "absence is normal, not a warning");
+			assert.equal(judgeOnce(space, NOW).stale, 0, "an empty workspace judges nothing");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("evidence a proposal already judged", () => {
+	const npmFail = "FAIL npm-min-release-age - npm 10.9.9 ignores min-release-age (needs npm ≥ 11)";
+	const dated = (name: string, at: number) => ({ path: `/w/reports/${name}`, text: npmFail, at });
+
+	test("a report written before the newest proposal is history, not evidence", () => {
+		const space = {
+			reports: [dated("a.md", NOW - minutes(600)), dated("b.md", NOW - minutes(600)), dated("c.md", NOW - minutes(5))],
+			decisions: [{ path: "state/decisions.jsonl:1", text: "override: shipped without review", at: NOW - minutes(600) }],
+		};
+		const judged = judgeOnce(space, NOW - minutes(60));
+		assert.deepEqual(judged.reports.map((row) => row.path), ["/w/reports/c.md"]);
+		assert.equal(judged.decisions.length, 0);
+		assert.equal(judged.stale, 3);
+	});
+
+	test("the same stale pair stops re-firing the gate", () => {
+		const reports = [dated("a.md", NOW - minutes(600)), dated("b.md", NOW - minutes(600))];
+		assert.equal(workerFailuresFrom(reports).length, 1, "the files really do repeat the same line");
+		const judged = judgeOnce({ reports, decisions: [] }, NOW - minutes(60));
+		assert.equal(workerFailuresFrom(judged.reports, judged.decisions).length, 0, "and one proposal already judged them");
+		assert.equal(decideLearner(evidence({ workerFailures: workerFailuresFrom(judged.reports) })).spawn, false);
+	});
+
+	test("a row with no timestamp is evidence, not an old row", () => {
+		const judged = judgeOnce({ reports: [{ path: "/w/reports/a.md", text: npmFail }], decisions: [] }, NOW);
+		assert.equal(judged.reports.length, 1);
+		assert.equal(judged.stale, 0);
+	});
+
+	test("no proposal yet judges nothing", () => {
+		const judged = judgeOnce(
+			{ reports: [dated("a.md", 0)], decisions: [{ path: "state/decisions.jsonl:1", text: "refusal: went ahead anyway", at: 0 }] },
+			null,
+		);
+		assert.equal(judged.stale, 0);
+		assert.equal(judged.reports.length, 1);
+		assert.equal(judged.decisions.length, 1);
+	});
+
+	test("readWorkspace dates a report from its mtime and a decision row from its ts", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-dated-"));
+		try {
+			await mkdir(join(dir, "reports"), { recursive: true });
+			await mkdir(join(dir, "state"), { recursive: true });
+			await writeFile(join(dir, "reports", "a.md"), npmFail, "utf8");
+			await writeFile(
+				join(dir, "state", "decisions.jsonl"),
+				`${JSON.stringify({ ts: new Date(NOW).toISOString(), decision: "override", reason: "shipped red" })}\n`,
+				"utf8",
+			);
+			const space = await readWorkspace(dir);
+			assert.equal(typeof space.reports[0]?.at, "number", "a report carries when it was written");
+			assert.equal(space.decisions[0]?.at, NOW, "a decision row carries its own ts");
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
