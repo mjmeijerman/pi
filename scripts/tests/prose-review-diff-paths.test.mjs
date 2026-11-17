@@ -21,8 +21,10 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const WORKFLOW = join(ROOT, ".github/workflows/prose-review.yml");
-// The same non-glob `**` mistake lived in the mutation job's diff as well.
-const MUTATION_WORKFLOW = join(ROOT, ".github/workflows/test.yml");
+// The same non-glob `**` mistake lived in the mutation job's diff as well. That
+// diff is now `scripts/mutate-changed.sh` (the workflow calls it rather than
+// carrying its own copy), so the pathspec this file guards lives there.
+const MUTATION_SOURCE = join(ROOT, "scripts/mutate-changed.sh");
 
 // A test's own git identity: the host's config must not decide what this diff is.
 const GIT_ENV = {
@@ -44,10 +46,14 @@ function git(cwd, ...args) {
 
 // The pathspecs exactly as the workflow shell runs them: every quoted argument
 // of a `git diff`/`git ls-files` line that looks like a pathspec (`:/...` or
-// `:(magic)...`), across the continued command.
+// `:(magic)...`), across the continued command. `git -C <dir> diff` counts: the
+// mutation check runs git from the repo root by absolute path.
 function workflowPathspecs(file = WORKFLOW) {
 	const lines = readFileSync(file, "utf8").split("\n");
-	const start = lines.findIndex((line) => /\bgit (diff|ls-files)\b/.test(line));
+	// A comment that quotes a git command is prose, not the command: on a script
+	// the first `git diff` in the file is the usage header's, and starting there
+	// finds no pathspec at all.
+	const start = lines.findIndex((line) => !/^\s*#/.test(line) && /\bgit\b.*\b(diff|ls-files)\b/.test(line));
 	const specs = [];
 	for (const line of lines.slice(start)) {
 		// A pathspec is the quoted argument that starts with `:` (`:/`, `:(glob)`, ...).
@@ -129,7 +135,7 @@ test("no `**/` pathspec in a workflow git command is left without the glob magic
 	// The narrow claim: a `**` segment only crosses directory levels under
 	// `:(glob)`. A pathspec that spells `**/` without it is the bug this file
 	// was written for, whatever the surrounding lines look like.
-	for (const file of [WORKFLOW, MUTATION_WORKFLOW]) {
+	for (const file of [WORKFLOW, MUTATION_SOURCE]) {
 		for (const spec of workflowPathspecs(file)) {
 			if (!spec.includes("**")) continue;
 			assert.match(spec, /^:\(glob(,[a-z]+)*\)/, `${file}: pathspec ${spec} uses ** without :(glob)`);
@@ -137,7 +143,7 @@ test("no `**/` pathspec in a workflow git command is left without the glob magic
 	}
 });
 
-test("the mutation job's pathspec sees extensions directly under agent/extensions", () => {
+test("the mutation check's pathspec sees extensions directly under agent/extensions", () => {
 	// agent/extensions holds its .ts files directly (merge-guard.ts and friends),
 	// so a pathspec that needs one directory level skips the mutation entirely.
 	const dir = mkdtempSync(join(tmp, "repos-ext-"));
@@ -152,13 +158,13 @@ test("the mutation job's pathspec sees extensions directly under agent/extension
 	git(dir, "commit", "-qm", "base");
 	git(dir, "ls-files", "-z");
 
-	const specs = workflowPathspecs(MUTATION_WORKFLOW);
+	const specs = workflowPathspecs(MUTATION_SOURCE);
 	const seen = git(dir, "ls-files", "--", ...specs).split("\n").filter(Boolean).sort();
 
 	// Whatever the pathspec keeps, the two extension sources must be in it, and
 	// nothing from outside agent/extensions.
 	for (const path of ["agent/extensions/merge-guard.ts", "agent/extensions/nested/deep.ts"]) {
-		assert.ok(seen.includes(path), `${MUTATION_WORKFLOW} pathspec ${specs.join(" ")} missed ${path}`);
+		assert.ok(seen.includes(path), `${MUTATION_SOURCE} pathspec ${specs.join(" ")} missed ${path}`);
 	}
 	assert.ok(!seen.includes("agent/other/thing.ts"), "the mutation pathspec reaches outside agent/extensions");
 	assert.ok(touched.length === 4);

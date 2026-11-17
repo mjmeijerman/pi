@@ -25,15 +25,18 @@ hooks:
 # Mutation testing (Radar Vol. 35, blip 2, Adopt): proves the extension assertions bite.
 # Two purposes, two targets. `mutate` is the incremental run over the whole configured
 # scope (agent/stryker.conf.json) — the score of the harness itself, for an audit or a
-# full first pass. `mutate-changed` is the branch check: it derives the mutant list from
-# `git diff --name-only origin/trunk...HEAD`, keeps only the files the config can mutate
-# (agent/extensions/**/*.ts, tests excluded) and passes them as one --mutate list, so a
-# branch that touches one file costs one file's worth of time and prints that file's score.
+# full first pass. `mutate-changed` is the branch check: it derives the mutant ranges from
+# `git diff -U0 origin/trunk...HEAD`, keeps only the lines the branch added in files the
+# config can mutate (agent/extensions/**/*.ts, tests excluded) and passes them as
+# `path:start-end` --mutate values, so a branch that adds a hunk costs a hunk's worth of
+# time and the score it prints is the score of what the branch wrote. A whole file was
+# the older rule and it asked the wrong question: a survivor that predates the branch is
+# not the branch's to kill, and 1042 mutants of one file do not fit a 25-minute PR job.
 # It refuses an empty list instead of letting stryker widen to the whole config.
 mutate:
 	@cd $(CURDIR)/agent && npx stryker run
 
-# Branch-scoped: only the files this branch touched (scripts/mutate-changed.sh).
+# Branch-scoped: only the lines this branch added (scripts/mutate-changed.sh).
 mutate-changed:
 	@bash $(CURDIR)/scripts/mutate-changed.sh
 

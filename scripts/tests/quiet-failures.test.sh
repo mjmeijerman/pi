@@ -92,11 +92,24 @@ expect_quiet_success() {
 }
 
 # ------------------------------------------------- mutate-changed, no agent/ ---
+# A patch that adds one line under agent/extensions: the script reads a real
+# `git diff -U0` body now, so a list of paths is no longer something it can
+# answer. The range it derives is `extensions/merge-guard.ts:2-2`.
+patch_adds_one_line() {
+	cat >"$1" <<'PATCH'
+diff --git a/agent/extensions/merge-guard.ts b/agent/extensions/merge-guard.ts
+--- a/agent/extensions/merge-guard.ts
++++ b/agent/extensions/merge-guard.ts
+@@ -1,0 +2,1 @@
++export const guard = 1;
+PATCH
+}
+
 case_start "mutate-changed in a tree with no agent/ says which directory is missing"
 mkdir -p "$DIR/bin"
 cp -- "$ROOT_DIR/scripts/mutate-changed.sh" "$DIR/bin/mutate-changed.sh"
-printf 'agent/extensions/merge-guard.ts\n' >"$DIR/diff.txt"
-run bash "$DIR/bin/mutate-changed.sh" --diff-file "$DIR/diff.txt"
+patch_adds_one_line "$DIR/diff.txt"
+run bash "$DIR/bin/mutate-changed.sh" --patch-file "$DIR/diff.txt"
 expect_failed 'agent is missing'
 
 # --------------------------------------- harness-check --write-skills-lock ---
@@ -141,10 +154,10 @@ expect_failed "no entry for 'nosuch'"
 
 # ------------------------------------------- a passing run stays off stderr ---
 case_start "mutate-changed --list-only on a good listing is silent on stderr"
-printf 'agent/extensions/merge-guard.ts\n' >"$DIR/diff.txt"
-run bash "$ROOT_DIR/scripts/mutate-changed.sh" --diff-file "$DIR/diff.txt" --list-only
+patch_adds_one_line "$DIR/diff.txt"
+run bash "$ROOT_DIR/scripts/mutate-changed.sh" --patch-file "$DIR/diff.txt" --list-only
 expect_quiet_success
-if [ "$OUT" != "extensions/merge-guard.ts" ]; then
+if [ "$OUT" != "extensions/merge-guard.ts:2-2" ]; then
 	fail "the glob list changed" "got: ${OUT:-<empty>}"
 else
 	pass "the list is still the branch's file"
