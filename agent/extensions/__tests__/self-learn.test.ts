@@ -40,6 +40,7 @@ const {
 	proposalSpellings,
 	proposalWritten,
 	ghCiRuns,
+	judgedByCode,
 	noStepRan,
 	parseRuns,
 	readWorkspace,
@@ -822,6 +823,7 @@ describe("repeated failing CI checks", () => {
 			const bin = await fakeGh(dir, `printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]},{"conclusion":"skipped","steps":[]}]}'`);
 			const result = await ghCiRuns(dir, bin);
 			assert.deepEqual(result.runs, [], "a queue refusal is not evidence about the code");
+			assert.match(result.warning ?? "", /all 3 of 3 failing runs ran no step/);
 			assert.match(result.warning ?? "", /failing CI checks not counted/);
 			assert.match(result.warning ?? "", /Billing & plans/);
 			const decision = decideLearner(evidence({ ciFailures: ciFailuresFrom(result.runs) }));
@@ -850,6 +852,79 @@ describe("repeated failing CI checks", () => {
 			const result = await ghCiRuns(dir, bin);
 			assert.equal(result.runs.length, 3, "doubt counts normally");
 			assert.equal(result.warning, null);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a mixed list drops only the runs that never started", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-mixed-gh-"));
+		try {
+			// 2026-11-17: the three newest runs had started, 76 older ones had not.
+			// The old probe looked at the newest three only and kept all 93.
+			const bin = await fakeGh(
+				dir,
+				`case "$3" in 1) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]}]}' ;; *) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;; esac`,
+			);
+			const result = await ghCiRuns(dir, bin);
+			assert.equal(result.runs.length, 2, "the two runs that executed a step are kept");
+			assert.match(result.warning ?? "", /1 of 3 failing runs ran no step/);
+			assert.match(result.warning ?? "", /Billing & plans/);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("judgedByCode keeps a run it cannot ask about, and counts the doubt", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-judged-"));
+		try {
+			const bin = await fakeGh(dir, "exit 1");
+			const runs = [
+				{ name: "tests", headBranch: "a", conclusion: "failure", databaseId: 1 },
+				{ name: "tests", headBranch: "b", conclusion: "failure" },
+			];
+			const judged = await judgedByCode(runs, dir, bin);
+			assert.equal(judged.runs.length, 2, "an unreadable probe and a missing id both count normally");
+			assert.equal(judged.refused, 0);
+			assert.equal(judged.unreadable, 1);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a refusal is counted as a refusal, not as doubt", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-tally-"));
+		try {
+			const bin = await fakeGh(
+				dir,
+				`case "$3" in 1) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]}]}' ;; 3) exit 1 ;; *) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;; esac`,
+			);
+			const runs = [
+				{ name: "tests", headBranch: "a", conclusion: "failure", databaseId: 1 },
+				{ name: "tests", headBranch: "b", conclusion: "failure", databaseId: 2 },
+				{ name: "tests", headBranch: "c", conclusion: "failure", databaseId: 3 },
+			];
+			const judged = await judgedByCode(runs, dir, bin);
+			assert.equal(judged.refused, 1);
+			assert.equal(judged.unreadable, 1, "a probe that could not answer is not a refusal");
+			assert.equal(judged.runs.length, 2);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("an empty failure list is not a billing block", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-empty-gh-"));
+		try {
+			const bin = await fakeGh(dir, "exit 1");
+			await writeFile(
+				bin,
+				`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '[]' ;;\n  view) exit 1 ;;\nesac\n`,
+				"utf8",
+			);
+			const result = await ghCiRuns(dir, bin);
+			assert.deepEqual(result.runs, []);
+			assert.equal(result.warning, null, "nothing failed, so nothing was refused");
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
