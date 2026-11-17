@@ -9,7 +9,8 @@
     "extensions/lib/**/*.ts",
     "extensions/merge-guard.ts",
     "extensions/secret-guard.ts",
-    "!extensions/**/*.test.ts"
+    "!extensions/**/*.test.ts",
+    "!extensions/**/__tests__/**"
   ],
   "ignorePatterns": [
     "reports/**",
