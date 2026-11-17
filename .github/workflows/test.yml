@@ -108,8 +108,18 @@ jobs:
     name: mutation on changed files (stryker)
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-    # A slow run must not hold the queue: a per-PR budget, not a hang.
-    timeout-minutes: 25
+    # A slow run must not hold the queue: a per-PR budget, not a hang. The
+    # number is arithmetic, not appetite. Measured on the PR #106 run (job
+    # 134170533027, 710 mutants in 25m18s at stryker's default concurrency of
+    # cpuCount, i.e. 4 workers, including 13 timeouts at 60s): one mutant costs
+    # 7.45 worker-seconds. The largest plausible diff is every file a PR can
+    # mutate at once — 1463 mutants (secret-guard 1042 + merge-guard 341 +
+    # lib/usage-format 80, measured with --dryRunOnly) — and 1463 x 7.45 / 4
+    # workers = 45.4 minutes with no help from the concurrency flag below. 60
+    # covers that worst case with 32% headroom, so a legitimate large diff
+    # finishes instead of being cancelled mid-run, while a wedged mutant still
+    # dies by the cap rather than by the runner's 6-hour default.
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: agent
@@ -214,7 +224,13 @@ jobs:
             if [[ -n $file ]]; then args+=(--mutate "$file"); fi
           done <<<"$MUTATE_FILES"
           printf 'mutating: %s\n' "${args[*]}"
-          npx stryker run stryker.pr.conf.json "${args[@]}"
+          # --concurrency 8 on a 4-core runner, measured, not assumed: 80
+          # mutants on lib/usage-format.ts under `taskset -c 0-3` (the runner's
+          # 4 vCPUs) took 109s at stryker's default 4 workers and 83s at 8, a
+          # 24% cut, because each worker spends most of a mutant waiting on its
+          # own `node --test` child processes rather than computing. 12 workers
+          # only reached 75s (10% more) at double the memory, so 8 is the knee.
+          npx stryker run stryker.pr.conf.json --concurrency 8 "${args[@]}"
 
       - name: keep the report
         if: always() && steps.changed.outputs.skip != 'true'
