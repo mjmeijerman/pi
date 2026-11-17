@@ -509,6 +509,70 @@ export function failureLines(text: string, cap = MAX_LINES_PER_REPORT): string[]
 }
 
 /**
+ * Does this line say *this check* is the thing that failed?
+ *
+ * A check name is short and ordinary — `tests`, `pr-tier` — so matching it as a
+ * substring turns any sentence that mentions tests into evidence about the CI
+ * check called `tests`. That is what the 2026-11-17T19-50 queue file counted:
+ * 37 "worker reports" for `tests`, with the sample line
+ * `Case 9 ("leads with the runnable command when asked how to run the tests")
+ * failed on …` — an eval case name, never a CI verdict. The 179 static files in
+ * `reports/` then read as 37 workers who each saw the same red check.
+ *
+ * Two shapes count, and both keep the verdict attached to the name:
+ *   `FAIL tests` — the harness's own convention, name right after the verdict
+ *   `tests`: failed / `pr-gate red` / `tests` not ok — the name, then a gap,
+ *     then the verdict
+ * The name must be a whole token, so `tests-extra` is a different check.
+ */
+export function namesCheckAsFailed(line: string, check: string): boolean {
+	if (!check) return false;
+	const lower = line.toLowerCase();
+	const name = check.toLowerCase();
+	// `FAIL tests` / `FAILED tests: one case red` — the harness's own line, the
+	// verdict first, the name right after it.
+	const head = FAIL_LINE.exec(line);
+	if (head) {
+		const start = head.index + head[0].length;
+		const end = start + name.length;
+		if (lower.startsWith(name, start) && !NAME_CHAR.test(line[end] ?? "")) return true;
+	}
+	// `tests: failed`, `pr-gate" red` — the name, one closing quote at most, then
+	// gaps, then the verdict. A check is named mid-sentence too, so every
+	// occurrence is tried, not just the first.
+	for (let found = lower.indexOf(name); found !== -1; found = lower.indexOf(name, found + 1)) {
+		const end = found + name.length;
+		if (NAME_CHAR.test(line[found - 1] ?? "")) continue;
+		// Stryker disable next-line StringLiteral: at the end of the line the
+		// fallback only feeds a name-character test, and either answer leads to the
+		// same verdict — an equivalent mutant.
+		if (NAME_CHAR.test(line[end] ?? "")) continue;
+		const gap = GAP.exec(line.slice(end));
+		const rest = line.slice(end + (gap ? gap[0].length : 0));
+		if (VERDICT_WORD.test(rest)) return true;
+	}
+	return false;
+}
+
+/** A whole line that starts with FAIL and names the check next. */
+const FAIL_LINE = /^\s*fail(?:ed)?\s+/i;
+
+/**
+ * What may sit between a name and its verdict: one closing quote, then gaps.
+ * Dropping the anchor lets the gap match later in the tail, but the verdict is
+ * read from `end + gap[0].length`, so a later match shifts the read forward by
+ * its own short length and lands on the same text: equivalent, not unasserted.
+ */
+// Stryker disable next-line Regex: equivalent, as above.
+const GAP = /^[`'"]?[\s:=]*/;
+
+/** A verdict word, at the start of what the gap left. */
+const VERDICT_WORD = /^(?:fail(?:ed|s|ing|ure)?|red|not ok)\b/i;
+
+/** A character that can be part of a check name, so `tests-extra` is not `tests`. */
+const NAME_CHAR = /[a-z0-9_./-]/i;
+
+/**
  * A check name that failed on two branches — or in two workers' reports — is
  * systemic even though no single session ever saw it twice. That was the whole
  * of 2026-11-14: six pull requests, one body shape, `pr-gate.sh mission` red
@@ -536,7 +600,7 @@ export function ciFailuresFrom(runs: CiRun[], reports: ReportText[] = []): CiFai
 	for (const report of reports) {
 		const lines = failureLines(report.text);
 		for (const ci of groups.values()) {
-			const hit = lines.find((line) => line.toLowerCase().includes(ci.check.toLowerCase()));
+			const hit = lines.find((line) => namesCheckAsFailed(line, ci.check));
 			if (!hit) continue;
 			if (!ci.reports.includes(report.path)) ci.reports.push(report.path);
 			if (!ci.sample) ci.sample = hit;

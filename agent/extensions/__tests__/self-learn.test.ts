@@ -32,6 +32,7 @@ const {
 	clipDetail,
 	turnSession,
 	ciFailuresFrom,
+	namesCheckAsFailed,
 	workerFailuresFrom,
 	decisionRows,
 	diedLearnersFrom,
@@ -800,8 +801,51 @@ describe("repeated failing CI checks", () => {
 		assert.match(decision.reason, /2× CI check "pr-gate" failed/);
 	});
 
+	test("a padded name is the same check, not a second one", () => {
+		const fired = ciFailuresFrom([run(" pr-gate", "one"), run("pr-gate ", "two")]);
+		assert.equal(fired.length, 1);
+		assert.equal(fired[0].check, "pr-gate", "the key is trimmed, so the two occurrences are one check");
+	});
+
 	test("the same branch failing three times is still one branch", () => {
 		assert.equal(ciFailuresFrom([run("pr-gate", "one"), run("pr-gate", "one"), run("pr-gate", "one")]).length, 0);
+	});
+
+	test("a verdict has to be attached to the name, in either of the two shapes", () => {
+		const counts: [string, string, boolean][] = [
+			["FAIL tests", "tests", true],
+			["FAILED tests: one case red", "tests", true],
+			["  FAIL   pr-gate red", "pr-gate", true],
+			["tests: failed", "tests", true],
+			["tests: fail", "tests", true],
+			["  FAIL tests: one case red", "tests", true],
+			["FAIL   tests: one case red", "tests", true],
+			["tests x: failed", "tests", false],
+			["testsfailed: one case red", "tests", false],
+			['pr-gate" red', "pr-gate", true],
+			["tests=failing", "tests", true],
+			["x tests: failed", "tests", true],
+			["tests not ok", "tests", true],
+			["tests failure", "tests", true],
+			["tests fails", "tests", true],
+			["pr-gate red", "pr-gate", true],
+			["tests", "tests", false],
+			["ok tests", "tests", false],
+			["the tests all passed", "tests", false],
+			["we FAIL tests last week", "tests", false],
+			["FAIL tests-extra: one case red", "tests", false],
+			["pr-gates: red", "pr-gate", false],
+			["tests (failed)", "tests", false],
+			["", "tests", false],
+			["anything", "", false],
+		];
+		for (const [line, check, expected] of counts) {
+			assert.equal(
+				namesCheckAsFailed(line, check),
+				expected,
+				`${JSON.stringify(line)} as ${JSON.stringify(check)}`,
+			);
+		}
 	});
 
 	test("a worker report naming the check is the second occurrence", () => {
@@ -810,6 +854,41 @@ describe("repeated failing CI checks", () => {
 		assert.equal(fired[0].branches.length, 1);
 		assert.equal(fired[0].reports.length, 1);
 		assert.match(fired[0].sample, /pr-gate/);
+	});
+
+	test("a report that merely mentions the word tests is not a CI verdict on `tests`", () => {
+		// 2026-11-17T19-50: this exact line, quoted from an eval report, counted as one of
+		// 37 "workers" who saw the `tests` check red. Nobody had.
+		const prose = report(
+			"evals.md",
+			'Case 9 ("leads with the runnable command when asked how to run the tests") failed on 2026-11-14',
+		);
+		assert.equal(namesCheckAsFailed(prose.text, "tests"), false);
+		assert.equal(ciFailuresFrom([run("tests", "trunk")], [prose]).length, 0);
+		assert.equal(
+			ciFailuresFrom([run("tests", "trunk")], [prose, report("other.md", prose.text)]).length,
+			0,
+			"two mentions are still not two workers",
+		);
+		assert.equal(
+			ciFailuresFrom([run("tests", "trunk")], [report("a.md", "FAIL tests-extra: one case red")]).length,
+			0,
+			"a longer name is a different check",
+		);
+		assert.equal(
+			ciFailuresFrom([run("tests", "trunk")], [report("a.md", "mytests failed, said the log")]).length,
+			0,
+			"the name has to start where the word starts",
+		);
+	});
+
+	test("a report naming the check and its verdict is the second occurrence", () => {
+		for (const line of ["FAIL tests", "fail tests", "`tests` failed: 3 red", "tests: failure in the shell job", "tests red on trunk"]) {
+			const fired = ciFailuresFrom([run("tests", "trunk")], [report("w1.md", line)]);
+			assert.equal(fired.length, 1, line);
+			assert.equal(fired[0].reports.length, 1, line);
+			assert.equal(fired[0].sample, line, line);
+		}
 	});
 
 	test("gh absent is a warning, never a crash and never a silent zero", async () => {
