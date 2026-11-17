@@ -94,7 +94,7 @@ cmd_spawn() {
 cmd_show() {
 	local target=${1:?usage: show <slug|terminal>}
 	local resolved terminal borrowed
-	resolved=$(resolve "$target") || exit 1
+	resolved=$(resolve "$target") || die "show: no entry for '$target' (try: agent-pane.sh list)"
 	terminal=${resolved%% *}; borrowed=${resolved#* }
 	[ -n "$terminal" ] || die "no terminal for $target"
 	need herdr-app
@@ -115,7 +115,7 @@ cmd_show() {
 cmd_hide() {
 	local target=${1:?usage: hide <slug|terminal>}
 	local resolved borrowed
-	resolved=$(resolve "$target") || exit 1
+	resolved=$(resolve "$target") || die "hide: no entry for '$target' (try: agent-pane.sh list)"
 	borrowed=${resolved#* }
 	[ -n "$borrowed" ] || die "nothing borrowed for $target (its pane was never swapped)"
 	need herdr-app
