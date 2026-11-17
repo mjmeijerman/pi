@@ -35,6 +35,9 @@ const {
 	workerFailuresFrom,
 	decisionRows,
 	diedLearnersFrom,
+	proposalAliases,
+	runPaths,
+	runStamp,
 	frustrationQuotes,
 	watchOutcome,
 	proposalSpellings,
@@ -958,6 +961,41 @@ describe("learners that died", () => {
 		assert.equal(noPath.length, 0, "an old row with no proposal path proves nothing either way");
 	});
 
+	test("a proposal written under the run's other name is not a death", () => {
+		// 2026-11-15T10:07Z: the queue file was `…T10-07-10-876Z.md`, the row
+		// expected `…-10-07-10-876Z.md`, and the learner copied the name it could
+		// see. A real submission read as a death and started another learner.
+		const at = Date.parse("2026-11-15T10:07:10.876Z");
+		const dash = join("/p", `${runStamp(at)}.md`);
+		assert.equal(dash, "/p/2026-11-15-10-07-10-876Z.md", "one run, one name");
+		assert.equal(dash.includes("T"), false, "the queue and the proposal must not differ by a T");
+		const paths = runPaths(at, "/p");
+		assert.deepEqual(
+			paths,
+			{ queue: "/p/queue/2026-11-15-10-07-10-876Z.md", proposal: "/p/2026-11-15-10-07-10-876Z.md" },
+			"the queue file and the proposal share one stamp, and only the queue is a level down",
+		);
+		const iso = join("/p", "2026-11-15T10-07-10-876Z.md");
+		assert.deepEqual(proposalAliases(dash), [iso]);
+		assert.deepEqual(proposalAliases(iso), [dash]);
+		assert.deepEqual(proposalAliases("/p/notes.md"), [], "anything else has no twin");
+		// The three regex anchors each carry a case: end ($), start (^), and an
+		// optional directory. Without them a suffix, a prefix, or a bare name is
+		// either read as a run or silently loses its twin.
+		assert.deepEqual(proposalAliases("/p/2026-11-15-10-07-10-876Z.mdx"), [], "the suffix is anchored at the end");
+		assert.deepEqual(proposalAliases("junk2026-11-15-10-07-10-876Z.md"), [], "the stamp starts the name");
+		assert.deepEqual(
+			proposalAliases("2026-11-15-10-07-10-876Z.md"),
+			["2026-11-15T10-07-10-876Z.md"],
+			"a bare name has no directory to require",
+		);
+		const died = diedLearnersFrom([row({ kind: "spawned", slug: "learn-10-07", proposal: dash })], {
+			exists: (path: string) => path === iso,
+			now: NOW,
+		});
+		assert.deepEqual(died, [], "the learner wrote it, under the name it was shown");
+	});
+
 	test("a runs.jsonl fixture with a proposal-less launch reads as a death", () => {
 		const raw = [
 			JSON.stringify({ ts: new Date(NOW - minutes(60)).toISOString(), kind: "spawned", slug: "learn-1936", launcher: "pane", queue: "/q/a.md", proposal: "/p/gone.md" }),
@@ -1019,6 +1057,35 @@ describe("learners that died", () => {
 		assert.equal(rows[0].queue, "/q/1936.md");
 		assert.equal(rows[0].proposal, "/p/1936.md");
 		assert.ok(rows[0].elapsedMs >= 0);
+	});
+
+	test("a death its learner already named is judged once, not every 30 minutes", () => {
+		const death = row({ kind: "spawned", slug: "learn-2015", launcher: "pane", queue: "/q/b.md", proposal: "/p/gone.md" });
+		const fresh = diedLearnersFrom([death], { exists: () => false, now: NOW });
+		assert.deepEqual(fresh.map((learner) => learner.slug), ["learn-2015"], "before the learner ran it is evidence");
+
+		const judgedRow = row({ kind: "spawned", slug: "learn-2051", proposal: "/p/2051.md", judged: ["learn-2015"] });
+		const after = diedLearnersFrom([death, judgedRow], { exists: () => false, now: NOW });
+		assert.deepEqual(after.map((learner) => learner.slug), ["learn-2051"], "the judged death stops counting; the learner that named it is its own case");
+		assert.equal(decideLearner(evidence({ diedLearners: after })).spawn, false, "one death alone does not trip the gate a second time");
+
+		const fresh2 = row({ kind: "spawned", slug: "learn-2130", proposal: "/p/2130.md" });
+		const again = diedLearnersFrom([death, judgedRow, fresh2], { exists: () => false, now: NOW });
+		assert.deepEqual(again.map((learner) => learner.slug), ["learn-2051", "learn-2130"], "a new dead learner still trips it");
+	});
+
+	test("the decision carries the slugs it judged, so the spawn row can mark them", () => {
+		const two = diedLearnersFrom(
+			[
+				row({ kind: "died", slug: "learn-1936" }),
+				row({ kind: "died", slug: "learn-2015" }),
+			],
+			{ exists: () => false, now: NOW },
+		);
+		assert.deepEqual(decideLearner(evidence({ diedLearners: two })).judged, ["learn-1936", "learn-2015"]);
+		const silent = decideLearner(evidence({ notes: 1 }));
+		assert.equal(silent.spawn, true);
+		assert.equal(silent.judged, undefined, "a /suggest note judged nothing");
 	});
 
 	test("a written proposal, or a watch window that closes, is not a death", async () => {
