@@ -32,6 +32,7 @@ const {
 	clipDetail,
 	turnSession,
 	ciFailuresFrom,
+	namesCheckAsFailed,
 	workerFailuresFrom,
 	decisionRows,
 	diedLearnersFrom,
@@ -785,6 +786,41 @@ describe("repeated failing CI checks", () => {
 		assert.equal(fired[0].branches.length, 1);
 		assert.equal(fired[0].reports.length, 1);
 		assert.match(fired[0].sample, /pr-gate/);
+	});
+
+	test("a report that merely mentions the word tests is not a CI verdict on `tests`", () => {
+		// 2026-11-17T19-50: this exact line, quoted from an eval report, counted as one of
+		// 37 "workers" who saw the `tests` check red. Nobody had.
+		const prose = report(
+			"evals.md",
+			'Case 9 ("leads with the runnable command when asked how to run the tests") failed on 2026-11-14',
+		);
+		assert.equal(namesCheckAsFailed(prose.text, "tests"), false);
+		assert.equal(ciFailuresFrom([run("tests", "trunk")], [prose]).length, 0);
+		assert.equal(
+			ciFailuresFrom([run("tests", "trunk")], [prose, report("other.md", prose.text)]).length,
+			0,
+			"two mentions are still not two workers",
+		);
+		assert.equal(
+			ciFailuresFrom([run("tests", "trunk")], [report("a.md", "FAIL tests-extra: one case red")]).length,
+			0,
+			"a longer name is a different check",
+		);
+		assert.equal(
+			ciFailuresFrom([run("tests", "trunk")], [report("a.md", "mytests failed, said the log")]).length,
+			0,
+			"the name has to start where the word starts",
+		);
+	});
+
+	test("a report naming the check and its verdict is the second occurrence", () => {
+		for (const line of ["FAIL tests", "fail tests", "`tests` failed: 3 red", "tests: failure in the shell job", "tests red on trunk"]) {
+			const fired = ciFailuresFrom([run("tests", "trunk")], [report("w1.md", line)]);
+			assert.equal(fired.length, 1, line);
+			assert.equal(fired[0].reports.length, 1, line);
+			assert.equal(fired[0].sample, line, line);
+		}
 	});
 
 	test("gh absent is a warning, never a crash and never a silent zero", async () => {

@@ -503,6 +503,32 @@ export function failureLines(text: string, cap = MAX_LINES_PER_REPORT): string[]
 }
 
 /**
+ * Does this line say *this check* is the thing that failed?
+ *
+ * A check name is short and ordinary — `tests`, `pr-tier` — so matching it as a
+ * substring turns any sentence that mentions tests into evidence about the CI
+ * check called `tests`. That is what the 2026-11-17T19-50 queue file counted:
+ * 37 "worker reports" for `tests`, with the sample line
+ * `Case 9 ("leads with the runnable command when asked how to run the tests")
+ * failed on …` — an eval case name, never a CI verdict. The 179 static files in
+ * `reports/` then read as 37 workers who each saw the same red check.
+ *
+ * Two shapes count, and both keep the verdict attached to the name:
+ *   `FAIL tests` — the harness's own convention, name right after the verdict
+ *   `tests`: failed / `pr-gate red` — the name, one closing quote at most, then
+ *     the verdict
+ * The name must be a whole token, so `tests-extra` is a different check.
+ */
+export function namesCheckAsFailed(line: string, check: string): boolean {
+	const name = check.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const open = "(?<![A-Za-z0-9_./-])";
+	const close = "(?![A-Za-z0-9_./-])";
+	const verdict = "(?:fail(?:ed|s|ing|ure)?|red|not ok)";
+	if (new RegExp(`\\bFAIL(?:ED)?\\s+${name}${close}`, "i").test(line)) return true;
+	return new RegExp(`${open}${name}${close}[\`'"]?[\\s:=]*${verdict}\\b`, "i").test(line);
+}
+
+/**
  * A check name that failed on two branches — or in two workers' reports — is
  * systemic even though no single session ever saw it twice. That was the whole
  * of 2026-11-14: six pull requests, one body shape, `pr-gate.sh mission` red
@@ -530,7 +556,7 @@ export function ciFailuresFrom(runs: CiRun[], reports: ReportText[] = []): CiFai
 	for (const report of reports) {
 		const lines = failureLines(report.text);
 		for (const ci of groups.values()) {
-			const hit = lines.find((line) => line.toLowerCase().includes(ci.check.toLowerCase()));
+			const hit = lines.find((line) => namesCheckAsFailed(line, ci.check));
 			if (!hit) continue;
 			if (!ci.reports.includes(report.path)) ci.reports.push(report.path);
 			if (!ci.sample) ci.sample = hit;
