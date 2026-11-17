@@ -892,6 +892,36 @@ describe("repeated failing CI checks", () => {
 		}
 	});
 
+	test("a run with no id is never asked about, and stays a failure", async () => {
+		// gh's list can omit databaseId. Such a run cannot be probed, so it is
+		// kept without a call: the day the id test inverts, an unprobeable run
+		// becomes the only thing probed and a real failure disappears.
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-noid-"));
+		try {
+			const seen = join(dir, "asked");
+			const bin = await fakeGh(
+				dir,
+				`printf 'x' >> '${seen}'; printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]}]}'`,
+			);
+			const runs = [
+				{ name: "tests", headBranch: "a", conclusion: "failure", databaseId: 1 },
+				{ name: "tests", headBranch: "b", conclusion: "failure" },
+			];
+			const judged = await judgedByCode(runs, dir, bin);
+			assert.deepEqual(
+				judged.runs.map((run) => run.headBranch),
+				["b"],
+				"the unprobeable run stays; the one that provably ran no step is refused",
+			);
+			assert.equal(judged.refused, 1, "only the run with an id could be refused");
+			assert.equal(judged.unreadable, 0, "no probe went unanswered");
+			const asked = await readFile(seen, "utf8").catch(() => "");
+			assert.equal(asked, "x", "one probe call, for the run that has an id");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("a refusal is counted as a refusal, not as doubt", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "self-learn-tally-"));
 		try {
