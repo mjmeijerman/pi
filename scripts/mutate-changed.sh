@@ -108,8 +108,10 @@ printf '%s\n' "$files" | sed 's/^/   agent\//'
 printf '== mutate-changed: npx stryker run --mutate <above> --force\n'
 
 list="$(printf '%s\n' "$files" | paste -sd, -)"
-
-cd "$ROOT/agent" || exit 1
+cd "$ROOT/agent" || {
+	printf 'mutate-changed: %s/agent is missing — this is not a harness checkout, so there is nothing to run stryker in\n' "$ROOT" >&2
+	exit 1
+}
 if [ -x ./node_modules/.bin/stryker ]; then
 	exec ./node_modules/.bin/stryker run --mutate "$list" --force
 fi

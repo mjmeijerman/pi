@@ -34,8 +34,16 @@ scan_commit() {
 	[ "$SCANNED" -gt "$MAX_COMMITS" ] && return
 
 	# commit message
-	local msg
-	msg="$(git log -1 --format=%B "$c" 2>/dev/null)" || return
+	local msg msg_err
+	msg_err="$(mktemp)" || msg_err=/dev/null
+	msg="$(git log -1 --format=%B "$c" 2>"$msg_err")" || {
+		printf 'secret-guard: could not read the message of %s (%s) — that commit is unscanned\n' \
+			"$short" "$(head -1 "$msg_err")" >&2
+		SCAN_ERRORS=$((SCAN_ERRORS + 1))
+		[ "$msg_err" = /dev/null ] || rm -f -- "$msg_err"
+		return
+	}
+	[ "$msg_err" = /dev/null ] || rm -f -- "$msg_err"
 	if [ -n "$msg" ]; then
 		while IFS=$'\t' read -r name pat; do
 			[ -z "$name" ] && continue
@@ -84,15 +92,27 @@ scan_commit() {
 }
 
 # pre-push feeds ref lines on stdin: "<local ref> <local sha> <remote ref> <remote sha>"
+SCAN_ERRORS=0
 while read -r local_ref local_sha remote_ref remote_sha; do
 	[ -z "$local_ref" ] && continue
 	[ "$local_sha" = "$ZERO" ] && continue # branch deletion — nothing to scan
 
 	if [ "$remote_sha" = "$ZERO" ]; then
 		# new branch: commits not reachable from any remote-tracking ref
-		commits="$(git rev-list "$local_sha" --not --remotes 2>/dev/null)"
+		commits="$(git rev-list "$local_sha" --not --remotes 2>&1)"
+		rc=$?
 	else
-		commits="$(git rev-list "$remote_sha..$local_sha" 2>/dev/null)"
+		commits="$(git rev-list "$remote_sha..$local_sha" 2>&1)"
+		rc=$?
+	fi
+	# A ref git cannot read is not an empty push: the old silent `continue` here
+	# let a push through unscanned, with no line saying the scan never happened.
+	if [ "$rc" -ne 0 ]; then
+		printf 'secret-guard: could not list the commits of %s..%s — %s\n' \
+			"${remote_sha:0:8}" "${local_sha:0:8}" "$(printf '%s' "$commits" | head -1)" >&2
+		printf 'secret-guard: this push was NOT scanned. Override on purpose: SKIP_SECRET_SCAN=1 git push, or git push --no-verify\n' >&2
+		SCAN_ERRORS=$((SCAN_ERRORS + 1))
+		continue
 	fi
 	[ -z "$commits" ] && continue
 
@@ -104,6 +124,12 @@ done
 
 if [ "$SCANNED" -gt "$MAX_COMMITS" ]; then
 	echo "secret-guard: warning — push contains >$MAX_COMMITS commits; scan truncated"
+fi
+
+# A scan that could not read everything is a failure, not a pass: an unscanned
+# push reported as clean is the silent exit this file exists to prevent.
+if [ "$FOUND" -eq 0 ] && [ "$SCAN_ERRORS" -gt 0 ]; then
+	FOUND=1
 fi
 
 exit "$FOUND"

@@ -271,7 +271,13 @@ write_skills_lock() {
 			printf '%s\t%s\t%s\n' "$(sha256_of "$ROOT/$rel")" "$(last_commit_of "$rel")" "$rel"
 		done < <(skills_lock_target | sort -u)
 	} >"$tmp"
-	mv "$tmp" "$lock"
+	# A failed mv used to leave the old lock in place and still print "N entries
+	# written": a write that did not happen, reported as one that did.
+	if [ -d "$lock" ]; then
+		rm -f -- "$tmp"
+		die "cannot write $lock: the path is a directory, not the lock file"
+	fi
+	mv "$tmp" "$lock" || die "cannot write $lock (the new table is still in $tmp)"
 	count=$(grep -vc '^#' "$lock" || true)
 	printf '%s: %s entries written\n' "$SKILLS_LOCK_REL" "$count"
 	if [ -d "$ROOT/agent/skills" ] && [ "$count" -eq 0 ]; then

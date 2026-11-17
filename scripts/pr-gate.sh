@@ -524,4 +524,7 @@ if ((FAILED == 0)); then
 	exit 0
 fi
 printf 'pr-gate: red (%s) — CI rejects this body, and a gate handed no file list counts as red until it can check\n' "${ORDER[*]}"
+# The verdict goes to stderr as well: CI reads stdout, a person or a script that
+# captured only stderr used to see a bare exit 1 with nothing next to it.
+printf 'pr-gate: red (%s) — the per-gate reasons are above (::error:: lines)\n' "${ORDER[*]}" >&2
 exit 1
