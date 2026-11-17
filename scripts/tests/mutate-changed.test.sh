@@ -153,6 +153,23 @@ EOF
 run --list-only
 expect_list "extensions/lib/nested/helper.ts:2-2"
 
+# ------------------------------------------------------- a test helper is out too ---
+case_start "a test helper under __tests__ adds no mutant range"
+cat >"$PATCH" <<'EOF'
+diff --git a/agent/extensions/__tests__/helpers/fake-pi.ts b/agent/extensions/__tests__/helpers/fake-pi.ts
+--- a/agent/extensions/__tests__/helpers/fake-pi.ts
++++ b/agent/extensions/__tests__/helpers/fake-pi.ts
+@@ -199,0 +200,3 @@
++export async function whenChildrenIdle(): Promise<void> {
++	await Promise.resolve();
++}
+EOF
+run --list-only
+[ -z "$OUT" ] && pass "the helper adds no range" ||
+	fail "a test helper produced a mutant range" "$OUT"
+[ "$STATUS" -eq 0 ] && pass "and list mode exits 0 so the caller skips green" ||
+	fail "expected exit 0, got $STATUS" "$ERR"
+
 # -------------------------------------------------- a +++ line inside the body ---
 case_start "a body line that renders as +++ is not read as a new file header"
 cat >"$PATCH" <<'EOF'

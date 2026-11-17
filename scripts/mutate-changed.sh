@@ -103,7 +103,11 @@ mutate_ranges() {
 				path = substr($0, 7)
 				sub(/^b\//, "", path)
 				minus = 0
-				mutable = (index(path, prefix) == 1) && (path !~ /\.test\.ts$/) && (path ~ /\.ts$/)
+				# Nothing under __tests__ is a mutant host: a test helper has no
+				# assertion that can kill it, so its survivors would fail every PR
+				# that touched one (measured on the desktop-notify pull request:
+				# 4 of 10 mutants survived in fake-pi.ts).
+				mutable = (index(path, prefix) == 1) && (path !~ /__tests__/) && (path ~ /\.ts$/)
 				next
 			}
 			{
