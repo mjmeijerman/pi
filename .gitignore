@@ -38,3 +38,4 @@ scripts/.agent-panes.json
 agent/herdr-resume/
 *.bak
 werken-met-ai.pdf
+agent/env.secret
