@@ -342,6 +342,19 @@ export function runStamp(at: number): string {
 }
 
 /**
+ * The queue file and the proposal one run will write.
+ *
+ * One function because they must agree: the evidence file prints both, and a
+ * learner that copies the name it can see has to land on the path the gate
+ * checks. `dir` is injectable so a test asserts the shape without the real
+ * proposals directory.
+ */
+export function runPaths(at: number, dir: string = PROPOSAL_DIR): { queue: string; proposal: string } {
+	const stamp = runStamp(at);
+	return { queue: join(dir, "queue", `${stamp}.md`), proposal: join(dir, `${stamp}.md`) };
+}
+
+/**
  * Both spellings of one run's proposal path, so a file written under the other
  * name still counts as written. Rows and proposals from before `runStamp` keep
  * the `T` form; without this they read as deaths forever.
@@ -1805,8 +1818,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 
 		const stamp = runStamp(at);
 		const slug = `learn-${stamp.slice(11, 16)}`;
-		const queuePath = join(QUEUE_DIR, `${stamp}.md`);
-		const proposalPath = join(PROPOSAL_DIR, `${stamp}.md`);
+		const { queue: queuePath, proposal: proposalPath } = runPaths(at);
 		await mkdir(QUEUE_DIR, { recursive: true });
 		await writeFile(
 			queuePath,

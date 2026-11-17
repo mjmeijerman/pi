@@ -36,6 +36,7 @@ const {
 	decisionRows,
 	diedLearnersFrom,
 	proposalAliases,
+	runPaths,
 	runStamp,
 	frustrationQuotes,
 	watchOutcome,
@@ -968,10 +969,26 @@ describe("learners that died", () => {
 		const dash = join("/p", `${runStamp(at)}.md`);
 		assert.equal(dash, "/p/2026-11-15-10-07-10-876Z.md", "one run, one name");
 		assert.equal(dash.includes("T"), false, "the queue and the proposal must not differ by a T");
+		const paths = runPaths(at, "/p");
+		assert.deepEqual(
+			paths,
+			{ queue: "/p/queue/2026-11-15-10-07-10-876Z.md", proposal: "/p/2026-11-15-10-07-10-876Z.md" },
+			"the queue file and the proposal share one stamp, and only the queue is a level down",
+		);
 		const iso = join("/p", "2026-11-15T10-07-10-876Z.md");
 		assert.deepEqual(proposalAliases(dash), [iso]);
 		assert.deepEqual(proposalAliases(iso), [dash]);
 		assert.deepEqual(proposalAliases("/p/notes.md"), [], "anything else has no twin");
+		// The three regex anchors each carry a case: end ($), start (^), and an
+		// optional directory. Without them a suffix, a prefix, or a bare name is
+		// either read as a run or silently loses its twin.
+		assert.deepEqual(proposalAliases("/p/2026-11-15-10-07-10-876Z.mdx"), [], "the suffix is anchored at the end");
+		assert.deepEqual(proposalAliases("junk2026-11-15-10-07-10-876Z.md"), [], "the stamp starts the name");
+		assert.deepEqual(
+			proposalAliases("2026-11-15-10-07-10-876Z.md"),
+			["2026-11-15T10-07-10-876Z.md"],
+			"a bare name has no directory to require",
+		);
 		const died = diedLearnersFrom([row({ kind: "spawned", slug: "learn-10-07", proposal: dash })], {
 			exists: (path: string) => path === iso,
 			now: NOW,
