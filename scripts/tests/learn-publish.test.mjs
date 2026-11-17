@@ -14,7 +14,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -265,4 +265,120 @@ test("a missing branch is an error, not a silent success", () => {
 	const r = run(f, ["no-such-slug", "--check"]);
 	assert.equal(r.status, 2);
 	assert.match(r.stderr, /no branch learn\/no-such-slug/);
+});
+
+// ---------------------------------------------------------------- PR body --
+// The spec used to hand the publishing agent a one-line literal,
+// `--body 'Tier: Medium. Proposal: …'`, and `scripts/pr-gate.sh` rejects that
+// three ways. Every learner PR therefore opened with a red `pr-tier` (34 runs
+// across 31 branches), and the reviewer had to ask for a body the gate already
+// knew was wrong. These cases pin the body against the real gate: the one that
+// was published, and the one that must not be.
+
+const PR_BODY = (f) => join(f.dir, "agent", "proposals", "publish", "test-slug-pr.pr.md");
+
+/** The paths the fixture branch changes, as the gate would list them. */
+function pathsFile(f) {
+	const p = join(f.dir, "changed.txt");
+	const diff = spawnSync("git", ["diff", "--name-only", "origin/trunk...learn/test-slug"], {
+		cwd: f.dir,
+		encoding: "utf8",
+	});
+	writeFileSync(p, diff.stdout);
+	return p;
+}
+
+function gate(f, bodyFile, paths) {
+	return spawnSync("bash", [join(ROOT, "scripts/pr-gate.sh"), "--body", bodyFile, "--paths", paths], {
+		encoding: "utf8",
+	});
+}
+
+test("the body the spec hands to gh passes the repo's own pr-gate", () => {
+	const f = fixture("after");
+	f.pane = f.publishingPane;
+	const proposal = join(f.dir, "agent", "proposals", "p.md");
+	writeFileSync(
+		proposal,
+		"# Publish the fix a dead learner wrote, so the same FAIL stops being re-learned\n\n**Verdict:** change\n**Risk tier:** Medium (`scripts/`)\n",
+	);
+	// A learner's branch moves a script and its test together, and a learner's
+	// checkout has the origin/trunk ref the diff is read against. That pair is
+	// exactly what pr-tier asked for a `Test change:` reason on, and what the
+	// old body did not carry.
+	const trunk = spawnSync("git", ["rev-parse", "trunk"], { cwd: f.dir, encoding: "utf8" }).stdout.trim();
+	spawnSync("git", ["update-ref", "refs/remotes/origin/trunk", trunk], { cwd: f.dir, encoding: "utf8" });
+	spawnSync("git", ["checkout", "-q", "learn/test-slug"], { cwd: f.dir, env: GIT_ENV, encoding: "utf8" });
+	mkdirSync(join(f.dir, "scripts", "tests"), { recursive: true });
+	writeFileSync(join(f.dir, "scripts", "learn-publish.sh"), "#!/usr/bin/env bash\n# the fix\n");
+	writeFileSync(join(f.dir, "scripts", "tests", "learn-publish.test.mjs"), "// the test that pins it\n");
+	spawnSync("git", ["add", "scripts/learn-publish.sh", "scripts/tests/learn-publish.test.mjs"], {
+		cwd: f.dir,
+		env: GIT_ENV,
+		encoding: "utf8",
+	});
+	spawnSync("git", ["commit", "-q", "-m", "fix: the thing, with its test"], {
+		cwd: f.dir,
+		env: GIT_ENV,
+		encoding: "utf8",
+	});
+	spawnSync("git", ["checkout", "-q", "trunk"], { cwd: f.dir, env: GIT_ENV, encoding: "utf8" });
+	const r = run(f, ["test-slug", "--proposal", proposal]);
+	assert.equal(r.status, 0, r.stderr);
+
+	const body = readFileSync(PR_BODY(f), "utf8");
+	assert.match(body, /^Mission: Publish the fix a dead learner wrote/, "the proposal's H1 becomes the mission");
+	assert.match(body, /^Review tier: Medium$/m, "the gate's spelling, not `Tier:`");
+	assert.match(body, /^Test change: /m, "a test moved beside its source, so the reason is stated");
+	assert.doesNotMatch(body, /^Tier:/m, "the old literal is not the body");
+
+	const verdict = gate(f, PR_BODY(f), pathsFile(f));
+	assert.equal(verdict.status, 0, `pr-gate rejects the published body:\n${verdict.stdout}${verdict.stderr}`);
+	assert.match(verdict.stdout + verdict.stderr, /green/);
+});
+
+test("the old one-line body is what pr-tier was failing on", () => {
+	const f = fixture("none");
+	const old = join(f.dir, "old-body.md");
+	writeFileSync(old, "Tier: Medium. Proposal: agent/proposals/x.md. Written by a self-learn learner; published by a big-boss-pi agent.\n");
+	// A script and its test, the pair every learner branch changes: the gate then
+	// asks for all three lines the literal has none of.
+	const changed = join(f.dir, "changed-static.txt");
+	writeFileSync(changed, "scripts/learn-publish.sh\nscripts/tests/learn-publish.test.mjs\n");
+	const verdict = gate(f, old, changed);
+	assert.equal(verdict.status, 1, "the literal is red — this is the defect, kept as a case");
+	const said = verdict.stdout + verdict.stderr;
+	assert.match(said, /no review tier/);
+	assert.match(said, /no mission/);
+	assert.match(said, /Test change/);
+});
+
+test("a body the gate calls red stops the publication instead of opening a PR", () => {
+	const f = fixture("none");
+	f.pane = f.publishingPane;
+	// The gate needs a base to diff against, and the hand-off must not reach the
+	// pane when the body is red.
+	mkdirSync(join(f.dir, "scripts"), { recursive: true });
+	copyFileSync(join(ROOT, "scripts", "pr-gate.sh"), join(f.dir, "scripts", "pr-gate.sh"));
+	const trunk = spawnSync("git", ["rev-parse", "trunk"], { cwd: f.dir, encoding: "utf8" }).stdout.trim();
+	spawnSync("git", ["update-ref", "refs/remotes/origin/trunk", trunk], { cwd: f.dir, encoding: "utf8" });
+	// A harness path in the diff: High is the only tier the gate accepts.
+	spawnSync("git", ["checkout", "-q", "learn/test-slug"], { cwd: f.dir, env: GIT_ENV, encoding: "utf8" });
+	mkdirSync(join(f.dir, "agent", "extensions"), { recursive: true });
+	writeFileSync(join(f.dir, "agent", "extensions", "x.ts"), "// harness\n");
+	spawnSync("git", ["add", "agent/extensions/x.ts"], { cwd: f.dir, env: GIT_ENV, encoding: "utf8" });
+	spawnSync("git", ["commit", "-q", "-m", "feat: harness change"], { cwd: f.dir, env: GIT_ENV, encoding: "utf8" });
+	spawnSync("git", ["checkout", "-q", "trunk"], { cwd: f.dir, env: GIT_ENV, encoding: "utf8" });
+
+	const proposal = join(f.dir, "agent", "proposals", "p.md");
+	writeFileSync(
+		proposal,
+		"# A learner change that touches a harness path but says Medium\n\n**Verdict:** change\n**Risk tier:** Medium (`scripts/`)\n",
+	);
+	const r = run(f, ["test-slug", "--proposal", proposal]);
+	assert.equal(r.status, 2, `a red body must not spawn a publisher:\n${r.stdout}${r.stderr}`);
+	assert.match(r.stderr, /fail pr-tier/);
+	assert.match(r.stderr, /tier must be High/);
+	assert.equal(existsSync(join(f.dir, "pane-called")), false, "nothing was handed over");
+	assert.equal(readdirSync(join(f.dir, "agent", "proposals")).includes("publish-log.jsonl"), false);
 });
