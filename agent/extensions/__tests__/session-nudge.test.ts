@@ -6,8 +6,12 @@
  * twice, and never in a session without a UI.
  */
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
 
 const mod = await import("../session-nudge.ts");
@@ -16,6 +20,7 @@ const {
 	decideNudge,
 	decideGrillNudge,
 	decideRetroNudge,
+	loadRetroState,
 	parseRetroWindowDays,
 	retroAgeDays,
 	isNonProjectDir,
@@ -45,6 +50,24 @@ function recordAt(ranEpoch: number): string {
 /** A record one day old: the default, so the non-retro tests stay silent. */
 function freshRetro() {
 	return { record: recordAt(NOW - DAY), maxAgeDays: 14, now: NOW };
+}
+
+/**
+ * The checkout root, found rather than assumed. `make mutate-*` copies only
+ * `agent/` into `.stryker-tmp/sandbox-*`, so a fixed `../../../` from this file
+ * stops at `.stryker-tmp` and never reaches `scripts/harness-check.sh` — the
+ * search climbs to the first ancestor that holds the checker, and returns null
+ * when the copy is genuinely detached from the repo (the drift check then skips
+ * instead of failing an otherwise healthy run).
+ */
+function harnessRoot(): string | null {
+	let dir = dirname(fileURLToPath(import.meta.url));
+	for (;;) {
+		if (existsSync(join(dir, "scripts", "harness-check.sh"))) return dir;
+		const up = resolve(dir, "..");
+		if (up === dir) return null;
+		dir = up;
+	}
 }
 
 function setup(
@@ -201,11 +224,35 @@ describe("session-nudge: retro due (blips 11 and 25)", () => {
 		assert.match(nudge?.message ?? "", /in 400 days/);
 	});
 
-	test("the window is read from scripts/harness-check.sh, and the fallback agrees", async () => {
-		const script = await readFile(new URL("../../../scripts/harness-check.sh", import.meta.url), "utf8");
+	test("the window is read from scripts/harness-check.sh, and the fallback agrees", async (t) => {
+		const root = harnessRoot();
+		if (root === null) {
+			// Nothing to compare against: say why, so a skip is never mistaken for a pass.
+			t.skip("scripts/harness-check.sh is not above this file — the mutation sandbox copies only agent/");
+			return;
+		}
+		const script = await readFile(join(root, "scripts", "harness-check.sh"), "utf8");
 		assert.equal(parseRetroWindowDays(script), RETRO_MAX_AGE_DAYS_FALLBACK);
 		assert.equal(parseRetroWindowDays("RETRO_MAX_AGE_DAYS=21\n"), 21);
 		assert.equal(parseRetroWindowDays("# RETRO_MAX_AGE_DAYS=21\n"), null);
+	});
+
+	test("with no checker to read, the fallback window is what the extension uses", () => {
+		// Literals on purpose: comparing against RETRO_MAX_AGE_DAYS_FALLBACK would let a
+		// change to that constant survive, and this case has to bite inside the sandbox,
+		// where scripts/harness-check.sh is not on disk at all.
+		const dir = mkdtempSync(join(tmpdir(), "session-nudge-"));
+		try {
+			assert.equal(loadRetroState(dir, NOW * 1000).maxAgeDays, 14, "absent checker: the fallback window");
+			mkdirSync(join(dir, "scripts"), { recursive: true });
+			writeFileSync(join(dir, "scripts", "harness-check.sh"), "RETRO_MAX_AGE_DAYS=21\n");
+			assert.equal(loadRetroState(dir, NOW * 1000).maxAgeDays, 21, "present checker: its own number wins");
+			writeFileSync(join(dir, "scripts", "harness-check.sh"), "# no assignment here\n");
+			assert.equal(loadRetroState(dir, NOW * 1000).maxAgeDays, 14, "unparseable checker: back to the fallback");
+			assert.equal(loadRetroState(dir, NOW * 1000).record, null, "no record here either");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("cwd outranks retro, retro outranks compaction", () => {
