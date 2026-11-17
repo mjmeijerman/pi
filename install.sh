@@ -474,6 +474,46 @@ else
 	echo "!! $SOURCE_DIR/systemd/pi-retro.service not found — skipped the retro timer"
 fi
 
+# --- 5h. desktop audio guard --------------------------------------------------
+# A oneshot at login (and the same script on a ten-minute timer): the user
+# session's PipeWire loses the ALSA open race to the greeter's stack on some
+# boots, WirePlumber aborts any sink node that returns EBUSY and never retries,
+# and a missing sink node is what "I am missing sound outputs" looks like. The
+# script waits for pipewire, checks that the nodes the configuration names
+# exist, and restarts wireplumber with a bounded retry. It exits 0 on a healthy
+# machine, so it never shows a failed unit.
+AUDIO_UNIT="desktop-audio-guard.service"
+AUDIO_TIMER="desktop-audio-guard.timer"
+if [ -f "$SOURCE_DIR/systemd/$AUDIO_UNIT" ] && [ -f "$SOURCE_DIR/systemd/$AUDIO_TIMER" ] && [ -f "$SOURCE_DIR/scripts/desktop-audio-guard.sh" ]; then
+	mkdir -p "$SYSTEMD_USER_DIR"
+	for unit in "$AUDIO_UNIT" "$AUDIO_TIMER"; do
+		sed "s|%h|$HOME|g" "$SOURCE_DIR/systemd/$unit" >"$SYSTEMD_USER_DIR/$unit"
+		echo "== $unit -> $SYSTEMD_USER_DIR/$unit"
+	done
+	# The unit execs the installed copy, not the checkout: the bit has to be on
+	# $HOME/.pi/scripts/desktop-audio-guard.sh whatever the source dir was.
+	chmod +x "$HOME/.pi/scripts/desktop-audio-guard.sh" "$SOURCE_DIR/scripts/desktop-audio-guard.sh" 2>/dev/null || true
+	if [ "${PI_SKIP_SYSTEMD:-}" = 1 ]; then
+		echo "== PI_SKIP_SYSTEMD=1 — not enabling $AUDIO_UNIT or $AUDIO_TIMER"
+	elif command -v systemctl >/dev/null 2>&1 && [ -d "/run/user/$(id -u)" ]; then
+		systemctl --user daemon-reload || echo "!! systemctl --user daemon-reload failed"
+		if systemctl --user enable "$AUDIO_UNIT"; then
+			echo "== desktop audio guard enabled at login ($AUDIO_UNIT)"
+		else
+			echo "!! could not enable $AUDIO_UNIT — run: systemctl --user enable $AUDIO_UNIT"
+		fi
+		if systemctl --user enable --now "$AUDIO_TIMER"; then
+			echo "== desktop audio guard re-checks every 10 minutes ($AUDIO_TIMER)"
+		else
+			echo "!! could not enable $AUDIO_TIMER — run: systemctl --user enable --now $AUDIO_TIMER"
+		fi
+	else
+		echo "!! no systemd user session — units copied, enable later: systemctl --user enable $AUDIO_UNIT && systemctl --user enable --now $AUDIO_TIMER"
+	fi
+else
+	echo "!! systemd/$AUDIO_UNIT, systemd/$AUDIO_TIMER or scripts/desktop-audio-guard.sh missing — skipped the audio guard"
+fi
+
 echo
 echo "Done. Restart pi (or run /reload) to load the extensions."
 echo
@@ -491,6 +531,9 @@ echo "   systemctl --user status big-boss-pi-guard.service    # workspace guard 
 echo "   systemctl --user list-timers pi-evals.timer           # weekly harness evals scheduled"
 echo "   systemctl --user status herdr-resume.service          # pi sessions resume after a reboot"
 echo "   systemctl --user list-timers pi-retro.timer            # weekly suggestion-box retro scheduled"
+echo "   systemctl --user start desktop-audio-guard.service      # check the audio sinks by hand"
+echo "   journalctl --user -u desktop-audio-guard.service -b     # what the guard decided at login"
+echo "   systemctl --user list-timers desktop-audio-guard.timer   # the ten-minute re-check scheduled"
 echo "   cat ~/.pi/agent/retro/last-run.txt                     # last retro run and digest path"
 echo "   cat ~/.pi/agent/evals/last-run.txt                    # last eval run and pass count"
 echo "   bash scripts/harness-check.sh                        # harness budgets as checks"
@@ -501,4 +544,6 @@ echo "To turn the workspace guard off:"
 echo "   systemctl --user disable --now pi-evals.timer         # stop the weekly evals"
 echo "   systemctl --user disable --now herdr-resume.service   # stop resuming pi after a reboot"
 echo "   systemctl --user disable --now pi-retro.timer         # stop the weekly retro"
+echo "   systemctl --user disable desktop-audio-guard.service   # stop repairing missing audio sinks"
+echo "   systemctl --user disable --now desktop-audio-guard.timer # stop the ten-minute audio re-check"
 echo "   systemctl --user disable --now big-boss-pi-guard.service"

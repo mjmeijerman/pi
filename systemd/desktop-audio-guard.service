@@ -1,0 +1,50 @@
+# desktop-audio-guard: put back the ALSA sink nodes WirePlumber gave up on
+# (Radar Vol. 35 blip 20, stateful guardrails).
+#
+# At login two PipeWire stacks can overlap — the desktop-manager greeter's and
+# the user session's — and the user session's ALSA opens then fail with EBUSY
+# (`spa.alsa: playback open failed: Device or resource busy`). WirePlumber logs
+# `s-monitors: Failed to create ...: Object activation aborted: PipeWire proxy
+# destroyed`, aborts that node and never retries, so a sink that lost the race
+# is missing for the whole session. On this machine the sink that lost was the
+# configured default, so GNOME's output list came up short (Debian bug #1153029,
+# same wireplumber 0.5.8-2 / pipewire 1.4.2-1 as here).
+#
+# `scripts/desktop-audio-guard.sh` waits for pipewire, then asserts the nodes
+# the configuration names exist; when they do not it restarts wireplumber with a
+# bounded retry. It never sets a default sink: the default belongs to the user,
+# and WirePlumber restores the configured one once the node is back. It exits 0
+# on a healthy machine, so a working desktop never shows a failed unit.
+#
+# Copied into ~/.config/systemd/user/ and enabled by ~/.pi/install.sh. The
+# installed copy is generated (`%h` is expanded), so edit this file and
+# reinstall.
+#
+# Why a timer as well as a login oneshot: this machine reboots and suspends a
+# lot, and the same symptom appeared after resume in the Debian bug. A user
+# session has no sleep.target to order on (there is no such user unit), so
+# desktop-audio-guard.timer re-checks on a schedule instead — that covers
+# resume, a monitor switched away and back, and a greeter stack that outlasted
+# the login run. Both paths are the same bounded script.
+[Unit]
+Description=desktop audio guard: recreate ALSA sinks WirePlumber gave up on
+Documentation=file://%h/.pi/scripts/desktop-audio-guard.sh
+# The session bus and pipewire are up by the time graphical-session.target is
+# reached; the script still waits for pipewire itself before touching anything.
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.pi
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.pi/scripts/desktop-audio-guard.sh
+# Worst case in the script is 92 s (45 s ready wait, two 20 s rechecks, two
+# short backoffs). 180 s leaves room for a slow login without holding the
+# session's start-up, and a hung probe is killed rather than waited on.
+TimeoutStartSec=180
+Nice=10
+
+[Install]
+WantedBy=default.target

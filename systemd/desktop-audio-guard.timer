@@ -1,0 +1,24 @@
+# Re-checks the audio sinks on a schedule (Radar Vol. 35 blip 20).
+#
+# Why a timer instead of a resume hook: a systemd *user* session has no
+# sleep.target on Debian, so there is no user unit to order after a resume
+# (`systemctl --user enable` on a WantedBy=sleep.target unit warns "added as a
+# dependency to a non-existent unit sleep.target" and never runs). Checking the
+# invariant every ten minutes covers the same ground — resume, a monitor
+# switched away and back, a USB sink that came back — and costs one pw-dump.
+#
+# The script behind the service is bounded and no-ops on a healthy stack, and
+# its one-repair-per-boot marker keeps a deliberately unplugged device from
+# being fought on every tick. OnStartupSec is measured from the user manager's
+# start, so a fresh login waits five minutes rather than firing immediately
+# after the login oneshot already ran.
+[Unit]
+Description=desktop audio guard: re-check the ALSA sinks every ten minutes
+
+[Timer]
+OnStartupSec=5min
+OnUnitActiveSec=10min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
