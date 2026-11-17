@@ -40,6 +40,7 @@ const {
 	proposalSpellings,
 	proposalWritten,
 	ghCiRuns,
+	chunks,
 	judgedByCode,
 	noStepRan,
 	parseRuns,
@@ -887,6 +888,41 @@ describe("repeated failing CI checks", () => {
 			assert.equal(judged.runs.length, 2, "an unreadable probe and a missing id both count normally");
 			assert.equal(judged.refused, 0);
 			assert.equal(judged.unreadable, 1);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("the probe runs in batches of eight, and no batch goes missing", () => {
+		// The loop bound and its slice were equivalent mutants before the
+		// batches were named: an extra empty batch, or a slice wider than the
+		// list, changed nothing the caller could see.
+		const items = Array.from({ length: 18 }, (_, at) => at);
+		assert.deepEqual(chunks(items, 8).map((batch) => batch.length), [8, 8, 2]);
+		assert.deepEqual(chunks(items, 8).flat(), items, "every run lands in exactly one batch");
+		assert.deepEqual(chunks([], 8), [], "nothing to probe is no batch at all");
+		assert.deepEqual(chunks([1], 8), [[1]]);
+	});
+
+	test("ten runs cost ten probes, not one per batch", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-batches-"));
+		try {
+			const seen = join(dir, "asked");
+			const bin = await fakeGh(
+				dir,
+				`printf 'x' >> '${seen}'; printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]}]}'`,
+			);
+			const runs = Array.from({ length: 10 }, (_, at) => ({
+				name: "tests",
+				headBranch: `b${at}`,
+				conclusion: "failure",
+				databaseId: at + 1,
+			}));
+			const judged = await judgedByCode(runs, dir, bin);
+			assert.equal(judged.refused, 10);
+			assert.equal(judged.runs.length, 0);
+			const asked = await readFile(seen, "utf8").catch(() => "");
+			assert.equal(asked.length, 10, "one probe per run across two batches");
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}

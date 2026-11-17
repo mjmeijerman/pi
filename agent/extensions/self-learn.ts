@@ -816,6 +816,22 @@ async function ranAStep(id: number, cwd: string, bin: string): Promise<boolean |
  * batched so a long list costs seconds, and a run gh cannot answer about is
  * kept: doubt counts normally.
  */
+/**
+ * One run list split into probe-sized batches.
+ *
+ * Owned by the caller's loop before it was its own function, and the changed
+ * lines job found its bound and its slice were both equivalent mutants: an
+ * extra empty batch changes nothing the loop can observe, and a slice wider
+ * than the list is the list. Naming the batches makes the shape assertable, so
+ * a batch too many or a slice that swallows the list is a failure, not a
+ * survivor.
+ */
+export function chunks<T>(items: T[], size: number): T[][] {
+	const out: T[][] = [];
+	for (let at = 0; at < items.length; at += size) out.push(items.slice(at, at + size));
+	return out;
+}
+
 export async function judgedByCode(
 	runs: CiRun[],
 	cwd: string,
@@ -827,8 +843,7 @@ export async function judgedByCode(
 	const probeable = runs.filter((run) => typeof run.databaseId === "number");
 	// A run without an id cannot be asked about, so it counts normally.
 	kept.push(...runs.filter((run) => typeof run.databaseId !== "number"));
-	for (let at = 0; at < probeable.length; at += CI_PROBE_CONCURRENCY) {
-		const batch = probeable.slice(at, at + CI_PROBE_CONCURRENCY);
+	for (const batch of chunks(probeable, CI_PROBE_CONCURRENCY)) {
 		const answers = await Promise.all(batch.map((run) => ranAStep(run.databaseId as number, cwd, bin)));
 		batch.forEach((run, index) => {
 			if (answers[index] === false) refused += 1;
