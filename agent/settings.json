@@ -14,7 +14,7 @@
     "git:github.com/michielpapenhove/pi-prompt-snippets"
   ],
   "extensionChangelogVersions": {
-    "{\"source\":\"npm:pi-web-access\",\"scope\":\"user\"}": "0.47.0",
+    "{\"source\":\"npm:pi-web-access\",\"scope\":\"user\"}": "0.48.0",
     "{\"source\":\"git:github.com/michielpapenhove/pi-prompt-snippets\",\"scope\":\"user\"}": "0.1.0"
   },
   "hideThinkingBlock": true,
