@@ -611,3 +611,156 @@ describe("secret-guard: bypass and false-positive regressions", () => {
 		assert.equal(result?.block, true);
 	});
 });
+
+/**
+ * A mention is not a read. The commands below were refused for naming a
+ * credential path while opening nothing: a quoted reason string, a question to
+ * a local model, a heredoc body, a sed program. Each one cost a real command and
+ * a `/secretguard allow`, so the guard now asks which verb the path is an
+ * argument of rather than whether the name appears somewhere in the line.
+ */
+describe("secret-guard: a mention is not a read", () => {
+	/** Send a bash command through the real extension; returns the refusal, if any. */
+	async function bash(command: string): Promise<string | undefined> {
+		const { emit, ctx } = setup();
+		const [result]: any = await emit("tool_call", { toolName: "bash", input: { command } }, ctx);
+		return result?.block ? String(result.reason) : undefined;
+	}
+
+	test("a quoted reason string naming no file is allowed", async () => {
+		const command = `./bin/delegate wipe guard-glued-names --skip "The report's Still-open section covers consolidation: the reader gap becomes its own spec, the rejected regex merge is recorded with its measured cost"`;
+		assert.equal(await bash(command), undefined);
+	});
+
+	test("a question to a local model is allowed", async () => {
+		const command = `./bin/jev thinking "Widen two regexes so a file whose name is glued to the word before the dot extension is still recognised"`;
+		assert.equal(await bash(command), undefined);
+	});
+
+	test("a heredoc body is text handed to a program, not a command line", async () => {
+		const command = [
+			"python3 - <<'PY'",
+			"p = 'docs/setup.md'",
+			"s = open(p).read()",
+			`note = "never paste your auth.json, .npmrc or ~/.ssh/id_rsa here"`,
+			"open(p, 'w').write(s + note)",
+			"PY",
+		].join("\n");
+		assert.equal(await bash(command), undefined);
+	});
+
+	test("a pull request body written from a heredoc is allowed", async () => {
+		const command = [
+			`gh pr create --title "docs: name the refused shapes" --body "$(cat <<'EOF'`,
+			"Mission: document which file shapes the guard refuses.",
+			"It refuses .env, *.pem, auth.json and ~/.aws/credentials.",
+			"EOF",
+			')"',
+		].join("\n");
+		assert.equal(await bash(command), undefined);
+	});
+
+	test("a sed program is not a file", async () => {
+		assert.equal(await bash(`sed -E 's/process\\.env\\.//; s/\\$\\{//' src/*.ts`), undefined);
+	});
+
+	test("listing a directory is not reading the files in it", async () => {
+		assert.equal(await bash("ls -a ~/.ssh | head -5"), undefined);
+		assert.equal(await bash("ls -l .env"), undefined);
+	});
+
+	test("a mention in one segment does not turn a reader elsewhere into a read", async () => {
+		assert.equal(await bash("echo .env && git status"), undefined);
+		assert.equal(await bash("git commit -m 'docs: stop reading .env in setup'"), undefined);
+	});
+
+	test("a path handed to a reader is still a read", async () => {
+		assert.match((await bash("cat .env")) ?? "", /reads a secret file/);
+		assert.match((await bash("rg DB_PASSWORD config/prod.env")) ?? "", /reads a secret file/);
+		assert.match((await bash("grep -rn APP_URL .env .env.local")) ?? "", /reads a secret file/);
+	});
+
+	test("a shell command inside -c is judged on its own", async () => {
+		assert.match((await bash(`sh -c 'cat .env'`)) ?? "", /reads a secret file/);
+		assert.equal(await bash(`sh -c 'echo no dotenv file here'`), undefined);
+	});
+
+	test("bytes redirected into a credential file are refused", async () => {
+		const command = ["cat > config/prod.env <<'EOF'", "APP_ENV=local", "EOF"].join("\n");
+		assert.match((await bash(command)) ?? "", /reads a secret file/);
+	});
+});
+
+/**
+ * The boundaries the read check now depends on: where a command starts and
+ * stops, which word is the verb, and which words are handed to a program.
+ */
+describe("secret-guard: segment and heredoc boundaries", () => {
+	/** Send a bash command through the real extension; returns the refusal, if any. */
+	async function bash(command: string): Promise<string | undefined> {
+		const { emit, ctx } = setup();
+		const [result]: any = await emit("tool_call", { toolName: "bash", input: { command } }, ctx);
+		return result?.block ? String(result.reason) : undefined;
+	}
+
+	test("every shell operator starts a new command", async () => {
+		for (const op of [";", "&&", "||", "|", "&", "\n"]) {
+			assert.match((await bash(`echo x ${op} cat .env`)) ?? "", /reads a secret file/, op);
+		}
+	});
+
+	test("an operator inside quotes is part of the argument, not a new command", async () => {
+		assert.equal(await bash(`git commit -m "docs: .env | ; && handled"`), undefined);
+	});
+
+	test("a wrapper hands the command position on", async () => {
+		for (const wrapper of ["sudo", "env", "nohup", "xargs", "time", "command", "exec", "builtin"]) {
+			assert.match((await bash(`${wrapper} cat .env`)) ?? "", /reads a secret file/, wrapper);
+		}
+		assert.match((await bash("timeout 5 cat .env")) ?? "", /reads a secret file/);
+		assert.match((await bash("X=1 cat .env")) ?? "", /reads a secret file/);
+	});
+
+	test("an assignment is not a verb", async () => {
+		assert.equal(await bash("X=1 ls -l .env"), undefined);
+	});
+
+	test("a redirect target is refused, heredoc or not", async () => {
+		assert.match((await bash("echo hi >> .env")) ?? "", /reads a secret file/);
+		assert.match((await bash("printf x > config/prod.env")) ?? "", /reads a secret file/);
+	});
+
+	test("a heredoc with a dashed, quoted delimiter is stripped", async () => {
+		const command = ["cat > notes.md <<-'MD'", "\tthe .env file and ~/.ssh/id_rsa", "\tMD", "wc -l notes.md"].join(
+			"\n",
+		);
+		assert.equal(await bash(command), undefined);
+	});
+
+	test("two heredocs on one line are both stripped", async () => {
+		const command = ["diff <(cat <<'A') <(cat <<'B')", "x .env", "A", "y .npmrc", "B"].join("\n");
+		assert.equal(await bash(command), undefined);
+	});
+
+	test("an unterminated heredoc does not hide its header", async () => {
+		assert.match((await bash("cat .env <<'EOF'\nDB_X=local")) ?? "", /reads a secret file/);
+	});
+
+	test("git behind a path still folds its subcommand in", async () => {
+		assert.match((await bash("/usr/bin/git show .env")) ?? "", /reads a secret file/);
+	});
+
+	test("a sed program is not a file, in all its shapes", async () => {
+		for (const program of ["s/a/b/g", "y/a/b/", "1,70p", "/host/p/", "{print $1}"]) {
+			assert.equal(await bash(`sed -n '${program}' notes.txt`), undefined, program);
+		}
+	});
+
+	test("a pattern file handed to grep is still a read", async () => {
+		assert.match((await bash("grep -f .env data.txt")) ?? "", /reads a secret file/);
+	});
+
+	test("a search that only names a file is a mention", async () => {
+		assert.equal(await bash("find . -name '.env'"), undefined);
+	});
+});
