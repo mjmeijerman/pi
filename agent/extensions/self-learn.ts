@@ -833,9 +833,9 @@ export async function ghCiRuns(cwd = REPO, bin = "gh"): Promise<{ runs: CiRun[];
 		return { runs: [], warning: "failing CI checks not read: gh printed something that is not JSON" };
 	}
 	if (!Array.isArray(parsed)) return { runs: [], warning: "failing CI checks not read: gh printed something that is not a list" };
-	const idle = await accountBlocked(parsed, cwd, bin);
-	if (idle) return { runs: [], warning: idle };
-	return { runs: parsed, warning: null };
+	const judged = await judgedByCode(parsed, cwd, bin);
+	if (judged.runs.length === 0 && judged.refused > 0) return { runs: [], warning: blockedWarning(judged.refused, parsed.length) };
+	return { runs: judged.runs, warning: judged.refused > 0 ? partialWarning(judged.refused, parsed.length) : null };
 }
 
 /**
@@ -855,8 +855,8 @@ export function noStepRan(jobs: CiJob[]): boolean {
 	return judged.length > 0 && judged.every((job) => (job.steps?.length ?? 0) === 0);
 }
 
-/** How many of the newest failing runs are inspected before the source is called blocked. */
-export const CI_PROBE_RUNS = 3;
+/** How many `gh run view` probes are in flight at once, so a 90-run list stays cheap. */
+export const CI_PROBE_CONCURRENCY = 8;
 
 /** Did the jobs of this run execute anything? `null` when gh could not say. */
 async function ranAStep(id: number, cwd: string, bin: string): Promise<boolean | null> {
@@ -872,21 +872,66 @@ async function ranAStep(id: number, cwd: string, bin: string): Promise<boolean |
 }
 
 /**
- * The warning that replaces repeated CI failures when the account is the cause.
+ * Split the failing runs into the ones that judged code and the ones whose jobs
+ * never started.
  *
- * Three of the newest failing runs is enough: a billing block is account-wide and
- * hits every workflow at once, so three refusals in a row are not three broken
- * checks. Anything short of three (an unreadable probe, a run that did start)
- * counts normally — the conservative direction is to keep a real failure.
+ * 2026-11-17: 76 of this repo's 93 failing runs were the 2026-11-15 account
+ * refusal, but the three *newest* runs had started normally, so a probe of only
+ * the newest three kept every run — and the same dead account state was re-read
+ * as `tests` red on 12 branches and `zizmor` on 9. The probe is per run now,
+ * batched so a long list costs seconds, and a run gh cannot answer about is
+ * kept: doubt counts normally.
  */
-async function accountBlocked(runs: CiRun[], cwd: string, bin: string): Promise<string | null> {
-	const probe = runs.filter((run) => typeof run.databaseId === "number").slice(0, CI_PROBE_RUNS);
-	if (probe.length < CI_PROBE_RUNS) return null;
-	const started = await Promise.all(probe.map((run) => ranAStep(run.databaseId as number, cwd, bin)));
-	if (!started.every((ran) => ran === false)) return null;
-	return (
-		`failing CI checks not counted: the ${CI_PROBE_RUNS} newest failing runs ran no step, so GitHub never started the jobs and no code was judged (${runs.length} failing runs; check the repo's Billing & plans — payments failed or the spending limit was reached)`
-	);
+/**
+ * One run list split into probe-sized batches.
+ *
+ * Owned by the caller's loop before it was its own function, and the changed
+ * lines job found its bound and its slice were both equivalent mutants: an
+ * extra empty batch changes nothing the loop can observe, and a slice wider
+ * than the list is the list. Naming the batches makes the shape assertable, so
+ * a batch too many or a slice that swallows the list is a failure, not a
+ * survivor.
+ */
+export function chunks<T>(items: T[], size: number): T[][] {
+	const out: T[][] = [];
+	for (let at = 0; at < items.length; at += size) out.push(items.slice(at, at + size));
+	return out;
+}
+
+export async function judgedByCode(
+	runs: CiRun[],
+	cwd: string,
+	bin: string,
+): Promise<{ runs: CiRun[]; refused: number; unreadable: number }> {
+	const kept: CiRun[] = [];
+	let refused = 0;
+	let unreadable = 0;
+	const probeable = runs.filter((run) => typeof run.databaseId === "number");
+	// A run without an id cannot be asked about, so it counts normally.
+	kept.push(...runs.filter((run) => typeof run.databaseId !== "number"));
+	for (const batch of chunks(probeable, CI_PROBE_CONCURRENCY)) {
+		const answers = await Promise.all(batch.map((run) => ranAStep(run.databaseId as number, cwd, bin)));
+		batch.forEach((run, index) => {
+			if (answers[index] === false) refused += 1;
+			else {
+				if (answers[index] === null) unreadable += 1;
+				kept.push(run);
+			}
+		});
+	}
+	return { runs: kept, refused, unreadable };
+}
+
+const BILLING_HINT = "check the repo's Billing & plans — payments failed or the spending limit was reached";
+
+/** Every failing run was a queue refusal: no code was judged, so nothing counts. */
+function blockedWarning(refused: number, total: number): string {
+	return `failing CI checks not counted: all ${refused} of ${total} failing runs ran no step, so GitHub never started the jobs and no code was judged (${BILLING_HINT})`;
+}
+
+/** Some of the failing runs never started: count the rest, and say what was dropped. */
+function partialWarning(refused: number, total: number): string {
+	return `failing CI checks: ${refused} of ${total} failing runs ran no step and were not counted, because GitHub never started their jobs (${BILLING_HINT})`;
 }
 
 /** What the delegation workspace contributes: other workers' written failures. */

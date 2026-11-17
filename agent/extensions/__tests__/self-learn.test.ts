@@ -43,6 +43,8 @@ const {
 	proposalSpellings,
 	proposalWritten,
 	ghCiRuns,
+	chunks,
+	judgedByCode,
 	noStepRan,
 	parseRuns,
 	readWorkspace,
@@ -825,6 +827,7 @@ describe("repeated failing CI checks", () => {
 			const bin = await fakeGh(dir, `printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]},{"conclusion":"skipped","steps":[]}]}'`);
 			const result = await ghCiRuns(dir, bin);
 			assert.deepEqual(result.runs, [], "a queue refusal is not evidence about the code");
+			assert.match(result.warning ?? "", /all 3 of 3 failing runs ran no step/);
 			assert.match(result.warning ?? "", /failing CI checks not counted/);
 			assert.match(result.warning ?? "", /Billing & plans/);
 			const decision = decideLearner(evidence({ ciFailures: ciFailuresFrom(result.runs) }));
@@ -853,6 +856,144 @@ describe("repeated failing CI checks", () => {
 			const result = await ghCiRuns(dir, bin);
 			assert.equal(result.runs.length, 3, "doubt counts normally");
 			assert.equal(result.warning, null);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a mixed list drops only the runs that never started", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-mixed-gh-"));
+		try {
+			// 2026-11-17: the three newest runs had started, 76 older ones had not.
+			// The old probe looked at the newest three only and kept all 93.
+			const bin = await fakeGh(
+				dir,
+				`case "$3" in 1) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]}]}' ;; *) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;; esac`,
+			);
+			const result = await ghCiRuns(dir, bin);
+			assert.equal(result.runs.length, 2, "the two runs that executed a step are kept");
+			assert.match(result.warning ?? "", /1 of 3 failing runs ran no step/);
+			assert.match(result.warning ?? "", /Billing & plans/);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("judgedByCode keeps a run it cannot ask about, and counts the doubt", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-judged-"));
+		try {
+			const bin = await fakeGh(dir, "exit 1");
+			const runs = [
+				{ name: "tests", headBranch: "a", conclusion: "failure", databaseId: 1 },
+				{ name: "tests", headBranch: "b", conclusion: "failure" },
+			];
+			const judged = await judgedByCode(runs, dir, bin);
+			assert.equal(judged.runs.length, 2, "an unreadable probe and a missing id both count normally");
+			assert.equal(judged.refused, 0);
+			assert.equal(judged.unreadable, 1);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("the probe runs in batches of eight, and no batch goes missing", () => {
+		// The loop bound and its slice were equivalent mutants before the
+		// batches were named: an extra empty batch, or a slice wider than the
+		// list, changed nothing the caller could see.
+		const items = Array.from({ length: 18 }, (_, at) => at);
+		assert.deepEqual(chunks(items, 8).map((batch) => batch.length), [8, 8, 2]);
+		assert.deepEqual(chunks(items, 8).flat(), items, "every run lands in exactly one batch");
+		assert.deepEqual(chunks([], 8), [], "nothing to probe is no batch at all");
+		assert.deepEqual(chunks([1], 8), [[1]]);
+	});
+
+	test("ten runs cost ten probes, not one per batch", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-batches-"));
+		try {
+			const seen = join(dir, "asked");
+			const bin = await fakeGh(
+				dir,
+				`printf 'x' >> '${seen}'; printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]}]}'`,
+			);
+			const runs = Array.from({ length: 10 }, (_, at) => ({
+				name: "tests",
+				headBranch: `b${at}`,
+				conclusion: "failure",
+				databaseId: at + 1,
+			}));
+			const judged = await judgedByCode(runs, dir, bin);
+			assert.equal(judged.refused, 10);
+			assert.equal(judged.runs.length, 0);
+			const asked = await readFile(seen, "utf8").catch(() => "");
+			assert.equal(asked.length, 10, "one probe per run across two batches");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a run with no id is never asked about, and stays a failure", async () => {
+		// gh's list can omit databaseId. Such a run cannot be probed, so it is
+		// kept without a call: the day the id test inverts, an unprobeable run
+		// becomes the only thing probed and a real failure disappears.
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-noid-"));
+		try {
+			const seen = join(dir, "asked");
+			const bin = await fakeGh(
+				dir,
+				`printf 'x' >> '${seen}'; printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]}]}'`,
+			);
+			const runs = [
+				{ name: "tests", headBranch: "a", conclusion: "failure", databaseId: 1 },
+				{ name: "tests", headBranch: "b", conclusion: "failure" },
+			];
+			const judged = await judgedByCode(runs, dir, bin);
+			assert.deepEqual(
+				judged.runs.map((run) => run.headBranch),
+				["b"],
+				"the unprobeable run stays; the one that provably ran no step is refused",
+			);
+			assert.equal(judged.refused, 1, "only the run with an id could be refused");
+			assert.equal(judged.unreadable, 0, "no probe went unanswered");
+			const asked = await readFile(seen, "utf8").catch(() => "");
+			assert.equal(asked, "x", "one probe call, for the run that has an id");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a refusal is counted as a refusal, not as doubt", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-tally-"));
+		try {
+			const bin = await fakeGh(
+				dir,
+				`case "$3" in 1) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]}]}' ;; 3) exit 1 ;; *) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;; esac`,
+			);
+			const runs = [
+				{ name: "tests", headBranch: "a", conclusion: "failure", databaseId: 1 },
+				{ name: "tests", headBranch: "b", conclusion: "failure", databaseId: 2 },
+				{ name: "tests", headBranch: "c", conclusion: "failure", databaseId: 3 },
+			];
+			const judged = await judgedByCode(runs, dir, bin);
+			assert.equal(judged.refused, 1);
+			assert.equal(judged.unreadable, 1, "a probe that could not answer is not a refusal");
+			assert.equal(judged.runs.length, 2);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("an empty failure list is not a billing block", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-empty-gh-"));
+		try {
+			const bin = await fakeGh(dir, "exit 1");
+			await writeFile(
+				bin,
+				`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '[]' ;;\n  view) exit 1 ;;\nesac\n`,
+				"utf8",
+			);
+			const result = await ghCiRuns(dir, bin);
+			assert.deepEqual(result.runs, []);
+			assert.equal(result.warning, null, "nothing failed, so nothing was refused");
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
