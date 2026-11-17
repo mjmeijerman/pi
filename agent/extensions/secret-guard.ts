@@ -83,8 +83,177 @@ const TOUCH_RE =
 	/(^|[;&|()\s\/\\])(cat|bat|sed|head|tail|base64|xxd|od|strings|diff|expand|awk|grep|rg|cp|mv|ln|tar|zip|unzip|gzip|gunzip|dd|install|tee|split|openssl|node|python3?|perl|ruby|php|jq|sort|uniq|wc|less|more|vi|vim|nano|source|sh|bash|sqlite3|xargs|find)\b|git\s+(add|show|cat-file|checkout|diff|restore|stash)\b/i;
 
 /** A word shaped like a path (`$HOME/.ssh/id_rsa`, `".env"`, `certs/x.pem`) rather than prose. */
-function looksLikePath(word: string): boolean {
-	return /[\/~]|^\.|^\$/.test(word) && !/\s/.test(word);
+const PATH_SHAPED_RE = /[\/~]|^\.|^\$/;
+
+/**
+ * The operators that start a new command. A separator inside a quoted word is
+ * part of that word: a commit message with a newline in it is one argument, not
+ * a command on line two.
+ */
+const SEGMENT_SEPARATORS = ";&|()\n";
+
+/**
+ * Split a command at the shell operators that start a new command, respecting
+ * quotes. Each segment is judged on its own: what matters is the verb a path is
+ * an argument of, not whether the character appears somewhere in the command.
+ */
+function commandSegments(command: string): string[] {
+	const segments: string[] = [];
+	let current = "";
+	let quote: string | null = null;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote) {
+			current += ch;
+			if (ch === quote && command[i - 1] !== "\\") quote = null;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch;
+			current += ch;
+			continue;
+		}
+		if (SEGMENT_SEPARATORS.includes(ch)) {
+			segments.push(current);
+			current = "";
+			continue;
+		}
+		current += ch;
+	}
+	segments.push(current);
+	return segments;
+}
+
+/** The heredoc delimiters opened on one line (`<<EOF`, `<<-'SH'`), quotes respected. */
+function heredocDelimiters(line: string): string[] {
+	const found: string[] = [];
+	let quote: string | null = null;
+	for (let i = 0; i < line.length; i++) {
+		const ch = line[i];
+		if (quote) {
+			if (ch === quote && line[i - 1] !== "\\") quote = null;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch;
+			continue;
+		}
+		if (ch !== "<" || line[i + 1] !== "<") continue;
+		const m = /^<<-?\s*(["']?)([A-Za-z0-9_.:-]+)\1/.exec(line.slice(i));
+		if (!m) continue;
+		found.push(m[2]);
+		i += m[0].length - 1;
+	}
+	return found;
+}
+
+/**
+ * Drop heredoc bodies. A body is text handed to a program, not a command line:
+ * prose in a `git commit -F - <<'MSG'` message names files without opening one.
+ * A body whose bytes land in a credential file still writes it, and that target
+ * stays on the header line (`cat > config/prod.env <<'EOF'`), where the read
+ * check sees it.
+ */
+function stripHeredocs(command: string): string {
+	const lines = command.split("\n");
+	const kept: string[] = [];
+	for (let i = 0; i < lines.length; i++) {
+		kept.push(lines[i]);
+		for (const delim of heredocDelimiters(lines[i])) {
+			while (++i < lines.length && lines[i].trim() !== delim) continue;
+		}
+	}
+	return kept.join("\n");
+}
+
+/** The command text with comments and heredoc bodies gone: command lines only. */
+function commandLines(command: string): string[] {
+	return commandSegments(stripHeredocs(stripComments(command)));
+}
+
+/**
+ * Words that hand the command position on: `sudo cat .env` reads the file, and
+ * `FOO=1 cat .env` still runs `cat`.
+ */
+const WRAPPER_RE = /^(?:sudo|doas|time|command|env|exec|nohup|nice|builtin|xargs|stdbuf|busybox)$/;
+
+/** A shell that runs its `-c` argument as a command: `sh -c 'cat .env'` reads. */
+const SHELL_RE = /(^|\/)(?:ba|da|k|z)?sh$/;
+
+/** The verb of a segment: wrappers and `NAME=value` skipped, a `git` subcommand folded in. */
+function segmentVerb(words: { text: string; quoted: boolean }[]): { verb: string; at: number } | null {
+	for (let i = 0; i < words.length; i++) {
+		const text = words[i].text;
+		if (text === "") continue;
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(text)) continue;
+		if (WRAPPER_RE.test(text)) continue;
+		if (text === "timeout") {
+			i++; // the duration, not the verb
+			continue;
+		}
+		if (/^[0-9]*[<>]/.test(text)) continue; // a redirect, not a verb
+		if (/(^|\/)git$/.test(text)) return { verb: `git ${words[i + 1]?.text ?? ""}`.trim(), at: i + 1 };
+		return { verb: text, at: i };
+	}
+	return null;
+}
+
+/** The script a shell was handed with `-c`, if any. */
+function shellScript(words: { text: string }[], at: number): string | null {
+	for (let i = at + 1; i < words.length - 1; i++) {
+		if (/^-[a-z]*c$/.test(words[i].text)) return words[i + 1].text;
+	}
+	return null;
+}
+
+/** A reader that takes a pattern or a script before the files it reads. */
+const PATTERN_VERB_RE = /(^|\/)(?:grep|egrep|fgrep|rg|sed|awk)$/;
+
+/** A sed/awk program rather than a file name: `s/a/b/g`, `1,70p`, `/re/p`, `{print $1}`. */
+function isProgram(text: string): boolean {
+	return (
+		/^[syd]([^\w\s]).*?\1[a-z]*(\s*;.*)?$/s.test(text) ||
+		/^[/{].*[/}]$/.test(text) ||
+		/^[0-9,$]+[a-zA-Z]{0,2}$/.test(text)
+	);
+}
+
+/**
+ * The words of a segment that are a program rather than a file.
+ * `sed -E 's/process\.env\.//'` names no file, so nothing is opened; a bare
+ * file name handed to the same verb does name one, and stays gated.
+ */
+function scriptIndices(words: { text: string }[], verb: string, at: number): Set<number> {
+	const skip = new Set<number>();
+	if (!PATTERN_VERB_RE.test(verb)) return skip;
+	let seen = false;
+	for (let i = at + 1; i < words.length; i++) {
+		const text = words[i].text;
+		if (text === "-e") {
+			skip.add(++i); // the script itself
+			seen = true;
+			continue;
+		}
+		if (text === "-f") {
+			i++; // a pattern file: a real read, keep checking it
+			seen = true;
+			continue;
+		}
+		if (text.startsWith("-") || seen) continue;
+		seen = true;
+		if (isProgram(text)) skip.add(i);
+	}
+	return skip;
+}
+
+/**
+ * True when a word names a credential file in argument position: unquoted words
+ * are always arguments, a quoted word only when it is shaped like a path rather
+ * than prose (`".env"` is an argument, `"no .env here"` is a sentence).
+ */
+function secretPathWord(word: { text: string; quoted: boolean }): boolean {
+	if (!hasMatch(SECRET_FILE_RE, word.text) || hasMatch(SAFE_RE, word.text)) return false;
+	return !word.quoted || PATH_SHAPED_RE.test(word.text);
 }
 
 /**
@@ -164,13 +333,21 @@ function shellWords(command: string): { text: string; quoted: boolean }[] {
  * `cat .env` or `cat "$HOME/.ssh/id_rsa"` still must.
  */
 function leaksSecretFile(command: string): boolean {
-	if (!hasMatch(READER_RE, command)) return false;
-	for (const word of shellWords(command)) {
-		if (!hasMatch(SECRET_FILE_RE, word.text)) continue;
-		if (hasMatch(SAFE_RE, word.text)) continue;
-		if (!word.quoted) return true;
-		// Quoted: only a path-shaped token is an argument, a bare name is prose.
-		if (/[\/~]|^\.|^\$/.test(word.text)) return true;
+	for (const line of commandLines(command)) {
+		const words = shellWords(line);
+		// A redirect target is written, not read, and a credential file written by
+		// the shell is the same leak as one read: `cat > config/prod.env <<'EOF'`.
+		for (let i = 1; i < words.length; i++) {
+			if (/^>>?$/.test(words[i - 1].text) && secretPathWord(words[i])) return true;
+		}
+		const cmd = segmentVerb(words);
+		if (!cmd) continue;
+		const scripts = scriptIndices(words, cmd.verb, cmd.at);
+		if (hasMatch(READER_RE, cmd.verb) && words.some((word, i) => !scripts.has(i) && secretPathWord(word))) return true;
+		if (SHELL_RE.test(cmd.verb)) {
+			const script = shellScript(words, cmd.at);
+			if (script !== null && script !== line && leaksSecretFile(script)) return true;
+		}
 	}
 	return false;
 }
@@ -284,14 +461,16 @@ function stripComments(command: string): string {
  * the common case). A blocked read never reaches here: it cannot have run.
  */
 function secretPathsTouched(command: string): string[] {
-	const cmd = stripComments(command);
-	if (!hasMatch(TOUCH_RE, cmd)) return [];
 	const paths: string[] = [];
-	for (const word of shellWords(cmd)) {
-		const text = word.text;
-		if (!hasMatch(SECRET_FILE_RE, text) || hasMatch(SAFE_RE, text)) continue;
-		if (word.quoted && !looksLikePath(text)) continue;
-		if (!paths.includes(text)) paths.push(text);
+	for (const line of commandLines(command)) {
+		const words = shellWords(line);
+		const cmd = segmentVerb(words);
+		if (!cmd || !hasMatch(TOUCH_RE, cmd.verb)) continue;
+		const scripts = scriptIndices(words, cmd.verb, cmd.at);
+		for (const [i, word] of words.entries()) {
+			if (scripts.has(i) || !secretPathWord(word)) continue;
+			if (!paths.includes(word.text)) paths.push(word.text);
+		}
 	}
 	return paths;
 }
