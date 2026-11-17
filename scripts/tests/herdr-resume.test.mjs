@@ -48,6 +48,13 @@ if (args[0] === "server" && args[1] === "status") {
 	process.stdout.write(JSON.stringify({ core: { id: "scratch" }, live: 1 }));
 	process.exit(0);
 }
+if (args[0] === "ls") {
+	// What the core knows: 'known' names the addresses, --all included.
+	const known = state.known ?? Object.keys(state.terminals ?? {});
+	if (state.lsFails) process.exit(1);
+	process.stdout.write(JSON.stringify({ terminals: known.map((address) => ({ address })) }));
+	process.exit(0);
+}
 if (args[0] === "get") {
 	// What the terminal looks like once the typed line has run (and after how
 	// many ignored sends, if the fixture models a swallowed first attempt).
@@ -101,7 +108,7 @@ function runningPi(overrides = {}) {
 }
 
 function writeState(terminal, extra = {}) {
-	writeFileSync(stateFile, JSON.stringify({ terminals: { t3: terminal }, ...extra }));
+	writeFileSync(stateFile, JSON.stringify({ terminals: { t3: terminal }, known: ["t3"], ...extra }));
 }
 
 function writeEntry(overrides = {}) {
@@ -229,7 +236,7 @@ test("a dead foreground during recovery is waited out, not called busy", () => {
 		argv: [wrapper, "--thinking", "high"],
 		foreground: { argv: ["pi", "--thinking", "high"], name: "pi", pid: 999999 },
 	});
-	writeFileSync(stateFile, JSON.stringify({ sequence: [stale, recoveredTerminal(), runningPi()] }));
+	writeFileSync(stateFile, JSON.stringify({ sequence: [stale, recoveredTerminal(), runningPi()], known: ["t3"] }));
 	writeEntry({ argv: [wrapper, "--thinking", "high"] });
 
 	run([], { PI_HERDR_RESUME_ENTRY_MS: "5000" });
@@ -343,4 +350,48 @@ test("a refused send is logged and leaves the entry unmarked", () => {
 	const out = run();
 	assert.match(out, /failed terminal t3/);
 	assert.equal(JSON.parse(readFileSync(join(stateRoot, "t3.json"), "utf8")).restored_at, undefined);
+});
+
+test("an entry whose terminal hc does not know is deleted, without a wait", () => {
+	// The core knows only t9; the entry names t3, a terminal no core has heard
+	// of since a reboot. `hc get t3` answers not_found until the deadline: the
+	// wait that made the unit time out.
+	writeState(recoveredTerminal(), { known: ["t9"] });
+	writeEntry();
+
+	const out = run([], { PI_HERDR_RESUME_ENTRY_MS: "20000" });
+	assert.equal(existsSync(join(stateRoot, "t3.json")), false, "the dead entry must be gone");
+	assert.match(out, /deleted terminal t3 \(worker\): hc does not know this terminal/);
+	assert.equal(sends().length, 0);
+	assert.equal(calls().filter((call) => call[0] === "get").length, 0, "an unknown terminal is not worth one get");
+	assert.equal(calls().filter((call) => call[0] === "ls").length, 1, "the terminal list is asked once");
+});
+
+test("an entry whose session file is gone is deleted, not kept", () => {
+	writeState(recoveredTerminal());
+	writeEntry({ session_path: join(root, "sessions", "gone.jsonl") });
+
+	const out = run();
+	assert.equal(existsSync(join(stateRoot, "t3.json")), false, "the dead entry must be gone");
+	assert.match(out, /deleted terminal t3 \(worker\): session file is gone/);
+	assert.equal(sends().length, 0);
+});
+
+test("--dry-run deletes nothing", () => {
+	writeState(recoveredTerminal(), { known: [] });
+	writeEntry();
+
+	const out = run(["--dry-run"]);
+	assert.match(out, /would delete terminal t3 \(worker\): hc does not know this terminal/);
+	assert.equal(existsSync(join(stateRoot, "t3.json")), true, "a dry run must not prune");
+});
+
+test("no terminal list means no pruning", () => {
+	// `hc ls` failing is not an answer, so nothing may be deleted on it.
+	writeState(recoveredTerminal(), { lsFails: true });
+	writeEntry();
+
+	const out = run();
+	assert.match(out, /skip pruning/);
+	assert.equal(existsSync(join(stateRoot, "t3.json")), true);
 });

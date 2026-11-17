@@ -24,6 +24,13 @@
 // entry so a second run in the same boot is a no-op. It never reads or writes
 // terminal output: no screen capture, no pane history, no scrollback.
 //
+// It also prunes the map instead of walking it forever: the core's terminal
+// list is asked once, and an entry whose terminal the core has never heard of
+// cannot come back as a shell, so the entry is deleted rather than waited on.
+// Entries whose session file is gone go the same way. Both would otherwise sit
+// in `hc get` until the per-entry deadline, every boot, for the life of the
+// folder (`agent/extensions/herdr-resume-map.ts` only ever writes).
+//
 // Usage: herdr-resume.mjs [--dry-run]
 //
 // Environment:
@@ -33,7 +40,7 @@
 //   PI_HERDR_RESUME_ENTRY_MS   per-terminal wait for the recovered shell (20000)
 //   PI_HERDR_RESUME_START_MS   after a send, how long to wait for it to start (15000)
 import { execFileSync } from "node:child_process";
-import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 /** Mirrors `isShellArgv` in agent/extensions/herdr-resume-map.ts. */
@@ -118,6 +125,26 @@ function runnable(path) {
 
 function sleep(ms) {
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Every terminal address the core knows, asked once before the walk.
+ *
+ * `--all` on purpose: a finished terminal is a terminal hc knows, and its entry
+ * may still name a session worth keeping. Only a terminal hc has never heard of
+ * is dead, and asking `hc get` about it answers `not_found` until the per-entry
+ * deadline runs out — the wait that made the unit time out.
+ *
+ * `null` means the question failed: that is never a reason to delete an entry.
+ */
+function knownTerminals() {
+	const list = hcJson(["ls", "--json", "--all"]);
+	if (!list || !Array.isArray(list.terminals)) return null;
+	const known = new Set();
+	for (const terminal of list.terminals) {
+		if (typeof terminal?.address === "string") known.add(terminal.address);
+	}
+	return known;
 }
 
 /** The core that hosts the terminals starts with the window; wait for it once. */
@@ -224,6 +251,23 @@ function readEntries() {
 		.filter(Boolean);
 }
 
+/**
+ * A dead entry is deleted, not skipped once per boot forever: nothing else ever
+ * removes one, so the folder would grow by one file per hc terminal, always.
+ */
+function forget(path, message) {
+	if (dryRun) {
+		log(`would delete ${message}`);
+		return;
+	}
+	try {
+		unlinkSync(path);
+		log(`deleted ${message}`);
+	} catch (error) {
+		log(`failed to delete ${message}: ${error?.message ?? error}`);
+	}
+}
+
 function markRestored(path, entry, bootId) {
 	const next = { ...entry, restored_at: new Date().toISOString(), restored_boot_id: bootId };
 	const temp = `${path}.${process.pid}.tmp`;
@@ -244,7 +288,13 @@ function main() {
 		return 0;
 	}
 
+	// One question for every entry, instead of one per entry: a terminal the
+	// core does not know is not a wait, it is a deletion.
+	const known = knownTerminals();
+	if (known === null) log(`skip pruning: ${hcBin} ls did not answer with a terminal list`);
+
 	let restored = 0;
+	let pruned = 0;
 	for (const { path, entry } of entries) {
 		const terminal = typeof entry.terminal === "string" ? entry.terminal : "";
 		if (!terminal) {
@@ -254,7 +304,13 @@ function main() {
 		const where = `terminal ${terminal}${entry.tab ? ` (${entry.tab})` : ""}`;
 
 		if (typeof entry.session_path !== "string" || !existsSync(entry.session_path)) {
-			log(`skip ${where}: session file is gone (${entry.session_path ?? "unset"})`);
+			forget(path, `${where}: session file is gone (${entry.session_path ?? "unset"})`);
+			pruned += 1;
+			continue;
+		}
+		if (known !== null && !known.has(terminal)) {
+			forget(path, `${where}: hc does not know this terminal`);
+			pruned += 1;
 			continue;
 		}
 		if (!Array.isArray(entry.argv) || entry.argv.length === 0) {
@@ -272,6 +328,9 @@ function main() {
 
 		const facts = waitForTerminal(terminal, Date.now() + entryMs);
 		if (!facts) {
+			// Only reachable when the terminal list could not be read and the core
+			// still refuses this one: keep the entry, one boot of waiting is cheaper
+			// than a deletion the core never agreed to.
 			log(`skip ${where}: hc does not know this terminal`);
 			continue;
 		}
@@ -327,7 +386,7 @@ function main() {
 		log(`restored ${where}: ${line}`);
 	}
 
-	if (restored === 0 && !dryRun) log("nothing restored: every entry was skipped");
+	if (restored === 0 && pruned === 0 && !dryRun) log("nothing restored: every entry was skipped");
 	return 0;
 }
 

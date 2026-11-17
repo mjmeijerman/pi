@@ -32,9 +32,12 @@ WorkingDirectory=%h/.pi
 Environment=HOME=%h
 Environment=PATH=%h/.local/bin:%h/.local/share/pnpm/bin:%h/big-boss-pi/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.pi/scripts/herdr-resume.sh
-# Bounded: the core wait is 120 s and each terminal gets 20 s, so a stuck core
-# logs instead of holding the login session's start-up for a quarter of an hour.
-TimeoutStartSec=180
+# Bounded: the core wait is up to 120 s, and after the dead entries are pruned
+# each terminal the core still knows gets 20 s for its recovered shell to
+# attach. So the worst case is 120 s plus 20 s per known terminal — 300 s covers
+# a dozen of them — and a stuck core logs instead of holding the login session's
+# start-up for a quarter of an hour.
+TimeoutStartSec=300
 Nice=10
 
 [Install]
