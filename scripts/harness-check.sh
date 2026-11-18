@@ -539,7 +539,7 @@ mise_major() { # tool -> major declared in mise.toml, or empty when there is non
 }
 
 check_mise_pins() {
-	local node_pin npm_pin file got hits
+	local node_pin npm_pin file got hits nf_lines nf_count nf_bad nf_bad_why nf_ok row value where why
 	node_pin=$(mise_major node)
 	if [ -z "$node_pin" ]; then
 		verdict mise-pin-node mise.toml 0 \
@@ -593,6 +593,60 @@ check_mise_pins() {
 	else
 		verdict mise-pin-workflows "$(printf '%s\n' "$hits" | head -n 1 | cut -d: -f1)" 0 \
 			"$(printf '%s\n' "$hits" | wc -l | tr -d ' ') node-version literal(s) — read .node-version through node-version-file, so mise.toml stays the only source"
+	fi
+
+	# 3b. and the value has to work, not merely be present. setup-node resolves
+	#     `node-version-file` against the workspace root and joins it
+	#     unconditionally, so `${{ github.workspace }}/.node-version` becomes
+	#     <root>/<root>/.node-version and the job dies before npm is installed —
+	#     harness-check and mutation went red in 14 s and 7 s on exactly that.
+	#     The row above counted the key and called it proof; mention is not
+	#     resolution, which is the gap this row closes.
+	nf_lines=$(grep -rn "^[[:space:]]*node-version-file:" "$ROOT/.github/workflows" 2>/dev/null | sed "s|^$ROOT/||" || true)
+	nf_count=0
+	nf_bad=""
+	nf_bad_why=""
+	nf_ok=""
+	while IFS= read -r row; do
+		[ -n "$row" ] || continue
+		nf_count=$((nf_count + 1))
+		value=${row#*node-version-file:}
+		# The value, without its trailing comment, quotes or padding: a workflow may
+		# write node-version-file: ".node-version"  # why.
+		value=$(printf '%s' "$value" | sed -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+		value=${value#\"}
+		value=${value%\"}
+		value=${value#\'}
+		value=${value%\'}
+		where=$(printf '%s\n' "$row" | cut -d: -f1)
+		why=""
+		case "$value" in
+		/*) why="absolute ($value) — setup-node joins it onto the workspace root, so the path becomes <root>/<root>/$(basename "$value")" ;;
+		*\${{*) why="an expression ($value) — github.workspace is already the root setup-node joins onto" ;;
+		*..*) why="escapes the repo root ($value)" ;;
+		'') why="empty — setup-node fails the job before npm runs" ;;
+		*)
+			if [ -f "$ROOT/$value" ]; then
+				nf_ok="$nf_ok $value@$where"
+			else
+				why="no $value under the repo root — setup-node would fail the job"
+			fi
+			;;
+		esac
+		if [ -n "$why" ] && [ -z "$nf_bad" ]; then
+			nf_bad="$where"
+			nf_bad_why="$why"
+		fi
+	done < <(printf '%s\n' "$nf_lines")
+	if [ "$nf_count" -eq 0 ]; then
+		record WARN mise-pin-node-version-file .github/workflows \
+			"no node-version-file: line anywhere — a job may take node from the matrix, but then nothing reads .node-version and this row compared nothing"
+	elif [ -z "$nf_bad" ]; then
+		verdict mise-pin-node-version-file .github/workflows 1 \
+			"$nf_count value(s), each relative and resolving to a file at the repo root:$nf_ok"
+	else
+		verdict mise-pin-node-version-file "$nf_bad" 0 \
+			"$nf_bad_why — write .node-version, relative, so setup-node's join lands on the repo root"
 	fi
 
 	# 4. the one global npm install (harness-check.yml), whose major must be the

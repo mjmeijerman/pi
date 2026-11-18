@@ -34,7 +34,9 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version-file: ${{ github.workspace }}/.node-version # mise.toml's `node` projected; drift FAILs check_mise_pins
+          # Relative: setup-node joins node-version-file onto the workspace root,
+          # so an absolute value becomes <workspace>/<workspace>/.node-version.
+          node-version-file: .node-version # mise.toml's `node` projected; drift FAILs check_mise_pins
 
       # npm is bumped because min-release-age is only honoured from 11.10 on
       # (blip 99), and its major must match mise.toml's `npm`: drift is a FAIL.

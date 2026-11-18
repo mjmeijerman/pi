@@ -38,8 +38,12 @@ function fixture(overrides = {}) {
 	const files = {
 		"mise.toml": '[tools]\nnode = "24"\nnpm = "11"\n',
 		".node-version": "24\n",
+		// The matrix job takes its version from `node-version: @@MN@@`; the job with
+		// no matrix reads the projected file. Both shapes are legitimate, so the
+		// fixture carries both.
 		".github/workflows/test.yml":
-			"jobs:\n  t:\n    strategy:\n      matrix:\n        node: [\"24\", \"26\"]\n",
+			"jobs:\n  t:\n    strategy:\n      matrix:\n        node: [\"24\", \"26\"]\n" +
+			"    steps:\n      - uses: actions/setup-node@v4\n        with:\n          node-version-file: .node-version\n",
 		".github/workflows/harness-check.yml":
 			"jobs:\n  h:\n    steps:\n      - run: npm install -g npm@11.21.2\n",
 		".github/workflows/prose-review.yml": "jobs:\n  p:\n    steps: []\n",
@@ -214,6 +218,104 @@ test("a mise.toml with no npm line FAILs the npm projection", () => {
 	assert.match(line(out, "mise-pin-npm"), /no npm major/);
 });
 
+
+// ------------------------------------------------------- the path, not the key --
+// The workflow row (mise-pin-workflows) counts `node-version-file` and stops
+// there: a mention is not a resolution. setup-node resolves the value against the
+// workspace root and joins it unconditionally, so an absolute value — or
+// ${{ github.workspace }} itself — becomes <root>/<root>/.node-version and the job dies in
+// seconds before npm runs. These are the cases that were red in CI.
+
+test("an absolute node-version-file FAILs, naming the doubled path", () => {
+	const { status, out } = check(
+		fixture({
+			".github/workflows/test.yml":
+				"jobs:\n  t:\n    steps:\n      - uses: actions/setup-node@v4\n        with:\n          node-version-file: /home/runner/work/pi/pi/.node-version\n",
+		}),
+	);
+	assert.equal(status, 1, out);
+	const row = line(out, "mise-pin-node-version-file");
+	assert.match(row, /FAIL/);
+	assert.match(row, /\.github\/workflows\/test\.yml/);
+	assert.match(row, /absolute/);
+	assert.match(row, /joins it onto the workspace root/);
+});
+
+test("node-version-file built from github.workspace FAILs", () => {
+	// The exact form that merged in ci/mise-owns-ci-too: absolute once expanded.
+	const { status, out } = check(
+		fixture({
+			".github/workflows/prose-review.yml":
+				"jobs:\n  p:\n    steps:\n      - uses: actions/setup-node@v4\n        with:\n          node-version-file: ${{ github.workspace }}/.node-version\n",
+		}),
+	);
+	assert.equal(status, 1, out);
+	const row = line(out, "mise-pin-node-version-file");
+	assert.match(row, /FAIL/);
+	assert.match(row, /expression/);
+});
+
+test("a relative node-version-file that names no file under the root FAILs", () => {
+	// Relative is not enough: the file the join lands on has to exist.
+	const { status, out } = check(
+		fixture({
+			".github/workflows/prose-review.yml":
+				"jobs:\n  p:\n    steps:\n      - uses: actions/setup-node@v4\n        with:\n          node-version-file: .nvmrc\n",
+		}),
+	);
+	assert.equal(status, 1, out);
+	const row = line(out, "mise-pin-node-version-file");
+	assert.match(row, /FAIL/);
+	assert.match(row, /no \.nvmrc under the repo root/);
+});
+
+test("a quoted, commented .node-version PASSes — the value is what is read", () => {
+	const { status, out } = check(
+		fixture({
+			".github/workflows/prose-review.yml":
+				"jobs:\n  p:\n    steps:\n      - uses: actions/setup-node@v4\n        with:\n          node-version-file: \".node-version\" # mise.toml's node, projected\n",
+		}),
+	);
+	assert.equal(status, 0, out);
+	const row = line(out, "mise-pin-node-version-file");
+	assert.match(row, /PASS/);
+	assert.match(row, /resolving to a file at the repo root/);
+});
+
+test("no node-version-file at all is a WARN that says so, never a quiet pass", () => {
+	// A matrix job takes its version from the matrix on purpose, so absence is not
+	// a FAIL — but a row that silently compared nothing is how a gate stops
+	// checking, so the row says which of the two it did.
+	const { status, out } = check(
+		fixture({
+			".github/workflows/test.yml":
+				"jobs:\n  t:\n    steps:\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 24\n",
+		}),
+	);
+	assert.match(line(out, "mise-pin-node-version-file"), /WARN/);
+	assert.match(line(out, "mise-pin-node-version-file"), /compared nothing/);
+	// The literal above is the FAIL; absence of the file is not a second one.
+	assert.equal(status, 1, out);
+	assert.match(line(out, "mise-pin-workflows"), /FAIL/);
+});
+
+// The check above is only worth what it says about this repo. This is the test that
+// would have caught it before the branch merged: every fixture case can pass while this
+// checkout still ships an absolute value, which is precisely what happened.
+test("this checkout: every node-version-file is relative and resolves", () => {
+	const res = spawnSync("bash", [CHECK, "--verify-mise-pins", "--root", ROOT], {
+		encoding: "utf8",
+	});
+	const out = `${res.stdout}${res.stderr}`;
+	const row = line(out, "mise-pin-node-version-file");
+	assert.match(row, /PASS/, out);
+	assert.match(row, /resolving to a file at the repo root/);
+	// four setup-node steps read it: harness-check, prose-review and test.yml twice.
+	assert.match(out, /\.node-version@\.github\/workflows\/harness-check\.yml/);
+	assert.match(out, /\.node-version@\.github\/workflows\/prose-review\.yml/);
+	assert.match(out, /\.node-version@\.github\/workflows\/test\.yml/);
+	assert.equal(res.status, 0, out);
+});
 test("an unreadable value is a FAIL, not the fallback literal", () => {
 	const { status, out } = check(
 		fixture({ "mise.toml": '[tools]\nnode = "twenty-four"\nnpm = "11"\n' }),
