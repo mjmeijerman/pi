@@ -267,8 +267,12 @@ function secretPathWord(word: { text: string; quoted: boolean }): boolean {
 const SEND_RE =
 	/(^|[;&|()\s\/\\])(curl|wget|scp|rsync|http|https|nc|netcat|ncat)\b|(^|[;&|()\s\/\\])git\s+push\b/i;
 
-/** An operand that names another host: a URL, `user@host:path`, or a dotted hostname. */
-const NET_TARGET_RE = /[a-z][a-z0-9+.-]*:\/\/|@[a-z0-9._-]+:|(^|\s)[a-z0-9_-]+(\.[a-z0-9_-]+)+([:\/\s]|$)/i;
+/**
+ * An operand that names another host: a URL, `user@host:path`, or a dotted hostname.
+ * The label run may end in a single root dot — `a.b.` is a host, and `curl -d @f a.b.`
+ * leaves it just as surely as `a.b` does — so the tail allows one optional `.`.
+ */
+const NET_TARGET_RE = /[a-z][a-z0-9+.-]*:\/\/|@[a-z0-9._-]+:|(^|\s)[a-z0-9_-]+(\.[a-z0-9_-]+)+\.?([:\/\s]|$)/i;
 
 /** Flags whose value is a file that goes out as the request body. */
 const UPLOAD_FLAG_RE = /(^|\s)(-T|--upload-file|--post-file|--body-file)(\s+|=)\S/;
