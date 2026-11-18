@@ -2,7 +2,7 @@
 // ============================================================================
 // setup.mjs — the interactive pass: what to keep, then install.mjs.
 //
-//   git clone git@github.com:mjmeijerman/pi.git ~/.pi
+//   git clone https://github.com/mjmeijerman/pi.git ~/.pi
 //   cd ~/.pi && ./setup.sh          # = node setup.mjs
 //
 // It asks four things, with a default on every question:

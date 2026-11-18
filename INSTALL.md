@@ -2,23 +2,24 @@
 
 You need `git`, and Node at the version in `.node-version` (24, pinned from
 `mise.toml`). `gh` is optional: the installer uses it to clone the delegation
-workspace when it is authenticated, and falls back to SSH. `herdr-app` is
-downloaded by the installer unless you set `PI_SKIP_NETWORK=1`.
+workspace when it is authenticated, and otherwise clones over https. SSH is the
+last resort and needs a key; both repos are public, so nothing here asks for one.
+`herdr-app` is downloaded by the installer unless you set `PI_SKIP_NETWORK=1`.
 
 Linux and macOS:
 
 ```bash
-git clone git@github.com:mjmeijerman/pi.git ~/.pi && cd ~/.pi && ./setup.sh
+git clone https://github.com/mjmeijerman/pi.git ~/.pi && cd ~/.pi && ./setup.sh
 ```
 
 Windows, in PowerShell:
 
 ```powershell
-git clone git@github.com:mjmeijerman/pi.git $env:USERPROFILE\.pi; cd $env:USERPROFILE\.pi; node setup.mjs
+git clone https://github.com/mjmeijerman/pi.git $env:USERPROFILE\.pi; cd $env:USERPROFILE\.pi; node setup.mjs
 ```
 
-No SSH key on GitHub yet? `gh repo clone mjmeijerman/pi ~/.pi` does the same clone
-over HTTPS, then run the `cd` and the setup command above.
+Have `gh` logged in? `gh repo clone mjmeijerman/pi ~/.pi` does the same clone.
+Either way, then run the `cd` and the setup command above.
 
 ## What happens next
 

@@ -27,7 +27,7 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 ## Rebuild this exact machine on another PC
 
 ```bash
-git clone git@github.com:mjmeijerman/pi.git ~/.pi   # or anywhere; setup copies what it needs
+git clone https://github.com/mjmeijerman/pi.git ~/.pi   # or anywhere; setup copies what it needs
 cd ~/.pi
 ./setup.sh            # asks what to keep, then installs
 pi

@@ -111,6 +111,37 @@ function dirname(p) {
 	return path.dirname(p);
 }
 
+// --- the delegation workspace clone ------------------------------------------
+export const BOSS_REPO_DEFAULT = 'mjmeijerman/big-boss-pi';
+
+/**
+ * bossClonePlan — the clone transports for the delegation workspace, in order.
+ *
+ * Both repos are public, so the first step on a bare machine must not need a
+ * key: `https://` clones without one, and it is the attempt that carries no
+ * precondition beyond the network. `gh` still goes first when it is
+ * authenticated (it is the account people already have), SSH is last because it
+ * is the only transport that fails for want of a key — and when it was the only
+ * fallback, the workspace silently did not arrive and the top of stepBoss read
+ * the missing directory as "fine".
+ *
+ * `hasNetwork: false` is PI_SKIP_NETWORK=1: no attempts at all, which is what
+ * the engine prints as skipped instead of cloning into an air-gapped box.
+ */
+export function bossClonePlan({
+	ghAuthed = false,
+	hasNetwork = true,
+	repo = BOSS_REPO_DEFAULT,
+	dir = 'big-boss-pi',
+} = {}) {
+	if (!hasNetwork) return [];
+	const attempts = [];
+	if (ghAuthed) attempts.push({ transport: 'gh', cmd: 'gh', args: ['repo', 'clone', repo, dir] });
+	attempts.push({ transport: 'https', cmd: 'git', args: ['clone', `https://github.com/${repo}.git`, dir] });
+	attempts.push({ transport: 'ssh', cmd: 'git', args: ['clone', `git@github.com:${repo}.git`, dir] });
+	return attempts;
+}
+
 // --- AGENTS.md rules --------------------------------------------------------
 
 /** ruleSlug — a stable id for a rule: its first six words, lowercased. */

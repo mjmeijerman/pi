@@ -41,3 +41,11 @@ jev	typesafe	localhost|11434|ollama	agent/AGENTS.md agent/skills/jev/SKILL.md do
 # (bin/local-model.mjs:13, qwen3.8:27b) counts as naming the transport, because
 # a doc that says which model runs locally has said the transport is local.
 local-run|local_llm	11434|ollama|qwen3\.8:27b	typesafe	agent/AGENTS.md agent/skills/jev/SKILL.md docs/radar-conformance.md docs/agent-playbook.md README.md sandbox/README.md docs/install.md	local-model.mjs
+
+# The quick start clones over https, because the first command on a bare machine
+# must not need a GitHub key. The engine does the same for the delegation
+# workspace (scripts/install-lib.mjs `bossClonePlan`: gh when authed, then
+# https, then SSH) and install.mjs reads that plan, so this row and the code
+# agree. No module field: the transport is an argument in install-lib.mjs, not a
+# url in a bin/ script.
+git clone	https://github\.com	git@github\.com	INSTALL.md README.md docs/install.md
