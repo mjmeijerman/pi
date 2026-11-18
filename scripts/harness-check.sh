@@ -33,6 +33,9 @@
 #                                         # only mode here that writes
 #   scripts/harness-check.sh --verify-skills-lock
 #                                         # only the skill pin check, for tests
+#   scripts/harness-check.sh --verify-doc-facts
+#                                         # only the transport table check, for
+#                                         # tests and for one honest line
 #   scripts/harness-check.sh --help
 #
 # Exit 0 when nothing FAILs (a baselined violation reports WARN), 1 on any FAIL.
@@ -47,6 +50,7 @@ JSON=0
 QUICK=0
 VERIFY_RELEASE_AGE=0
 VERIFY_CONFIG=0
+VERIFY_DOC_FACTS=0
 WRITE_SKILLS_LOCK=0
 VERIFY_SKILLS_LOCK=0
 
@@ -80,7 +84,7 @@ RETRO_MAX_AGE_DAYS=14
 # grace period keeps a learner's own fresh branch out of its own run (blip 11).
 LEARN_BRANCH_GRACE_MIN="${PI_LEARN_BRANCH_GRACE_MIN:-60}"
 
-usage() { sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() {
 	printf 'harness-check: %s\n' "$*" >&2
 	exit 2
@@ -334,6 +338,174 @@ check_skills_lock() {
 	done < <(skills_lock_target | sort -u)
 	if [ "$bad" -eq 0 ]; then
 		verdict skills-lock "$SKILLS_LOCK_REL" 1 "$count file(s) match their locked sha256"
+	fi
+	return 0
+}
+
+# ---------------------------------------------------------------- doc facts --
+# A doc that named the wrong transport used to be found by a person reading:
+# agent/skills/jev/SKILL.md and agent/AGENTS.md described jev as a local ollama
+# model for as long as the code said TypeSafe, because nothing compared prose to
+# code (blip 36: check the text, not just the code; blip 62: the harness depends
+# on a remote model, so its docs must say so).
+#
+# scripts/doc-facts.txt is the table: subject, the transport it must be described
+# with, the transport it must not be, the files that talk about it, and the
+# module the fact was read from. Two questions per row:
+#   does one sentence put the subject and the forbidden transport in one clause?
+#   does a file that talks about the subject ever name the right transport?
+# Matching is per sentence, not per file: `local-run` sits two sentences from a
+# jev paragraph and is still correct. Within a sentence, `;`, a dash and
+# `, and/but/while/whereas/yet/or` are clause boundaries, so a true sentence
+# that contrasts the two transports is allowed and only a pairing is reported.
+# The module is read as well (comments dropped): the table's claim came from it,
+# so a transport that moves in code fails here the day it moves.
+DOC_FACTS_REL="scripts/doc-facts.txt"
+# Where bin/ modules live when they are not in this checkout: install.sh puts the
+# delegation workspace at ~/big-boss-pi by default (PI_BOSS_DIR).
+DOC_FACTS_BIN="${DOC_FACTS_BIN:-${PI_BOSS_DIR:-$HOME/big-boss-pi}/bin}"
+
+doc_facts_word() { # subject -> the same pattern, whole word, not inside a path
+	# `agent/skills/jev/SKILL.md` names a file, not the decision model: a mention
+	# has to be a word of its own, or a path in another clause invents a pairing.
+	printf '(^|[^[:alnum:]_/.-])(%s)([^[:alnum:]_/.-]|$)' "$1"
+}
+
+doc_facts_sentences() { # stdin -> one sentence per line
+	sed -E 's/[.!?]+([[:space:]]|$)/\n/g'
+}
+
+doc_facts_clauses() { # stdin -> one clause per line
+	sed -E 's/(;|—|–)/\n/g; s/,[[:space:]]+(and|but|while|whereas|yet|or)[[:space:]]+/\n/g'
+}
+
+doc_facts_code_file() { # module name -> path, empty status 1 when absent
+	local name=$1 cand
+	for cand in "$ROOT/bin/$name" "$ROOT/agent/bin/$name" "$DOC_FACTS_BIN/$name"; do
+		[ -f "$cand" ] && {
+			printf '%s' "$cand"
+			return 0
+		}
+	done
+	return 1
+}
+
+doc_facts_code_body() { # module -> code, comments dropped (a comment is not the endpoint)
+	# `//` only starts a comment after whitespace: `https://api.typesafe.ai` is the
+	# endpoint this whole check is about, not a remark about it.
+	sed -E -e '/^[[:space:]]*(\*|\/\/|\/\*)/d' -e 's@(^|[[:space:]])//.*@@'
+}
+
+doc_facts_scan_file() { # file, subject regex, forbidden regex -> line<TAB>sentence per pairing
+	local file=$1 subj_re=$2 forb=$3 hit text sentence clause low lowc
+	while IFS= read -r hit; do
+		text=${hit#*:}
+		hit=${hit%%:*}
+		while IFS= read -r sentence; do
+			[ -n "${sentence//[[:space:]]/}" ] || continue
+			low=$(printf '%s' "$sentence" | tr '[:upper:]' '[:lower:]')
+			[[ $low =~ $forb ]] || continue
+			[[ $low =~ $subj_re ]] || continue
+			# Same sentence is not enough: the two transports are allowed to
+			# share one when a clause boundary separates them. Only a pairing is a
+			# fault, and the whole sentence is printed so it can be read in place.
+			while IFS= read -r clause; do
+				lowc=$(printf '%s' "$clause" | tr '[:upper:]' '[:lower:]')
+				[[ $lowc =~ $forb && $lowc =~ $subj_re ]] || continue
+				printf '%s\t%s\n' "$hit" "$sentence"
+				break
+			done < <(printf '%s\n' "$sentence" | doc_facts_clauses)
+		done < <(printf '%s\n' "$text" | doc_facts_sentences)
+	done < <(grep -niE -e "$subj_re" "$file")
+}
+
+check_doc_facts() {
+	local table="$ROOT/$DOC_FACTS_REL" subj req forb files code label rows=0 checked=0 codeok=0 fails=0
+	local file rel ln sentence module subj_re req_label forb_label
+	local -a listed=()
+	local -A GONE=()
+	if [ ! -f "$table" ]; then
+		if [ -f "$HARNESS_ROOT/$DOC_FACTS_REL" ]; then
+			table="$HARNESS_ROOT/$DOC_FACTS_REL"
+		else
+			verdict doc-facts "$DOC_FACTS_REL" 0 \
+				"missing — nothing says which transport serves which subject any more"
+			return 0
+		fi
+	fi
+	while IFS=$'\t' read -r subj req forb files code; do
+		case "$subj" in '' | '#'*) continue ;; esac
+		if [ -z "$req" ] || [ -z "$forb" ] || [ -z "$files" ]; then
+			verdict doc-facts "$DOC_FACTS_REL" 0 \
+				"incomplete row for '${subj:-?}' — 5 tab-separated fields: subject, must name, must not name, files, module"
+			fails=$((fails + 1))
+			continue
+		fi
+		rows=$((rows + 1))
+		label=${subj//\\/}
+		label=${label//|/, }
+		req_label=${req//\\/}
+		req_label=${req_label//|/, }
+		forb_label=${forb//\\/}
+		forb_label=${forb_label//|/, }
+		subj_re=$(doc_facts_word "$subj")
+		listed=()
+		read -ra listed <<<"$files"
+		for file in "${listed[@]}"; do
+			if [ ! -f "$ROOT/$file" ]; then
+				# Two rows may list the same file; a stale entry is one fault.
+				if [ -z "${GONE[$file]:-}" ]; then
+					GONE[$file]=1
+					verdict doc-facts "$file" 0 \
+						"listed in $DOC_FACTS_REL but missing — the table is stale, or the file was renamed"
+					fails=$((fails + 1))
+				fi
+				continue
+			fi
+			# A file that never mentions the subject has nothing to say about its
+			# transport, so it is not forced to name one; add it when it does.
+			grep -qiE -e "$subj_re" "$ROOT/$file" || continue
+			if ! grep -qiE -e "$req" "$ROOT/$file"; then
+				verdict doc-facts "$file" 0 \
+					"talks about $label and never names '$req_label' — the transport sentence is missing or names the wrong one"
+				fails=$((fails + 1))
+				continue
+			fi
+			checked=$((checked + 1))
+			while IFS=$'\t' read -r ln sentence; do
+				record FAIL doc-facts "$file:$ln" \
+					"$label sits with '$forb_label' in one clause — the sentence: $sentence"
+				fails=$((fails + 1))
+			done < <(doc_facts_scan_file "$ROOT/$file" "$subj_re" "$forb")
+		done
+		if [ -n "$code" ]; then
+			if module=$(doc_facts_code_file "$code"); then
+				rel=${module#"$ROOT"/}
+				if ! doc_facts_code_body <"$module" | grep -qiE -e "$req"; then
+					verdict doc-facts "$rel" 0 \
+						"no '$req' in the code — $DOC_FACTS_REL promises $label is served by it, and the module disagrees"
+					fails=$((fails + 1))
+				elif doc_facts_code_body <"$module" | grep -qiE -e "$forb"; then
+					verdict doc-facts "$rel" 0 \
+						"the code now names '$forb' — $label moved transport; fix the code or the table the same day"
+					fails=$((fails + 1))
+				else
+					codeok=$((codeok + 1))
+				fi
+			else
+				record WARN doc-facts "$code" \
+					"not found here or in $DOC_FACTS_BIN — the row for $label was not checked against code"
+			fi
+		fi
+	done < <(grep -v '^[[:space:]]*#' "$table")
+	if [ "$rows" -eq 0 ] && [ "$fails" -eq 0 ]; then
+		verdict doc-facts "$DOC_FACTS_REL" 0 "holds no subjects — the table exists and says nothing"
+	elif [ "$fails" -eq 0 ] && [ "$checked" -eq 0 ]; then
+		record WARN doc-facts "$DOC_FACTS_REL" \
+			"$rows subject(s) in the table, none of them discussed in a listed file — nothing was compared"
+	elif [ "$fails" -eq 0 ]; then
+		verdict doc-facts "$DOC_FACTS_REL" 1 \
+			"$rows subject(s), $checked file(s) checked, $codeok module(s) agree; no sentence names the wrong transport"
 	fi
 	return 0
 }
@@ -897,6 +1069,7 @@ while [ $# -gt 0 ]; do
 	--quick) QUICK=1 ;;
 	--verify-release-age) VERIFY_RELEASE_AGE=1 ;;
 	--verify-config) VERIFY_CONFIG=1 ;;
+	--verify-doc-facts) VERIFY_DOC_FACTS=1 ;;
 	--write-skills-lock) WRITE_SKILLS_LOCK=1 ;;
 	--verify-skills-lock) VERIFY_SKILLS_LOCK=1 ;;
 	--root)
@@ -968,6 +1141,21 @@ if [ "$VERIFY_CONFIG" = 1 ]; then
 	exit $?
 fi
 
+# One check, on demand, for the transport table alone: tests assert on the exit
+# status, and a reader gets one line instead of the whole report.
+if [ "$VERIFY_DOC_FACTS" = 1 ]; then
+	section "docs — the transport each subject is served by"
+	check_doc_facts
+	if [ "$JSON" = 1 ]; then
+		printf '{"pass":%d,"warn":%d,"fail":%d,"results":[%s]}\n' \
+			"$PASS_N" "$WARN_N" "$FAIL_N" "${JSON_ITEMS[*]}"
+	else
+		printf '\n%d passed, %d warn, %d failed\n' "$PASS_N" "$WARN_N" "$FAIL_N"
+	fi
+	[ "$FAIL_N" -eq 0 ]
+	exit $?
+fi
+
 section "budgets — files that load on every turn"
 check_agents_md
 check_skill_lines
@@ -975,6 +1163,10 @@ check_skill_lines
 # editing a skill and not regenerating the lock fails at commit time, while the
 # edit is still one fix away.
 check_skills_lock
+# Reading a handful of small docs costs milliseconds, and a sentence that names
+# the wrong transport is exactly the rot that survives review: this runs in
+# --quick so the commit hook says so, not a reader three months later.
+check_doc_facts
 
 if [ "$QUICK" = 0 ]; then
 	section "config — things an install step sets"
