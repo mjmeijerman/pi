@@ -67,6 +67,22 @@ run() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Node major this repo pins, read out of mise.toml (Radar Vol. 35 blip 68, Adopt:
+# mise, "we're keeping it in Adopt because it consolidates three fragmented
+# concerns"). One file owns the number; this script and any later reader stop
+# writing it out again. sed rather than a TOML parser: four lines do not need a
+# dependency, and a bare `node = "24"` is the only shape mise writes.
+# Falls back to the old literal when the file is missing, unreadable or silent,
+# so a tree without mise.toml behaves exactly as it did before the pin existed.
+pinned_node_major() {
+	local file="$SOURCE_DIR/mise.toml" raw="" major
+	if [ -r "$file" ]; then
+		raw=$(sed -n 's/^[[:space:]]*node[[:space:]]*=[[:space:]]*["'"'"']\{0,1\}\([0-9][0-9.]*\).*/\1/p' "$file" 2>/dev/null | head -n 1 || true)
+	fi
+	major="${raw%%.*}"
+	printf '%s\n' "${major:-24}"
+}
+
 # Major version of the npm on PATH, or 0 when there is no npm at all.
 npm_major() {
 	local v
@@ -189,10 +205,11 @@ Linux) note "system : Linux $(uname -r)" ;;
 esac
 
 have git || die "git is not installed"
-have node || die "node is not installed (pi needs Node 24 or newer)"
+NODE_PIN="$(pinned_node_major)"
+have node || die "node is not installed (pi needs Node $NODE_PIN or newer)"
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-if [ "$NODE_MAJOR" -lt 24 ]; then
-	warn "node $(node -v) is older than 24; pi 1.5.x expects 24 or 26"
+if [ "$NODE_MAJOR" -lt "$NODE_PIN" ]; then
+	warn "node $(node -v) is older than $NODE_PIN; pi 1.5.x expects $NODE_PIN or 26"
 fi
 
 if ! have pi; then
