@@ -20,6 +20,8 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 | `install.mjs` | the installer engine, one file for Linux, macOS and Windows (config, hooks, bin entries, services) |
 | `setup.mjs` | the interactive pass: per skill, per extension, per AGENT rule and per key, then `install.mjs` |
 | `install.sh`, `setup.sh` | thin shims so the old commands still work: they exec the Node entry points |
+| `INSTALL.md` | quick start on a bare machine: prerequisites, one command per OS, the questions in order |
+| `docs/install.md` | the install reference: every flag, the environment overrides, what lands where, per-OS facts, uninstall, troubleshooting, secrets |
 | `Makefile` | `setup` / `bootstrap` / `verify` / `hooks` / `update` / `uninstall`, plus `mutate` / `mutate-full` for mutation testing (blip 2) |
 
 ## Rebuild this exact machine on another PC
@@ -34,6 +36,12 @@ pi
 `setup.sh` and `install.sh` are one-line shims now: the work happens in
 `setup.mjs` (the questions) and `install.mjs` (the install), both plain Node 24
 with no dependencies. They run on **Linux, macOS and Windows**.
+
+Quick start for a bare machine: [INSTALL.md](INSTALL.md). The reference — what it
+asks in which order, every flag, the per-OS differences, uninstall and
+troubleshooting — is [docs/install.md](docs/install.md). `node setup.mjs --help`
+prints the flag list from the same table the parser reads; do not restate the
+flags here, they have one home.
 
 Preflight, once per machine: Node 24 (`.node-version`, pinned from `mise.toml`)
 and `git`. On Windows, run them from Git Bash or PowerShell.
@@ -65,36 +73,15 @@ Everything above is one table in `scripts/install-lib.mjs` (`OS_PLAN`) plus one
 copy-vs-symlink helper — three places at most, on purpose.
 
 `setup.mjs` asks, with a default on every question and `-y` for the defaults:
-
-1. **skills**, one per skill in `agent/skills/` (plus `~/.pi/skills` extras);
-2. **extensions**, one per `agent/extensions/*.ts`;
-3. **agent rules**: every bullet rule in `agent/AGENTS.md`, shown as
-   `rule 4 of 17 — <its first line>`, keep or drop. The installed `AGENTS.md` is
-   written from those answers, so the rule set is the one you chose and not a
-   file you edit and re-lose on the next install;
-4. **keys**: `TYPESAFE_API_KEY` for jev and the DeepSeek key `models.json` reads.
-
-Answers are recorded in `~/.pi/state/setup.json`, so a dropped rule stays
-dropped, and only rules that file does not cover are asked again. `--reask`
-ignores the record. A key is asked with the terminal echo off, never printed,
-never logged, and written only to the file that owns it (`agent/deepseek.key`,
-`agent/env.secret`, both mode 600). No key file: one line, skip.
-
-| Flag | Effect |
-| --- | --- |
-| `-y`, `--yes` | Accept every default: installs the full set, no prompts |
-| `--skills=a,b` | Only these skills |
-| `--extensions=a.ts,b.ts` | Only these extensions |
-| `--rules=all\|none\|keep:1,2\|drop:3,4` | The rule answers, without a person |
-| `--no-keys` | Never ask for a key |
-| `--dry-run` | Print the plan, change nothing |
-| `--reask` | Ask again about everything, record the new answers |
-| `--no-apt` | Never call `sudo apt-get` (Linux only; other OSes say so) |
-| `--with-ollama` | Pull `qwen3.8:27b` (~17 GB) for the `local_llm` tool |
-| `--with-dictation` | Build the faster-whisper venv (~2.5 GB of wheels) |
-| `--force-key` | Replace an existing key file |
-| `--no-verify` | Skip the verification block |
-| `--install-pi` | Let the engine install pi with npm when it is missing |
+skills (one per `agent/skills/` entry), extensions (one per
+`agent/extensions/*.ts`), the agent rules (one per bullet in `agent/AGENTS.md`,
+shown as `rule 4 of 17` across its 7 sections), and the two keys. Answers are
+recorded in `~/.pi/state/setup.json`, so a dropped rule stays dropped;
+`--reask` ignores the record. A key is asked with the terminal echo off, never
+printed and never logged, and written only to the file that owns it
+(`agent/deepseek.key`, `agent/env.secret`, both mode 600). The optional extras it
+offers, both defaulting to no, are the local ollama model (`qwen3.8:27b`, ~17 GB)
+and the faster-whisper venv for dictation (~2.5 GB).
 
 `./setup.sh -y --no-keys --no-apt --no-verify` is the CI-shaped run: it is what
 `.github/workflows/install-matrix.yml` executes on `ubuntu-latest`,
