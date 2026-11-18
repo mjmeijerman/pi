@@ -303,6 +303,76 @@ pi() {
 }
 # <<< pi sandbox <<<`;
 
+// --- the flags ---------------------------------------------------------------
+// One table per engine, and the parser reads it. `--help` renders the same
+// table, so a flag the code accepts cannot be a flag the help text forgets:
+// scripts/tests/install-help.test.mjs asserts exactly that, and a new entry
+// with no help line fails it (docs/install.md has the human copy).
+//
+// kind  'bool' sets `value` and takes no argument; 'list' splits on commas;
+//       'text' keeps the string as written.
+export const ENGINE_FLAGS = {
+	install: [
+		{ names: ['--install-pi'], key: 'installPi', kind: 'bool', value: true, default: false, help: 'install pi with npm when it is missing' },
+		{ names: ['--dry-run'], key: 'dryRun', kind: 'bool', value: true, default: false, help: 'print the plan, change nothing' },
+		{ names: ['--skills='], key: 'skills', kind: 'list', help: 'only these skills (comma-separated)' },
+		{ names: ['--extensions='], key: 'extensions', kind: 'list', help: 'only these extensions (comma-separated, .ts optional)' },
+		{ names: ['-h', '--help'], key: 'help', kind: 'bool', value: true, help: 'print this text and exit 0' },
+	],
+	setup: [
+		{ names: ['-y', '--yes'], key: 'yes', kind: 'bool', value: true, default: false, help: 'accept every default (installs the full set)' },
+		{ names: ['--skills='], key: 'skills', kind: 'list', help: 'only these skills (comma-separated), no question per skill' },
+		{ names: ['--extensions='], key: 'extensions', kind: 'list', help: 'only these extensions (comma-separated, .ts optional)' },
+		{ names: ['--rules='], key: 'rules', kind: 'text', help: 'all | none | keep:1,2 | drop:3,4 — the rule answers without a person' },
+		{ names: ['--no-keys'], key: 'noKeys', kind: 'bool', value: true, default: false, help: 'never ask for a key' },
+		{ names: ['--dry-run'], key: 'dryRun', kind: 'bool', value: true, default: false, help: 'print the plan, change nothing' },
+		{ names: ['--reask'], key: 'reask', kind: 'bool', value: true, default: false, help: 'ask again about everything the state file records' },
+		{ names: ['--no-apt'], key: 'doApt', kind: 'bool', value: false, default: true, help: 'never call sudo apt-get (Linux only)' },
+		{ names: ['--no-verify'], key: 'verify', kind: 'bool', value: false, default: true, help: 'skip the verification block' },
+		{ names: ['--force-key'], key: 'forceKey', kind: 'bool', value: true, default: false, help: 'replace an existing key file' },
+		{ names: ['--with-ollama'], key: 'withOllama', kind: 'bool', value: true, default: false, help: 'pull the local model (~17 GB) without asking' },
+		{ names: ['--with-dictation'], key: 'withDictation', kind: 'bool', value: true, default: false, help: 'build the whisper venv (~2.5 GB) without asking' },
+		{ names: ['--install-pi'], key: 'installPi', kind: 'bool', value: true, default: false, help: 'let install.mjs install pi with npm when it is missing' },
+		{ names: ['-h', '--help'], key: 'help', kind: 'bool', value: true, help: 'print this text and exit 0' },
+	],
+};
+
+/**
+ * parseFlags — argv in, options out, driven by ENGINE_FLAGS.
+ * Throws on an option no table entry names, so the engine can print it and stop
+ * instead of ignoring a typo and installing the defaults.
+ */
+export function parseFlags(engine, argv = []) {
+	const table = ENGINE_FLAGS[engine];
+	if (!table) throw new Error(`no flag table for engine "${engine}"`);
+	const opts = {};
+	for (const entry of table) if (entry.default !== undefined) opts[entry.key] = entry.default;
+	for (const arg of argv) {
+		const entry = table.find((e) => (e.kind === 'bool' ? e.names.includes(arg) : e.names.some((n) => n.endsWith('=') && arg.startsWith(n))));
+		if (!entry) throw new Error(`unknown option: ${arg} (try --help)`);
+		if (entry.kind === 'bool') {
+			opts[entry.key] = entry.value === undefined ? true : entry.value;
+			continue;
+		}
+		const prefix = entry.names.find((n) => n.endsWith('='));
+		const value = arg.slice(prefix.length);
+		opts[entry.key] = entry.kind === 'list' ? value.split(',') : value;
+	}
+	return opts;
+}
+
+/** helpText — the same table, as the text `--help` prints. */
+export function helpText(engine, { command = `node ${engine}.mjs` } = {}) {
+	const table = ENGINE_FLAGS[engine];
+	if (!table) throw new Error(`no flag table for engine "${engine}"`);
+	const names = table.map((e) => e.names.join(', '));
+	const width = Math.max(...names.map((n) => n.length));
+	const lines = [`Usage: ${command} [flags]`, '', 'Flags:'];
+	table.forEach((entry, i) => lines.push(`  ${names[i].padEnd(width)}  ${entry.help}`));
+	lines.push('', 'Environment overrides and what each writes: docs/install.md');
+	return `${lines.join('\n')}\n`;
+}
+
 // --- files, names, hashes ---------------------------------------------------
 
 /** sha256 — content hash used for "second run changes nothing" assertions. */

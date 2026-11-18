@@ -47,7 +47,9 @@ import {
 	PI_WRAPPER_BEGIN,
 	PI_WRAPPER_BLOCK,
 	PI_WRAPPER_END,
+	helpText,
 	homePaths,
+	parseFlags,
 	planFor,
 	spawnPlan,
 	spliceManagedBlock,
@@ -72,19 +74,21 @@ let OPT = { installPi: false };
 let changed = 0;
 
 // --- argv -------------------------------------------------------------------
+// The flag list lives in scripts/install-lib.mjs (ENGINE_FLAGS.install), so the
+// parser and `--help` are one table and cannot disagree; the test in
+// scripts/tests/install-help.test.mjs holds the two together.
 function parseArgs(argv) {
-	const out = { installPi: false };
-	for (const arg of argv) {
-		if (arg === '--install-pi') out.installPi = true;
-		else if (arg === '--dry-run') out.dryRun = true;
-		else if (arg === '-h' || arg === '--help') {
-			process.stdout.write(`${fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(0, 40).join('\n')}\n`);
-			process.exit(0);
-		} else if (arg.startsWith('--skills=')) out.skills = arg.slice(9).split(',');
-		else if (arg.startsWith('--extensions=')) out.extensions = arg.slice(13).split(',');
-		else die(`unknown option: ${arg} (try --help)`);
+	let opts;
+	try {
+		opts = parseFlags('install', argv);
+	} catch (err) {
+		die(err.message);
 	}
-	return out;
+	if (opts.help) {
+		process.stdout.write(helpText('install', { command: 'node install.mjs' }));
+		process.exit(0);
+	}
+	return opts;
 }
 
 function die(message) {
