@@ -129,7 +129,7 @@ variable one of the two engines or `scripts/install-lib.mjs` reads.
 | `pi` itself, sandboxed | a `pi()` wrapper block, marked `# >>> pi sandbox >>>`, in `~/.bashrc` and `~/.zshrc` (Linux and macOS only) |
 | Herdr mods and menu row | `~/.config/herdr-app/mods/`, `~/.config/herdr-app/programs.json` — an existing `programs.json` is left alone and the line says what to add by hand |
 | `herdr-app` | `~/.local/share/herdr-app/herdr-app`, then a bin entry |
-| the delegation workspace | `~/big-boss-pi` (`gh repo clone` when `gh` is authenticated, otherwise `git clone git@github.com:…`) |
+| the delegation workspace | `~/big-boss-pi` (`gh repo clone` when `gh` is authenticated, then `git clone https://github.com/mjmeijerman/big-boss-pi.git`; the SSH remote `git@github.com:mjmeijerman/big-boss-pi.git` is the last resort and needs a key) |
 | services | Linux `~/.config/systemd/user/`, macOS `~/Library/LaunchAgents/`, Windows a Task Scheduler entry |
 
 Nothing here touches `~/.pi/agent/auth.json`, sessions, `models-store.json`, or a
