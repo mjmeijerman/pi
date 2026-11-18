@@ -24,6 +24,7 @@ import {
 	parseRuleSelection,
 	pickNames,
 	planFor,
+	spawnPlan,
 	ruleIds,
 	ruleSlug,
 	samePath,
@@ -158,4 +159,50 @@ test('samePath: git echoes back a different spelling of the same directory', () 
 	assert.equal(samePath('/c/Users/me/.pi/git-hooks', 'C:\\Users\\me\\.pi\\git-hooks', 'win32'), true);
 	assert.equal(samePath('/c/Users/me/.pi/git-hooks', '/c/Users/me/.pi/git-hooks/', 'win32'), true);
 	assert.equal(samePath('', '/home/me', 'linux'), false);
+});
+
+// `.cmd` shims: npm, gh and the rest are .cmd files on Windows, which node
+// cannot exec directly. The fix is argv, not `shell: true` — a shell turns argv
+// into a string, and a string is one quote away from a second command. These
+// two tests pin the argv that replaces it, so nobody can quietly put the shell
+// back: semgrep: javascript.lang.security.audit.spawn-shell-true.
+test('spawnPlan: a .cmd command on win32 goes through cmd.exe, argv intact', () => {
+	const spec = spawnPlan('npm.cmd', ['install', '-g', 'pi'], { platform: 'win32', comspec: 'C:\\Windows\\system32\\cmd.exe' });
+	assert.equal(spec.file, 'C:\\Windows\\system32\\cmd.exe');
+	assert.equal(spec.args[0], '/d', '/d skips AutoRun, which a person may have pointed at anything');
+	assert.equal(spec.args[1], '/s', '/s is what makes cmd.exe keep the outer quotes as written');
+	assert.equal(spec.args[2], '/c');
+	assert.equal(spec.args[3], '"npm.cmd install -g pi"');
+	assert.equal(spec.args.length, 4, 'the command line is ONE argument: /c takes the rest of the line');
+	assert.equal(spec.windowsVerbatimArguments, true, 'node must not quote the quotes a second time');
+	// One argument with a space and one with an operator: both are quoted, and
+	// the arguments around them are left alone.
+	assert.equal(
+		spawnPlan('gh.cmd', ['pr', 'create', '--title', 'One Node installer & friends', '-R', 'a/b'], { platform: 'win32' }).args[3],
+		'"gh.cmd pr create --title "One Node installer & friends" -R a/b"',
+		'quote the argument cmd.exe would split, not the whole line',
+	);
+});
+
+test('spawnPlan: everything else is spawned directly, with no shell in sight', () => {
+	for (const platform of ['linux', 'darwin', 'win32']) {
+		const spec = spawnPlan('git', ['config', '--global', 'user.name', 'Mark'], { platform });
+		assert.equal(spec.file, 'git', platform);
+		assert.deepEqual(spec.args, ['config', '--global', 'user.name', 'Mark'], platform);
+		assert.equal(spec.windowsVerbatimArguments, false, platform);
+	}
+	// A plain .exe on Windows is exec'd, not handed to cmd.exe: gh and node are
+	// real executables there, and cmd.exe would only add a parsing layer.
+	assert.equal(spawnPlan('gh.exe', ['auth', 'status'], { platform: 'win32', comspec: 'cmd.exe' }).file, 'gh.exe');
+});
+
+// The point of the two tests above is that nobody puts the shell back to make a
+// scanner quiet. That is a property of the engines, so it is read off them.
+test('the engines build argv with spawnPlan and never set a shell', () => {
+	for (const file of ['../../install.mjs', '../../setup.mjs']) {
+		const src = fs.readFileSync(new URL(file, import.meta.url), 'utf8').replace(/^\s*\/\/.*$/gm, '');
+		assert.ok(!/\bshell\s*:/.test(src), `${file} sets a child_process shell option again`);
+		assert.ok(/spawnPlan\(/.test(src), `${file} does not run commands through spawnPlan`);
+		assert.ok(!/nosemgrep/.test(src), `${file} silences a scanner finding instead of fixing it`);
+	}
 });

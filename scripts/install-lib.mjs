@@ -415,6 +415,49 @@ export function shellQuote(arg) {
 	return /^[A-Za-z0-9_./:=@-]+$/.test(arg) ? arg : `"${arg.replace(/"/g, '\\"')}"`;
 }
 
+/**
+ * cmdQuote — one argument spelled the way cmd.exe needs it.
+ *
+ * cmd.exe splits on whitespace and reads & | < > ^ ( ) as operators, so an
+ * argument carrying any of those is wrapped in double quotes. A quote inside
+ * the argument is doubled, which is the only escape cmd.exe honours inside a
+ * quoted string. % and ! expand before the program sees them — quoting does not
+ * stop that, so an argument holding them is marked as quoted and the comment
+ * here is the honest limit of this function.
+ */
+export function cmdQuote(arg) {
+	const s = String(arg);
+	if (s !== '' && !/[\s"&|<>^()%!]/.test(s)) return s;
+	return `"${s.replace(/"/g, '""')}"`;
+}
+
+/**
+ * spawnPlan — the argv for one command, as data, before spawnSync sees it.
+ *
+ * Windows ships npm, gh and every other node tool as a .cmd shim, and node
+ * cannot exec a .cmd directly. The obvious answer — hand the command line to a
+ * shell — is the thing security scanners refuse (`shell: true` turns argv into
+ * a string one injection away from a second command). So the same effect is
+ * spelled out instead: cmd.exe in front of it, /d to skip AutoRun, /s so cmd
+ * keeps the outer quotes as written, /c to run the line, and the line built
+ * from argv with only the quoting cmd.exe actually requires. spawnSync is then
+ * called with shell: false, on every platform, for every command.
+ *
+ * Everything else — a plain command on Windows, every command on Linux and
+ * macOS — is spawned directly, with argv untouched.
+ */
+export function spawnPlan(cmd, args = [], { platform = process.platform, comspec = process.env.ComSpec } = {}) {
+	if (platform !== 'win32' || !/\.(cmd|bat)$/i.test(cmd)) return { file: cmd, args: [...args], windowsVerbatimArguments: false };
+	const line = [cmd, ...args].map(cmdQuote).join(' ');
+	return {
+		file: comspec || 'cmd.exe',
+		args: ['/d', '/s', '/c', `"${line}"`],
+		// Verbatim because the quotes above are already the ones cmd.exe must
+		// receive; node quoting them a second time is what breaks .cmd shims.
+		windowsVerbatimArguments: true,
+	};
+}
+
 /** describeSkip — one line when a section does not apply to this OS. */
 export function describeSkip(plan, what) {
 	return `== ${what}: not available on ${plan.platform} — skipped`;

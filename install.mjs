@@ -49,6 +49,7 @@ import {
 	PI_WRAPPER_END,
 	homePaths,
 	planFor,
+	spawnPlan,
 	spliceManagedBlock,
 } from './scripts/install-lib.mjs';
 
@@ -196,10 +197,10 @@ function run(cmd, args, { quiet = false, allowFail = false } = {}) {
 		say(`   [dry-run] ${cmd} ${args.join(' ')}`);
 		return 0;
 	}
-	const shell = PLAN.platform === 'win32' && /\.(cmd|bat)$/i.test(cmd);
-	const r = spawnSync(cmd, args, {
+	const spec = spawnPlan(cmd, args, { platform: PLAN.platform });
+	const r = spawnSync(spec.file, spec.args, {
 		stdio: quiet ? 'ignore' : 'inherit',
-		shell,
+		windowsVerbatimArguments: spec.windowsVerbatimArguments,
 		env: process.env,
 	});
 	if (r.status !== 0 && !allowFail) warn(`${cmd} ${args.join(' ')} failed (exit ${r.status ?? 'n/a'})`);
