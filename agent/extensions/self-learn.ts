@@ -89,6 +89,23 @@ export const PUBLISH_TIMEOUT_MS = 10 * 60 * 1000;
 export const PUBLISH_POLL_MS = 5_000;
 /** How long it waits for one, after the proposal appeared. */
 export const PUBLISH_WINDOW_MS = 15 * 60 * 1000;
+/**
+ * How a sandboxed session asks the host to start the learner it cannot start.
+ *
+ * `herdr-app` is deliberately outside every sandbox mount, so a space can only be
+ * made by a host session. The publish hand-off already solved the same problem
+ * for the branch; this is the same shape for the launch, so the learning loop
+ * runs in the default (sandboxed) mode instead of only in a bare one.
+ */
+export const SPAWN_SUFFIX = ".spawn.json";
+/**
+ * How long a launch request stays worth acting on.
+ *
+ * The evidence in it is about one compaction. A host session that starts an hour
+ * later would be judging a moment nobody remembers, so the request ages out and
+ * the next compaction writes its own.
+ */
+export const SPAWN_REQUEST_TTL_MS = 15 * 60 * 1000;
 
 /** Two occurrences of one failure is a pattern; one is an accident. */
 export const MIN_REPEATS = 2;
@@ -497,6 +514,94 @@ export async function publishQueue(dir: string = QUEUE_DIR): Promise<string[]> {
 	}
 	return entries
 		.filter((entry) => entry.isFile() && entry.name.endsWith(PUBLISH_SUFFIX))
+		.map((entry) => join(dir, entry.name))
+		.sort();
+}
+
+/**
+ * One launch hand-off, as a sandboxed session may write it.
+ *
+ * Small and strict, for the same reason `parsePublishRequest` is: the file decides
+ * which session reads what, so every path in it is checked against the one
+ * directory it may point at. `slug` names the learner and its proposal, `reason`
+ * is the gate's own sentence, and `judged` carries the deaths that reason named so
+ * the host does not re-cite them after the launch.
+ */
+export interface SpawnRequest {
+	slug: string;
+	trigger: "compact" | "manual";
+	/** The evidence file the learner is told to read; under QUEUE_DIR. */
+	queue: string;
+	/** Where the learner writes its proposal; under PROPOSAL_DIR. */
+	proposal: string;
+	reason: string;
+	/**
+	 * The evidence file's own text, carried instead of written.
+	 *
+	 * A sandboxed session must not leave a queue file behind: nothing on this side
+	 * can read it, and the shipped skip rule (PR 159) treats such a spec as
+	 * garbage. The session that can start the learner writes it at `queue` instead,
+	 * so the text the learner is told to read is the text this session measured.
+	 */
+	evidence: string;
+	/** When the request was written: the learner's `at`, and what ages it out. */
+	at: number;
+	judged: string[];
+}
+
+export type SpawnParse = { ok: true; request: SpawnRequest } | { ok: false; why: string; stale?: true };
+
+/** Where a request may point: this directory and no parent of it. */
+function underPath(value: unknown, dir: string): string | null {
+	if (typeof value !== "string" || !value.trim()) return null;
+	const path = value.trim();
+	if (!path.startsWith(`${dir}/`) || path.split("/").includes("..")) return null;
+	return path;
+}
+
+/** Read one queue file's JSON, or say why it is not a launch request. */
+export function parseSpawnRequest(raw: string, options: { now: number; ttlMs?: number }): SpawnParse {
+	let value: unknown;
+	try {
+		value = JSON.parse(raw);
+	} catch {
+		return { ok: false, why: "not JSON" };
+	}
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return { ok: false, why: "not one JSON object" };
+	}
+	const object = value as Record<string, unknown>;
+	const slug = typeof object.slug === "string" ? object.slug.trim().toLowerCase() : "";
+	if (!SLUG_SHAPE.test(slug)) return { ok: false, why: `slug is not 1-32 of a-z 0-9 - _: ${JSON.stringify(object.slug ?? null)}` };
+	const trigger = object.trigger === "manual" ? "manual" : object.trigger === "compact" ? "compact" : null;
+	if (!trigger) return { ok: false, why: `trigger must be compact or manual, not ${JSON.stringify(object.trigger ?? null)}` };
+	const queue = underPath(object.queue, QUEUE_DIR);
+	if (!queue) return { ok: false, why: `queue is not a file under ${QUEUE_DIR}` };
+	const proposal = underPath(object.proposal, PROPOSAL_DIR);
+	if (!proposal) return { ok: false, why: `proposal is not a file under ${PROPOSAL_DIR}` };
+	const reason = typeof object.reason === "string" ? object.reason.replace(/\s+/g, " ").trim().slice(0, 200) : "";
+	if (!reason) return { ok: false, why: "reason is empty" };
+	const evidence = typeof object.evidence === "string" ? object.evidence : "";
+	if (!evidence.trim()) return { ok: false, why: "evidence is empty" };
+	const at = Date.parse(typeof object.ts === "string" ? object.ts : "");
+	if (!Number.isFinite(at)) return { ok: false, why: "ts is not a timestamp" };
+	const ttl = options.ttlMs ?? SPAWN_REQUEST_TTL_MS;
+	const age = options.now - at;
+	if (age > ttl) return { ok: false, stale: true, why: `request is ${Math.round(age / 60000)} min old (limit ${Math.round(ttl / 60000)})` };
+	const judged = Array.isArray(object.judged) ? object.judged.filter((entry): entry is string => typeof entry === "string") : [];
+	return { ok: true, request: { slug, trigger, queue, proposal, reason, evidence, at, judged } };
+}
+
+/** Launch requests waiting for the host, by name. A `.claimed` file is nobody's. */
+export async function spawnQueue(dir: string = QUEUE_DIR): Promise<string[]> {
+	let entries;
+	try {
+		entries = await readdir(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	return entries
+		.filter((entry) => entry.isFile() && entry.name.endsWith(SPAWN_SUFFIX))
 		.map((entry) => join(dir, entry.name))
 		.sort();
 }
@@ -2192,9 +2297,12 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		void drainPublishQueue({ record, run: deps.publishRun }).catch(() => {
 			// A queue that cannot be drained is not worth a broken session.
 		});
+		// The same hand-off for the launch: a sandboxed session wrote the evidence and
+		// asked here, and this session is the one that can make a visible space.
+		void drainSpawnQueue(ctx).catch(() => {});
 	});
 
-	pi.on("before_agent_start", () => {
+	pi.on("before_agent_start", (_event: any, ctx: any) => {
 		// The other half of the broker: a learner usually finishes long after the watch
 		// that followed its launch has closed, and the person is still typing here. One
 		// look a minute is enough — a readdir, and a claim only when a file is waiting.
@@ -2203,6 +2311,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		if (at - lastPublishScanAt < 60_000) return;
 		lastPublishScanAt = at;
 		void drainPublishQueue({ record, run: deps.publishRun }).catch(() => {});
+		void drainSpawnQueue(ctx).catch(() => {});
 	});
 
 	pi.on("tool_result", (event: any) => {
@@ -2237,10 +2346,12 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 	async function launchLearner(plan: {
 		at: number;
 		trigger: "compact" | "manual";
-		decision: Decision;
 		slug: string;
 		queuePath: string;
 		proposalPath: string;
+		/** Why this learner, and the deaths the reason named: not the verdict, which
+		 * the caller has already taken. */
+		decision: { reason: string; judged?: string[] };
 		ctx: any;
 	}): Promise<void> {
 		const ts = new Date(plan.at).toISOString();
@@ -2452,35 +2563,11 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		});
 		if (!decision.spawn) return decision;
 
-		// The launch this decision asks for needs a Herdr space, and a sandboxed
-		// session cannot make one. Skip before the queue file is written: a spec no
-		// learner will ever read is garbage in the proposals directory, and a
-		// `spawn-failed` row for it counts as a death the harness never had.
-		const blocked = sandboxBlocksSpawn();
-		if (blocked) {
-			if (!sandboxSkipRecorded) {
-				sandboxSkipRecorded = true;
-				await record({
-					ts: new Date(at).toISOString(),
-					kind: "spawn-skipped",
-					slug: `learn-${runStamp(at).slice(11, 16)}`,
-					reason: decision.reason,
-					stderr: clipDetail(blocked),
-				});
-				notify(ctx, `no learner started: ${clipDetail(blocked)}`, "info");
-			}
-			return { spawn: false, reason: blocked };
-		}
-
 		const stamp = runStamp(at);
 		const slug = `learn-${stamp.slice(11, 16)}`;
 		const { queue: queuePath, proposal: proposalPath } = runPaths(at);
 		await mkdir(QUEUE_DIR, { recursive: true });
-		await writeFile(
-			queuePath,
-			evidenceMarkdown({ trigger, decision, errors, notes, at, proposalPath, slug, external }),
-			"utf8",
-		);
+		const evidence = evidenceMarkdown({ trigger, decision, errors, notes, at, proposalPath, slug, external });
 
 		// Reserve the slot before the launch is verified: two compactions a second
 		// apart must not both spawn while the first is still being checked.
@@ -2488,6 +2575,46 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		lastSpawnAt = at;
 		lastCompactIso = new Date(at).toISOString();
 
+		// The launch needs a Herdr space, and a sandboxed session cannot make one: a
+		// sandbox never mounts `herdr-app`. It hands the launch to the host session in
+		// the same shape the branch is handed over in. The evidence travels inside the
+		// request because the shipped skip rule (PR 159) leaves no queue file behind:
+		// a spec written here is one nothing on this side can read.
+		const blocked = sandboxBlocksSpawn();
+		if (blocked) {
+			if (!sandboxSkipRecorded) {
+				sandboxSkipRecorded = true;
+				const requestPath = join(QUEUE_DIR, `${slug}${SPAWN_SUFFIX}`);
+				await writeFile(
+					requestPath,
+					`${JSON.stringify({
+						slug,
+						trigger,
+						queue: queuePath,
+						proposal: proposalPath,
+						reason: decision.reason,
+						evidence,
+						ts: new Date(at).toISOString(),
+						judged: decision.judged ?? [],
+					})}\n`,
+					"utf8",
+				);
+				await record({
+					ts: new Date(at).toISOString(),
+					kind: "spawn-skipped",
+					slug,
+					queue: queuePath,
+					proposal: proposalPath,
+					reason: decision.reason,
+					stderr: clipDetail(`${blocked} — the launch of ${slug} waits for the host session`),
+				});
+				notify(ctx, `no learner started: ${clipDetail(blocked)} — the request waits for the host session`, "info");
+			}
+			// Not a launch: the caller must not read this as one.
+			return { spawn: false, reason: blocked };
+		}
+
+		await writeFile(queuePath, evidence, "utf8");
 		void launchLearner({ at, trigger, decision, slug, queuePath, proposalPath, ctx }).catch(() => {
 			// A launch that fails in a way not foreseen above is still not allowed to
 			// reach the host session.
@@ -2529,6 +2656,94 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		} catch {
 			// Logging is not worth an exception.
 		}
+	}
+
+	/**
+	 * Start the learner a sandboxed session asked for, exactly once.
+	 *
+	 * The mirror of `publishOnce`, for the other thing a sandbox cannot do: a
+	 * sandbox never mounts `herdr-app`, so the space has to be made here. The
+	 * `rename` is the claim, a refused or stale request becomes a row instead of a
+	 * silent deletion, and the launch itself is not awaited — `agent-pane.sh` waits
+	 * up to 40 s for a banner and the person is typing.
+	 */
+	// Stryker disable next-line ArrayDeclaration: the return type is erased before it
+	// runs, so a mutation there cannot reach a test.
+	async function drainSpawnQueue(ctx: any): Promise<void> {
+		// A sandboxed session is the one that writes these files: claiming its own
+		// request would fail the launch, which is the `spawn-failed` row this hand-off
+		// exists to stop writing. The host session drains it instead.
+		if (sandboxBlocksSpawn()) return;
+		const [file] = await spawnQueue();
+		// Stryker disable next-line ConditionalExpression: an empty queue and a lost
+		// claim end the same way here (no request, no row), so the guard only saves a
+		// doomed rename.
+		if (!file) return;
+		// One look a minute, one claim a look: `agent-pane.sh` waits up to 40 s for a
+		// banner, so a second claim is the next turn's business.
+		const claimed = `${file}.claimed`;
+		try {
+			await rename(file, claimed);
+		} catch {
+			// Not silent: two sessions looking at once is normal, and the one that lost
+			// the claim must not look like a queue that was never drained.
+			await record({
+				ts: new Date().toISOString(),
+				kind: "spawn-refused",
+				request: file,
+				status: null,
+				stderr: clipDetail(`another session held the claim on ${claimed}`),
+			});
+			return;
+		}
+		// Read as bytes and decoded once: the file is one JSON object, and no encoding
+		// argument means no way to read it as something JSON.parse cannot take.
+		const parsed = parseSpawnRequest(String(await readFile(claimed)), { now: Date.now() });
+		if (!parsed.ok) {
+			await record({
+				ts: new Date().toISOString(),
+				kind: parsed.stale ? "spawn-stale" : "spawn-refused",
+				request: file,
+				status: null,
+				stderr: clipDetail(parsed.why),
+			});
+		} else {
+			const request = parsed.request;
+			// The evidence travelled inside the request: this session writes the file the
+			// learner is told to read, at the path the requesting session chose, so the
+			// proposal lands where that session's evidence expected it. A learner told to
+			// read a file that is not there is the silent failure this refuses.
+			let wrote = true;
+			try {
+				await mkdir(QUEUE_DIR, { recursive: true });
+				await writeFile(request.queue, request.evidence);
+			} catch {
+				wrote = false;
+			}
+			if (!wrote) {
+				await record({
+					ts: new Date().toISOString(),
+					kind: "spawn-refused",
+					slug: request.slug,
+					request: file,
+					status: null,
+					stderr: clipDetail(`the evidence file could not be written at ${request.queue}`),
+				});
+			} else {
+				void launchLearner({
+					at: request.at,
+					trigger: request.trigger,
+					decision: { reason: request.reason, judged: request.judged },
+					slug: request.slug,
+					queuePath: request.queue,
+					proposalPath: request.proposal,
+					ctx,
+				}).catch(() => {
+					// A launch that fails is recorded by launchLearner itself.
+				});
+			}
+		}
+		await unlink(claimed).catch(() => undefined);
 	}
 
 	pi.on("session_compact", async (_event: any, ctx: any) => {

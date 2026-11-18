@@ -31,6 +31,10 @@ const {
 	redact,
 	pickLauncher,
 	sandboxBlocksSpawn,
+	parseSpawnRequest,
+	spawnQueue,
+	SPAWN_SUFFIX,
+	SPAWN_REQUEST_TTL_MS,
 	paneTerminal,
 	paneLaunch,
 	verifyLaunch,
@@ -3079,5 +3083,394 @@ describe("a launch that ends in a request is published", () => {
 		} finally {
 			await rm(join(scratch, "proposals", "queue"), { recursive: true, force: true });
 		}
+	});
+});
+
+describe("a launch handed to the host session", () => {
+	// Last in the file on purpose: these tests write rows to the shared scratch
+	// `runs.jsonl`, and `lastSpawnAnywhere` reads that log as a debounce, so a
+	// describe after them would see a learner started in its own future (the
+	// 2026-11-15 lesson: test order is part of the fixture).
+	//
+	// A sandbox never mounts `herdr-app`, so a sandboxed session cannot make a
+	// space. It writes one `<slug>.spawn.json` request carrying the evidence it
+	// measured, and a host session claims it and starts the learner.
+	const PROPOSALS = join(scratch, "proposals");
+	const queueDir = () => join(PROPOSALS, "queue");
+	const runsLog = () => join(PROPOSALS, "runs.jsonl");
+	const EVIDENCE = "# Evidence\n\n2× workers recorded \"tests: failed\"\n";
+	let launched: { argv: string[]; env: NodeJS.ProcessEnv }[] = [];
+
+	function hostSession(deps: Record<string, unknown> = {}) {
+		launched = [];
+		const fake = createFakePi();
+		selfLearn(fake.pi, {
+			launch: (launcher: any, env: NodeJS.ProcessEnv) => {
+				launched.push({ argv: launcher.argv, env });
+				return { ok: true, status: 0 };
+			},
+			confirm: async () => ({ ok: true, source: "session" }),
+			closeSpace: async () => {},
+			countNotes: async () => 0,
+			has: () => true,
+			exists: () => true,
+			ciRuns: async () => ({ runs: [], warning: null }),
+			workspace: async () => ({ reports: [], decisions: [], present: false, warnings: [] }),
+			transcriptPath: () => null,
+			proposalExists: () => true,
+			outcomePollMs: 5,
+			outcomeTimeoutMs: 100,
+			publishPollMs: 5,
+			publishWindowMs: 0,
+			...deps,
+		});
+		const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+		return { fake, ctx };
+	}
+
+	async function readRows(): Promise<any[]> {
+		try {
+			return (await readFile(runsLog(), "utf8"))
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line));
+		} catch {
+			return [];
+		}
+	}
+
+	/** Claiming a file and writing its row are two steps, so poll, never read once. */
+	async function waitForRow(predicate: (row: any) => boolean, timeoutMs = 3000): Promise<any> {
+		const deadline = Date.now() + timeoutMs;
+		for (;;) {
+			const row = (await readRows()).find(predicate);
+			if (row) return row;
+			if (Date.now() > deadline) throw new Error(`no run row matched within ${timeoutMs} ms`);
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+
+	const evidencePath = () => join(queueDir(), "2026-11-18-07-07-00-000Z.md");
+
+	function requestBody(over: Record<string, unknown> = {}) {
+		return JSON.stringify({
+			slug: "learn-07-07",
+			trigger: "compact",
+			queue: evidencePath(),
+			proposal: join(PROPOSALS, "2026-11-18-07-07-00-000Z.md"),
+			reason: "2× workers recorded \"tests: failed\"",
+			evidence: EVIDENCE,
+			ts: new Date().toISOString(),
+			judged: ["learn-10-59"],
+			...over,
+		});
+	}
+
+	async function writeRequest(over: Record<string, unknown> = {}): Promise<string> {
+		await mkdir(queueDir(), { recursive: true });
+		const file = join(queueDir(), `${over.slug ?? "learn-07-07"}${SPAWN_SUFFIX}`);
+		await writeFile(file, requestBody(over), "utf8");
+		return file;
+	}
+
+	/** The requests waiting on disk, by name: the sandbox's side of the hand-off. */
+	async function requestNames(): Promise<string[]> {
+		try {
+			return (await readdir(queueDir())).filter((name) => name.endsWith(".spawn.json")).sort();
+		} catch {
+			return [];
+		}
+	}
+
+	test("the host session writes the evidence and starts the learner the request names", async () => {
+		const file = await writeRequest();
+		const { fake, ctx } = hostSession();
+		try {
+			await fake.emit("session_start", {}, ctx);
+			await waitFor(() => launched.length === 1, 3000, "the host never started the learner");
+			assert.equal(launched[0].argv[1], "spawn");
+			assert.equal(launched[0].argv[2], "learn-07-07", "the slug the requesting session chose, not a new one");
+			assert.equal(launched[0].env.PI_SELF_LEARN, "1", "a learner cannot start a learner");
+			assert.equal(
+				await readFile(evidencePath(), "utf8"),
+				EVIDENCE,
+				"the text the sandbox measured, written where the learner is told to read it",
+			);
+			assert.equal(existsSync(file), false, "the claimed request is gone, not retried forever");
+			assert.equal(existsSync(`${file}.claimed`), false, "and the claim does not linger either");
+			// The launch carries the requesting session's own judgement: the host is a
+			// courier, not a second judge.
+			const spawned = await waitForRow((row) => row.kind === "spawned" && row.slug === "learn-07-07");
+			assert.equal(spawned.reason, "2× workers recorded \"tests: failed\"", "the gate's own sentence, from the request");
+			assert.deepEqual(spawned.judged, ["learn-10-59"], "and the deaths that sentence named");
+			assert.equal(spawned.trigger, "compact");
+		} finally {
+			await rm(queueDir(), { recursive: true, force: true });
+		}
+	});
+
+	test("a sandboxed session leaves the request for the host", async () => {
+		const file = await writeRequest();
+		process.env.PI_SANDBOX_MODE = "bwrap";
+		try {
+			const { fake, ctx } = hostSession();
+			await fake.emit("session_start", {}, ctx);
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			assert.equal(launched.length, 0, "a sandbox cannot make the space either");
+			assert.equal(existsSync(file), true, "the file is left for the session that can");
+			assert.equal(existsSync(evidencePath()), false, "and no evidence file is written by the wrong session");
+		} finally {
+			delete process.env.PI_SANDBOX_MODE;
+			await rm(queueDir(), { recursive: true, force: true });
+		}
+	});
+
+	test("a request inside the window is the host's, one outside it is a row", async () => {
+		// 14 minutes is inside the 15-minute window: the text is about a compaction
+		// the person still remembers. 16 is not.
+		const inside = join(queueDir(), `learn-07-08${SPAWN_SUFFIX}`);
+		const outside = join(queueDir(), `learn-07-09${SPAWN_SUFFIX}`);
+		await mkdir(queueDir(), { recursive: true });
+		try {
+			await writeFile(inside, requestBody({ slug: "learn-07-08", ts: new Date(Date.now() - 14 * 60_000).toISOString() }), "utf8");
+			const first = hostSession();
+			await first.fake.emit("session_start", {}, first.ctx);
+			await waitFor(() => launched.length === 1, 3000, "a 14-minute-old request is still worth acting on");
+
+			await writeFile(outside, requestBody({ slug: "learn-07-09", ts: new Date(Date.now() - 16 * 60_000).toISOString() }), "utf8");
+			const second = hostSession();
+			await second.fake.emit("session_start", {}, second.ctx);
+			const stale = await waitForRow((row) => row.kind === "spawn-stale" && row.request === outside);
+			assert.equal(launched.length, 0, "evidence about a compaction nobody remembers is not a learner");
+			assert.match(stale.stderr, /min old/);
+			assert.equal(existsSync(outside), false, "a stale request is retired, not left to age further");
+		} finally {
+			await rm(queueDir(), { recursive: true, force: true });
+		}
+	});
+
+	test("a request that points outside the proposals directory is refused", async () => {
+		const file = await writeRequest({ slug: "learn-07-11", queue: "/etc/passwd" });
+		const { fake, ctx } = hostSession();
+		try {
+			await fake.emit("session_start", {}, ctx);
+			const refused = await waitForRow((row) => row.kind === "spawn-refused" && row.request === file);
+			assert.equal(launched.length, 0, "the broker does not write where a request points");
+			assert.match(refused.stderr, /queue is not a file under/);
+			assert.equal(launched.length, 0, "and no learner is started on a path the broker would not write");
+		} finally {
+			await rm(queueDir(), { recursive: true, force: true });
+		}
+	});
+
+	test("an evidence file that cannot be written refuses the launch instead of losing it", async () => {
+		// A learner told to read a file that is not there is a launch that fails
+		// silently. `blocker` is a file, so the directory below it cannot be made.
+		await mkdir(queueDir(), { recursive: true });
+		await writeFile(join(queueDir(), "blocker"), "not a directory", "utf8");
+		const file = await writeRequest({ slug: "learn-07-12", queue: join(queueDir(), "blocker", "evidence.md") });
+		const { fake, ctx } = hostSession();
+		try {
+			await fake.emit("session_start", {}, ctx);
+			const refused = await waitForRow((row) => row.kind === "spawn-refused" && row.request === file);
+			assert.match(refused.stderr, /could not be written/);
+			assert.equal(launched.length, 0, "no learner is started on evidence nobody can read");
+		} finally {
+			await rm(queueDir(), { recursive: true, force: true });
+		}
+	});
+
+	test("a claim another session holds is recorded, not swallowed and not retried", async () => {
+		// Two host sessions can look at the same minute. The file is the lock: the
+		// session that cannot rename it lost the claim, and the trail says so.
+		await mkdir(queueDir(), { recursive: true });
+		const file = await writeRequest({ slug: "learn-07-14" });
+		await mkdir(`${file}.claimed`, { recursive: true });
+		await writeFile(join(`${file}.claimed`, "keeper"), "someone else has it", "utf8");
+		const { fake, ctx } = hostSession();
+		try {
+			await fake.emit("session_start", {}, ctx);
+			const row = await waitForRow((entry) => entry.kind === "spawn-refused" && entry.request === file);
+			assert.match(row.stderr, /another session held the claim/);
+			assert.equal(launched.length, 0, "the session that lost the claim starts nothing");
+			assert.equal(existsSync(file), true, "and leaves the request for the session that has it");
+		} finally {
+			await rm(queueDir(), { recursive: true, force: true });
+		}
+	});
+
+	test("a request JSON that is not a request is claimed and recorded, not retried", async () => {
+		await mkdir(queueDir(), { recursive: true });
+		const file = join(queueDir(), `learn-07-13${SPAWN_SUFFIX}`);
+		await writeFile(file, "{not json", "utf8");
+		const { fake, ctx } = hostSession();
+		try {
+			await fake.emit("session_start", {}, ctx);
+			const refused = await waitForRow((row) => row.kind === "spawn-refused" && row.request === file);
+			assert.match(refused.stderr, /not JSON/);
+			assert.equal(existsSync(file), false, "a broken request does not sit on the queue forever");
+		} finally {
+			await rm(queueDir(), { recursive: true, force: true });
+		}
+	});
+
+	test("the parser refuses a request the broker must not act on", () => {
+		const now = Date.parse("2026-11-18T12:00:00.000Z");
+		const good = JSON.parse(requestBody({ slug: "learn-12-00", ts: new Date(now - 60_000).toISOString() }));
+		const parse = (over: Record<string, unknown> = {}, options: Record<string, unknown> = {}) =>
+			parseSpawnRequest(JSON.stringify({ ...good, ...over }), { now, ...options });
+		const ok = parse();
+		assert.equal(ok.ok, true, "the request the sandbox writes is one the host accepts");
+		if (ok.ok) {
+			assert.equal(ok.request.slug, "learn-12-00");
+			assert.equal(ok.request.evidence, EVIDENCE, "the evidence travels with the request");
+			assert.deepEqual(ok.request.judged, ["learn-10-59"], "and so do the deaths the reason named");
+		}
+		const trimmed = parse({ slug: "  LEARN-12-00  " });
+		assert.equal(trimmed.ok, true);
+		if (trimmed.ok) assert.equal(trimmed.request.slug, "learn-12-00", "a slug is case-folded and trimmed");
+		assert.equal(parse({ slug: "../trunk" }).ok, false, "a slug names a learner, not a branch");
+		assert.equal(parse({ slug: 42 }).ok, false);
+		assert.equal(parse({ trigger: "resume" }).ok, false);
+		assert.equal(parse({ trigger: "manual" }).ok, true);
+		assert.equal(parse({ reason: "   " }).ok, false);
+		assert.equal(parse({ reason: null }).ok, false);
+		assert.equal(parse({ evidence: "" }).ok, false, "a learner with no evidence is not a learner");
+		assert.equal(parse({ evidence: " \n " }).ok, false);
+		assert.equal(parse({ evidence: 12 }).ok, false);
+		assert.equal(parse({ queue: "/tmp/x.md" }).ok, false, "only the evidence directory");
+		assert.equal(parse({ queue: `${queueDir()}/../x.md` }).ok, false, "and not its parent");
+		assert.equal(parse({ queue: "" }).ok, false);
+		assert.equal(parse({ proposal: "/tmp/x.md" }).ok, false, "only the proposals directory");
+		assert.equal(parse({ ts: "yesterday" }).ok, false);
+		assert.equal(parse({ ts: undefined }).ok, false);
+		assert.equal(parse({ judged: ["a", 3, null] }).ok === true, true, "a non-string in judged is dropped, not fatal");
+		const filtered = parse({ judged: ["a", 3] });
+		if (filtered.ok) assert.deepEqual(filtered.request.judged, ["a"]);
+		const ttl = parse({}, { ttlMs: 60_000 });
+		assert.equal(ttl.ok, true, "the window is the caller's to set");
+		const stale = parse({ ts: new Date(now - SPAWN_REQUEST_TTL_MS - 1).toISOString() });
+		assert.equal(stale.ok, false);
+		if (!stale.ok) assert.equal(stale.stale, true, "a stale request is a different row from a broken one");
+		for (const raw of ["not json", "[]", "null", '"learn-12-00"']) {
+			const parsed = parseSpawnRequest(raw, { now });
+			assert.equal(parsed.ok, false, `${raw} is not one JSON object`);
+			if (!parsed.ok) assert.equal(parsed.stale, undefined, "and it is not stale: it is broken");
+		}
+	});
+
+	test("the launch queue lists only its own suffix, in name order", async () => {
+		const dir = await mkdtemp(join(scratch, "spawn-queue-"));
+		try {
+			assert.deepEqual(await spawnQueue(dir), [], "no directory yet is no requests, not a crash");
+			await writeFile(join(dir, `b${SPAWN_SUFFIX}`), "{}", "utf8");
+			await writeFile(join(dir, `a.spawn.json`), "{}", "utf8");
+			await writeFile(join(dir, `a.spawn.json.claimed`), "{}", "utf8");
+			await writeFile(join(dir, `a${PUBLISH_SUFFIX}`), "{}", "utf8");
+			await mkdir(join(dir, `c${SPAWN_SUFFIX}`));
+			assert.deepEqual(
+				await spawnQueue(dir),
+				[join(dir, "a.spawn.json"), join(dir, `b${SPAWN_SUFFIX}`)],
+				"the suffix the sandbox writes, the claim and the publish queue left out",
+			);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	describe("the sandbox's side", () => {
+		function sandboxed(over: Record<string, unknown> = {}) {
+			const fake = createFakePi();
+			const api = selfLearn(fake.pi, {
+				launch: () => ({ ok: true, status: 0 }),
+				confirm: async () => ({ ok: true, source: "session" }),
+				closeSpace: async () => {},
+				countNotes: async () => 0,
+				has: () => true,
+				exists: () => true,
+				ciRuns: async () => ({ runs: [], warning: null }),
+				workspace: async () => ({ reports: [], decisions: [], present: false, warnings: [] }),
+				transcriptPath: () => null,
+				proposalExists: () => true,
+				outcomePollMs: 5,
+				outcomeTimeoutMs: 100,
+				publishPollMs: 5,
+				publishWindowMs: 0,
+				...over,
+			});
+			const { ctx, notices } = createFakeCtx({ mode: "tui", hasUI: true });
+			const emit = (name: string, event: any = {}, c: any = ctx) => fake.emit(name, event, c);
+			return { emit, ctx, notices, api };
+		}
+
+		/** Two identical tool errors: the gate's cheapest way in. */
+		const trip = async (emit: (n: string, e?: any, c?: any) => Promise<any[]>, ctx: any) => {
+			const boom = { isError: true, toolName: "bash", content: "command not found: zizmor" };
+			await emit("tool_result", boom, ctx);
+			await emit("tool_result", boom, ctx);
+		};
+
+		test("a sandboxed session writes the request instead of a spec, and says so once", async () => {
+			// Past the rows the earlier tests left in the shared log, so the gate is
+			// open and the sandbox rule is the only thing that can refuse.
+			const clock = Date.now() + 60 * 60_000;
+			const { emit, ctx, notices, api } = sandboxed({ now: () => clock });
+			await trip(emit, ctx);
+			process.env.PI_SANDBOX_MODE = "bwrap";
+			try {
+				const decision = await api.learn("compact", ctx);
+				assert.equal(decision.spawn, false, "a sandboxed session is not allowed to claim a launch");
+				assert.match(decision.reason, /sandboxed \(bwrap\)/, "the refusal says the sandbox did it");
+				const [name] = await requestNames();
+				assert.ok(name, "one request, waiting for the host");
+				const parsed = parseSpawnRequest(await readFile(join(queueDir(), name), "utf8"), { now: Date.now() });
+				assert.equal(parsed.ok, true, `the request the host will read must parse: ${name}`);
+				if (parsed.ok) {
+					assert.match(parsed.request.evidence, /workers recorded/, "it carries the evidence this session measured");
+					assert.equal(parsed.request.trigger, "compact");
+					assert.ok(existsSync(parsed.request.proposal) === false, "the proposal is the learner's to write");
+				}
+				const rows = await readRows();
+				const skipped = rows.filter((row) => row.kind === "spawn-skipped").at(-1);
+				assert.ok(skipped, "the skip is the row the trail carries");
+				assert.match(skipped.stderr, /waits for the host session/, "and the row names the hand-off");
+				assert.equal(skipped.slug, name.replace(/\.spawn\.json$/, ""), "the row names the run the request is for");
+				assert.equal(
+					existsSync(skipped.queue),
+					false,
+					"the spec is not written here: nothing on this side could read it",
+				);
+				assert.equal(notices.filter((notice) => /no learner started/.test(notice.message)).length, 1);
+				assert.match(notices.at(-1)!.message, /waits for the host session/);
+			} finally {
+				delete process.env.PI_SANDBOX_MODE;
+				await rm(queueDir(), { recursive: true, force: true });
+			}
+		});
+
+		test("one request per session, however many compactions trip the gate", async () => {
+			let tick = Date.now() + 60 * 60_000;
+			const { emit, ctx } = sandboxed({ now: () => tick });
+			process.env.PI_SANDBOX_MODE = "bwrap";
+			// The log is shared with the describes above: judge only these rows.
+			const before = (await readRows()).length;
+			try {
+				await trip(emit, ctx);
+				await emit("session_compact", { reason: "threshold" }, ctx);
+				const names = await requestNames();
+				assert.equal(names.length, 1, "the first compaction asks");
+				// Past the gap, and under the per-session cap: the gate lets this one
+				// through, so only the once-per-session rule can stop a second request.
+				tick += 11 * 60_000;
+				await trip(emit, ctx);
+				await emit("session_compact", { reason: "threshold" }, ctx);
+				assert.equal((await requestNames()).length, 1, "a sandbox does not become a host mid-session");
+				const rows = (await readRows()).slice(before);
+				assert.equal(rows.filter((row) => row.kind === "spawn-skipped").length, 1, "and the person is told once");
+			} finally {
+				delete process.env.PI_SANDBOX_MODE;
+				await rm(queueDir(), { recursive: true, force: true });
+			}
+		});
 	});
 });
