@@ -36,6 +36,13 @@ const SAFE_PATH = (process.env.PATH ?? "")
 	.filter((dir) => dir && !HOST_BINS.some((bin) => existsSync(join(dir, bin))))
 	.join(":");
 
+// The script under test needs node on the PATH it is given: it JSON-encodes the space
+// argv with `node -e`. On a laptop that comes free from /usr/bin, on a GitHub runner
+// node lives only in setup-node's toolcache directory, so a PATH hardcoded to
+// /usr/bin made the same case pass here and die there. The node running this file is
+// the one guaranteed to exist, wherever the runner put it.
+const NODE_BIN_DIR = dirname(process.execPath);
+
 // What a real space says when its pi cannot start: pi-sandbox.sh's own error line.
 const BANNERLESS = "pi-sandbox.sh: error: pi is not on PATH (looked for an executable named 'pi')";
 
@@ -269,8 +276,15 @@ test("a runner line whose PATH has no pi directory still finds pi", () => {
 	);
 	chmodSync(sandboxStub, 0o755);
 
-	// A PATH shaped like herdr's: node and bash, a pi nowhere on it.
-	const herdrPath = `${f.bin}:${f.dir}/no-bin:/usr/bin:/bin`;
+	// A PATH shaped like herdr's: node and bash, a pi nowhere on it. /usr/bin and /bin are
+	// only there so sh and bash resolve; the node is this process's own binary, wherever
+	// the runner put it, so no user path and no toolcache layout is assumed.
+	const herdrPath = `${f.bin}:${NODE_BIN_DIR}:${f.dir}/no-bin:/usr/bin:/bin`;
+	assert.equal(
+		herdrPath.split(":").includes(piBinDir),
+		false,
+		"the pi directory is not on the PATH before the runner line adds it, or this proves nothing",
+	);
 	const out = f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"], {
 		PISANDBOX: sandboxStub,
 		PI_BIN: piStub,
