@@ -540,7 +540,41 @@ mise_major() { # tool -> major declared in mise.toml, or empty when there is non
 
 check_mise_pins() {
 	local node_pin npm_pin file got hits nf_lines nf_count nf_bad nf_bad_why nf_ok row value where why
+	local mise_path mise_ver mise_node
 	node_pin=$(mise_major node)
+
+	# 0. the tool that owns the pin, before any question about the pin itself.
+	#    Blip 68 was adopted as a file and for two released pins `command -v mise`
+	#    was empty on the machine — every row below happily compared mise.toml to
+	#    .node-version while nothing anywhere could act on it. So this row asks
+	#    the question the others assume.
+	#    Three states, and the difference is the point: absent is a WARN, because a
+	#    fresh clone is not a broken repo and CI has no mise either; a binary that
+	#    is on PATH and cannot answer `--version` is a FAIL, because that install
+	#    is broken; installed-but-no-pinned-tool is a WARN naming the one command
+	#    that fixes it. setup.sh installs the binary and deliberately never runs
+	#    `mise install`, so the middle state is the normal one on a fresh laptop.
+	mise_path=$(command -v mise 2>/dev/null || true)
+	if [ -z "$mise_path" ]; then
+		record WARN mise-installed mise.toml \
+			"mise is not on PATH — nothing on this machine installs mise.toml's pin; ./setup.sh installs the binary only, or: curl -fsSL https://mise.run | sh"
+	else
+		mise_ver=$(mise --version 2>/dev/null | head -n 1 || true)
+		if [ -z "$mise_ver" ]; then
+			verdict mise-installed mise.toml 0 \
+				"mise at $mise_path answers no --version — that install is broken; reinstall: curl -fsSL https://mise.run | sh"
+		else
+			mise_node=$(cd "$ROOT" 2>/dev/null && mise which node 2>/dev/null | head -n 1 || true)
+			if [ -z "$mise_node" ]; then
+				record WARN mise-installed mise.toml \
+					"$mise_ver is installed at $mise_path but node ${node_pin:-?} is not — run: mise install (in the repo, once)"
+			else
+				verdict mise-installed mise.toml 1 \
+					"$mise_ver at $mise_path resolves the pinned node ${node_pin:-?} to $mise_node"
+			fi
+		fi
+	fi
+
 	if [ -z "$node_pin" ]; then
 		verdict mise-pin-node mise.toml 0 \
 			"no node major — missing, unreadable, or has no node = \"NN\" line; .node-version and the CI matrix have no source"
