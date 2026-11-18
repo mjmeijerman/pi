@@ -148,6 +148,8 @@ function run(f, args, extraEnv = {}) {
 			LEARN_PUBLISH_GH: f.gh,
 			LEARN_PUBLISH_PANE: f.pane,
 			LEARN_PUBLISH_BBP: f.bbp,
+			// A caller's sandbox marker must not leak in: one case sets it on purpose.
+			PI_SANDBOX_MODE: "",
 			...extraEnv,
 		},
 		encoding: "utf8",
@@ -381,4 +383,27 @@ test("a body the gate calls red stops the publication instead of opening a PR", 
 	assert.match(r.stderr, /tier must be High/);
 	assert.equal(existsSync(join(f.dir, "pane-called")), false, "nothing was handed over");
 	assert.equal(readdirSync(join(f.dir, "agent", "proposals")).includes("publish-log.jsonl"), false);
+});
+
+test("a sandboxed caller is refused and told to write the broker's queue file", () => {
+	// The learner runs sandboxed: it cannot see herdr-app, so the hand-off is the
+	// host's job. A learner that reaches for this script instead of the queue file
+	// must get one sentence that names the file, not an empty space and no PR.
+	const f = fixture("after");
+	f.pane = f.publishingPane;
+	const proposal = join(f.dir, "agent", "proposals", "p.md");
+	writeFileSync(proposal, "# x\n\n**Risk tier:** High\n");
+
+	const r = run(f, ["test-slug", "--proposal", proposal], { PI_SANDBOX_MODE: "bwrap" });
+
+	assert.equal(r.status, 2, "a refusal, not a spawn and not a 'no PR'");
+	assert.match(r.stderr, /sandboxed \(bwrap\)/);
+	assert.match(r.stderr, /agent\/proposals\/queue\/<slug>\.publish\.json/, "it names the file to write instead");
+	assert.match(r.stderr, /broker/, "and who runs it");
+	assert.equal(existsSync(join(f.dir, "pane-called")), false, "nothing was handed over");
+	assert.equal(
+		readdirSync(join(f.dir, "agent", "proposals")).includes("publish-log.jsonl"),
+		false,
+		"a refused caller is not a publish attempt",
+	);
 });

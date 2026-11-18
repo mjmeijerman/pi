@@ -9,6 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile, chmod } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -56,6 +57,12 @@ const {
 	failureLines,
 	MAX_FRUSTRATION,
 	noteBaseline,
+	parsePublishRequest,
+	publishQueue,
+	publishOnce,
+	drainPublishQueue,
+	watchPublish,
+	PUBLISH_SUFFIX,
 } = mod;
 const REPO = join(homedir(), ".pi");
 
@@ -406,6 +413,10 @@ describe("wiring", () => {
 			proposalExists: () => true,
 			outcomePollMs: 5,
 			outcomeTimeoutMs: 100,
+			// The publish watch rides the outcome watch. A window of zero is one look and
+			// out: a test must not leave a broker polling behind it.
+			publishPollMs: 5,
+			publishWindowMs: 0,
 			...deps,
 		});
 		const { ctx, notices } = createFakeCtx({ mode: "tui", hasUI: true });
@@ -586,9 +597,16 @@ describe("wiring", () => {
 		const body = await readFile(run.queue, "utf8");
 		assert.match(
 			body,
-			/scripts\/learn-publish\.sh learn-\d{2}-\d{2} --proposal/,
-			"the spec hands the branch over with the verifying script",
+			/queue\/learn-\d{2}-\d{2}\.publish\.json/,
+			"the spec names the one file the learner writes to ask for publication",
 		);
+		assert.match(
+			body,
+			/"branch":"learn\/learn-\d{2}-\d{2}"/,
+			"the request carries the learner's own branch, which is the only one the broker takes",
+		);
+		assert.match(body, /Do not run/, "and says the script is not the learner's to run");
+		assert.match(body, /\.publish\.json/, "the suffix the broker scans for is in the file");
 		assert.match(body, /agent-pane\.sh close/, "the spec tells the learner to close its own space");
 		assert.match(body, /learn-\d{2}-\d{2}/, "the slug it must close is in the file");
 		assert.match(body, /worktree add/, "the boss's checkout must not be switched");
@@ -622,12 +640,16 @@ describe("wiring", () => {
 
 		// The prompt file itself, not only the generated queue file.
 		const spec = await readFile(new URL("../../prompts/learn.md", import.meta.url), "utf8");
-		// The spec publishes through the script that hands the branch over and
-		// verifies a PR exists: naming a bare agent in prose is what let three
-		// branches sit unpublished.
-		assert.match(spec, /scripts\/learn-publish\.sh/, "the spec publishes through the verifying script");
-		assert.match(spec, /\*\*Exit 1\*\* means/, "the spec says what a missing PR verdict means");
-		assert.match(spec, /Exit 2/, "and says what 'cannot ask GitHub' means");
+		// The learner asks the host's broker for publication with a queue file: the
+		// script needs herdr-app, which a sandbox cannot see, so telling it to run the
+		// script only lost turns (and every branch stayed unpublished at exit 2).
+		assert.match(spec, /publish\.json/, "the spec names the queue file it writes");
+		assert.match(spec, /PI_SANDBOX_MODE/, "and says why the script refuses a sandboxed caller");
+		assert.doesNotMatch(
+			spec,
+			/learn-publish\.sh <slug> --proposal/,
+			"the learner is never told to invoke the publisher itself",
+		);
 		assert.match(spec, /agent-pane\.sh close/);
 		assert.match(spec, /review tier/i);
 		assert.doesNotMatch(spec, /pi-bare/, "the prompt never sends the learner to a bare agent");
@@ -1675,5 +1697,248 @@ describe("the gate stays conservative", () => {
 		assert.match(decision.reason, /^2× workers recorded "gate 0 failed"/, "the strongest signal is named first");
 		assert.match(decision.reason, /\+5 more signals/);
 		assert.ok(decision.reason.length < 400, "a reason is a line, not a report");
+	});
+});
+
+// The publish broker: the learner writes one JSON file, the host session is the
+// only caller of learn-publish.sh. These cases never spawn a publishing agent and
+// never touch GitHub — the runner is a recorder.
+const PROPOSALS = join(scratch, "proposals");
+
+async function publishFixture(request: Record<string, unknown> = {}) {
+	const dir = await mkdtemp(join(scratch, "publish-"));
+	await mkdir(PROPOSALS, { recursive: true });
+	const proposal = join(PROPOSALS, `broker-${Date.now()}-${Math.random().toString(16).slice(2)}.md`);
+	await writeFile(proposal, "# a fix\n\n**Risk tier:** Medium\n", "utf8");
+	const calls: { argv: string[]; env: NodeJS.ProcessEnv }[] = [];
+	const rows: Record<string, unknown>[] = [];
+	let status: number | null = 0;
+	let stderr = "";
+	const deps = {
+		dir,
+		run: async (argv: string[], env: NodeJS.ProcessEnv) => {
+			calls.push({ argv, env });
+			return { status, stdout: "learn-publish: PR #42 exists for learn/x — published", stderr };
+		},
+		record: (row: Record<string, unknown>) => {
+			rows.push(row);
+		},
+	};
+	const write = (name: string, body: Record<string, unknown> | string) =>
+		writeFile(join(dir, name), typeof body === "string" ? body : JSON.stringify(body), "utf8");
+	const answers = (code: number | null, text = "") => {
+		status = code;
+		stderr = text;
+	};
+	return { dir, proposal, calls, rows, deps, write, answers };
+}
+
+const request = (over: Record<string, unknown> = {}) => ({
+	slug: "learn-1200",
+	branch: "learn/learn-1200",
+	reason: "the publish hand-off died at the sandbox wall",
+	...over,
+});
+
+describe("the publish request a learner writes", () => {
+	test("one object with a slug, its own branch and a reason is accepted", () => {
+		const parsed = parsePublishRequest(JSON.stringify(request({ proposal: join(PROPOSALS, "p.md") })));
+		assert.equal(parsed.ok, true);
+		if (!parsed.ok) return;
+		assert.equal(parsed.request.slug, "learn-1200");
+		assert.equal(parsed.request.branch, "learn/learn-1200");
+		assert.equal(parsed.request.reason, "the publish hand-off died at the sandbox wall");
+	});
+
+	test("a learner cannot ask for trunk, or for a branch that is not its own", () => {
+		for (const branch of ["trunk", "learn/someone-else", "main"]) {
+			const parsed = parsePublishRequest(JSON.stringify(request({ branch })));
+			assert.equal(parsed.ok, false, branch);
+			if (parsed.ok) continue;
+			assert.match(parsed.why, /branch must be learn\/learn-1200/);
+		}
+	});
+
+	test("a slug that is not a slug, no reason, no JSON and a proposal outside the queue are refused", () => {
+		assert.equal(parsePublishRequest(JSON.stringify(request({ slug: "../etc" }))).ok, false);
+		assert.equal(parsePublishRequest(JSON.stringify(request({ reason: "  " }))).ok, false);
+		assert.equal(parsePublishRequest("not json").ok, false);
+		assert.equal(parsePublishRequest("[1,2]").ok, false);
+		const outside = parsePublishRequest(JSON.stringify(request({ proposal: "/etc/passwd" })));
+		assert.equal(outside.ok, false);
+		if (!outside.ok) assert.match(outside.why, /not a file under/);
+	});
+});
+
+describe("the publish broker", () => {
+	test("a queue file is picked up exactly once, even by two brokers at the same moment", async () => {
+		const f = await publishFixture();
+		await f.write("learn-1200.publish.json", request({ proposal: f.proposal }));
+
+		const [first, second] = await Promise.all([publishOnce(f.deps), publishOnce(f.deps)]);
+
+		assert.equal(f.calls.length, 1, "the rename is the claim: one winner, one publish");
+		assert.equal([first, second].filter(Boolean).length, 1);
+		assert.equal(f.rows.length, 1);
+		assert.equal(f.rows[0].kind, "publish");
+		assert.equal(f.rows[0].slug, "learn-1200");
+		assert.equal(f.rows[0].branch, "learn/learn-1200");
+		assert.equal(f.rows[0].publish, "published");
+		assert.deepEqual(await publishQueue(f.dir), [], "and the claim does not linger");
+	});
+
+	test("the broker runs learn-publish.sh for that slug, as the broker", async () => {
+		const f = await publishFixture();
+		await f.write("learn-1200.publish.json", request({ proposal: f.proposal }));
+		await publishOnce(f.deps);
+		const { argv, env } = f.calls[0];
+		assert.equal(argv[0], join(REPO, "scripts", "learn-publish.sh"));
+		assert.deepEqual(argv.slice(1), ["learn-1200", "--proposal", f.proposal, "--repo", REPO]);
+		assert.equal(env.PI_LEARN_BROKER, "1");
+		assert.equal(env.PI_SANDBOX_MODE, undefined, "the host side carries no sandbox marker");
+	});
+
+	test("a failed publish is recorded, with the script's own words", async () => {
+		const f = await publishFixture();
+		f.answers(1, "learn-publish: FAIL — still unpublished");
+		await f.write("learn-1200.publish.json", request({ proposal: f.proposal }));
+		const row = await publishOnce(f.deps);
+		assert.equal(row?.publish, "failed");
+		assert.equal(row?.status, 1);
+		assert.match(String(row?.stderr), /still unpublished/);
+		assert.equal(f.rows.length, 1, "a failure is a row, not a silence");
+	});
+
+	test("a machine that cannot ask GitHub records unverified, never failed", async () => {
+		const f = await publishFixture();
+		f.answers(2, "learn-publish: could not ask gh for a PR — hosts.yml missing");
+		await f.write("learn-1200.publish.json", request({ proposal: f.proposal }));
+		const row = await publishOnce(f.deps);
+		assert.equal(row?.publish, "unverified");
+		assert.match(String(row?.stderr), /hosts\.yml missing/);
+	});
+
+	test("a refused request is recorded and publishes nothing", async () => {
+		const f = await publishFixture();
+		await f.write("learn-1200.publish.json", request({ branch: "trunk", proposal: f.proposal }));
+		const row = await publishOnce(f.deps);
+		assert.equal(row?.publish, "refused");
+		assert.match(String(row?.stderr), /branch must be learn\/learn-1200/);
+		assert.equal(f.calls.length, 0, "nothing was run for it");
+		assert.equal(f.rows.length, 1);
+	});
+
+	test("a request that names no proposal still gets the newest one", async () => {
+		const f = await publishFixture();
+		await f.write("learn-1200.publish.json", request());
+		await publishOnce(f.deps);
+		const argv = f.calls[0].argv;
+		const named = argv[argv.indexOf("--proposal") + 1];
+		assert.ok(named?.startsWith(PROPOSALS), `an absolute proposal path: ${named}`);
+	});
+
+	test("one drain publishes every file waiting", async () => {
+		const f = await publishFixture();
+		await f.write(`learn-1201${PUBLISH_SUFFIX}`, request({ slug: "learn-1201", branch: "learn/learn-1201" }));
+		await f.write(`learn-1202${PUBLISH_SUFFIX}`, request({ slug: "learn-1202", branch: "learn/learn-1202" }));
+		const rows = await drainPublishQueue(f.deps);
+		assert.equal(rows.length, 2);
+		assert.deepEqual(
+			rows.map((row) => row.slug),
+			["learn-1201", "learn-1202"],
+		);
+		assert.equal(f.calls.length, 2);
+	});
+
+	test("the watch waits for the file, then publishes it", async () => {
+		const f = await publishFixture();
+		const pending = watchPublish({ ...f.deps, pollMs: 10, windowMs: 5_000 });
+		await new Promise((resolve) => setTimeout(resolve, 40));
+		await f.write("learn-1200.publish.json", request({ proposal: f.proposal }));
+		const row = await pending;
+		assert.equal(row?.slug, "learn-1200");
+		assert.equal(row?.publish, "published");
+	});
+
+	test("the watch gives up when no request arrives", async () => {
+		const f = await publishFixture();
+		const row = await watchPublish({ ...f.deps, pollMs: 10, windowMs: 60 });
+		assert.equal(row, null);
+		assert.equal(f.calls.length, 0);
+	});
+});
+
+describe("a request left by a learner that already finished", () => {
+	// The half of the broker that does not ride a launch: the host session looks at
+	// the queue on start and once a minute while the person keeps typing, so a
+	// learner that took an hour still gets published.
+	let published: { argv: string[]; env: NodeJS.ProcessEnv }[] = [];
+
+	function setupWithBroker() {
+		published = [];
+		const started: any[] = [];
+		const fake = createFakePi();
+		selfLearn(fake.pi, {
+			launch: () => ({ ok: true, status: 0 }),
+			confirm: async () => ({ ok: true, source: "session" }),
+			closeSpace: async () => {},
+			countNotes: async () => 0,
+			has: () => true,
+			exists: () => true,
+			ciRuns: async () => ({ runs: [], warning: null }),
+			workspace: async () => ({ reports: [], decisions: [], present: false, warnings: [] }),
+			transcriptPath: () => null,
+			proposalExists: () => true,
+			outcomePollMs: 5,
+			outcomeTimeoutMs: 100,
+			publishWindowMs: 0,
+			publishRun: async (argv: string[], env: NodeJS.ProcessEnv) => {
+				published.push({ argv, env });
+				return { status: 0, stdout: "PR #7 exists", stderr: "" };
+			},
+			...started,
+		});
+		return { fake, started };
+	}
+
+	test("a queue file waiting at session start is published exactly once", async () => {
+		const queue = join(scratch, "proposals", "queue");
+		await mkdir(queue, { recursive: true });
+		const file = join(queue, `learn-09-09${PUBLISH_SUFFIX}`);
+		await writeFile(file, JSON.stringify({ slug: "learn-09-09", branch: "learn/learn-09-09", reason: "x" }), "utf8");
+
+		const { fake } = setupWithBroker();
+		const rows: any[] = [];
+		const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+		// The extension's own runs.jsonl appender is what records the row here.
+		await fake.emit("session_start", {}, ctx);
+		await new Promise((resolve) => setTimeout(resolve, 120));
+
+		assert.equal(published.length, 1, "one claim, one publish");
+		assert.equal(published[0].argv[1], "learn-09-09");
+		assert.equal(existsSync(file), false, "the claimed file is gone, not retried forever");
+		await rm(queue, { recursive: true, force: true });
+		void rows;
+	});
+
+	test("a learner's own session never claims the queue file", async () => {
+		const queue = join(scratch, "proposals", "queue");
+		await mkdir(queue, { recursive: true });
+		const file = join(queue, `learn-08-08${PUBLISH_SUFFIX}`);
+		await writeFile(file, JSON.stringify({ slug: "learn-08-08", branch: "learn/learn-08-08", reason: "x" }), "utf8");
+		const before = process.env.PI_SELF_LEARN;
+		process.env.PI_SELF_LEARN = "1";
+		try {
+			const { fake } = setupWithBroker();
+			const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+			await fake.emit("session_start", {}, ctx);
+			await new Promise((resolve) => setTimeout(resolve, 120));
+			assert.equal(published.length, 0, "a sandboxed broker would claim and fail it");
+			assert.equal(existsSync(file), true, "the file is left for the host");
+		} finally {
+			if (before === undefined) delete process.env.PI_SELF_LEARN;
+			else process.env.PI_SELF_LEARN = before;
+			await rm(queue, { recursive: true, force: true });
+		}
 	});
 });
