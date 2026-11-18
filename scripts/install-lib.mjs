@@ -396,6 +396,30 @@ export function extensionNames(dir, readdir) {
 		.sort();
 }
 
+/**
+ * systemdUnitsIn — every unit in a directory, and whether it may be enabled.
+ *
+ * Read off the directory instead of a list in the installer: the timers were once
+ * copied without the `.service` files their `Unit=` names, so an enabled
+ * `pi-evals.timer` pointed at a unit that was not there. A list in install.mjs is
+ * how that happens, and a directory listing is the fix — a fifth unit is copied
+ * the day someone drops it in `systemd/`.
+ *
+ * `enable` comes from the unit itself: `systemctl enable` accepts only a unit with
+ * an `[Install]` section, and a oneshot backing a timer has none — the timer's
+ * `Unit=` pulls it in. `now` is for timers, which start on enable.
+ */
+export function systemdUnitsIn(dir, { readdirSync, readFileSync }) {
+	return readdirSync(dir)
+		.filter((name) => /\.(service|timer)$/.test(name))
+		.sort()
+		.map((name) => {
+			const text = readFileSync(path.join(dir, name), 'utf8');
+			const installable = /^\[Install\]/m.test(text);
+			return { name, text, enable: installable, now: installable && name.endsWith('.timer') };
+		});
+}
+
 /** pickNames — "all" when nothing is given, the named subset otherwise. */
 export function pickNames(all, wanted) {
 	if (!wanted || wanted.length === 0) return [...all];
