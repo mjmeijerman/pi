@@ -7,7 +7,12 @@
 # npm that would run `npm ci` — so the install is pinned to an exact version
 # instead and the finding is ignored for that line only. Any other ad-hoc install,
 # or a second one in this file, still fails the gate.
+#
+# The ignore is the `npm install -g npm@11.21.2` line in harness-check.yml, which
+# is line 44 since node-version-file added two comment lines above it. Editing the
+# workflow above that line means editing this number too; the pin is the object of
+# check_mise_pins, so the install stays and the finding stays suppressed.
 rules:
   adhoc-packages:
     ignore:
-      - harness-check.yml:42
+      - harness-check.yml:44
