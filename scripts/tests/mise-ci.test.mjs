@@ -58,10 +58,41 @@ function fixture(overrides = {}) {
 	return root;
 }
 
+/**
+ * A PATH that holds only this test's stub plus the system directories bash needs.
+ * The user's own ~/.local/bin is excluded on purpose: whether mise happens to be
+ * installed on the machine running the suite must not decide what these
+ * assertions see, and after ./setup.sh it very well might be.
+ */
+const SYSTEM_PATH =
+	"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/**
+ * A `mise` stub for the PATH: `broken` is a binary that cannot answer, `node`
+ * null is a working mise whose pinned tool was never installed, and a path is
+ * the happy case. Shapes copied from the real 2026.11.9 output.
+ */
+function miseStub({ node = null, broken = false } = {}) {
+	const dir = join(tmp, `bin-${n++}`);
+	mkdirSync(dir, { recursive: true });
+	const body = broken
+		? "#!/bin/sh\nexit 1\n"
+		: "#!/bin/sh\n" +
+			'[ "$1" = "--version" ] && echo "2026.11.9 linux-x64 (2026-11-16)" && exit 0\n' +
+			'[ "$1" = "which" ] || exit 0\n' +
+			(node
+				? `echo "${node}"\n`
+				: 'echo "mise ERROR node is not a mise bin. Perhaps you need to install it first." >&2\nexit 1\n') +
+			"exit 0\n";
+	writeFileSync(join(dir, "mise"), body, { mode: 0o755 });
+	return dir;
+}
+
 /** The only check this file owns, against one fixture root. */
-function check(root) {
+function check(root, env = {}) {
 	const res = spawnSync("bash", [CHECK, "--verify-mise-pins", "--root", root], {
 		encoding: "utf8",
+		env: { ...process.env, PATH: SYSTEM_PATH, ...env },
 	});
 	return { status: res.status, out: `${res.stdout}${res.stderr}` };
 }
@@ -322,4 +353,59 @@ test("an unreadable value is a FAIL, not the fallback literal", () => {
 	);
 	assert.equal(status, 1, out);
 	assert.match(line(out, "mise-pin-node"), /no node major/);
+});
+
+// The row the other rows assume: is the tool that owns the pin on this machine at
+// all. Blip 68 was adopted as a file, and for two released pins `command -v mise`
+// answered nothing while five rows compared mise.toml to its projections. Absent
+// is a WARN (a fresh clone, and CI, have no mise); present-but-broken is a FAIL.
+
+test("no mise on PATH is a WARN that says so, and not a broken repo", () => {
+	const { status, out } = check(fixture());
+	const row = line(out, "mise-installed");
+	assert.match(row, /WARN/);
+	assert.match(row, /not on PATH/);
+	assert.match(row, /mise\.run/);
+	// A WARN must not fail the run: a fresh clone is not a violation.
+	assert.equal(status, 0, out);
+});
+
+test("a mise that answers no --version FAILs and names the reinstall", () => {
+	const dir = miseStub({ broken: true });
+	const { status, out } = check(fixture(), {
+		PATH: `${dir}:${SYSTEM_PATH}`,
+	});
+	const row = line(out, "mise-installed");
+	assert.match(row, /FAIL/);
+	assert.match(row, /answers no --version/);
+	assert.match(row, /mise\.run/);
+	assert.equal(status, 1, out);
+});
+
+test("mise installed but the pinned tool not installed WARNs and gives the command", () => {
+	// The state ./setup.sh leaves: the binary is there, and it deliberately never
+	// ran `mise install`. That is a one-command fix, not a FAIL.
+	const dir = miseStub({ node: null });
+	const { status, out } = check(fixture(), {
+		PATH: `${dir}:${SYSTEM_PATH}`,
+	});
+	const row = line(out, "mise-installed");
+	assert.match(row, /WARN/);
+	assert.match(row, /node 24 is not/);
+	assert.match(row, /mise install/);
+	assert.equal(status, 0, out);
+});
+
+test("a mise that resolves the pinned node PASSes and prints where it landed", () => {
+	const bin = "/tmp/mise-probe/installs/node/24/bin/node";
+	const dir = miseStub({ node: bin });
+	const { status, out } = check(fixture(), {
+		PATH: `${dir}:${SYSTEM_PATH}`,
+	});
+	const row = line(out, "mise-installed");
+	assert.match(row, /PASS/);
+	assert.match(row, /2026\.11\.9/);
+	assert.match(row, /pinned node 24/);
+	assert.match(row, new RegExp(bin.replace(/\./g, "\\.")));
+	assert.equal(status, 0, out);
 });

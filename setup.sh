@@ -11,7 +11,8 @@
 # their scanners. `install.sh` puts those on disk.
 #
 # What is NOT in git, and what this script therefore does:
-#   1. system packages (bubblewrap, jq, alsa-utils, python3-venv, ...)
+#   1. system packages (bubblewrap, jq, alsa-utils, python3-venv, ...) and the
+#      mise binary, which mise.toml's pin needs to answer for itself
 #   2. the DeepSeek API key that models.json resolves at request time
 #   3. pi packages declared in settings.json (installed/reconciled by pi)
 #   4. git identity and gh auth state
@@ -243,6 +244,53 @@ else
 		run sudo apt-get install -y "${uniq_pkgs[@]}" || warn "apt-get failed; install them by hand"
 	else
 		note "skipped — re-run with sudo, or with --no-apt to keep it quiet"
+	fi
+fi
+
+# ------------------------------------------------------- tool versions ----
+
+step "tool versions (mise)"
+# Radar Vol. 35 blip 68 (mise, Adopt). mise.toml is this repo's single source for
+# the node and npm majors, and `mise` is the installer that reads it — but nothing
+# here ever installed it, so the pin was a file with no tool behind it
+# (`command -v mise` was empty, and harness-check had no row to notice).
+#
+# Two deliberate limits, both about not surprising a working laptop:
+#   * The binary only. Never `mise install` and never `mise use`: either would
+#     re-point node and npm on PATH in one command, and this script provisions
+#     what is missing — it does not switch the toolchain a running pi uses. The
+#     PATH node is still measured against the pin in preflight.
+#   * No network, no install. The official installer is one HTTPS GET to
+#     mise.run, so with the network down this step says so and moves on with
+#     status 0: a checkout must still configure what it can, and
+#     `harness-check.sh`'s mise-installed row reports the absence as a WARN.
+# Idempotent: a mise already on PATH is reported and left alone.
+if have mise; then
+	note "mise        : $(mise --version 2>/dev/null | head -1) at $(command -v mise)"
+else
+	note "mise is not installed — mise.toml's pin has no installer on this machine"
+	if [ "$DRY_RUN" = 1 ]; then
+		note "[dry-run] would run: curl -fsSL https://mise.run | sh  (binary only, no 'mise install')"
+	elif ask_default_yes "install the mise binary into ~/.local/bin (needs network, official mise.run installer)?"; then
+		if run sh -c 'curl -fsSL https://mise.run | sh'; then
+			hash -r 2>/dev/null || true
+		fi
+		# The installer's default target is ~/.local/bin, which is not always on
+		# PATH in a fresh shell — so the proof is the file, not a PATH lookup.
+		mise_bin=$(command -v mise 2>/dev/null || true)
+		[ -n "$mise_bin" ] || mise_bin="$HOME/.local/bin/mise"
+		if [ -x "$mise_bin" ]; then
+			note "mise        : $("$mise_bin" --version 2>/dev/null | head -1) at $mise_bin"
+			case ":$PATH:" in
+			*":$HOME/.local/bin:"*) ;;
+			*) note "add $HOME/.local/bin to PATH — that is where the binary landed" ;;
+			esac
+			note "pinned tools are NOT installed by this script; run 'mise install' in the repo when you want them"
+		else
+			warn "mise was not installed (no network, or the installer failed) — nothing else changes; harness-check reports it as a WARN"
+		fi
+	else
+		note "skipped — the pin stays a file, and harness-check's mise-installed row WARNs about it"
 	fi
 fi
 

@@ -160,13 +160,20 @@ if [ -d "$home/.local/bin" ] && ! path_covered_ro "$home/.local/bin"; then
 	args+=(--ro-bind "$home/.local/bin" "$home/.local/bin")
 fi
 # Those binaries point into their tool homes: pipx venvs (semgrep), uv tools,
-# npm/pnpm prefixes. Mount the stores read-only so the symlinks resolve.
-for d in "$home/.local/share/pipx" "$home/.local/share/uv"; do
+# npm/pnpm prefixes, the node versions mise installed. Mount the stores read-only
+# so the symlinks resolve.
+for d in "$home/.local/share/pipx" "$home/.local/share/uv" "$home/.local/share/mise"; do
 	if [ -d "$d" ] && ! path_covered_ro "$d"; then
 		args+=(--ro-bind "$d" "$d")
 	fi
 done
 
+# No bind for ~/.local/state/mise, where mise records its trust decisions:
+# measured here, and it is not needed. With the state directory absent — and even
+# with `mise trust` wiped from the host — `mise which node`, `mise ls` and
+# `mise exec -- node -v` all answer correctly inside the sandbox, because trust
+# gates envs and tasks, not reads of an installed tool. The data directory above
+# is the one that matters: without it the same commands report "not a mise bin".
 # A symlink in ~/.local/bin can point outside every tree bound so far: jev and
 # local-run are symlinks into ~/big-boss-pi/bin, so inside the sandbox the link
 # dangled and a worker's mandatory `jev route` check died with "command not
