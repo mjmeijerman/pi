@@ -1,0 +1,90 @@
+# The installer, run on all three operating systems, twice.
+#
+# Radar basis: #29 harness quality evaluation (a claim nobody runs is a claim),
+# #1 agent sandboxing (the Linux wrapper has to survive the port), #36 agent
+# instruction bloat (setup.mjs's rule filtering is exercised here).
+#
+# What each job proves, in order and with no network:
+#   1. setup.mjs -y provisions a throwaway HOME: skills, extensions, settings,
+#      global hooks, bin entries, the guard unit — or the one-line skip the OS
+#      dictates;
+#   2. scripts/verify-install.mjs --snapshot records what landed;
+#   3. the same command runs a second time;
+#   4. verify-install.mjs against the snapshot fails if one byte moved.
+#
+# The vendor download and the private delegation clone are stubbed out with
+# PI_SKIP_NETWORK=1 rather than fired at a runner: a matrix that depends on
+# releases.herdr.dev is a matrix that goes red for someone else's outage.
+name: install-matrix
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    name: install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      # No vendor installer and no private clone on a runner, and no init system
+      # to enable into: the files still have to land, which is what is asserted.
+      PI_SKIP_NETWORK: "1"
+      PI_SKIP_SYSTEMD: "1"
+      # A runner has no pi binary. install.mjs stops when pi is missing (that is
+      # right on a laptop); this flag is the CI-shaped version of that check.
+      PI_ALLOW_MISSING_PI: "1"
+      # Both spellings, because node reads USERPROFILE on Windows and git and
+      # the POSIX tools read HOME.
+      HOME: ${{ runner.temp }}/home
+      USERPROFILE: ${{ runner.temp }}/home
+      PI_AGENT_DIR: ${{ runner.temp }}/home/.pi/agent
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+
+      - name: shims still parse
+        run: bash -n install.sh setup.sh
+
+      - name: first install into a throwaway HOME
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME"
+          node setup.mjs -y --no-keys --no-apt --no-verify --rules=all
+          node scripts/verify-install.mjs --home "$HOME" --snapshot "$RUNNER_TEMP/before.json"
+
+      - name: second install changes nothing
+        run: |
+          set -euo pipefail
+          node setup.mjs -y --no-keys --no-apt --no-verify --rules=all
+          node scripts/verify-install.mjs --home "$HOME" --snapshot "$RUNNER_TEMP/before.json"
+
+      - name: a dropped rule stays dropped
+        run: |
+          set -euo pipefail
+          node setup.mjs -y --no-keys --no-apt --no-verify --rules=drop:1 >/dev/null
+          rules=$(grep -c '^- ' "$PI_AGENT_DIR/AGENTS.md")
+          echo "rules after --rules=drop:1: $rules"
+          test "$rules" -eq 16
+          node setup.mjs -y --no-keys --no-apt --no-verify >/dev/null
+          rules=$(grep -c '^- ' "$PI_AGENT_DIR/AGENTS.md")
+          echo "rules after a plain re-run: $rules"
+          test "$rules" -eq 16

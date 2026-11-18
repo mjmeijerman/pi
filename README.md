@@ -17,51 +17,106 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 | `herdr-mods/` | Herdr window mods: `prs` shows open pull requests with merge |
 | `scripts/` | session report / prune helpers + Herdr pane launcher |
 | `docs/` | Radar conformance audit and the agent working playbook |
-| `install.sh` | config + hooks only, non-interactive |
-| `setup.sh` | full provisioning on a new machine: packages, API key, pi packages, optional model/venv, verification |
+| `install.mjs` | the installer engine, one file for Linux, macOS and Windows (config, hooks, bin entries, services) |
+| `setup.mjs` | the interactive pass: per skill, per extension, per AGENT rule and per key, then `install.mjs` |
+| `install.sh`, `setup.sh` | thin shims so the old commands still work: they exec the Node entry points |
 | `Makefile` | `setup` / `bootstrap` / `verify` / `hooks` / `update` / `uninstall`, plus `mutate` / `mutate-full` for mutation testing (blip 2) |
 
 ## Rebuild this exact machine on another PC
 
 ```bash
-# clone to ~/.pi so the absolute paths in AGENTS.md resolve
-# (a clone elsewhere works too; setup.sh copies sandbox/ and scripts/ into ~/.pi)
-git clone git@github.com:mjmeijerman/pi.git ~/.pi
+git clone git@github.com:mjmeijerman/pi.git ~/.pi   # or anywhere; setup copies what it needs
 cd ~/.pi
-./setup.sh
+./setup.sh            # asks what to keep, then installs
 pi
 ```
 
-`setup.sh` is the whole story: it asks for the API key, installs the system
-packages it can, puts config and hooks on disk, reconciles the pi packages named
-in `settings.json`, and then verifies the result (sandbox selftest, 278 extension
-tests, hook paths, key present). Read it before running it — 300 lines, no
-network calls except apt, `pi update` and the optional model pull.
+`setup.sh` and `install.sh` are one-line shims now: the work happens in
+`setup.mjs` (the questions) and `install.mjs` (the install), both plain Node 24
+with no dependencies. They run on **Linux, macOS and Windows**.
 
-Every skill, extension and pi package is offered one at a time — name,
-one-line description taken from the file's own header, then `install? [Y/n]`.
-Enter keeps it, `n` skips it. Declining a package runs `pi remove`, so it leaves
-`settings.json` instead of coming back on the next update. Nothing already on
-disk is deleted; a skipped component that was installed earlier just stays, and
-the script says so.
+Preflight, once per machine: Node 24 (`.node-version`, pinned from `mise.toml`)
+and `git`. On Windows, run them from Git Bash or PowerShell.
+
+`install.mjs` is non-interactive and idempotent: skills, extensions,
+`settings.json`/`models.json`/`keybindings.json`/`i-have-adhd.json`/`package.json`,
+`~/.pi/sandbox` + `~/.pi/scripts` (AGENTS.md names them by absolute path), the
+global git hooks plus their `init.templateDir` layer, the global gitignore,
+`git-vuln-scan`, `pisandbox`, `pi-bare`, the Herdr "Pi (bare)" menu row, the
+managed `pi()` sandbox wrapper in `~/.bashrc`/`~/.zshrc`, `herdr-app` (vendor
+installer), the `big-boss-pi` clone with its `jev`/`delegate`/`local-run` bin
+entries, and the guard service. Its sections keep the old `install.sh` numbering
+0..5, so a reader can map one file onto the other.
+
+A second run writes nothing. It never replaces a file you may have edited in
+place: Herdr mods, `herdr-app/programs.json`, anything outside the
+`# >>> pi sandbox >>>` markers, and an existing `AGENTS.md` rule set (that one
+`setup.mjs` asks about).
+
+| What | Linux | macOS | Windows |
+|---|---|---|---|
+| sandbox (`bubblewrap`) | installed and wraps `pi` | not available — one line, no failure | not available — one line, no failure |
+| bin entries in `~/.local/bin` | symlinks | symlinks | copies (a symlink needs elevation or Developer Mode) |
+| guard service | systemd user unit, enabled | launchd plist, opt-in with `PI_ENABLE_SERVICES=1` | Task Scheduler entry at logon, same opt-in |
+| weekly timers (`pi-evals`, `pi-retro`) | systemd timers | skipped, one line | skipped, one line |
+| `herdr-app` | `curl … install.sh \| sh` | same | `irm … install.ps1 \| iex` |
+
+Everything above is one table in `scripts/install-lib.mjs` (`OS_PLAN`) plus one
+copy-vs-symlink helper — three places at most, on purpose.
+
+`setup.mjs` asks, with a default on every question and `-y` for the defaults:
+
+1. **skills**, one per skill in `agent/skills/` (plus `~/.pi/skills` extras);
+2. **extensions**, one per `agent/extensions/*.ts`;
+3. **agent rules**: every bullet rule in `agent/AGENTS.md`, shown as
+   `rule 4 of 17 — <its first line>`, keep or drop. The installed `AGENTS.md` is
+   written from those answers, so the rule set is the one you chose and not a
+   file you edit and re-lose on the next install;
+4. **keys**: `TYPESAFE_API_KEY` for jev and the DeepSeek key `models.json` reads.
+
+Answers are recorded in `~/.pi/state/setup.json`, so a dropped rule stays
+dropped, and only rules that file does not cover are asked again. `--reask`
+ignores the record. A key is asked with the terminal echo off, never printed,
+never logged, and written only to the file that owns it (`agent/deepseek.key`,
+`agent/env.secret`, both mode 600). No key file: one line, skip.
 
 | Flag | Effect |
 | --- | --- |
-| `-y`, `--yes` | Accept every prompt: installs the full set (the API key is still typed by you) |
+| `-y`, `--yes` | Accept every default: installs the full set, no prompts |
+| `--skills=a,b` | Only these skills |
+| `--extensions=a.ts,b.ts` | Only these extensions |
+| `--rules=all\|none\|keep:1,2\|drop:3,4` | The rule answers, without a person |
+| `--no-keys` | Never ask for a key |
 | `--dry-run` | Print the plan, change nothing |
-| `--no-apt` | Never call `sudo apt-get`, only report missing packages |
+| `--reask` | Ask again about everything, record the new answers |
+| `--no-apt` | Never call `sudo apt-get` (Linux only; other OSes say so) |
 | `--with-ollama` | Pull `qwen3.8:27b` (~17 GB) for the `local_llm` tool |
 | `--with-dictation` | Build the faster-whisper venv (~2.5 GB of wheels) |
-| `--force-key` | Replace an existing `deepseek.key` |
+| `--force-key` | Replace an existing key file |
 | `--no-verify` | Skip the verification block |
+| `--install-pi` | Let the engine install pi with npm when it is missing |
 
-What it does **not** do, because it is a per-machine identity rather than
-config: `git config --global user.name/email`, `gh auth login`, and `pi auth`
-for any provider other than DeepSeek. It prints a reminder when any of them is
-missing.
+`./setup.sh -y --no-keys --no-apt --no-verify` is the CI-shaped run: it is what
+`.github/workflows/install-matrix.yml` executes on `ubuntu-latest`,
+`macos-latest` and `windows-latest`, twice, with a throwaway `HOME` and
+`PI_SKIP_NETWORK=1`, then asserts the manifest and that the second run changed
+nothing (`scripts/verify-install.mjs`).
 
 `make setup` runs `./setup.sh`. `make bootstrap` runs the subset that touches no
 secrets and no system packages (`--no-apt --no-verify`).
+
+### When to stop and go back (revert triggers)
+
+The port is worth keeping only while these hold. Hitting one means report it and
+stop, not grind:
+
+1. a Windows install that needs manual fixes to work;
+2. per-OS special cases spreading past three places (the `OS_PLAN` table, the
+   copy-vs-symlink helper, and the service step);
+3. the CI matrix unavailable — no Windows or macOS runner, or a job that has to
+   be skipped to stay green;
+4. more than one worker-day across two attempts without a green matrix run;
+5. start-at-login on macOS or Windows proving flaky.
 
 ### Herdr window
 
@@ -254,6 +309,12 @@ Repo-local hooks are preserved: the global wrappers chain to your repo's own `.g
 - `git add -f .env` — force-stage a gitignored file (pre-commit still blocks it)
 - `SKIP_VULN_SCAN=1` — skip the agent vuln scan for one push
 - Repos that set their own `core.hooksPath` (e.g. husky) bypass the global wrappers
+- Installer env flags: `PI_SKIP_NETWORK=1` (no vendor download, no
+  `big-boss-pi` clone), `PI_SKIP_SYSTEMD=1` (copy units, enable nothing),
+  `PI_ENABLE_SERVICES=1` (opt into the macOS/Windows login entry),
+  `PI_ALLOW_MISSING_PI=1` (a config-only install on a box without `pi`),
+  `PI_DRY_RUN=1`, `PI_PLATFORM=win32|darwin|linux` (exercise another OS's
+  branches from one host — the CI matrix and the tests use it)
 
 ## Updating
 
