@@ -12,31 +12,32 @@ const TOKEN_UNITS = ["", "k", "M", "B", "T"] as const;
  * The precision is chosen from the value *after* rounding, so a count that
  * fills its unit moves up one (`999_999` -> `1.0M`, not `1000k`) and a count
  * that rounds up to ten drops the decimal (`9999` -> `10k`, not `10.0k`).
+ *
+ * Both steps are walk-and-stop, never a counted loop: a value either consumes
+ * one of the units below or it does not, so there is no counter a wrong branch
+ * can leave standing still (the old fixed-point loop spun forever the moment a
+ * mutant made it skip its own progress).
  */
 export function fmtTokens(count: number): string {
 	if (count < 1000) return `${count}`;
 
-	let unit = 0;
-	let scaled = count;
-	while (scaled >= 1000 && unit + 1 < TOKEN_UNITS.length) {
+	let unit = 0; // how many units the count was divided by
+	let scaled = count; // the count in the unit it lands in
+	for (const _suffix of TOKEN_UNITS.slice(1)) {
+		if (scaled < 1000) break;
 		scaled /= 1000;
 		unit++;
 	}
 
-	for (;;) {
-		const decimals = scaled < 10 ? 1 : 0;
-		const shown = Number(scaled.toFixed(decimals)); // the value the string will display
-		if (decimals === 1 && shown >= 10) {
-			scaled = shown; // 9.999 k would print "10.0k"; print "10k" instead
-			continue;
-		}
-		if (shown >= 1000 && unit + 1 < TOKEN_UNITS.length) {
-			scaled = shown / 1000; // 999.999 k would print "1000k"; print "1.0M" instead
-			unit++;
-			continue;
-		}
-		return `${shown.toFixed(decimals)}${TOKEN_UNITS[unit] ?? ""}`;
+	let shown = scaled.toFixed(scaled < 10 ? 1 : 0); // exactly the string that will be printed
+	const rounded = Number(shown); // the value the string shows, which is what decides the next step
+	if (rounded >= 10 && scaled < 10) {
+		shown = scaled.toFixed(0); // 9.999 k would print "10.0k"; print "10k" instead
+	} else if (rounded >= 1000 && unit + 1 < TOKEN_UNITS.length) {
+		unit++;
+		shown = (rounded / 1000).toFixed(1); // 999.999 k would print "1000k"; print "1.0M" instead
 	}
+	return `${shown}${TOKEN_UNITS[unit] ?? ""}`;
 }
 
 /**
