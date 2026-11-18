@@ -176,16 +176,21 @@ Dropping and re-adding later:
 | drop an extension | `rm ~/.pi/agent/extensions/<name>.ts` |
 | add a skill or extension back | `./setup.sh --extensions=<name> --no-keys --no-apt --no-verify`, or `./setup.sh --reask` and answer again |
 | change the rule set | `./setup.sh --rules=drop:3,4` (applies immediately when no `AGENTS.md` conflict is pending) or `./setup.sh --reask` |
+| refresh the hook wrappers without a full install | `bash ~/.pi/git-hooks/install-hooks.sh` — writes the 15 wrappers and sets both git paths |
 | see every answer you gave | `cat ~/.pi/state/setup.json` |
 
-Switching services off (the exact lines, as the installer prints them):
+Switching services off (the exact lines, as the installer prints them — one row
+per unit it copied; the two timer services have no `[Install]` section, so they
+are named as comments and stopped by their timers):
 
 ```bash
 # Linux
+systemctl --user disable herdr-resume.service
 systemctl --user disable --now pi-evals.timer
 systemctl --user disable --now pi-retro.timer
-systemctl --user disable herdr-resume.service
 systemctl --user disable --now big-boss-pi-guard.service
+# pi-evals.service: started by its timer — nothing to disable
+# pi-retro.service: started by its timer — nothing to disable
 ```
 
 ```bash
@@ -199,12 +204,14 @@ launchctl unload -w ~/Library/LaunchAgents/*.plist   # every pi login item
 schtasks /Delete /TN big-boss-pi-guard /F
 ```
 
-One Linux fact worth knowing before you rely on the timers: `install.mjs` copies
-`pi-evals.timer`, `pi-retro.timer`, `herdr-resume.service` and the guard unit, but
-not the two `.service` files the timers point at (`Unit=pi-evals.service`). Run
-`make evals-install` and `make retro-install` once to write those two units and
-re-enable the timers; until then `systemctl --user status pi-evals.timer` reports
-the unit it cannot find.
+The systemd step copies every unit in the clone's `systemd/` directory, because it
+reads that directory instead of a list: the guard, `pi-evals.timer` with its
+`pi-evals.service`, `pi-retro.timer` with its `pi-retro.service`, and
+`herdr-resume.service`. The timers are enabled `--now`, `herdr-resume.service`
+without `--now` (it runs at the next login), and the two timer services are
+copied but not enabled — they carry no `[Install]` section, and their timer's
+`Unit=` line is what starts them. Nothing is left for you to run by hand after an
+install: `systemctl --user list-timers` shows both timers with a next run.
 
 Removing an install without touching sessions or keys:
 
@@ -245,19 +252,19 @@ step still runs.
 the sandbox `$HOME` is read-only except the paths the launcher binds, so the hook
 installer's template write fails and prints something like
 `mkdir: cannot create directory '…/.git-templates/hooks': Permission denied`.
-Hooks still work: `install.mjs` sets `core.hooksPath` itself right after, from
-node, and prints `== git hooks active : ~/.pi/git-hooks`. What stays unset is
-`init.templateDir`, so `git init` gets no hook template. Fix: run
-`./install.sh` once from a normal host shell, or
-`mkdir -p ~/.git-templates/hooks && git config --global init.templateDir ~/.git-templates`.
-The verification block shows it as `templateDir: MISSING` and `MISSING` there is
-this, not a broken install.
+Nothing to fix: `install.mjs` sets `core.hooksPath` and `init.templateDir` itself
+from node, after that script and whether it succeeded or not, and prints
+`== git hooks active : ~/.pi/git-hooks`. What did not happen is the write of the
+15 wrapper files into `~/.pi/git-hooks` and `~/.git-templates/hooks` — re-run
+`./install.sh` from a host shell to refresh those. Until then `git init` gets no
+hook template; the verification block shows the key as
+`init.templateDir=~/.git-templates`, not `MISSING`.
 
 **No systemd user manager.** In a container or on a bare TTY the unit files are
 copied but nothing is enabled, and the installer prints
-`== enable: no systemd user session — start it, then: systemctl --user enable --now pi-evals.timer pi-retro.timer herdr-resume.service`.
-Fix: after logging into a real user session, run exactly that line. The files are
-already in `~/.config/systemd/user/`.
+`== enable: no systemd user session — start it, then: systemctl --user enable --now pi-evals.timer pi-retro.timer && systemctl --user enable herdr-resume.service`.
+Fix: after logging into a real user session, run exactly those lines. The five unit
+files are already in `~/.config/systemd/user/`, so nothing else has to be copied.
 
 ## Secrets
 

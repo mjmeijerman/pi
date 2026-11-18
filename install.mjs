@@ -53,6 +53,7 @@ import {
 	planFor,
 	spawnPlan,
 	spliceManagedBlock,
+	systemdUnitsIn,
 } from './scripts/install-lib.mjs';
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -72,6 +73,9 @@ const ENABLE_SERVICES = process.env.PI_ENABLE_SERVICES === '1';
 
 let OPT = { installPi: false };
 let changed = 0;
+// Every unit stepSystemd copied, so the summary's disable lines name what is
+// really there instead of a list that can drift from the directory.
+let systemdInstalled = [];
 
 // --- argv -------------------------------------------------------------------
 // The flag list lives in scripts/install-lib.mjs (ENGINE_FLAGS.install), so the
@@ -398,14 +402,18 @@ function stepGitHooks() {
 		// The same hook bodies on all three OSes: git's own sh runs them.
 		run('bash', [installer], { allowFail: true });
 	} else {
-		warn('install-hooks.sh or bash not found — setting the git paths directly');
-		gitConfig('core.hooksPath', P.gitHooksDir);
-		gitConfig('init.templateDir', P.gitTemplatesDir);
+		warn('install-hooks.sh or bash not found — writing the wrappers from node is not possible here');
 	}
-	// Set once more from here, so the value git reports is the one node computed:
-	// on Windows the shell installer had spelled it /c/Users/... and the next run
-	// would have looked like a change that never happened.
+	// Both keys are set from here whatever that script did, because it can fail
+	// after doing useful work: inside the sandbox ~/.git-templates is read-only,
+	// so it writes the wrappers, dies on the template copy, and used to leave
+	// init.templateDir unset — `git init` then got no hook template. The script
+	// stays the thing that refreshes the 15 wrapper files; the config values are
+	// node's job. Setting them here also keeps the reported value the one node
+	// computed: on Windows the shell installer had spelled it /c/Users/..., and
+	// the next run would have looked like a change that never happened.
 	gitConfig('core.hooksPath', P.gitHooksDir);
+	gitConfig('init.templateDir', P.gitTemplatesDir);
 	const hooksPath = spawnSync('git', ['config', '--global', '--get', 'core.hooksPath'], { encoding: 'utf8' });
 	note(`git hooks active : ${(hooksPath.stdout || '').trim() || '(unset)'}`);
 }
@@ -640,39 +648,45 @@ function systemdUserUp() {
 
 function stepSystemd() {
 	const systemdDir = P.serviceDir;
+	const srcDir = path.join(SOURCE_DIR, 'systemd');
+	systemdInstalled = [];
 	const units = [];
 	const bossUnit = path.join(BOSS_DIR, 'systemd', 'big-boss-pi-guard.service');
-	if (exists(bossUnit)) units.push({ file: bossUnit, name: 'big-boss-pi-guard.service', enable: 'big-boss-pi-guard.service', now: true });
+	if (exists(bossUnit)) units.push({ file: bossUnit, name: 'big-boss-pi-guard.service', enable: true, now: true });
 	else warn(`${bossUnit} not found — skipped the big-boss-pi guard unit`);
 
-	for (const [name, enable, now] of [
-		['pi-evals.timer', 'pi-evals.timer', true],
-		['pi-retro.timer', 'pi-retro.timer', true],
-		['herdr-resume.service', 'herdr-resume.service', false],
-	]) {
-		const file = path.join(SOURCE_DIR, 'systemd', name);
-		if (exists(file)) units.push({ file, name, enable, now });
-		else warn(`systemd/${name} not found — skipped`);
+	// The repo's units are read off systemd/, never listed here: the timers were
+	// copied without the .service files their `Unit=` names, and a hard-coded
+	// list is how that happens. scripts/tests/systemd-units.test.mjs reads the
+	// same directory and fails if a timer names a unit this would not copy.
+	for (const unit of systemdUnitsIn(srcDir, fs)) {
+		units.push({ file: path.join(srcDir, unit.name), name: unit.name, enable: unit.enable, now: unit.now });
 	}
 
 	for (const unit of units) {
 		const dst = path.join(systemdDir, unit.name);
 		writeText(dst, read(unit.file).replaceAll('%h', HOME), { mode: 0o644 });
+		systemdInstalled.push(unit);
 		note(`${unit.name} -> ${dst}`);
 	}
 	if (units.length === 0) return;
+	const enableable = units.filter((u) => u.enable);
 
 	if (SKIP_SERVICES) {
 		say('== PI_SKIP_SYSTEMD=1 — units copied, none enabled');
 	} else if (!systemdUserUp()) {
 		// A container or a bare tty has the files and no user manager; enabling
 		// there prints systemd's own error and looks like an installer bug.
-		skipped('enable', `no systemd user session — start it, then: systemctl --user enable --now ${units.map((u) => u.enable).join(' ')}`);
+		const now = enableable.filter((u) => u.now).map((u) => u.name);
+		const later = enableable.filter((u) => !u.now).map((u) => u.name);
+		const lines = [];
+		if (now.length > 0) lines.push(`systemctl --user enable --now ${now.join(' ')}`);
+		if (later.length > 0) lines.push(`systemctl --user enable ${later.join(' ')}`);
+		skipped('enable', `no systemd user session — start it, then: ${lines.join(' && ')}`);
 	} else {
 		run('systemctl', ['--user', 'daemon-reload'], { allowFail: true });
-		for (const unit of units) {
-			const args = ['--user', 'enable', ...(unit.now ? ['--now'] : []), unit.enable];
-			run('systemctl', args, { allowFail: true });
+		for (const unit of enableable) {
+			run('systemctl', ['--user', 'enable', ...(unit.now ? ['--now'] : []), unit.name], { allowFail: true });
 		}
 	}
 }
@@ -688,12 +702,16 @@ function summary() {
 	else say(`   sandbox: unavailable on ${PLAN.platform} — pi runs unsandboxed here`);
 	say('   herdr-app --version                             # desktop app');
 	say('   jev count "split this task"                     # delegation workspace on PATH (needs the clone)');
-	if (PLAN.service === 'systemd') {
+	if (PLAN.service === 'systemd' && systemdInstalled.length > 0) {
 		say('Disable:');
-		say('   systemctl --user disable --now pi-evals.timer');
-		say('   systemctl --user disable --now pi-retro.timer');
-		say('   systemctl --user disable herdr-resume.service');
-		say('   systemctl --user disable --now big-boss-pi-guard.service');
+		for (const unit of systemdInstalled.filter((u) => u.enable)) {
+			say(`   systemctl --user disable${unit.now ? ' --now' : ''} ${unit.name}`);
+		}
+		// Named, so the block accounts for every file that was copied: a unit
+		// without [Install] cannot be disabled and its timer starts it.
+		for (const unit of systemdInstalled.filter((u) => !u.enable)) {
+			say(`   # ${unit.name}: started by its timer — nothing to disable`);
+		}
 	} else if (PLAN.service === 'launchd') {
 		say(`Disable: launchctl unload -w ${path.join(P.serviceDir, 'dev.herdr.big-boss-pi-guard.plist')}`);
 		say('Disable: launchctl unload -w ~/Library/LaunchAgents/*.plist   # every pi login item');

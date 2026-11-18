@@ -120,6 +120,17 @@ if (fs.existsSync(agentsMd)) {
 // off Linux, so a matrix run does not register a login item on a shared mac.
 if (PLAN.service === 'systemd') {
 	mustExist('guard unit', path.join(P.serviceDir, 'herdr-resume.service'));
+	// A timer without the unit its `Unit=` names is the failure this row exists
+	// for: both files are copied by the same step, so nothing notices until the
+	// schedule fires weeks later. Read off the installed timers, not a list.
+	if (fs.existsSync(P.serviceDir)) {
+		for (const name of fs.readdirSync(P.serviceDir).filter((n) => n.endsWith('.timer'))) {
+			const text = fs.readFileSync(path.join(P.serviceDir, name), 'utf8');
+			for (const match of text.matchAll(/^Unit=(.+)$/gm)) {
+				mustExist(`timer ${name}`, path.join(P.serviceDir, match[1].trim()));
+			}
+		}
+	}
 } else if (PLAN.service === 'launchd') {
 	mustBeAbsent('launchd login item', path.join(P.serviceDir, 'dev.herdr.big-boss-pi-guard.plist'), 'PI_ENABLE_SERVICES was not set');
 } else {
