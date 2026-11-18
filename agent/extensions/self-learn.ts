@@ -1479,6 +1479,25 @@ export interface Launcher {
 export const LEARNER_ENV_KEYS = ["PI_SELF_LEARN", "PI_SELF_LEARN_SLUG", "PI_SELF_LEARN_PROPOSAL"] as const;
 
 /**
+ * Why a visible learner cannot be started from *this* session, when the reason is
+ * the sandbox and not a broken machine.
+ *
+ * `herdr-app` is the one `~/.local/bin` link the sandbox's `too_broad` rule keeps
+ * out (`sandbox/README.md`: it is deliberately absent inside), so a sandboxed
+ * session asks for a space it cannot have. Recorded as `spawn-failed`, the gate
+ * reads it as a death: four on 2026-11-18 (`learn-10-59`, `learn-11-03`,
+ * `learn-13-08`, `learn-15-29`) carried the identical sentence, and each one was
+ * a fact about the mount table, not about the learning loop. A launch that never
+ * happens is not a death, so it is skipped before a queue file is written and
+ * logged as its own row, which `diedLearnersFrom` does not read.
+ */
+export function sandboxBlocksSpawn(env: NodeJS.ProcessEnv = process.env): string | null {
+	const mode = (env.PI_SANDBOX_MODE ?? "").trim();
+	if (!mode) return null;
+	return `this session is sandboxed (${mode}) and a sandbox never mounts herdr-app — no visible space can be made here, so start the learner from a bare session (PI_BARE=1 pi)`;
+}
+
+/**
  * A visible, sandboxed learner, or a named reason why this machine cannot start
  * one.
  *
@@ -2088,6 +2107,8 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 	let lastCompactIso: string | null = null;
 	let spawns = 0;
 	let lastSpawnAt: number | null = null;
+	/** One `spawn-skipped` row per session: a sandbox does not become a host mid-session. */
+	let sandboxSkipRecorded = false;
 	let disabled = Boolean(process.env.PI_SELF_LEARN);
 	/** Compaction entries this session has already handled, by id. */
 	let seenCompactions = new Set<string>();
@@ -2397,6 +2418,26 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			now: at,
 		});
 		if (!decision.spawn) return decision;
+
+		// The launch this decision asks for needs a Herdr space, and a sandboxed
+		// session cannot make one. Skip before the queue file is written: a spec no
+		// learner will ever read is garbage in the proposals directory, and a
+		// `spawn-failed` row for it counts as a death the harness never had.
+		const blocked = sandboxBlocksSpawn();
+		if (blocked) {
+			if (!sandboxSkipRecorded) {
+				sandboxSkipRecorded = true;
+				await record({
+					ts: new Date(at).toISOString(),
+					kind: "spawn-skipped",
+					slug: `learn-${runStamp(at).slice(11, 16)}`,
+					reason: decision.reason,
+					stderr: clipDetail(blocked),
+				});
+				notify(ctx, `no learner started: ${clipDetail(blocked)}`, "info");
+			}
+			return { spawn: false, reason: blocked };
+		}
 
 		const stamp = runStamp(at);
 		const slug = `learn-${stamp.slice(11, 16)}`;
