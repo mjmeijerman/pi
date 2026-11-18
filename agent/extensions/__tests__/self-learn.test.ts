@@ -623,14 +623,63 @@ describe("wiring", () => {
 			assert.equal(written.filter((row) => row.kind === "spawned").length, 0, "nothing was started");
 			assert.match(skipped.stderr, /sandboxed \(bwrap\)/);
 			assert.match(skipped.stderr, /PI_BARE=1 pi/, "and says where a learner can be started");
+			// The row has to name the run it stands in for: `learn-` plus the same
+			// `HH:MM` every other row's slug carries, taken from this row's own stamp
+			// so a clock that moved between the row and the assertion cannot fake it.
+			assert.match(skipped.slug, /^learn-\d{2}-\d{2}$/, "a slug a reader can match to a run");
+			assert.equal(
+				skipped.slug,
+				`learn-${skipped.ts.slice(11, 16).replace(":", "-")}`,
+				"the run's own `HH-MM`, not an empty string and not the whole stamp",
+			);
+			// No spec for a learner that cannot exist: a queue file nothing will ever
+			// read is the garbage the skip is meant to avoid.
+			assert.equal(
+				existsSync(runPaths(Date.parse(skipped.ts)).queue),
+				false,
+				"nothing was queued for a learner the sandbox would refuse",
+			);
 			assert.equal(
 				diedLearnersFrom(written, { exists: () => false, now }).length,
 				0,
 				"the next learner is not told a learner died here",
 			);
-			assert.ok(
-				notices.some((notice) => /no learner started/.test(notice.message) && /sandbox/.test(notice.message)),
-				"the person is told once, in the session",
+			const told = notices.filter((notice) => /no learner started/.test(notice.message) && /sandbox/.test(notice.message));
+			assert.equal(told.length, 1, "the person is told once, in the session");
+			assert.equal(told[0].level, "info", "a skip is information, not a warning about a broken machine");
+		} finally {
+			delete process.env.PI_SANDBOX_MODE;
+		}
+	});
+
+	test("a sandboxed skip is returned as a refusal, not as a launch", async () => {
+		// The decision is what the caller acts on. `{}` and `spawn: true` both leave
+		// the row above intact and then write a queue file and try to launch anyway,
+		// so the refusal has to be the shape of the value that comes back.
+		const { emit, ctx, api } = setup();
+		await trip(emit, ctx);
+		const before = (await readRuns()).length;
+		process.env.PI_SANDBOX_MODE = "bwrap";
+		try {
+			const decision = await api.learn("compact", ctx);
+			assert.equal(decision.spawn, false, "a sandboxed session is not allowed to claim a launch");
+			assert.match(
+				decision.reason,
+				/sandboxed \(bwrap\)/,
+				"the refusal says the sandbox did it, not that the gate was quiet",
+			);
+			const rows = (await readRuns()).slice(before);
+			const skipped = rows.filter((row) => row.kind === "spawn-skipped").at(-1);
+			assert.ok(skipped, "the skip is the row the trail carries");
+			assert.equal(
+				existsSync(runPaths(Date.parse(skipped.ts)).queue),
+				false,
+				"and the refusal wrote no queue file behind it",
+			);
+			assert.equal(
+				rows.filter((row) => row.kind === "spawned" || row.kind === "spawn-failed").length,
+				0,
+				"nothing was started and nothing died",
 			);
 		} finally {
 			delete process.env.PI_SANDBOX_MODE;
