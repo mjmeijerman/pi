@@ -66,6 +66,7 @@ const {
 	PUBLISH_TIMEOUT_MS,
 	PUBLISH_WINDOW_MS,
 	PUBLISH_POLL_MS,
+	runOnce,
 } = mod;
 const REPO = join(homedir(), ".pi");
 
@@ -1981,6 +1982,118 @@ describe("the publish request a learner writes", () => {
 		assert.equal(outside.ok, false);
 		if (!outside.ok) assert.match(outside.why, /not a file under/);
 	});
+	test("every refusal says which thing was wrong, in the words the row will carry", () => {
+		// One case per branch of the parser. A refusal that cannot name what it refused
+		// is a mystery in runs.jsonl at 2 a.m., and the row is the only record.
+		const cases: [string, string][] = [
+			["not json", "not JSON"],
+			["{", "not JSON"],
+			['"just a string"', "not one JSON object"],
+			["42", "not one JSON object"],
+			["null", "not one JSON object"],
+			["[]", "not one JSON object"],
+			["[1,2]", "not one JSON object"],
+		];
+		for (const [raw, why] of cases) {
+			const parsed = parsePublishRequest(raw);
+			assert.equal(parsed.ok, false, raw);
+			if (parsed.ok) continue;
+			assert.equal(parsed.why, why, raw);
+		}
+	});
+
+	test("a slug is a slug at both ends, and the refusal quotes what was written", () => {
+		for (const slug of ["../etc", "Learn 1200", "!", "-lead", "abc!", "a".repeat(33)]) {
+			const parsed = parsePublishRequest(JSON.stringify(request({ slug })));
+			assert.equal(parsed.ok, false, slug);
+			if (parsed.ok) continue;
+			assert.match(parsed.why, /^slug is not 1-32 of a-z 0-9 - _: /, slug);
+			assert.ok(parsed.why.includes(JSON.stringify(slug)), `the refused value is named: ${parsed.why}`);
+		}
+	});
+
+	test("a slug that is not even a string is refused, not coerced", () => {
+		for (const slug of [42, null, true]) {
+			const parsed = parsePublishRequest(JSON.stringify(request({ slug })));
+			assert.equal(parsed.ok, false, String(slug));
+			if (parsed.ok) continue;
+			assert.match(parsed.why, /slug is not 1-32/, `the refusal is about the slug: ${parsed.why}`);
+			assert.ok(
+				parsed.why.includes(JSON.stringify(slug)),
+				`and shows the value that was there: ${parsed.why}`,
+			);
+		}
+	});
+
+	test("a slug and a branch are trimmed and lowercased, so a learner's own casing is not a refusal", () => {
+		const parsed = parsePublishRequest(JSON.stringify({ slug: "  Learn-1200 ", branch: " learn/learn-1200 ", reason: "x" }));
+		assert.equal(parsed.ok, true);
+		if (!parsed.ok) return;
+		assert.equal(parsed.request.slug, "learn-1200");
+		assert.equal(parsed.request.branch, "learn/learn-1200");
+	});
+
+	test("a request with no branch asks for learn/<slug>, the only branch the broker takes", () => {
+		for (const branch of [undefined, 42]) {
+			const parsed = parsePublishRequest(JSON.stringify(request({ branch })));
+			assert.equal(parsed.ok, true, String(branch));
+			if (!parsed.ok) continue;
+			assert.equal(parsed.request.branch, "learn/learn-1200", String(branch));
+		}
+		// A branch that is there and empty is a mistake, not an omission.
+		for (const branch of ["", "   "]) {
+			assert.equal(parsePublishRequest(JSON.stringify(request({ branch }))).ok, false, JSON.stringify(branch));
+		}
+	});
+
+	test("the reason is one line, at most 200 characters", () => {
+		const parsed = parsePublishRequest(JSON.stringify(request({ reason: "  two\n\nlines\tand  spaces  " })));
+		assert.equal(parsed.ok, true);
+		if (!parsed.ok) return;
+		assert.equal(parsed.request.reason, "two lines and spaces");
+		const long = parsePublishRequest(JSON.stringify(request({ reason: "x".repeat(500) })));
+		assert.equal(long.ok, true, "a long reason is clipped, not refused");
+		if (!long.ok) return;
+		assert.equal(long.request.reason.length, 200);
+	});
+
+	test("a reason that is not a string, or only spaces, is refused in so many words", () => {
+		for (const reason of [42, null, "", "   "]) {
+			const parsed = parsePublishRequest(JSON.stringify(request({ reason })));
+			assert.equal(parsed.ok, false, String(reason));
+			if (parsed.ok) continue;
+			assert.equal(parsed.why, "reason is empty", String(reason));
+		}
+	});
+
+	test("a proposal has to be a file under the proposals directory", () => {
+		for (const proposal of [join(PROPOSALS, "..", "x.md"), "/etc/passwd", `${PROPOSALS}/a/../b.md`]) {
+			const parsed = parsePublishRequest(JSON.stringify(request({ proposal })));
+			assert.equal(parsed.ok, false, proposal);
+			if (parsed.ok) continue;
+			assert.match(parsed.why, /^proposal is not a file under /, proposal);
+		}
+		const ok = parsePublishRequest(JSON.stringify(request({ proposal: join(PROPOSALS, "p.md") })));
+		assert.equal(ok.ok, true);
+		if (!ok.ok) return;
+		assert.equal(ok.request.proposal, join(PROPOSALS, "p.md"));
+	});
+
+	test("a proposal path is trimmed before it is judged", () => {
+		const parsed = parsePublishRequest(JSON.stringify(request({ proposal: `  ${join(PROPOSALS, "p.md")}  ` })));
+		assert.equal(parsed.ok, true, "spaces around a path do not make it a path outside the queue");
+		if (!parsed.ok) return;
+		assert.equal(parsed.request.proposal, join(PROPOSALS, "p.md"));
+	});
+
+	test("a proposal that is blank, or not a string, is no proposal at all", () => {
+		for (const proposal of ["  ", 42, null]) {
+			const parsed = parsePublishRequest(JSON.stringify(request({ proposal })));
+			assert.equal(parsed.ok, true, String(proposal));
+			if (!parsed.ok) continue;
+			assert.equal(parsed.request.proposal, undefined, `${String(proposal)} is not a path`);
+		}
+	});
 });
 
 describe("the publish broker", () => {
@@ -2088,6 +2201,166 @@ describe("the publish broker", () => {
 		assert.equal(row, null);
 		assert.equal(f.calls.length, 0);
 	});
+	test("a refused request still names the slug and the branch it would have published", async () => {
+		const f = await publishFixture();
+		await f.write(`learn-1200${PUBLISH_SUFFIX}`, "{not json");
+		const row = await publishOnce(f.deps);
+		assert.equal(row?.kind, "publish");
+		assert.equal(row?.slug, "learn-1200", "the slug is the file name without its suffix, not the whole path");
+		assert.equal(row?.branch, "learn/learn-1200");
+		assert.equal(row?.publish, "refused");
+		assert.equal(row?.status, null);
+		assert.equal(row?.queue, join(f.dir, `learn-1200${PUBLISH_SUFFIX}`));
+		assert.equal(f.calls.length, 0, "nothing is run for a request that was refused");
+		assert.equal(existsSync(join(f.dir, `learn-1200${PUBLISH_SUFFIX}.claimed`)), false);
+	});
+
+	test("the host side of the hand-off carries no sandbox marker of its own", async () => {
+		const f = await publishFixture();
+		const before = { mode: process.env.PI_SANDBOX_MODE, net: process.env.PI_SANDBOX_NET };
+		process.env.PI_SANDBOX_MODE = "bwrap";
+		process.env.PI_SANDBOX_NET = "on";
+		try {
+			await f.write(`learn-1200${PUBLISH_SUFFIX}`, request({ proposal: f.proposal }));
+			const row = await publishOnce({ ...f.deps, record: () => {
+				throw new Error("runs.jsonl is not writable");
+			} });
+			assert.equal(f.calls[0].env.PI_SANDBOX_MODE, undefined, "the script would refuse a sandboxed caller");
+			assert.equal(f.calls[0].env.PI_SANDBOX_NET, undefined);
+			assert.equal(f.calls[0].env.PI_LEARN_BROKER, "1", "and says which side is calling it");
+			assert.equal(row?.publish, "published", "a log that cannot be written does not undo the publish");
+			assert.deepEqual(await publishQueue(f.dir), [], "nor does it keep the claim");
+		} finally {
+			if (before.mode === undefined) delete process.env.PI_SANDBOX_MODE;
+			else process.env.PI_SANDBOX_MODE = before.mode;
+			if (before.net === undefined) delete process.env.PI_SANDBOX_NET;
+			else process.env.PI_SANDBOX_NET = before.net;
+		}
+	});
+
+	test("a request that names no proposal gets the newest proposal, and only a .md is one", async () => {
+		await mkdir(PROPOSALS, { recursive: true });
+		const older = join(PROPOSALS, "pick-older.md");
+		const newer = join(PROPOSALS, "pick-newer.md");
+		const notAProposal = join(PROPOSALS, "pick-newest.md.bak");
+		const aDirectory = join(PROPOSALS, "pick-dir.md");
+		const at = new Date("2100-01-01T00:00:00Z").getTime();
+		const hour = 60 * 60 * 1000;
+		try {
+			await writeFile(older, "# older\n", "utf8");
+			await writeFile(newer, "# newer\n", "utf8");
+			await writeFile(notAProposal, "x", "utf8");
+			await mkdir(aDirectory, { recursive: true });
+			await utimes(older, new Date(at), new Date(at));
+			await utimes(newer, new Date(at + hour), new Date(at + hour));
+			await utimes(notAProposal, new Date(at + 2 * hour), new Date(at + 2 * hour));
+			await utimes(aDirectory, new Date(at + 3 * hour), new Date(at + 3 * hour));
+			const f = await publishFixture();
+			await f.write(`learn-1200${PUBLISH_SUFFIX}`, request());
+			const row = await publishOnce(f.deps);
+			assert.equal(row?.proposal, newer, "the newest .md, not the newest file and not a directory");
+			const argv = f.calls[0].argv;
+			assert.equal(argv[argv.indexOf("--proposal") + 1], newer);
+		} finally {
+			await rm(older, { force: true });
+			await rm(newer, { force: true });
+			await rm(notAProposal, { force: true });
+			await rm(aDirectory, { recursive: true, force: true });
+		}
+	});
+
+	test("two proposals of the same age: the one the directory offers first is the newest", async () => {
+		await mkdir(PROPOSALS, { recursive: true });
+		for (const entry of await readdir(PROPOSALS)) await rm(join(PROPOSALS, entry), { recursive: true, force: true });
+		const at = new Date("2100-02-02T00:00:00Z");
+		const names = ["tie-first.md", "tie-second.md"];
+		const written: string[] = [];
+		try {
+			for (const name of names) {
+				await writeFile(join(PROPOSALS, name), "# tie\n", "utf8");
+				written.push(join(PROPOSALS, name));
+			}
+			for (const path of written) await utimes(path, at, at);
+			// The directory decides which of the two identical ages comes first; the
+			// broker takes that one, and a tie broken the other way is a different file.
+			const offered = (await readdir(PROPOSALS)).filter((entry) => entry.startsWith("tie-"));
+			const f = await publishFixture();
+			await f.write(`learn-1200${PUBLISH_SUFFIX}`, request());
+			const row = await publishOnce(f.deps);
+			assert.equal(row?.proposal, join(PROPOSALS, offered[0]));
+		} finally {
+			for (const path of written) await rm(path, { force: true });
+			for (const path of await readdir(PROPOSALS)) {
+				if (path.startsWith("tie-")) await rm(join(PROPOSALS, path), { force: true, recursive: true });
+			}
+		}
+	});
+
+	test("nothing in the queue is no publish and no claim, not a crash", async () => {
+		const f = await publishFixture();
+		assert.equal(await publishOnce(f.deps), null);
+		assert.equal(f.calls.length, 0);
+	});
+
+	test("a look that lost the claim race is retried until the window closes", async () => {
+		// A rename that cannot happen is a broker that lost to another one. The file is
+		// still claimed, so the answer is nothing — but nothing after the window, not
+		// nothing on the first look, or a broker that lost a race gives up on the queue.
+		const f = await publishFixture();
+		const lost = `learn-1210${PUBLISH_SUFFIX}`;
+		await f.write(lost, request({ slug: "learn-1210", branch: "learn/learn-1210", proposal: f.proposal }));
+		await mkdir(join(f.dir, `${lost}.claimed`));
+		const started = Date.now();
+		const row = await watchPublish({ ...f.deps, pollMs: 5, windowMs: 400 });
+		const elapsed = Date.now() - started;
+		assert.equal(row, null, "another broker holds that file, so there is nothing to report");
+		assert.ok(elapsed >= 300, `the watch waited out its window (${elapsed}ms), one look at a time`);
+	});
+
+	test("with no proposal anywhere, the script is asked for the slug and nothing else", async () => {
+		const f = await publishFixture();
+		const before = await readdir(PROPOSALS);
+		for (const entry of before) await rm(join(PROPOSALS, entry), { recursive: true, force: true });
+		try {
+			await f.write(`learn-1200${PUBLISH_SUFFIX}`, request());
+			const row = await publishOnce(f.deps);
+			assert.equal(row?.proposal, null);
+			assert.deepEqual(f.calls[0].argv.slice(1), ["learn-1200", "--repo", REPO], "no --proposal to point at");
+		} finally {
+			await writeFile(join(PROPOSALS, "restored.md"), "# restored\n", "utf8");
+		}
+	});
+
+	test("one drain publishes five files, not six, so a full queue cannot hold a session", async () => {
+		const f = await publishFixture();
+		for (let i = 0; i < 6; i += 1) {
+			const slug = `learn-12${String(i).padStart(2, "0")}`;
+			await f.write(`${slug}${PUBLISH_SUFFIX}`, request({ slug, branch: `learn/${slug}` }));
+		}
+		const rows = await drainPublishQueue(f.deps);
+		assert.equal(rows.length, 5, "the limit is five per drain");
+		assert.equal((await publishQueue(f.dir)).length, 1, "the sixth waits for the next drain");
+	});
+
+	test("a file already waiting is published on the first look", async () => {
+		const f = await publishFixture();
+		await f.write(`learn-1200${PUBLISH_SUFFIX}`, request({ proposal: f.proposal }));
+		const row = await watchPublish({ ...f.deps, pollMs: 5, windowMs: 100 });
+		assert.equal(row?.slug, "learn-1200", "the first look is not a look that is thrown away");
+	});
+
+	test("the watch waits five seconds between looks, not one millisecond", async () => {
+		// The bound, not a race: an empty queue and a window shorter than the beat means
+		// one look, one five-second wait, then out. A poll of a millisecond would spin
+		// through the window in a few hundred microseconds and return just as null.
+		const f = await publishFixture();
+		const started = Date.now();
+		const row = await watchPublish({ dir: f.dir, run: f.deps.run, record: f.deps.record, windowMs: 700 });
+		const elapsed = Date.now() - started;
+		assert.equal(row, null);
+		assert.equal(f.calls.length, 0);
+		assert.ok(elapsed >= 4_000, `the beat is ${PUBLISH_POLL_MS}ms, and this wait lasted ${elapsed}ms`);
+	});
 });
 
 describe("a request left by a learner that already finished", () => {
@@ -2161,6 +2434,295 @@ describe("a request left by a learner that already finished", () => {
 			if (before === undefined) delete process.env.PI_SELF_LEARN;
 			else process.env.PI_SELF_LEARN = before;
 			await rm(queue, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("a request left by a learner that already finished", () => {
+	// The half of the broker that does not ride a launch: the host session looks at
+	// the queue on start and once a minute while the person keeps typing, so a
+	// learner that took an hour still gets published.
+	let published: { argv: string[]; env: NodeJS.ProcessEnv }[] = [];
+
+	function setupWithBroker() {
+		published = [];
+		const started: any[] = [];
+		const fake = createFakePi();
+		selfLearn(fake.pi, {
+			launch: () => ({ ok: true, status: 0 }),
+			confirm: async () => ({ ok: true, source: "session" }),
+			closeSpace: async () => {},
+			countNotes: async () => 0,
+			has: () => true,
+			exists: () => true,
+			ciRuns: async () => ({ runs: [], warning: null }),
+			workspace: async () => ({ reports: [], decisions: [], present: false, warnings: [] }),
+			transcriptPath: () => null,
+			proposalExists: () => true,
+			outcomePollMs: 5,
+			outcomeTimeoutMs: 100,
+			publishWindowMs: 0,
+			publishRun: async (argv: string[], env: NodeJS.ProcessEnv) => {
+				published.push({ argv, env });
+				return { status: 0, stdout: "PR #7 exists", stderr: "" };
+			},
+			...started,
+		});
+		return { fake, started };
+	}
+
+	test("a queue file waiting at session start is published exactly once", async () => {
+		const queue = join(scratch, "proposals", "queue");
+		await mkdir(queue, { recursive: true });
+		const file = join(queue, `learn-09-09${PUBLISH_SUFFIX}`);
+		await writeFile(file, JSON.stringify({ slug: "learn-09-09", branch: "learn/learn-09-09", reason: "x" }), "utf8");
+
+		const { fake } = setupWithBroker();
+		const rows: any[] = [];
+		const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+		// The extension's own runs.jsonl appender is what records the row here.
+		await fake.emit("session_start", {}, ctx);
+		await new Promise((resolve) => setTimeout(resolve, 120));
+
+		assert.equal(published.length, 1, "one claim, one publish");
+		assert.equal(published[0].argv[1], "learn-09-09");
+		assert.equal(existsSync(file), false, "the claimed file is gone, not retried forever");
+		await rm(queue, { recursive: true, force: true });
+		void rows;
+	});
+
+	test("a learner's own session never claims the queue file", async () => {
+		const queue = join(scratch, "proposals", "queue");
+		await mkdir(queue, { recursive: true });
+		const file = join(queue, `learn-08-08${PUBLISH_SUFFIX}`);
+		await writeFile(file, JSON.stringify({ slug: "learn-08-08", branch: "learn/learn-08-08", reason: "x" }), "utf8");
+		const before = process.env.PI_SELF_LEARN;
+		process.env.PI_SELF_LEARN = "1";
+		try {
+			const { fake } = setupWithBroker();
+			const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+			await fake.emit("session_start", {}, ctx);
+			await new Promise((resolve) => setTimeout(resolve, 120));
+			assert.equal(published.length, 0, "a sandboxed broker would claim and fail it");
+			assert.equal(existsSync(file), true, "the file is left for the host");
+		} finally {
+			if (before === undefined) delete process.env.PI_SELF_LEARN;
+			else process.env.PI_SELF_LEARN = before;
+			await rm(queue, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("the publish queue on disk", () => {
+	test("only the suffix the broker scans for is a queue file, and the list is ordered", async () => {
+		const dir = await mkdtemp(join(scratch, "queue-"));
+		try {
+			// Written in reverse, so a listing that just hands back the directory order
+			// is not the same list as the broker's.
+			await writeFile(join(dir, `c${PUBLISH_SUFFIX}`), "{}", "utf8");
+			await writeFile(join(dir, `b${PUBLISH_SUFFIX}`), "{}", "utf8");
+			await writeFile(join(dir, `a${PUBLISH_SUFFIX}`), "{}", "utf8");
+			await writeFile(join(dir, "notes.md"), "x", "utf8");
+			await writeFile(join(dir, `c${PUBLISH_SUFFIX}.claimed`), "x", "utf8");
+			await mkdir(join(dir, `d${PUBLISH_SUFFIX}`));
+			assert.deepEqual(await publishQueue(dir), [
+				join(dir, `a${PUBLISH_SUFFIX}`),
+				join(dir, `b${PUBLISH_SUFFIX}`),
+				join(dir, `c${PUBLISH_SUFFIX}`),
+			], "the queue files, in name order, whatever order the directory is in");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a queue directory that is not there is empty, not an error", async () => {
+		assert.deepEqual(await publishQueue(join(scratch, "no-such-queue")), []);
+	});
+});
+
+describe("the broker's bounds", () => {
+	test("a command is run with its own cwd, both streams captured, and nothing to read on stdin", async () => {
+		// The spawn this pins is the one that runs learn-publish.sh: no cwd and no pipes
+		// would still exit 0 and report nothing, which reads exactly like a publish.
+		const script = [
+			"const fs=require('node:fs')",
+			"process.stdout.write(process.cwd()+'|'+fs.fstatSync(0).isFIFO())",
+			"process.stderr.write('why it failed')",
+			"process.exit(3)",
+		].join(";");
+		const result = await runOnce([process.execPath, "-e", script], scratch, 10_000);
+		assert.equal(result.status, 3, "the child's own exit code is the answer");
+		assert.equal(result.stdout, `${scratch}|false`, "its cwd is what it was handed, stdout is read, and stdin is /dev/null, not a pipe nobody closes");
+		assert.match(result.stderr, /why it failed/, "and stderr is kept, not dropped");
+	});
+
+	test("a command gets the environment it was handed, not the session's own", async () => {
+		const result = await runOnce(
+			[process.execPath, "-e", "process.stdout.write(`${process.env.PI_LEARN_BROKER}|${process.env.HOST_ONLY}`)"],
+			scratch,
+			10_000,
+			{ PI_LEARN_BROKER: "1" },
+		);
+		assert.equal(result.stdout, "1|undefined", "one variable in, and the host's own environment out");
+	});
+
+	test("a command that cannot be started is null, not a crash", async () => {
+		const result = await runOnce([join(scratch, "no-such-binary")], scratch, 10_000);
+		assert.equal(typeof result.status === "number" ? "number" : "null", "null");
+		assert.notEqual(String(result.stderr), "", "and it says why");
+	});
+});
+
+describe("the host session's half of the broker", () => {
+	function hostOnly(over: Record<string, unknown> = {}) {
+		const fake = createFakePi();
+		selfLearn(fake.pi, {
+			launch: () => ({ ok: true, status: 0 }),
+			confirm: async () => ({ ok: true, source: "session" }),
+			closeSpace: async () => {},
+			countNotes: async () => 0,
+			has: () => true,
+			exists: () => true,
+			ciRuns: async () => ({ runs: [], warning: null }),
+			workspace: async () => ({ reports: [], decisions: [], present: false, warnings: [] }),
+			transcriptPath: () => null,
+			proposalExists: () => true,
+			outcomePollMs: 5,
+			outcomeTimeoutMs: 100,
+			publishWindowMs: 0,
+			...over,
+		});
+		const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+		return { fake, ctx };
+	}
+
+	const queueDir = () => join(scratch, "proposals", "queue");
+	const runsLog = () => join(scratch, "proposals", "runs.jsonl");
+
+	async function refusedFile(slug: string): Promise<string> {
+		await mkdir(queueDir(), { recursive: true });
+		const file = join(queueDir(), `${slug}${PUBLISH_SUFFIX}`);
+		await writeFile(file, "{not json", "utf8");
+		return file;
+	}
+
+	test("the first turn of a host session drains the queue, and the next one does not", async () => {
+		const first = await refusedFile("learn-06-06");
+		const { fake, ctx } = hostOnly();
+		try {
+			await fake.emit("before_agent_start", {}, ctx);
+			await waitFor(() => !existsSync(first));
+			const rows = (await readFile(runsLog(), "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+			const refused = rows.filter((row) => row.kind === "publish" && row.slug === "learn-06-06");
+			assert.equal(refused.length, 1, "the row lands in runs.jsonl, not in the void");
+			assert.equal(refused[0].slug, "learn-06-06");
+			assert.equal(refused[0].publish, "refused");
+
+			const second = await refusedFile("learn-06-07");
+			await fake.emit("before_agent_start", {}, ctx);
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			assert.equal(existsSync(second), true, "one look a minute is enough; a turn is not a reason to look");
+			await rm(second, { force: true });
+		} finally {
+			await rm(queueDir(), { recursive: true, force: true });
+		}
+	});
+
+	test("a learner's own session never drains the queue it writes into", async () => {
+		const file = await refusedFile("learn-05-05");
+		const before = process.env.PI_SELF_LEARN;
+		process.env.PI_SELF_LEARN = "1";
+		try {
+			const { fake, ctx } = hostOnly();
+			await fake.emit("before_agent_start", {}, ctx);
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			assert.equal(existsSync(file), true, "a sandboxed broker would claim the file and fail it");
+		} finally {
+			if (before === undefined) delete process.env.PI_SELF_LEARN;
+			else process.env.PI_SELF_LEARN = before;
+			await rm(queueDir(), { recursive: true, force: true });
+		}
+	});
+});
+
+describe("a launch that ends in a request is published", () => {
+	const boom = { isError: true, toolName: "bash", content: "command not found: zizmor" };
+	function launching(over: Record<string, unknown> = {}) {
+		const clock = NOW + 20 * 60_000;
+		const published: { argv: string[]; env: NodeJS.ProcessEnv }[] = [];
+		const fake = createFakePi();
+		selfLearn(fake.pi, {
+			launch: () => ({ ok: true, status: 0 }),
+			confirm: async () => ({ ok: true, source: "session" }),
+			closeSpace: async () => {},
+			countNotes: async () => 0,
+			has: () => true,
+			exists: () => true,
+			now: () => clock,
+			proposalExists: () => true,
+			ciRuns: async () => ({ runs: [], warning: null }),
+			workspace: async () => ({ reports: [], decisions: [], present: false, warnings: [] }),
+			transcriptPath: () => null,
+			outcomePollMs: 5,
+			outcomeTimeoutMs: 100,
+			publishPollMs: 5,
+			publishWindowMs: 500,
+			publishRun: async (argv: string[], env: NodeJS.ProcessEnv) => {
+				published.push({ argv, env });
+				return { status: 0, stdout: "PR exists", stderr: "" };
+			},
+			...over,
+		});
+		const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+		return { fake, ctx, published };
+	}
+
+	async function queueRequest(slug: string): Promise<string> {
+		const queue = join(scratch, "proposals", "queue");
+		await mkdir(queue, { recursive: true });
+		const file = join(queue, `${slug}${PUBLISH_SUFFIX}`);
+		await writeFile(file, JSON.stringify({ slug, branch: `learn/${slug}`, reason: "the fix is ready" }), "utf8");
+		return file;
+	}
+
+	test("a learner that wrote its proposal has its waiting request published", async () => {
+		const file = await queueRequest("learn-04-04");
+		const { fake, ctx, published } = launching();
+		try {
+			await fake.emit("tool_result", boom, ctx);
+			await fake.emit("tool_result", boom, ctx);
+			await fake.emit("session_compact", { reason: "threshold" }, ctx);
+			await waitFor(() => published.length === 1);
+			assert.equal(published[0].argv[1], "learn-04-04");
+			assert.equal(existsSync(file), false, "claimed once, published once");
+		} finally {
+			await rm(join(scratch, "proposals", "queue"), { recursive: true, force: true });
+		}
+	});
+
+	test("a learner that died is not a reason to publish the request it never made", async () => {
+		// A request on the queue and no proposal is a learner that did not finish; the
+		// broker waits for the next run instead of publishing a branch nobody wrote.
+		const file = await queueRequest("learn-03-03");
+		let launched = 0;
+		const { fake, ctx, published } = launching({
+			now: () => NOW + 90 * 60_000,
+			proposalExists: () => false,
+			launch: () => {
+				launched += 1;
+				return { ok: true, status: 0 };
+			},
+		});
+		try {
+			await fake.emit("tool_result", boom, ctx);
+			await fake.emit("tool_result", boom, ctx);
+			await fake.emit("session_compact", { reason: "threshold" }, ctx);
+			await new Promise((resolve) => setTimeout(resolve, 700));
+			assert.equal(launched, 1, "the learner started, so this is a death and not a missing launch");
+			assert.equal(published.length, 0, "the proposal is the learner's product, not the request");
+			assert.equal(existsSync(file), true, "so the file stays for the next run");
+		} finally {
+			await rm(join(scratch, "proposals", "queue"), { recursive: true, force: true });
 		}
 	});
 });
