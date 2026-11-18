@@ -115,11 +115,7 @@ jobs:
   # killed by the 25-minute budget below at 65% and 68%. A few hunks are a few
   # dozen mutants. `scripts/mutate-changed.sh` derives the ranges, and the range
   # rule has its own tests, so what is mutated here is decided where it is
-  # checked. break 100 makes one surviving mutant fail the PR, and the verdict
-  # never comes from a cached run: stryker 10.1.1 spells "ignore the incremental
-  # file" `--force` (`--incremental false` is not a flag — it is read as a config
-  # path and dies with `ConfigReaderError: Invalid config file "false"`), and the
-  # derived config below sets `incremental: false` outright. Radar Vol. 35, blip 2.
+  # checked. break 100 makes one surviving mutant fail the PR.
   mutation-changed:
     name: mutation on changed files (stryker)
     runs-on: ubuntu-latest
@@ -135,6 +131,16 @@ jobs:
     # covers that worst case with 32% headroom, so a legitimate large diff
     # finishes instead of being cancelled mid-run, while a wedged mutant still
     # dies by the cap rather than by the runner's 6-hour default.
+    #
+    # A gate that runs too long is theater; a cap that reports is a budget. The
+    # budget here is 200 mutants — 200 x 7.45 / 4 workers is about six minutes of
+    # mutants on top of the install and the initial test run — and it is chosen
+    # deterministically, file then line, so the same diff always tests the same
+    # 200 and two pushes of it stay comparable. What the cap defers is not
+    # forgotten: it is printed into the job summary and it is what the weekly
+    # `mutation` job (uncapped, break null, its own cache) sweeps in full.
+    # --cap lives in scripts/mutate-changed.sh, next to the range rule it spends;
+    # --cap 0 means no cap, which is why the weekly path passes nothing at all.
     timeout-minutes: 60
     defaults:
       run:
@@ -199,15 +205,46 @@ jobs:
         if: steps.changed.outputs.skip != 'true'
         run: npm ci
 
+      # The wall time is the mutants, not the checkout: 710 of them cost 25m18s,
+      # and a re-push on the same base asks about the same mutants again. Stryker
+      # keeps their verdicts in an incremental report, and until now this job
+      # threw it away (the derived config below set `incremental: false`, because
+      # 10.1.1 has no CLI flag for it — `--incremental false` is read as a config
+      # path and dies with `ConfigReaderError: Invalid config file "false"`, and
+      # `--force` skips the file instead of trusting it). Persisting it is only
+      # sound if the key changes whenever anything that decides a verdict does:
+      #
+      #   * every TypeScript file under agent/extensions, tests included. The
+      #     command runner reports no per-test coverage, so stryker's own reuse
+      #     rule degenerates to "same mutant, same result" — a weakened test would
+      #     inherit a cache that predates it. Hashing the whole tree is what makes
+      #     a changed test a cache miss instead of a stale Killed.
+      #   * stryker.conf.json and the lockfile: a new stryker, timeout or mutator
+      #     set is a different verdict on the same code.
+      #   * the base sha, last, so a base move still restores through the
+      #     restore-key prefix; reuse is by mutant identity, which a base move
+      #     does not touch.
+      #
+      # The weekly `mutation` job has its own cache and its own key; that path is
+      # never capped and never inherits this one.
+      - name: restore incremental state
+        if: steps.changed.outputs.skip != 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: agent/reports/stryker/stryker-incremental.json
+          key: stryker-pr-${{ hashFiles('agent/extensions/**/*.ts') }}-${{ hashFiles('agent/stryker.conf.json', 'agent/package-lock.json', '.node-version') }}-${{ github.event.pull_request.base.sha }}
+          restore-keys: |
+            stryker-pr-${{ hashFiles('agent/extensions/**/*.ts') }}-${{ hashFiles('agent/stryker.conf.json', 'agent/package-lock.json', '.node-version') }}-
+
       # stryker 10's CLI has no --thresholds flag (it rejects
-      # --thresholds.break) and no boolean `--incremental` value to switch off
-      # (10.1.1 reads `--incremental false` as a config path and exits with
-      # `Invalid config file "false"`; `--force` skips the cached file but
-      # cannot express break 100), so the PR verdict is built from the weekly
-      # config with two keys changed: incremental off, so a PR never inherits a
-      # cached run, and break 100, so one surviving mutant fails the job.
-      # Derived, not copied: the two configs cannot drift.
-      - name: pr mutation config (break 100, no incremental)
+      # --thresholds.break) and no boolean `--incremental` value at all, so the PR
+      # verdict is built from the weekly config with two keys changed: break 100,
+      # so one surviving mutant fails the job, and its own report paths, so a
+      # capped PR run never overwrites the weekly run's report. `incremental`
+      # stays on — that is the cache above — and it is keyed so that nothing which
+      # decides a mutant's verdict can be older than the cache. Derived, not
+      # copied: the two configs cannot drift.
+      - name: pr mutation config (break 100, cache-friendly)
         if: steps.changed.outputs.skip != 'true'
         run: |
           set -euo pipefail
@@ -216,36 +253,86 @@ jobs:
             const base = JSON.parse(readFileSync("stryker.conf.json", "utf8"));
             writeFileSync("stryker.pr.conf.json", JSON.stringify({
               ...base,
-              incremental: false,
               thresholds: { ...base.thresholds, break: 100 },
               htmlReporter: { fileName: "reports/stryker-pr/mutation.html" },
               jsonReporter: { fileName: "reports/stryker-pr/mutation.json" },
             }, null, 2) + "\n");
           '
 
-      - name: stryker on exactly the added lines
+      # A silent cap is a lie, so the cap is a step with an output, not a flag
+      # buried in a command line: what it kept goes to stryker, what it deferred
+      # goes into the job summary where the reviewer reads the verdict.
+      - name: budget the run (200 mutants, the rest to the weekly job)
+        id: budget
         if: steps.changed.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          capped="$(bash ../scripts/mutate-changed.sh --base origin/trunk --cap 200 --list-only 2>budget.txt)"
+          cat budget.txt
+          cat budget.txt >>"$GITHUB_STEP_SUMMARY"
+
+          if [[ -z $capped ]]; then
+            # The changed lines hold no mutant at all (a comment-only hunk, say).
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            echo "mutation on changed files: no mutant on the changed lines, nothing to run"
+            exit 0
+          fi
+
+          echo "skip=false" >>"$GITHUB_OUTPUT"
+          {
+            echo "files<<MUTATE_EOF"
+            printf '%s\n' "$capped"
+            echo "MUTATE_EOF"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: stryker on exactly the added lines
+        if: steps.changed.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
         env:
           # Passed through env, never expanded into the script: paths and ranges
           # derived from untrusted file names stay quoted values (blip 38).
-          MUTATE_FILES: ${{ steps.changed.outputs.files }}
+          MUTATE_FILES: ${{ steps.budget.outputs.files }}
         run: |
           set -euo pipefail
-          args=()
-          while IFS= read -r file; do
-            if [[ -n $file ]]; then args+=(--mutate "$file"); fi
-          done <<<"$MUTATE_FILES"
-          printf 'mutating: %s\n' "${args[*]}"
+          # One --mutate value, comma separated. stryker 10.1.1's CLI splits it on
+          # commas and keeps only the LAST --mutate it is given: measured here,
+          # three ranges in three flags mutated only the third range (7 mutants,
+          # not the 20 the ranges hold). Repeating the flag would silently narrow
+          # the gate to one hunk per push.
+          mutate="$(printf '%s' "$MUTATE_FILES" | paste -sd, -)"
+          printf 'mutating: %s\n' "$mutate"
           # --concurrency 8 on a 4-core runner, measured, not assumed: 80
           # mutants on lib/usage-format.ts under `taskset -c 0-3` (the runner's
           # 4 vCPUs) took 109s at stryker's default 4 workers and 83s at 8, a
           # 24% cut, because each worker spends most of a mutant waiting on its
           # own `node --test` child processes rather than computing. 12 workers
           # only reached 75s (10% more) at double the memory, so 8 is the knee.
-          npx stryker run stryker.pr.conf.json --concurrency 8 "${args[@]}"
+          npx stryker run stryker.pr.conf.json --concurrency 8 --mutate "$mutate"
+
+      # The budget line above counts mutants the enumerator found; this counts the
+      # ones stryker actually ran. They can differ by a mutant or two — a block
+      # statement that starts on a selected line and ends past the range's last
+      # line is clipped out of the run (measured: 20 enumerated, 18 tested) — so
+      # both numbers go in the summary and neither stands in for the other.
+      - name: what stryker actually ran
+        if: always() && steps.budget.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          if [[ ! -f reports/stryker-pr/mutation.json ]]; then
+            echo "mutation: no report, the run did not finish — see the artifact" >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const report = JSON.parse(readFileSync("reports/stryker-pr/mutation.json", "utf8"));
+            const mutants = Object.values(report.files).flatMap((file) => file.mutants);
+            const byStatus = {};
+            for (const mutant of mutants) byStatus[mutant.status] = (byStatus[mutant.status] ?? 0) + 1;
+            const parts = Object.entries(byStatus).map(([status, n]) => `${n} ${status.toLowerCase()}`);
+            console.log(`mutation: stryker ran ${mutants.length} mutant(s): ${parts.join(", ") || "none"}`);
+          ' >>"$GITHUB_STEP_SUMMARY"
 
       - name: keep the report
-        if: always() && steps.changed.outputs.skip != 'true'
+        if: always() && steps.changed.outputs.skip != 'true' && steps.budget.outputs.skip != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stryker-report-changed
