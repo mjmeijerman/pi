@@ -9,7 +9,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { after, beforeEach, describe, test } from "node:test";
-import { createFakeCtx, createFakePi, waitFor, whenChildrenIdle } from "./helpers/fake-pi.ts";
+import { createFakeCtx, createFakePi, whenChildrenIdle } from "./helpers/fake-pi.ts";
 
 const root = mkdtempSync(join(tmpdir(), "pi-desktop-notify-"));
 const binDir = join(root, "bin");
@@ -67,11 +67,20 @@ function recordedCalls(): string[][] {
 		.map((line) => line.split("\u001f"));
 }
 
+/**
+ * The calls the child made, once it is gone.
+ *
+ * Waiting for the child is stronger than waiting for the clock, and the clock deadline is
+ * the thing that was load-sensitive: a fake `gdbus` is a real fork, and under 96 concurrent
+ * suites the fork alone was measured past 3.2 s, so `waitFor`'s 3 s threw on a test whose
+ * code was right. `whenChildrenIdle` returns as soon as the child is reaped — on an idle box
+ * that is milliseconds — and the budget is only spent when something really is stuck.
+ */
 async function calls(expected = 1): Promise<string[][]> {
-	return await waitFor(() => {
-		const recorded = recordedCalls();
-		return recorded.length >= expected ? recorded : undefined;
-	});
+	await whenChildrenIdle(6000);
+	const recorded = recordedCalls();
+	assert.ok(recorded.length >= expected, `expected ${expected} gdbus call(s), recorded ${recorded.length}`);
+	return recorded;
 }
 
 describe("agent_settled", () => {
@@ -106,7 +115,7 @@ describe("agent_settled", () => {
 		// The handler dispatches synchronously, so anything it started is a live child
 		// process by now. Waiting for children to exit is what makes the empty log
 		// final: no child, no more bytes.
-		await whenChildrenIdle();
+		await whenChildrenIdle(6000);
 		assert.equal(readFileSync(logFile, "utf8"), "");
 	});
 

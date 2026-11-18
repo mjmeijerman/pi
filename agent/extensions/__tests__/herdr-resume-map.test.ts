@@ -124,13 +124,25 @@ test("a sandboxed worker records the wrapper, the flags and the labels", async (
 	writeFileSync(argv[1], "");
 	process.argv = argv;
 
-	const mod = await load();
-	const fake = createFakePi();
-	mod.default(fake.pi);
 	const sessionPath = join(root, "sessions", "b.jsonl");
-	await fake.emit("session_start", { reason: "startup" }, ctxFor(sessionPath));
+	const attempt = async () => {
+		rmSync(entries, { recursive: true, force: true });
+		mkdirSync(entries, { recursive: true });
+		const mod = await load();
+		const fake = createFakePi();
+		mod.default(fake.pi);
+		await fake.emit("session_start", { reason: "startup" }, ctxFor(sessionPath));
+		return onlyEntry();
+	};
 
-	const entry = onlyEntry();
+	// `hc get` is a real fork and readTerminalFacts gives it 2000 ms before it gives up on
+	// the labels — by design, because a missing label must never cost the session. On a box
+	// running 31 stryker workers the fork alone can queue past 2 s, so the entry lands
+	// without `space`/`tab` and the assertion reads as a code fault. Ask again until `hc`
+	// answered inside its own budget: a path that never asks `hc`, or loses the labels it
+	// gets, fails every attempt. The per-attempt entry assertions are unchanged.
+	let entry = await attempt();
+	for (let tries = 0; entry.space === undefined && tries < 2; tries++) entry = await attempt();
 	assert.equal(entry.terminal, terminal);
 	assert.equal(entry.session_path, sessionPath);
 	assert.equal(entry.session_id, "session-1");
@@ -140,7 +152,7 @@ test("a sandboxed worker records the wrapper, the flags and the labels", async (
 	assert.equal(entry.wrapper, join(home, "big-boss-pi/bin/pi-sandboxed"));
 	assert.equal(entry.model, "claude-x");
 	assert.equal(entry.thinking, "high");
-	assert.equal(entry.space, "big-boss-pi");
+	assert.equal(entry.space, "big-boss-pi", "hc answered inside its 2000 ms budget at least once");
 	assert.equal(entry.tab, "worker");
 	assert.equal(typeof entry.boot_id, "string");
 	assert.equal(entry.version, 1);
