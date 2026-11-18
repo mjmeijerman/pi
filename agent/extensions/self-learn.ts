@@ -78,6 +78,8 @@ const PUBLISH_SCRIPT = join(REPO, "scripts", "learn-publish.sh");
  * learn-publish.sh, and a sandboxed learner cannot reach herdr-app anyway.
  */
 export const PUBLISH_SUFFIX = ".publish.json";
+/** How a learner names its own proposal file when it forgets the absolute path. */
+export const PROPOSAL_RELATIVE_PREFIX = "agent/proposals/";
 /**
  * A publish is a spawn plus a `gh` call, so it is bounded like one: a hand-off
  * that never returns must not hold the broker forever.
@@ -465,10 +467,22 @@ export function parsePublishRequest(raw: string): PublishParse {
 	let proposal: string | undefined;
 	if (typeof object.proposal === "string" && object.proposal.trim()) {
 		const path = object.proposal.trim();
-		if (!path.startsWith(`${PROPOSAL_DIR}/`) || path.split("/").includes("..")) {
-			return { ok: false, why: `proposal is not a file under ${PROPOSAL_DIR}: ${path}` };
+		// A learner often names the file the way `git status` does —
+		// `agent/proposals/<date>-<slug>.md` — and that is the same file as the
+		// absolute path the queue file handed it. Resolving the relative form here,
+		// instead of refusing it: a refusal is silent (one `publish: "refused"` row
+		// in runs.jsonl and nothing else), so on 2026-11-18 `learn-19-12` lost the
+		// branch that ends the sandboxed-spawn death loop to a shortened path.
+		const resolved = path.startsWith(PROPOSAL_RELATIVE_PREFIX)
+			? join(PROPOSAL_DIR, path.slice(PROPOSAL_RELATIVE_PREFIX.length))
+			: path;
+		if (!resolved.startsWith(`${PROPOSAL_DIR}/`) || path.split("/").includes("..")) {
+			return {
+				ok: false,
+				why: `proposal is not a file under ${PROPOSAL_DIR} (absolute, or ${PROPOSAL_RELATIVE_PREFIX}<file>): ${path}`,
+			};
 		}
-		proposal = path;
+		proposal = resolved;
 	}
 	return { ok: true, request: proposal ? { slug, branch, reason, proposal } : { slug, branch, reason } };
 }
