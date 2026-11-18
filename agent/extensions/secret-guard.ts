@@ -377,8 +377,11 @@ function leaksSecretFile(command: string): boolean {
 		const words = shellWords(line);
 		// A redirect target is written, not read, and a credential file written by
 		// the shell is the same leak as one read: `cat > config/prod.env <<'EOF'`.
+		// The operator may carry a stream number (`2>`, `1>>`), and `&>` arrives
+		// here already split by the `&` segment separator, so the number is the
+		// only prefix this word can still hold.
 		for (let i = 1; i < words.length; i++) {
-			if (/^>>?$/.test(words[i - 1].text) && secretPathWord(words[i])) return true;
+			if (/^\d*>>?$/.test(words[i - 1].text) && secretPathWord(words[i])) return true;
 		}
 		const cmd = segmentVerb(words);
 		if (!cmd) continue;
