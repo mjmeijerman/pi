@@ -8,16 +8,35 @@
 # with `show` (borrows the current pane in place), put the screen back with
 # `hide`.
 #
-#   agent-pane.sh spawn <slug> <spec.md> [--cwd DIR]
+# Two kinds of worker, and the difference is on purpose:
+#
+#   spawn SLUG SPEC                 hidden: no space, no herdr label, focus cannot move.
+#                                   This is the delegation path (learn-publish.sh): the
+#                                   person asked for that work, they do not want the view
+#                                   taken away from them.
+#   spawn SLUG SPEC --visible       its own space and tab in the agents pane, which the
+#                                   person can find in `list`, watch with `show` and end
+#                                   with `close`. The self-learn learner uses this: an
+#                                   agent nobody can see is an agent nobody can stop.
+#
+# `--sandbox` runs the pi inside through scripts/pisandbox (no ssh keys, no cloud creds,
+# network on) with the working directory readable and writable. The host creates the
+# space, the sandbox runs the work — the same split bin/delegate uses, where the space
+# is made by the unsandboxed host and bin/pi-sandboxed runs the worker. A sandboxed
+# process cannot make a space (herdr-app lives outside every sandbox mount), so the
+# creation half must stay here, on the host.
+#
+#   agent-pane.sh spawn <slug> <spec.md> [--cwd DIR] [--visible] [--sandbox] [--env K=V]...
 #   agent-pane.sh show <slug|terminal>
 #   agent-pane.sh hide <slug|terminal>
 #   agent-pane.sh close <slug|terminal> [--pane]
 #   agent-pane.sh list
 #
-# State (slug → terminal, borrowed pane) lives in ~/.pi/scripts/.agent-panes.json.
+# State (slug → terminal, space, borrowed pane) lives in ~/.pi/scripts/.agent-panes.json.
 set -euo pipefail
 
 PI_BIN=${PI_BIN:-/home/mark/.local/share/pnpm/bin/pi}
+PISANDBOX=${PISANDBOX:-$HOME/.pi/scripts/pisandbox}
 STATE=${STATE:-$HOME/.pi/scripts/.agent-panes.json}
 PROG=${0##*/}
 
@@ -44,32 +63,80 @@ resolve() {
 		process.stdout.write((e.terminal||"")+" "+(e.borrowed||""));' "$STATE" "$want"
 }
 
+# The command line the new space or terminal runs: cd, then any --env pairs, then the
+# runner. Built here rather than by the caller so a sandboxed worker cannot be started
+# unsandboxed by a caller that forgot the wrapper, and so the env a learner needs
+# (PI_SELF_LEARN=1 and friends) survives into a process that does not inherit it —
+# herdr starts the space from the app's environment, not from this shell's.
+runner_line() {
+	local dir=$1 sandboxed=$2 line e
+	line="cd $(printf '%q' "$dir")"
+	for e in "${envs[@]+${envs[@]}}"; do
+		line="$line; export $(printf '%q' "$e")"
+	done
+	if [ "$sandboxed" = 1 ]; then
+		line="$line; exec $(printf '%q' "$PISANDBOX") --rw $(printf '%q' "$dir") -- $(printf '%q' "$PI_BIN") -a"
+	else
+		line="$line; exec $(printf '%q' "$PI_BIN") -a"
+	fi
+	printf '%s' "$line"
+}
+
 cmd_spawn() {
 	mkdir -p "$(dirname "$STATE")"
 	local slug=${1:?usage: spawn <slug> <spec.md>}; local spec=${2:?usage: spawn <slug> <spec.md>}
-	local workdir=""
+	local workdir="" visible=0 sandboxed=0
+	envs=()
 	shift 2
 	while [ "$#" -gt 0 ]; do
 		case $1 in
 		--cwd) workdir=${2:?}; shift 2 ;;
+		--visible) visible=1; shift ;;
+		--sandbox) sandboxed=1; shift ;;
+		--env) envs+=("${2:?--env needs KEY=VAL}"); shift 2 ;;
 		*) die "unknown option $1" ;;
 		esac
 	done
 	[ -f "$spec" ] || die "spec not found: $spec"
 	need hc
+	# herdr-app is the host's own app, and it is the one thing a sandbox does not mount.
+	# Requiring it on both paths is what turns "a worker started somewhere inside a
+	# sandbox and nobody noticed" into a line the caller has to read: a process that
+	# cannot see herdr-app is not on the host, so the space it thinks it made belongs
+	# to a herdr of its own.
+	need herdr-app
+	if [ "$sandboxed" = 1 ] && [ ! -x "$PISANDBOX" ]; then die "$PISANDBOX not found — cannot start a sandboxed worker"; fi
 	local spawn_dir
 	spawn_dir=${workdir:-$(cd "$(dirname "$spec")" && pwd)}
 	# hc names are 1-32 of a-z 0-9 - _ ; keep the slug usable as both.
 	local name
 	name=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-' | cut -c1-32)
 
-	# Hidden on purpose: no herdr.space / herdr.tab label, so the window shows
-	# nothing and focus cannot move. --outlive-parent keeps the worker alive
-	# when this agent's turn ends.
-	local out terminal
-	out=$(hc run --bg --json --name "$name" --cwd "$spawn_dir" --no-notify --outlive-parent -- "$PI_BIN" -a 2>&1) \
-		|| die "hc run failed: $out"
-	terminal=$(printf '%s' "$out" | json_get address)
+	local out terminal="" space=""
+	if [ "$visible" = 1 ]; then
+		# Visible on purpose: a real space and tab, so the person finds the worker in the
+		# agents pane, can watch it and can end it. space.new has no hidden mode, so this
+		# is the path that cannot lie about existing.
+		local argv
+		argv=$(node -e 'process.stdout.write(JSON.stringify(["sh","-lc",process.argv[1]]))' \
+			"$(runner_line "$spawn_dir" "$sandboxed")")
+		out=$(herdr-app do space.new --name "$name" --folder "$spawn_dir" --tab "$name" \
+			--argv "$argv" --task "Read $spec and do it" 2>&1) \
+			|| die "space.new failed for $name: $out"
+		space=$(printf '%s' "$out" | json_get space)
+		[ -n "$space" ] || space=$(printf '%s' "$out" | json_get result.space)
+		terminal=$(printf '%s' "$out" | json_get terminal)
+		[ -n "$terminal" ] || terminal=$(printf '%s' "$out" | json_get result.terminal)
+		[ -n "$space" ] || die "space.new made no space: $out"
+	else
+		# Hidden on purpose: no herdr.space / herdr.tab label, so the window shows
+		# nothing and focus cannot move. --outlive-parent keeps the worker alive
+		# when this agent's turn ends.
+		out=$(hc run --bg --json --name "$name" --cwd "$spawn_dir" --no-notify --outlive-parent \
+			-- sh -lc "$(runner_line "$spawn_dir" "$sandboxed")" 2>&1) \
+			|| die "hc run failed: $out"
+		terminal=$(printf '%s' "$out" | json_get address)
+	fi
 	[ -n "$terminal" ] || die "could not read terminal from: $out"
 
 	# Wait for pi's banner before sending; a send to a booting agent can be dropped.
@@ -83,10 +150,19 @@ cmd_spawn() {
 
 	state_write "$(node -e '
 		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
-		j[process.argv[2]]={terminal:process.argv[3],spec:process.argv[4],ts:new Date().toISOString()};
-		process.stdout.write(JSON.stringify(j,null,2));' "$STATE" "$slug" "$terminal" "$spec")"
+		j[process.argv[2]]={terminal:process.argv[3],space:process.argv[4]||null,spec:process.argv[5],
+			hidden:process.argv[6]!=="1",sandboxed:process.argv[7]==="1",ts:new Date().toISOString()};
+		process.stdout.write(JSON.stringify(j,null,2));' "$STATE" "$slug" "$terminal" "$space" "$spec" "$visible" "$sandboxed")"
 
-	printf '{"slug":"%s","terminal":"%s","spec":"%s","hidden":true}\n' "$slug" "$terminal" "$spec"
+	# One JSON line, read by callers as the proof a worker exists: the terminal and the
+	# space are named, and `hidden` says which of the two paths made it.
+	if [ "$visible" = 1 ]; then
+		printf '{"slug":"%s","terminal":"%s","space":"%s","spec":"%s","hidden":false,"sandboxed":%s}\n' \
+			"$slug" "$terminal" "$space" "$spec" "$([ "$sandboxed" = 1 ] && echo true || echo false)"
+	else
+		printf '{"slug":"%s","terminal":"%s","spec":"%s","hidden":true,"sandboxed":%s}\n' \
+			"$slug" "$terminal" "$spec" "$([ "$sandboxed" = 1 ] && echo true || echo false)"
+	fi
 }
 
 # Borrow the focused pane for a look: the pane's own terminal stays alive and
@@ -149,10 +225,19 @@ cmd_close() {
 		const e=j[process.argv[2]]||{};process.stdout.write(e.pane||"");' "$STATE" "$target" 2>/dev/null || true)
 
 	# If the worker is on screen in a borrowed pane, put the pane back first.
-	local borrowed
+	local borrowed space
 	borrowed=${resolved#* }
 	if [ -n "$borrowed" ]; then herdr-app do terminal.show --pane "$borrowed" >/dev/null 2>&1 || true; fi
 	if [ "$want_pane" = 1 ] && [ -n "$pane" ]; then herdr-app do pane.close --pane "$pane" >/dev/null 2>&1 || true; fi
+	# A visible worker owns a space; close that too, or the pane keeps an empty one.
+	# Best effort and never fatal: a close that half-works must not fail a caller's
+	# last step, and a sandboxed learner cannot reach herdr-app at all.
+	space=$(node -e '
+		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+		const e=j[process.argv[2]]||{};process.stdout.write(e.space||"");' "$STATE" "$target" 2>/dev/null || true)
+	if [ -n "$space" ] && command -v herdr-app >/dev/null 2>&1; then
+		herdr-app do space.close --id "$space" --confirmed true >/dev/null 2>&1 || true
+	fi
 	[ -n "$terminal" ] && hc kill "$terminal" >/dev/null 2>&1 || true
 	[ -n "$terminal" ] && hc rm "$terminal" >/dev/null 2>&1 || true
 	state_write "$(node -e '

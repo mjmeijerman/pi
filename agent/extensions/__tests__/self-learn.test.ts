@@ -28,7 +28,8 @@ const {
 	redact,
 	pickLauncher,
 	paneTerminal,
-	withSelfClose,
+	paneLaunch,
+	verifyLaunch,
 	clipDetail,
 	turnSession,
 	ciFailuresFrom,
@@ -168,11 +169,29 @@ describe("pickLauncher", () => {
 	const slug = "learn-1200";
 	const queue = "/tmp/queue.md";
 
-	test("herdr pane when herdr is running", () => {
+	test("one visible space, and the pi inside it runs sandboxed", () => {
 		// Injected probes: CI has no ~/.pi, and the choice must not depend on it.
 		const launcher = pickLauncher(() => true, slug, queue, () => true);
 		assert.equal(launcher.kind, "pane");
 		assert.match(launcher.argv[0], /agent-pane\.sh$/);
+		assert.match(launcher.argv[1], /^spawn$/);
+		assert.ok(launcher.argv.includes("--visible"), "it must appear in the agents pane");
+		assert.ok(launcher.argv.includes("--sandbox"), "the pi inside it must run through the sandbox");
+		assert.equal(launcher.missing, undefined);
+	});
+
+	test("there is no headless or detached runner left to fall back to", () => {
+		// The old fallback was `pisandbox -- pi -p` (or plain `pi -p`), detached, and it
+		// looked like a sub-agent of the host session for seven launches in a row.
+		for (const has of [() => true, () => false]) {
+			for (const exists of [() => true, () => false]) {
+				const launcher = pickLauncher(has, slug, queue, exists);
+				assert.equal(launcher.kind, "pane");
+				const argv = launcher.argv.join(" ");
+				assert.ok(!argv.includes(" -p "), "a print-mode pi is not a visible learner");
+				assert.ok(!launcher.argv.includes("--", ), "pisandbox is reached through agent-pane.sh --sandbox");
+			}
+		}
 	});
 
 	test("the learner is started in the repo, never in the queue", () => {
@@ -185,20 +204,37 @@ describe("pickLauncher", () => {
 		}
 		// agent-pane.sh spawns in the spec's directory unless it is told otherwise.
 		const pane = pickLauncher(() => true, slug, queue, () => true);
-		assert.deepEqual(pane.argv.slice(4), ["--cwd", join(homedir(), ".pi")]);
+		assert.deepEqual(pane.argv.slice(4, 6), ["--cwd", join(homedir(), ".pi")]);
 	});
 
-	test("otherwise a headless sandboxed run", () => {
-		const launcher = pickLauncher(() => false, slug, queue, (path) => path.endsWith("pisandbox"));
-		assert.equal(launcher.kind, "headless");
-		assert.match(launcher.argv[0], /pisandbox$/);
-		assert.deepEqual(launcher.argv.slice(1, 3), ["--", "pi"]);
+	test("the markers that stop a learner starting a learner are handed over", () => {
+		const launcher = pickLauncher(() => true, slug, queue, () => true, join(homedir(), ".pi"), {
+			PI_SELF_LEARN: "1",
+			PI_SELF_LEARN_SLUG: slug,
+		});
+		const pairs = launcher.argv.flatMap((word, index) => (word === "--env" ? [launcher.argv[index + 1]] : []));
+		assert.ok(pairs.includes("PI_SELF_LEARN=1"), "herdr starts the space from the app's env, not this process's");
+		assert.ok(pairs.includes(`PI_SELF_LEARN_SLUG=${slug}`));
 	});
 
-	test("no launcher script at all: plain pi, still headless", () => {
-		const launcher = pickLauncher(() => false, slug, queue, () => false);
-		assert.equal(launcher.kind, "headless");
-		assert.deepEqual(launcher.argv, ["pi", "-p", `Read and execute ${queue}`]);
+	test("no herdr: a named failure, not a hidden learner", () => {
+		// The bug this replaces: without herdr the learner ran detached, as a
+		// sub-agent of the host session, visible to nobody.
+		const launcher = pickLauncher((cmd) => cmd !== "hc", slug, queue, () => true);
+		assert.deepEqual(launcher.argv, [], "nothing may be started");
+		assert.match(launcher.missing ?? "", /hc.*not on PATH/);
+	});
+
+	test("no herdr-app: a space could be made but not seen, so it is a failure too", () => {
+		const launcher = pickLauncher((cmd) => cmd !== "herdr-app", slug, queue, () => true);
+		assert.deepEqual(launcher.argv, []);
+		assert.match(launcher.missing ?? "", /herdr-app.*not on PATH/);
+	});
+
+	test("no launcher script: same named failure, not plain pi", () => {
+		const launcher = pickLauncher(() => true, slug, queue, () => false);
+		assert.deepEqual(launcher.argv, []);
+		assert.match(launcher.missing ?? "", /agent-pane\.sh is missing/);
 	});
 });
 
@@ -214,28 +250,30 @@ describe("launch verification", () => {
 		assert.equal(paneTerminal("{"), null);
 	});
 
+	test("the report says whether the worker is visible", () => {
+		const visible = paneLaunch(
+			'{"slug":"learn-1200","terminal":"t7","space":"s3","hidden":false,"sandboxed":true}\n',
+		);
+		assert.deepEqual(visible, { terminal: "t7", space: "s3", hidden: false });
+		const hidden = paneLaunch('{"slug":"learn-1200","terminal":"t7","hidden":true}');
+		assert.equal(hidden?.hidden, true, "a hidden worker is recognisable, so it can be refused");
+	});
+
+	test("a launch this machine cannot make fails with its own reason, without spawning", async () => {
+		// Nothing is run: the failure is the answer, and the run log carries it.
+		const result = await verifyLaunch(
+			{ argv: [], kind: "pane", cwd: REPO, missing: "herdr (hc) is not on PATH" },
+			{},
+		);
+		assert.equal(result.ok, false);
+		assert.match(result.detail ?? "", /herdr \(hc\) is not on PATH/);
+	});
+
 	test("stderr is redacted and clipped before it reaches the run log", () => {
 		const key = "sk-" + "b".repeat(20);
 		const detail = clipDetail(`${key}\n${"x".repeat(1000)}`);
 		assert.ok(!detail.includes(key), "a credential in stderr must not be logged");
 		assert.ok(detail.length <= 400, "stderr is clipped, the log stays one line");
-	});
-
-	test("the learner closes its own space, even if pi dies first", () => {
-		const launcher = {
-			argv: ["/tmp/pisandbox", "--", "pi", "-p", "Read and execute /tmp/q.md"],
-			kind: "headless" as const,
-			cwd: join(homedir(), ".pi"),
-		};
-		const wrapped = withSelfClose(launcher, "learn-1200");
-		assert.equal(wrapped.argv[0], "sh");
-		const script = wrapped.argv[2];
-		assert.match(script, /agent-pane\.sh' 'close' 'learn-1200'/);
-		assert.match(script, /; rc=\$\?;/, "the close runs whatever pi's exit status was");
-		assert.equal(wrapped.cwd, launcher.cwd);
-		// A pane learner closes its own space itself; do not wrap it twice.
-		const pane = { argv: ["/tmp/agent-pane.sh", "spawn", "s", "/tmp/q.md"], kind: "pane" as const, cwd: REPO };
-		assert.equal(withSelfClose(pane, "learn-1200"), pane);
 	});
 });
 
@@ -351,7 +389,7 @@ describe("wiring", () => {
 				learn.calls += 1;
 				return 0;
 			},
-			has: () => false,
+			has: () => true,
 			exists: () => true,
 			now: () => base,
 			// A launch that confirms in a test must not read ~/.pi/agent/sessions, and a
@@ -411,7 +449,7 @@ describe("wiring", () => {
 		assert.match(started[0].env.PI_SELF_LEARN_SLUG, /^learn-\d{2}-\d{2}$/);
 	});
 
-	test("a pane launch that exits 0 without a space fails, and headless takes over", async () => {
+	test("a launch that exits 0 without a space is a failure, and nothing else is tried", async () => {
 		// The reported bug: agent-pane.sh exits 0 without creating a herdr space,
 		// and the old code wrote a `spawned` row for a learner that never existed.
 		const attempts: string[] = [];
@@ -419,25 +457,23 @@ describe("wiring", () => {
 			has: () => true,
 			launch: (launcher: any) => {
 				attempts.push(launcher.kind);
-				if (launcher.kind === "pane") return { ok: false, status: 0, detail: "exited 0 without a herdr space" };
-				return { ok: true, status: null };
+				return { ok: false, status: 0, detail: "exited 0 without a herdr space" };
 			},
 		});
 		await trip(emit, ctx);
 		await settle();
 		const before = (await readRuns()).length;
 		await emit("session_compact", { reason: "threshold" }, ctx);
-		await waitFor(() => attempts.length === 2);
-		assert.deepEqual(attempts, ["pane", "headless"], "the pane is tried first, headless is the fallback");
+		await waitFor(() => attempts.length === 1);
+		await settle();
+		assert.deepEqual(attempts, ["pane"], "one visible attempt, no hidden retry behind it");
 
 		const runs = (await readRuns()).slice(before);
 		const failed = runs.filter((row) => row.kind === "spawn-failed" && row.launcher === "pane");
 		assert.equal(failed.length, 1, "a pane that made no space is logged as a failure");
 		assert.equal(failed[0].status, 0, "the exit status is recorded, not just the fact of failure");
 		assert.match(failed[0].stderr, /without a herdr space/);
-		const spawned = runs.filter((row) => row.kind === "spawned");
-		assert.equal(spawned.length, 1);
-		assert.equal(spawned[0].launcher, "headless", "the log names the launcher that actually ran");
+		assert.equal(runs.filter((row) => row.kind === "spawned").length, 0, "no space, no learner");
 	});
 
 	test("a space whose agent never takes a turn is a failure, not a learner", async () => {
@@ -449,8 +485,7 @@ describe("wiring", () => {
 			has: () => true,
 			launch: (launcher: any) => {
 				attempts.push(launcher.kind);
-				// Both launchers report success; neither produces a turn.
-				return launcher.kind === "pane" ? { ok: true, status: 0, detail: "t7" } : { ok: true, status: null };
+				return { ok: true, status: 0, detail: "t7" };
 			},
 			confirm: async () => ({ ok: false, detail: "no session took the prompt within 90000ms" }),
 			closeSpace: async (slug: string) => {
@@ -461,35 +496,52 @@ describe("wiring", () => {
 		await settle();
 		const before = (await readRuns()).length;
 		await emit("session_compact", { reason: "threshold" }, ctx);
-		await waitFor(() => attempts.length === 2);
-		const last = await waitForRun((row, index) => index >= before && row.launcher === "headless");
+		await waitFor(() => attempts.length === 1);
+		const failed = await waitForRun((row, index) => index >= before && row.kind === "spawn-failed");
+		await settle();
 		const written = (await readRuns()).slice(before);
-		assert.deepEqual(attempts, ["pane", "headless"], "the pane is tried, then the headless retry");
+		assert.deepEqual(attempts, ["pane"], "the visible space is the only attempt");
 		assert.equal(written.filter((row) => row.kind === "spawned").length, 0, "no turn, no spawned row");
-		const failed = written.filter((row) => row.kind === "spawn-failed");
-		assert.deepEqual(failed.map((row) => row.launcher), ["pane", "headless"]);
-		assert.equal(failed[0].status, 0, "the pane's own exit status is recorded");
-		assert.match(failed[0].stderr, /no session took the prompt/);
-		assert.deepEqual(closed, [last.slug, last.slug], "the space that never ran a learner is killed");
+		assert.equal(failed.launcher, "pane");
+		assert.equal(failed.status, 0, "the launcher's own exit status is recorded");
+		assert.match(failed.stderr, /no session took the prompt/);
+		assert.deepEqual(closed, [failed.slug], "the space that never ran a learner is closed, so it cannot linger");
 		assert.ok(
 			notices.some((notice) => notice.level === "warning" && /no learner took the turn/.test(notice.message)),
 			"the person is told, in the session, that no learner started",
 		);
 	});
 
-	test("the headless retry that does take a turn logs spawned, launcher headless", async () => {
+	test("no herdr on this machine: one spawn-failed row that names the reason", async () => {
+		// The old behaviour was a detached `pi -p` that looked like a sub-agent of
+		// the host session. It is a recorded failure now, with its own line.
 		const attempts: string[] = [];
-		let confirmations = 0;
+		const { emit, ctx, notices } = setup({
+			has: (cmd: string) => cmd !== "hc",
+			// The real launch: this machine cannot make a space, so nothing is spawned.
+			launch: verifyLaunch,
+		});
+		await trip(emit, ctx);
+		await settle();
+		const before = (await readRuns()).length;
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		const failed = await waitForRun((row, index) => index >= before && row.kind === "spawn-failed");
+		await settle();
+		assert.match(failed.stderr, /hc.*not on PATH/, "the row names what is missing");
+		assert.match(failed.stderr, /you cannot see is not started/, "and why that stops the learner");
+		assert.ok(
+			notices.some((notice) => notice.level === "warning" && /no learner started/.test(notice.message)),
+			"the person is told in the session, not left to read runs.jsonl",
+		);
+	});
+
+	test("a visible launch that does take a turn logs spawned, sandboxed and visible", async () => {
+		const attempts: string[] = [];
 		const { emit, ctx } = setup({
-			has: () => true,
 			launch: (launcher: any) => {
 				attempts.push(launcher.kind);
-				return launcher.kind === "pane" ? { ok: true, status: 0, detail: "t7" } : { ok: true, status: null };
+				return { ok: true, status: 0, detail: "t7" };
 			},
-			confirm: async () =>
-				++confirmations === 1
-					? { ok: false, detail: "no session took the prompt within 90000ms" }
-					: { ok: true, source: "session" as const, detail: "/tmp/session.jsonl" },
 		});
 		await trip(emit, ctx);
 		await settle();
@@ -497,14 +549,15 @@ describe("wiring", () => {
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		const spawned = await waitForRun((row, index) => index >= before && row.kind === "spawned");
 		const written = (await readRuns()).slice(before);
-		assert.deepEqual(attempts, ["pane", "headless"]);
-		assert.equal(written.filter((row) => row.kind === "spawn-failed").length, 1, "only the pane lied");
-		assert.equal(spawned.launcher, "headless", "the log names the launcher that really ran");
+		assert.deepEqual(attempts, ["pane"]);
+		assert.equal(written.filter((row) => row.kind === "spawn-failed").length, 0, "nothing failed");
+		assert.equal(spawned.launcher, "pane", "the log names the launcher that really ran");
+		assert.equal(spawned.sandboxed, true, "and that the pi inside it ran through the sandbox");
 		assert.equal(spawned.confirmed, "session", "and how the turn was proven");
 	});
 
 	test("one confirmed launch writes exactly one row", async () => {
-		const { emit, ctx, notices } = setup({ has: () => false });
+		const { emit, ctx, notices } = setup();
 		await trip(emit, ctx);
 		await settle();
 		const before = (await readRuns()).length;
@@ -513,7 +566,7 @@ describe("wiring", () => {
 		await settle();
 		const written = (await readRuns()).slice(before);
 		assert.equal(written.length, 1, "one learner, one row");
-		assert.equal(spawned.launcher, "headless");
+		assert.equal(spawned.launcher, "pane");
 		assert.equal(spawned.confirmed, "session");
 		assert.ok(
 			notices.some((notice) => notice.level === "info" && /learner started/.test(notice.message)),
@@ -627,7 +680,6 @@ describe("wiring", () => {
 	test("a failed spawn does not throw and does not count as a learner", async () => {
 		const attempts: string[] = [];
 		const { emit, ctx, notices } = setup({
-			has: () => true,
 			launch: (launcher: any) => {
 				attempts.push(launcher.kind);
 				return { ok: false, status: 127, detail: "no herdr today" };
@@ -637,10 +689,12 @@ describe("wiring", () => {
 		await settle();
 		const before = (await readRuns()).length;
 		await emit("session_compact", { reason: "threshold" }, ctx);
-		await waitFor(() => attempts.length === 2);
+		await waitFor(() => attempts.length === 1);
+		const failed = await waitForRun((row, index) => index >= before && row.kind === "spawn-failed");
 		const runs = (await readRuns()).slice(before);
 		assert.equal(runs.filter((row) => row.kind === "spawned").length, 0, "no learner, no spawned row");
-		assert.equal(runs.filter((row) => row.kind === "spawn-failed").length, 2);
+		assert.equal(runs.filter((row) => row.kind === "spawn-failed").length, 1);
+		assert.match(failed.stderr, /no herdr today/);
 		assert.ok(
 			notices.some((notice) => notice.level === "warning" && /no learner took the turn/.test(notice.message)),
 			"the person is told, in the session, that no learner started",
@@ -732,11 +786,16 @@ describe("wiring", () => {
 		assert.match(body, /gh is not logged in/, "the evidence says why it could not look");
 	});
 
-	test("a confirmed learner that exits without its proposal leaves a died row", async () => {
+	test("a confirmed learner whose session goes quiet without its proposal leaves a died row", async () => {
+		// The launcher (agent-pane.sh) exits as soon as the spec is sent, so an exit
+		// status says nothing about the learner: silence is the only honest death.
+		const session = join(scratch, "died-session.jsonl");
+		await writeFile(session, "{\"type\":\"session\"}\n", "utf8");
 		const { emit, ctx } = setup({
-			has: () => false,
-			launch: () => ({ ok: true, status: null, exited: Promise.resolve(0) }),
+			launch: () => ({ ok: true, status: 0, detail: "t7" }),
+			confirm: async () => ({ ok: true, source: "session" as const, detail: session }),
 			proposalExists: () => false,
+			outcomeIdleMs: 10,
 		});
 		await trip(emit, ctx);
 		await settle();
@@ -744,14 +803,42 @@ describe("wiring", () => {
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		const died = await waitForRun((row, index) => index >= before && row.kind === "died");
 		assert.match(died.slug, /^learn-\d{2}-\d{2}$/);
-		assert.equal(died.launcher, "headless");
+		assert.equal(died.launcher, "pane");
 		assert.match(died.queue, /proposals\/queue\/.*\.md$/);
 		assert.equal(typeof died.elapsedMs, "number", "how long it lived is in the row");
 	});
 
+	test("agent-pane.sh exiting is not the learner dying", async () => {
+		// The launcher exits right after it sends the spec. Wiring that exit status to
+		// the outcome watch wrote a `died` row for every live learner; the session file
+		// still moving is what says the learner is alive.
+		const session = join(scratch, "alive-session.jsonl");
+		await writeFile(session, "{\"type\":\"session\"}\n", "utf8");
+		const beat = setInterval(() => {
+			void utimes(session, new Date(), new Date()).catch(() => {});
+		}, 5);
+		try {
+			const { emit, ctx } = setup({
+				launch: () => ({ ok: true, status: 0, detail: "t7", exited: Promise.resolve(0) }),
+				confirm: async () => ({ ok: true, source: "session" as const, detail: session }),
+				proposalExists: () => false,
+				outcomeIdleMs: 1000,
+			});
+			await trip(emit, ctx);
+			await settle();
+			const before = (await readRuns()).length;
+			await emit("session_compact", { reason: "threshold" }, ctx);
+			await waitForRun((row, index) => index >= before && row.kind === "spawned");
+			await new Promise((done) => setTimeout(done, 200));
+			const written = (await readRuns()).slice(before);
+			assert.equal(written.filter((row) => row.kind === "died").length, 0, "a talking learner is not a dead one");
+		} finally {
+			clearInterval(beat);
+		}
+	});
+
 	test("a confirmed learner that wrote its proposal is not a death", async () => {
 		const { emit, ctx } = setup({
-			has: () => false,
 			launch: () => ({ ok: true, status: null, exited: Promise.resolve(0) }),
 			proposalExists: () => true,
 		});
