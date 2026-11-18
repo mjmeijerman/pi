@@ -14,7 +14,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,29 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const SCRIPT = join(ROOT, "scripts", "agent-pane.sh");
 const PISANDBOX = join(ROOT, "scripts", "pisandbox");
+
+/**
+ * A PATH that holds everything the script needs except the named binary.
+ *
+ * The sandbox case is "herdr-app is not reachable", and prepending a directory to
+ * `$PATH` does not remove the real binary — lookup skips a non-executable file and
+ * keeps going. So the path is built from symlinks instead: node, hc and grep, nothing
+ * else, and `command -v herdr-app` is then honestly false.
+ */
+function pathWithout(fixture, missing) {
+	const dir = join(fixture.dir, `without-${missing}`);
+	mkdirSync(dir, { recursive: true });
+	for (const bin of ["bash", "node", "hc", "grep", "cat", "mkdir", "dirname", "env"]) {
+		if (bin === missing) continue;
+		// `hc` comes from the fixture's own stub: the real one would kill a real terminal.
+		const found =
+			bin === "hc"
+				? join(fixture.dir, "bin", "hc")
+				: spawnSync("bash", ["-c", `command -v ${bin}`], { encoding: "utf8" }).stdout.trim();
+		if (found) symlinkSync(found, join(dir, bin));
+	}
+	return dir;
+}
 
 const tmp = mkdtempSync(join(tmpdir(), "agent-pane-visible-"));
 
@@ -31,7 +54,7 @@ let caseId = 0;
  * A stub host: `herdr-app` and `hc` record their argv, and `herdr-app` answers
  * space.new with the JSON the real app prints. `spaceNew` decides how it answers.
  */
-function fixture({ spaceNew = "ok", hc = true, herdrApp = true } = {}) {
+function fixture({ spaceNew = "ok", spaceClose = "ok", hc = true, herdrApp = true } = {}) {
 	const dir = join(tmp, `case-${++caseId}`);
 	const bin = join(dir, "bin");
 	const work = join(dir, "work");
@@ -47,6 +70,14 @@ function fixture({ spaceNew = "ok", hc = true, herdrApp = true } = {}) {
 			app,
 			`#!/usr/bin/env bash
 printf '{"bin":"herdr-app","argv":%s}\\n' "$(node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' "$@")" >> "${record}"
+if [ "$1" = do ] && [ "$2" = space.close ]; then
+	case "${spaceClose}" in
+		ok) printf '{"closed":"s9"}\\n' ;;
+		boom) echo 'space.close failed: not talking to a herdr core' >&2; exit 3 ;;
+		gone) printf '{"error":"no space \\\\"s9\\\\""}\\n'; exit 1 ;;
+	esac
+	exit 0
+fi
 case "${spaceNew}" in
 	ok) printf '{"space":"s9","tab":"t2","terminal":"t14z"}\\n' ;;
 	empty) printf '{}\\n' ;;
@@ -187,11 +218,20 @@ test("space.new that fails says so and changes nothing", () => {
 test("no herdr-app means a loud refusal, not a hidden worker", () => {
 	// A sandbox cannot see herdr-app: its own core would make a terminal nobody can
 	// reach, which is the silent half-launch this refuses.
+	//
+	// The PATH is built, not prepended: on a host where the real herdr-app *is* on PATH,
+	// `${dir}/bin:${PATH}` still reaches it, and this case then did exactly the thing it
+	// refuses — it made a real space named learn-1200 running a real pi in the fixture's
+	// temp directory, left it open, and recorded no state to close it by. Two of them
+	// were live on 2026-11-18 (`hc ls`: "learn-1200 / learn-1200"), which is what the
+	// person meant by "I see 2 learn-1200 spaces still open".
 	const f = fixture({ herdrApp: false });
-	const r = f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"]);
+	const r = f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"], {
+		PATH: pathWithout(f, "herdr-app"),
+	});
 	assert.notEqual(r.status, 0);
 	assert.match(r.stderr, /herdr-app not found in PATH/);
-	assert.equal(f.calls().length, 0, "nothing was started");
+	assert.equal(f.calls().length, 0, "nothing was started, least of all a real space on the host");
 });
 
 test("a working directory with a space in it is still one argument", () => {
@@ -221,11 +261,38 @@ test("closing a visible worker closes its space too", () => {
 	assert.equal(existsSync(f.state) && JSON.parse(readFileSync(f.state, "utf8"))["learn-1200"], undefined);
 });
 
-test("a worker with no herdr-app in reach can still be closed", () => {
-	// The learner is sandboxed: it cannot see herdr-app, and its own `close` must not
-	// die on the way out. Best effort, exit 0.
+test("a worker with no herdr-app in reach is stopped, and the space it left is named", () => {
+	// A sandboxed learner cannot reach herdr-app, so its own `close` used to delete the
+	// entry and print success while the space stayed in the person's window: that is how
+	// two `learn-1200` spaces outlived every record of them (2026-11-18). The worker still
+	// has to stop — but the entry stays, and the failure is on stderr with the space id.
 	const f = fixture();
 	assert.equal(f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"]).status, 0);
-	const r = f.run(["close", "learn-1200"], { PATH: `${join(f.dir, "no-bin")}:${process.env.PATH}` });
+	const r = f.run(["close", "learn-1200"], { PATH: pathWithout(f, "herdr-app") });
+	assert.notEqual(r.status, 0, "a close that leaves a space open is not a finished close");
+	assert.match(r.stderr, /s9 is still open/, "the space id is the thing the host needs");
+	assert.match(r.stderr, /herdr-app is not in PATH/);
+	const report = JSON.parse(r.stdout.trim().split("\n").pop());
+	assert.equal(report.space_closed, false);
+	assert.equal(JSON.parse(readFileSync(f.state, "utf8"))["learn-1200"].space, "s9", "`list` must still find it");
+	assert.ok(f.calls().some((call) => call.bin === "hc" && call.argv[0] === "kill"), "the worker itself stops anyway");
+});
+
+test("a space.close that fails is reported in the app's words, and the entry survives", () => {
+	const f = fixture({ spaceClose: "boom" });
+	assert.equal(f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"]).status, 0);
+	const r = f.run(["close", "learn-1200"]);
+	assert.notEqual(r.status, 0);
+	assert.match(r.stderr, /space s9 is still open/);
+	assert.match(r.stderr, /not talking to a herdr core/, "the app's own words, not a summary of them");
+	assert.equal(JSON.parse(readFileSync(f.state, "utf8"))["learn-1200"].space, "s9");
+});
+
+test("a space that is already gone is a finished close, not a failure to retry forever", () => {
+	const f = fixture({ spaceClose: "gone" });
+	assert.equal(f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"]).status, 0);
+	const r = f.run(["close", "learn-1200"]);
 	assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+	assert.equal(JSON.parse(r.stdout.trim().split("\n").pop()).space_closed, true);
+	assert.equal(JSON.parse(readFileSync(f.state, "utf8"))["learn-1200"], undefined);
 });
