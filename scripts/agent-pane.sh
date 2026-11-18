@@ -76,11 +76,21 @@ resolve() {
 runner_line() {
 	local dir=$1 sandboxed=$2 line e
 	line="cd $(printf '%q' "$dir")"
+	# herdr starts the space from the app's own environment, whose PATH has no pi
+	# directory: `pi-sandbox.sh` then dies with "pi is not on PATH" before pi ever
+	# runs, and the space stays behind as an empty tab. The binary's directory goes
+	# on the front of PATH here, so the sandbox resolves the same absolute binary
+	# from inside the sandboxed path it builds. One line, and both the visible space
+	# and the hidden worker (same function) start from an environment that has no pi.
+	line="$line; export PATH=$(printf '%q' "$(dirname "$PI_BIN")"):\$PATH"
 	for e in "${envs[@]+${envs[@]}}"; do
 		line="$line; export $(printf '%q' "$e")"
 	done
 	if [ "$sandboxed" = 1 ]; then
-		line="$line; exec $(printf '%q' "$PISANDBOX") --rw $(printf '%q' "$dir") -- $(printf '%q' "$PI_BIN") -a"
+		# Nothing after `--` but pi's own arguments: pi-sandbox.sh resolves the binary
+		# from PATH and runs it with the rest of the line, so handing it the absolute
+		# path as well started `pi /home/…/pi -a` — a binary path as the first message.
+		line="$line; exec $(printf '%q' "$PISANDBOX") --rw $(printf '%q' "$dir") -- -a"
 	else
 		line="$line; exec $(printf '%q' "$PI_BIN") -a"
 	fi
@@ -145,12 +155,29 @@ cmd_spawn() {
 	[ -n "$terminal" ] || die "could not read terminal from: $out"
 
 	# Wait for pi's banner before sending; a send to a booting agent can be dropped.
-	local i ready=0
-	for i in $(seq 1 40); do
-		if hc read "$terminal" 2>/dev/null | grep -q "escape interrupt\|/[Cc]ommands"; then ready=1; break; fi
-		sleep 1
+	# A space whose pi never starts is not a worker: it is closed and reported here,
+	# because the alternative is an empty tab the person has to find and end by hand.
+	local i ready=0 seen="" why tries pause
+	tries=${PI_PANE_BANNER_TRIES:-40}
+	pause=${PI_PANE_BANNER_PAUSE:-1}
+	for i in $(seq 1 "$tries"); do
+		seen=$(hc read "$terminal" 2>&1 || true)
+		if printf '%s' "$seen" | grep -q "escape interrupt\|/[Cc]ommands"; then ready=1; break; fi
+		[ "$pause" = 0 ] || sleep "$pause"
 	done
-	[ "$ready" = 1 ] || printf '%s: warning: banner not seen after 40s, sending anyway\n' "$PROG" >&2
+	if [ "$ready" != 1 ]; then
+		why=$(printf '%s\n' "$seen" | grep -m1 -i 'error' || true)
+		[ -n "$why" ] || why=$(printf '%s\n' "$seen" | grep -m1 -v '^[[:space:]]*$' || true)
+		[ -n "$why" ] || why="no output from $terminal"
+		why=$(printf '%s' "$why" | cut -c1-300)
+		if [ -n "$space" ] && command -v herdr-app >/dev/null 2>&1; then
+			# Best effort: a space that will not close must not hide the reason pi failed.
+			herdr-app do space.close --id "$space" --confirmed true >/dev/null 2>&1 || true
+		fi
+		hc kill "$terminal" >/dev/null 2>&1 || true
+		hc rm "$terminal" >/dev/null 2>&1 || true
+		die "pi did not start in $terminal: $why"
+	fi
 	hc send "$terminal" "Read $spec and do it" >/dev/null || die "send failed for $terminal"
 
 	state_write "$(node -e '
