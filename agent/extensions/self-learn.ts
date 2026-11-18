@@ -10,15 +10,18 @@
  *
  * 1. **The session is not the student.** This extension never edits the repo and
  *    never patches the prompt. It writes a queue file and starts another pi
- *    process (a Herdr pane when Herdr is up, otherwise a headless sandboxed
- *    run), so a slow or talkative reflection cannot stall, pollute or lengthen
- *    the conversation that triggered it. The child gets `PI_SELF_LEARN=1` and
- *    therefore never spawns a learner of its own. A launch is *verified* twice:
- *    a pane that exits 0 without creating a herdr space is a failure, and a space
+ *    process — always a Herdr space of its own, visible in the agents pane, with
+ *    the pi inside it run through the sandbox (`scripts/pisandbox`: no ssh keys,
+ *    no cloud credentials, network on, `~/.pi` read-write) — so a slow or
+ *    talkative reflection cannot stall, pollute or lengthen the conversation
+ *    that triggered it. There is no hidden path: a machine without herdr is a
+ *    loud launch failure in `runs.jsonl`, not a detached `pi -p` that looks like
+ *    a sub-agent of the session. The child gets `PI_SELF_LEARN=1` and therefore
+ *    never spawns a learner of its own. A launch is *verified* twice: a pane
+ *    that exits 0 without creating a herdr space is a failure, and a space
  *    whose agent never consumes the prompt is a failure too — six of the seven
  *    launches on 2026-11-14 made a space and took no turn, and each one was
- *    logged as a success until the turn itself became the evidence. The headless
- *    launcher takes over, and it is checked the same way.
+ *    logged as a success until the turn itself became the evidence.
  * 2. **Most compactions do nothing, and repetition is what makes the rest worth
  *    learning.** A gate runs first, with no model call. It fires on two or more
  *    of the same failed tool signature, the same CI check failing on two
@@ -1099,23 +1102,38 @@ export async function readTranscript(path: string): Promise<string | null> {
 	}
 }
 
-/** How the learner is started, given what this machine has. */
+/** How the learner is started. There is one way: a visible, sandboxed space. */
 export interface Launcher {
 	argv: string[];
-	/** "pane" is visible in Herdr; "headless" runs detached with a log. */
-	kind: "pane" | "headless";
+	/** Always "pane": a Herdr space the person can see, watch and close. */
+	kind: "pane";
 	/**
 	 * Where the learner starts. Always the repo: the queue directory made the one
 	 * learner that ever ran work in `~/.pi/agent/proposals/queue` and never reach
 	 * the code it was meant to judge.
 	 */
 	cwd: string;
+	/**
+	 * What this machine is missing, when it cannot start a visible learner. Set
+	 * instead of an argv: the caller records it as a launch failure. A hidden or
+	 * detached substitute is not a fallback, it is the bug this replaced.
+	 */
+	missing?: string;
 }
 
+/** The env a learner must carry so it cannot spawn a learner of its own. */
+export const LEARNER_ENV_KEYS = ["PI_SELF_LEARN", "PI_SELF_LEARN_SLUG", "PI_SELF_LEARN_PROPOSAL"] as const;
+
 /**
- * Prefer a Herdr pane: the work is visible, it is a real pi session, and the
- * user can watch or close it. Fall back to a detached sandboxed `pi -p` so the
- * feature still works without Herdr (and in a plain ssh session).
+ * A visible, sandboxed learner, or a named reason why this machine cannot start
+ * one.
+ *
+ * Visible: `agent-pane.sh spawn … --visible` makes a real Herdr space and tab, so
+ * the learner is in the agents pane, `agent-pane.sh list` shows it, `show`
+ * borrows a pane to watch it and `close` ends it. Nothing about it is hidden.
+ * Sandboxed: the host session creates the space (a sandbox cannot, herdr-app is
+ * outside every mount), and the pi inside it runs through `scripts/pisandbox`
+ * with `--rw` on the repo it must read and write.
  *
  * `cwd` is passed explicitly (`--cwd`) because agent-pane.sh otherwise spawns in
  * the spec's directory — the queue, not the repo.
@@ -1126,35 +1144,25 @@ export function pickLauncher(
 	specPath: string,
 	exists: (path: string) => boolean = existsSync,
 	cwd: string = REPO,
-	preferPane = true,
+	env: Record<string, string | undefined> = {},
 ): Launcher {
-	if (preferPane && has("hc") && exists(PANE_SCRIPT)) {
-		return { argv: [PANE_SCRIPT, "spawn", slug, specPath, "--cwd", cwd], kind: "pane", cwd };
+	const missing = !has("hc")
+		? "herdr (hc) is not on PATH, so no space can be made — a learner you cannot see is not started here"
+		: !has("herdr-app")
+			? "herdr-app is not on PATH, so no visible space can be made — a learner you cannot see is not started here"
+			: !exists(PANE_SCRIPT)
+				? `${PANE_SCRIPT} is missing, so no visible space can be made`
+				: undefined;
+	if (missing) return { argv: [], kind: "pane", cwd, missing };
+	const argv = [PANE_SCRIPT, "spawn", slug, specPath, "--cwd", cwd, "--visible", "--sandbox"];
+	// herdr starts the space from the app's environment, not from this process's, so
+	// the markers are handed over explicitly. Without PI_SELF_LEARN the learner would
+	// be free to start a learner of its own.
+	for (const key of LEARNER_ENV_KEYS) {
+		const value = env[key] ?? process.env[key];
+		if (value) argv.push("--env", `${key}=${value}`);
 	}
-	const pisandbox = join(REPO, "scripts", "pisandbox");
-	const prompt = `Read and execute ${specPath}`;
-	if (exists(pisandbox)) {
-		return { argv: [pisandbox, "--", "pi", "-p", prompt], kind: "headless", cwd };
-	}
-	return { argv: ["pi", "-p", prompt], kind: "headless", cwd };
-}
-
-function shellQuote(word: string): string {
-	return `'${word.replace(/'/g, "'\\''")}'`;
-}
-
-/**
- * Make a headless learner close its own space when pi exits, however it exits.
- *
- * A pane learner can run `agent-pane.sh close SLUG` as its last step; a headless
- * one has no space, so the same call is harmless. Wrapping the command is the
- * part the extension can enforce instead of hoping the prompt was remembered.
- */
-export function withSelfClose(launcher: Launcher, slug: string): Launcher {
-	if (launcher.kind !== "headless") return launcher;
-	const command = launcher.argv.map(shellQuote).join(" ");
-	const close = [PANE_SCRIPT, "close", slug].map(shellQuote).join(" ");
-	return { ...launcher, argv: ["sh", "-c", `${command}; rc=$?; ${close} >/dev/null 2>&1 || true; exit $rc`] };
+	return { argv, kind: "pane", cwd };
 }
 
 /** What a launch attempt actually produced. `ok: false` is the interesting case. */
@@ -1174,8 +1182,6 @@ export interface LaunchResult {
 
 /** agent-pane.sh waits up to 40 s for pi's banner before it sends the spec. */
 export const PANE_TIMEOUT_MS = 45_000;
-/** A headless learner that is still alive after this has started. */
-export const HEADLESS_GRACE_MS = 2_000;
 /**
  * How long a launched learner gets to prove it took the turn.
  *
@@ -1201,17 +1207,35 @@ export function clipDetail(text: string): string {
 }
 
 /**
- * The terminal id agent-pane.sh prints on success: `{"slug":…,"terminal":"t7"…}`.
+ * What a launch attempt is allowed to prove, and the two ways a space can lie:
+ * exit 0 without a space, and a space the person cannot see.
+ */
+export interface PaneReport {
+	terminal: string | null;
+	space: string | null;
+	/** The launcher's own word. `true` means it made a hidden worker, which is refused. */
+	hidden: boolean;
+}
+
+/**
+ * The spawn report agent-pane.sh prints on success:
+ * `{"slug":…,"terminal":"t7","space":"s3","hidden":false}`.
+ *
  * Empty, unparsable or terminal-less stdout means no space was created, however
  * cheerfully the script exited — the bug that wrote four lying `spawned` rows.
  */
-export function paneTerminal(stdout: string): string | null {
+export function paneLaunch(stdout: string): PaneReport | null {
 	for (const raw of stdout.split("\n").reverse()) {
 		const line = raw.trim();
 		if (!line.startsWith("{")) continue;
 		try {
-			const parsed = JSON.parse(line) as { terminal?: unknown };
-			if (typeof parsed.terminal === "string" && parsed.terminal.trim()) return parsed.terminal.trim();
+			const parsed = JSON.parse(line) as { terminal?: unknown; space?: unknown; hidden?: unknown };
+			if (typeof parsed.terminal !== "string" || !parsed.terminal.trim()) continue;
+			return {
+				terminal: parsed.terminal.trim(),
+				space: typeof parsed.space === "string" && parsed.space.trim() ? parsed.space.trim() : null,
+				hidden: parsed.hidden === true,
+			};
 		} catch {
 			// Not the spawn report; keep looking.
 		}
@@ -1219,21 +1243,31 @@ export function paneTerminal(stdout: string): string | null {
 	return null;
 }
 
+/** The terminal id agent-pane.sh prints on success; the rest of the report is dropped. */
+export function paneTerminal(stdout: string): string | null {
+	return paneLaunch(stdout)?.terminal ?? null;
+}
+
 /**
- * Run the launcher and check that a learner exists afterwards.
+ * Run the launcher and check that a visible learner exists afterwards.
  *
- * A pane launch must exit 0 *and* print a terminal id: a space that does not
- * appear is a failure. A headless launch is checked by survival — if it is still
- * running after the grace window it started, and a fast exit is a fast failure.
+ * The launch must exit 0, print a terminal id, and not report itself hidden: a
+ * space that does not appear is a failure, and a hidden worker is the path this
+ * feature deleted. A machine that cannot make a space fails here with its own
+ * reason (see `pickLauncher`), instead of falling back to a detached `pi -p`
+ * that looks like a sub-agent of the session.
+ *
  * Never throws, never rejects: this runs in the background of a live session.
  */
 export function verifyLaunch(
 	launcher: Launcher,
 	env: NodeJS.ProcessEnv,
-	options: { paneTimeoutMs?: number; graceMs?: number } = {},
+	options: { paneTimeoutMs?: number } = {},
 ): Promise<LaunchResult> {
-	const pane = launcher.kind === "pane";
-	const timeoutMs = pane ? (options.paneTimeoutMs ?? PANE_TIMEOUT_MS) : (options.graceMs ?? HEADLESS_GRACE_MS);
+	const timeoutMs = options.paneTimeoutMs ?? PANE_TIMEOUT_MS;
+	if (launcher.missing) {
+		return Promise.resolve({ ok: false, status: null, detail: clipDetail(launcher.missing) });
+	}
 	return new Promise<LaunchResult>((resolve) => {
 		let stdout = "";
 		let stderr = "";
@@ -1271,22 +1305,13 @@ export function verifyLaunch(
 			finish({ ok: false, status: null, detail: clipDetail(String(error)) });
 		});
 		child.on("exit", (code: number | null, signal: string | null) => {
-			if (!pane) {
-				if (code === 0) finish({ ok: true, status: 0 });
-				else finish({ ok: false, status: code, detail: clipDetail(stderr || `exit ${signal ?? code}`) });
-				return;
-			}
-			const terminal = paneTerminal(stdout);
+			const report = paneLaunch(stdout);
 			if (code !== 0) finish({ ok: false, status: code, detail: clipDetail(stderr || `agent-pane.sh exited ${signal ?? code}`) });
-			else if (!terminal) finish({ ok: false, status: 0, detail: clipDetail(stderr || "exited 0 without a herdr space") });
-			else finish({ ok: true, status: 0, detail: terminal });
+			else if (!report) finish({ ok: false, status: 0, detail: clipDetail(stderr || "exited 0 without a herdr space") });
+			else if (report.hidden) finish({ ok: false, status: 0, detail: clipDetail("a hidden worker is not a learner: it must be a visible space") });
+			else finish({ ok: true, status: 0, detail: report.terminal ?? undefined });
 		});
 		timer = setTimeout(() => {
-			if (!pane) {
-				// Alive past the grace window: it started. Watch no further.
-				finish({ ok: true, status: null });
-				return;
-			}
 			try {
 				child.kill("SIGTERM");
 			} catch {
@@ -1774,7 +1799,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 	};
 
 	/**
-	 * Start the learner, prove it took the turn, fall back to headless, and log the
+	 * Start the learner in its own visible space, prove it took the turn, and log the
 	 * launcher that really ran. Runs after `learn()` has returned: agent-pane.sh
 	 * waits up to 40 s for pi's banner, the turn takes as long again, and the
 	 * session that just compacted must not.
@@ -1816,12 +1841,12 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			const since = Date.now();
 			const space = await launch(candidate, env);
 			if (!space.ok) return { launcher: candidate, space, turn: null };
-			// A space, or a living pi, is the pre-condition. The turn is the proof.
+			// A space is the pre-condition. The turn is the proof.
 			const turn = await confirm({
 				cwd: candidate.cwd,
 				queuePath: plan.queuePath,
 				since,
-				terminal: candidate.kind === "pane" ? (space.detail ?? null) : null,
+				terminal: space.detail ?? null,
 			});
 			return { launcher: candidate, space, turn };
 		};
@@ -1840,24 +1865,27 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			if (failure.space.ok) await close(plan.slug);
 		};
 
-		let ran = await attempt(withSelfClose(pickLauncher(has, plan.slug, plan.queuePath, fileExists), plan.slug));
+		// One attempt, one way. `pickLauncher` either names a visible sandboxed space
+		// or says what this machine is missing; a failure is recorded and told to the
+		// person. There is no second, quieter path to fall back to: a learner the
+		// person cannot see is one they cannot stop, and a detached `pi -p` looked
+		// like a sub-agent of this session for seven launches in a row.
+		const ran = await attempt(
+			pickLauncher(has, plan.slug, plan.queuePath, fileExists, REPO, {
+				PI_SELF_LEARN: env.PI_SELF_LEARN,
+				PI_SELF_LEARN_SLUG: env.PI_SELF_LEARN_SLUG,
+				PI_SELF_LEARN_PROPOSAL: env.PI_SELF_LEARN_PROPOSAL,
+			}),
+		);
 		if (!started(ran)) {
-			// Record what this launcher said before trying the next one: the exit
-			// status is the part a reader cannot reconstruct afterwards.
 			await fail(ran);
-			if (ran.launcher.kind !== "pane") {
-				notify(plan.ctx, `no learner took the turn (${ran.launcher.kind}): ${clipDetail(whyFailed(ran))}`, "warning");
-				return;
+			if (ran.launcher.missing) {
+				// Not a Herdr that lied: this machine cannot show a learner at all.
+				notify(plan.ctx, `no learner started: ${clipDetail(ran.launcher.missing)}`, "warning");
+			} else {
+				notify(plan.ctx, `no learner took the turn: ${clipDetail(whyFailed(ran))}`, "warning");
 			}
-			// The pane is what lied. Retry once without herdr, and check it the same way.
-			ran = await attempt(
-				withSelfClose(pickLauncher(has, plan.slug, plan.queuePath, fileExists, REPO, false), plan.slug),
-			);
-			if (!started(ran)) {
-				await fail(ran);
-				notify(plan.ctx, `no learner took the turn (${ran.launcher.kind}): ${clipDetail(whyFailed(ran))}`, "warning");
-				return;
-			}
+			return;
 		}
 
 		errors = new Map();
@@ -1874,8 +1902,10 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			judged: plan.decision.judged ?? [],
 			/** How the turn was confirmed: a session file or the pane's screen. */
 			confirmed: ran.turn?.source ?? "unknown",
+			/** The learner ran through scripts/pisandbox, not as the host's own process. */
+			sandboxed: true,
 		});
-		notify(plan.ctx, `learner started in a separate pi session (${ran.launcher.kind}): ${plan.decision.reason}`, "info");
+		notify(plan.ctx, `learner started in a visible sandboxed space (${ran.launcher.kind}): ${plan.decision.reason}`, "info");
 
 		// A confirmed turn is not a finished learner: watch for the proposal, and
 		// write a `died` row when the process is gone and the file never appears.
@@ -1885,7 +1915,9 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			queue: plan.queuePath,
 			proposal: plan.proposalPath,
 			at: plan.at,
-			exited: ran.launcher.kind === "headless" ? (ran.space.exited ?? null) : null,
+			// The process that exits is agent-pane.sh, not the learner: a visible space is
+			// judged by its session file going quiet, never by a launcher exit status.
+			exited: null,
 			session: ran.turn?.source === "session" ? (ran.turn.detail ?? null) : null,
 			exists: proposalExists,
 			onDied: (row) => record(row),
