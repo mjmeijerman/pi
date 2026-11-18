@@ -539,7 +539,7 @@ export interface SpawnRequest {
 	 * The evidence file's own text, carried instead of written.
 	 *
 	 * A sandboxed session must not leave a queue file behind: nothing on this side
-	 * can read it, and the shipped skip rule (PR #159) treats such a spec as
+	 * can read it, and the shipped skip rule (PR 159) treats such a spec as
 	 * garbage. The session that can start the learner writes it at `queue` instead,
 	 * so the text the learner is told to read is the text this session measured.
 	 */
@@ -2559,7 +2559,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		// The launch needs a Herdr space, and a sandboxed session cannot make one: a
 		// sandbox never mounts `herdr-app`. It hands the launch to the host session in
 		// the same shape the branch is handed over in. The evidence travels inside the
-		// request because the shipped skip rule (PR #159) leaves no queue file behind:
+		// request because the shipped skip rule (PR 159) leaves no queue file behind:
 		// a spec written here is one nothing on this side can read.
 		const blocked = sandboxBlocksSpawn();
 		if (blocked) {
