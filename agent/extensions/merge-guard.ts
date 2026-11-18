@@ -76,10 +76,14 @@ function gitSubcommand(segment: string): string | null {
 	const after = /\bgit\b(.*)$/.exec(segment)?.[1];
 	if (after === undefined) return null;
 	const tokens = after.trim().split(/\s+/).filter(Boolean);
-	for (let i = 0; i < tokens.length; i++) {
-		const token = tokens[i];
+	let skipNext = false; // a global flag's argument is not the subcommand
+	for (const token of tokens) {
+		if (skipNext) {
+			skipNext = false;
+			continue;
+		}
 		if (GIT_FLAG_WITH_VALUE.has(token)) {
-			i++; // its value is not the subcommand
+			skipNext = true;
 			continue;
 		}
 		if (token.startsWith("-")) continue;

@@ -689,6 +689,28 @@ describe("secret-guard: a mention is not a read", () => {
 		const command = ["cat > config/prod.env <<'EOF'", "APP_ENV=local", "EOF"].join("\n");
 		assert.match((await bash(command)) ?? "", /reads a secret file/);
 	});
+
+	/**
+	 * A `#` at the very start of a command opens a comment even though there is no
+	 * whitespace before it (there is no character at all). That start bound is only
+	 * observable when the comment holds an unbalanced quote: read as ordinary text,
+	 * the quote opens in the comment and swallows every following line, so the read
+	 * on the next line goes unseen. No other leading `#` input separates the two —
+	 * a plain `# note` line parses into a non-verb word and is skipped either way.
+	 */
+	test("a leading comment holding an apostrophe does not swallow the next line", async () => {
+		const command = ["# it's a note", "cat .env"].join("\n");
+		assert.match((await bash(command)) ?? "", /reads a secret file/);
+	});
+
+	test("a leading comment holding a double quote does not swallow the next line", async () => {
+		const command = ['# the " in this note is unmatched', "cat .env"].join("\n");
+		assert.match((await bash(command)) ?? "", /reads a secret file/);
+	});
+
+	test("a leading comment with no preceding whitespace is still dropped", async () => {
+		assert.equal(await bash(["# it's a note", "echo done"].join("\n")), undefined);
+	});
 });
 
 /**

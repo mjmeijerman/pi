@@ -103,11 +103,13 @@ function commandSegments(command: string): string[] {
 	const segments: string[] = [];
 	let current = "";
 	let quote: string | null = null;
-	for (let i = 0; i < command.length; i++) {
-		const ch = command[i];
+	let before = ""; // the code point before this one, so an escaped quote is not a close
+	for (const ch of command) {
+		const previous = before;
+		before = ch;
 		if (quote) {
 			current += ch;
-			if (ch === quote && command[i - 1] !== "\\") quote = null;
+			if (ch === quote && previous !== "\\") quote = null;
 			continue;
 		}
 		if (ch === '"' || ch === "'") {
@@ -129,22 +131,30 @@ function commandSegments(command: string): string[] {
 /** The heredoc delimiters opened on one line (`<<EOF`, `<<-'SH'`), quotes respected. */
 function heredocDelimiters(line: string): string[] {
 	const found: string[] = [];
+	const units = line.split(""); // UTF-16 units, so an index is a string index
 	let quote: string | null = null;
-	for (let i = 0; i < line.length; i++) {
-		const ch = line[i];
+	let before = "";
+	let skipped = 0; // units left inside the `<<DELIM` that was just read
+	for (const [i, ch] of units.entries()) {
+		const previous = before;
+		before = ch;
+		if (skipped > 0) {
+			skipped--;
+			continue;
+		}
 		if (quote) {
-			if (ch === quote && line[i - 1] !== "\\") quote = null;
+			if (ch === quote && previous !== "\\") quote = null;
 			continue;
 		}
 		if (ch === '"' || ch === "'") {
 			quote = ch;
 			continue;
 		}
-		if (ch !== "<" || line[i + 1] !== "<") continue;
+		if (ch !== "<" || units[i + 1] !== "<") continue;
 		const m = /^<<-?\s*(["']?)([A-Za-z0-9_.:-]+)\1/.exec(line.slice(i));
 		if (!m) continue;
 		found.push(m[2]);
-		i += m[0].length - 1;
+		skipped = m[0].length - 1; // the rest of the match is not another opener
 	}
 	return found;
 }
@@ -157,13 +167,15 @@ function heredocDelimiters(line: string): string[] {
  * check sees it.
  */
 function stripHeredocs(command: string): string {
-	const lines = command.split("\n");
 	const kept: string[] = [];
-	for (let i = 0; i < lines.length; i++) {
-		kept.push(lines[i]);
-		for (const delim of heredocDelimiters(lines[i])) {
-			while (++i < lines.length && lines[i].trim() !== delim) continue;
+	let open: string[] = []; // delimiters whose body is still being dropped, in order
+	for (const line of command.split("\n")) {
+		if (open.length > 0) {
+			if (line.trim() === open[0]) open = open.slice(1); // the terminator closes one body
+			continue;
 		}
+		kept.push(line);
+		open = heredocDelimiters(line);
 	}
 	return kept.join("\n");
 }
@@ -184,13 +196,18 @@ const SHELL_RE = /(^|\/)(?:ba|da|k|z)?sh$/;
 
 /** The verb of a segment: wrappers and `NAME=value` skipped, a `git` subcommand folded in. */
 function segmentVerb(words: { text: string; quoted: boolean }[]): { verb: string; at: number } | null {
-	for (let i = 0; i < words.length; i++) {
-		const text = words[i].text;
+	let skipNext = false; // the token after `timeout` is its duration, not the verb
+	for (const [i, word] of words.entries()) {
+		const text = word.text;
+		if (skipNext) {
+			skipNext = false;
+			continue;
+		}
 		if (text === "") continue;
 		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(text)) continue;
 		if (WRAPPER_RE.test(text)) continue;
 		if (text === "timeout") {
-			i++; // the duration, not the verb
+			skipNext = true;
 			continue;
 		}
 		if (/^[0-9]*[<>]/.test(text)) continue; // a redirect, not a verb
@@ -229,16 +246,23 @@ function scriptIndices(words: { text: string }[], verb: string, at: number): Set
 	const skip = new Set<number>();
 	if (!PATTERN_VERB_RE.test(verb)) return skip;
 	let seen = false;
-	for (let i = at + 1; i < words.length; i++) {
-		const text = words[i].text;
+	let skipNext = false; // the token after -e / -f is its script or pattern file
+	for (const [i, word] of words.entries()) {
+		if (i <= at) continue; // the verb and everything before it is not an argument
+		const text = word.text;
+		if (skipNext) {
+			skipNext = false;
+			continue;
+		}
 		if (text === "-e") {
-			skip.add(++i); // the script itself
+			skip.add(i + 1); // the script itself
 			seen = true;
+			skipNext = true;
 			continue;
 		}
 		if (text === "-f") {
-			i++; // a pattern file: a real read, keep checking it
-			seen = true;
+			seen = true; // a pattern file: a real read, keep checking it
+			skipNext = true;
 			continue;
 		}
 		if (text.startsWith("-") || seen) continue;
@@ -447,11 +471,20 @@ function describeTouch(t: Touch): string {
 function stripComments(command: string): string {
 	let out = "";
 	let quote: string | null = null;
-	for (let i = 0; i < command.length; i++) {
-		const ch = command[i];
+	let before = ""; // the code point before this one, so `#` at the start still counts
+	let inComment = false;
+	for (const ch of command) {
+		const previous = before;
+		before = ch;
+		if (inComment) {
+			if (ch !== "\n") continue;
+			inComment = false;
+			out += "\n"; // the comment and the newline that ends it become one newline
+			continue;
+		}
 		if (quote) {
 			out += ch;
-			if (ch === quote && command[i - 1] !== "\\") quote = null;
+			if (ch === quote && previous !== "\\") quote = null;
 			continue;
 		}
 		if (ch === '"' || ch === "'") {
@@ -459,9 +492,8 @@ function stripComments(command: string): string {
 			out += ch;
 			continue;
 		}
-		if (ch === "#" && (i === 0 || /\s/.test(command[i - 1] ?? ""))) {
-			while (i < command.length && command[i] !== "\n") i++;
-			out += "\n";
+		if (ch === "#" && (previous === "" || /\s/.test(previous))) {
+			inComment = true;
 			continue;
 		}
 		out += ch;
