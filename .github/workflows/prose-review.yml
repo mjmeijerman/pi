@@ -18,7 +18,11 @@
 # change, it counts the instruction-file diff itself and refuses over 400
 # changed lines (exit 3 → a warning, no request), and the answer is capped in
 # `max_tokens`. A missing `PROSE_REVIEW_API_KEY` secret is an annotation that
-# says "not configured", never a silent green check.
+# says "not configured", never a silent green check. An endpoint or
+# configuration failure is `::error title=prose-review-infra` with the words
+# "the review did not run", its own step-summary heading, and the script's
+# status/model/body/diagnosis — never the same annotation as prose that was
+# read and could not be parsed, which keeps the `prose-review` title.
 name: prose-review
 
 on:
@@ -116,8 +120,25 @@ jobs:
               { echo "### prose-review: not configured"; echo; echo '`PROSE_REVIEW_API_KEY` is unset, so nothing was reviewed. The check is green because there is nothing to review with, not because the prose passed.'; } >>"$GITHUB_STEP_SUMMARY"
               exit 0
               ;;
+            5)
+              # The endpoint or the configuration failed: wrong endpoint, bad
+              # key, a model the provider does not have, a quota, or a token cap
+              # spent before the answer. Nothing was reviewed. Still red — an
+              # unrunnable check is never green — under a title of its own and
+              # with the script's one-line diagnosis, redacted body snippet and
+              # status in the annotation.
+              diagnostic=$(tr '\n' ' ' <"$err" | tr -s ' ')
+              echo "::error title=prose-review-infra::the review did not run — ${diagnostic}"
+              { echo "### prose-review-infra: the review did not run"; echo; echo 'The API or its configuration failed, not the prose. No request answered, so nothing was reviewed: no finding is missing because none was ever produced.'; echo; sed 's/^/    /' "$err"; } >>"$GITHUB_STEP_SUMMARY"
+              exit "$status"
+              ;;
             *)
-              echo "::error title=prose-review::the review failed (exit $status)"
+              # This branch is the review that ran and answered with something
+              # that is not five findings: prose the model did read. The branch
+              # above is the review that never ran at all. A reader must be able
+              # to tell a bad model name or an empty answer from bad prose.
+              echo "::error title=prose-review::the review ran and its answer is not five findings (exit $status)"
+              { echo "### prose-review: the answer could not be used"; echo; echo 'The review ran and answered, but the answer is not five findings, so nothing was reported. This is a review problem, not an API problem.'; echo; sed 's/^/    /' "$err"; } >>"$GITHUB_STEP_SUMMARY"
               exit "$status"
               ;;
           esac

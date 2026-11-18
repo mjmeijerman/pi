@@ -11,21 +11,26 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+	ATTEMPTS,
 	INSTRUCTION_PATHS,
+	MAX_BODY_CHARS,
 	MAX_CHANGED_LINES,
 	MAX_OUTPUT_TOKENS,
 	QUESTIONS,
 	buildRequest,
 	changedLineCount,
+	diagnose,
 	diffPaths,
 	isInstructionPath,
 	parseAnswer,
+	redact,
 	renderComment,
 } from "../../.github/scripts/prose-review.mjs";
 
@@ -186,6 +191,181 @@ test("the comment is one line per question, with no score and no verdict", () =>
 	assert.equal(numbered.length, 5);
 	assert.match(comment, /^<!-- prose-review -->$/m);
 	assert.doesNotMatch(comment, /looks good|score|grade|approved/i);
+});
+
+// A fake endpoint on 127.0.0.1: a request that never leaves the machine, so
+// the failure paths are tested as code instead of as a once-a-month surprise.
+// `replies` is consumed in order; the last one repeats, so a retry sees it too.
+async function withFakeEndpoint(replies, fn) {
+	const calls = [];
+	const server = createServer((req, res) => {
+		let body = "";
+		req.on("data", (chunk) => (body += chunk));
+		req.on("end", () => {
+			calls.push({ authorization: req.headers.authorization, body });
+			const reply = replies[Math.min(calls.length - 1, replies.length - 1)];
+			const text = typeof reply.body === "string" ? reply.body : JSON.stringify(reply.body);
+			res.writeHead(reply.status, { "content-type": "application/json" });
+			res.end(text);
+		});
+	});
+	await new Promise((done) => server.listen(0, "127.0.0.1", done));
+	const { port } = server.address();
+	try {
+		return await fn({ endpoint: `http://127.0.0.1:${port}/v1/chat/completions`, calls });
+	} finally {
+		await new Promise((done) => server.close(done));
+	}
+}
+
+const GOOD_ANSWER = JSON.stringify(QUESTIONS.map((_, i) => ({ question: i + 1, finding: "no finding" })));
+const OK_JSON = { model: "test-model", choices: [{ message: { role: "assistant", content: GOOD_ANSWER }, finish_reason: "stop" }] };
+
+const FAKE_KEY = "sk-fake-" + "z".repeat(20); // 28 bytes, known, and never real.
+
+// Async, not spawnSync: the fake endpoint lives in this process, so a blocking
+// spawn would deadlock the server that has to answer the child.
+function liveRun(endpoint, env = {}) {
+	return new Promise((done) => {
+		const child = spawn(process.execPath, [SCRIPT, "--root", ROOT], {
+			cwd: ROOT,
+			env: {
+				...process.env,
+				PROSE_REVIEW_API_KEY: FAKE_KEY,
+				PROSE_REVIEW_ENDPOINT: endpoint,
+				PROSE_REVIEW_MODEL: "deepseek-v4-flash",
+				PROSE_REVIEW_RETRY_DELAY_MS: "0",
+				...env,
+			},
+		});
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (chunk) => (stdout += chunk));
+		child.stderr.on("data", (chunk) => (stderr += chunk));
+		child.on("close", (status) => done({ status, stdout, stderr }));
+		child.stdin.end(DIFF);
+	});
+}
+
+test("a non-2xx names the status, the model and the body snippet, and exits 5", async () => {
+	const body = { error: { message: "Model deepseek-v4-flash does not exist", type: "invalid_request_error" } };
+	await withFakeEndpoint([{ status: 404, body }], async ({ endpoint, calls }) => {
+		const { status, stdout, stderr } = await liveRun(endpoint);
+		assert.equal(status, 5, stderr);
+		assert.equal(stdout, "", "an API failure must not print a comment");
+		assert.match(stderr, /the review did not run/);
+		assert.match(stderr, /status: 404/);
+		assert.match(stderr, /model: deepseek-v4-flash/);
+		assert.match(stderr, /model not found/);
+		assert.match(stderr, /does not exist/, "the body snippet must reach the reader");
+		assert.equal(calls.length, 1, "a 4xx that names the request is not retried");
+	});
+});
+
+test("an empty answer names the model, the token cap and the attempts", async () => {
+	const body = {
+		model: "deepseek-flash",
+		choices: [{ message: { role: "assistant", content: "", reasoning_content: "thinking" }, finish_reason: "length" }],
+		usage: { completion_tokens: MAX_OUTPUT_TOKENS, completion_tokens_details: { reasoning_tokens: MAX_OUTPUT_TOKENS } },
+	};
+	await withFakeEndpoint([{ status: 200, body }], async ({ endpoint, calls }) => {
+		const { status, stdout, stderr } = await liveRun(endpoint);
+		assert.equal(status, 5, stderr);
+		assert.equal(stdout, "");
+		assert.match(stderr, /the review did not run/);
+		assert.match(stderr, /model: deepseek-v4-flash/);
+		assert.match(stderr, /token cap/);
+		assert.match(stderr, /status: 200/);
+		assert.match(stderr, /attempts: 2\/2/);
+		assert.equal(calls.length, ATTEMPTS, "an empty answer is retried once");
+	});
+});
+
+test("a 5xx is retried once and the second answer is used", async () => {
+	await withFakeEndpoint([{ status: 503, body: { error: "upstream is down" } }, { status: 200, body: OK_JSON }], async ({ endpoint, calls }) => {
+		const { status, stdout, stderr } = await liveRun(endpoint);
+		assert.equal(status, 0, stderr);
+		assert.equal(calls.length, 2, "one retry, not two");
+		assert.match(stderr, /attempt 1\/2/);
+		assert.match(stderr, /server error/);
+		assert.equal(stdout.split("\n").filter((line) => /^\d\. /.test(line)).length, 5);
+	});
+});
+
+test("a 400 is not retried: a config error does not improve on a second call", async () => {
+	await withFakeEndpoint([{ status: 400, body: { error: { message: "unknown model: nope" } } }], async ({ endpoint, calls }) => {
+		const { status, stderr } = await liveRun(endpoint);
+		assert.equal(status, 5);
+		assert.equal(calls.length, 1);
+		assert.match(stderr, /attempts: 1\/2/);
+		assert.match(stderr, /model not found/);
+	});
+});
+
+test("an answer that is prose is a review failure (exit 1), not an infra one", async () => {
+	const body = { model: "test-model", choices: [{ message: { role: "assistant", content: "I could not review this." }, finish_reason: "stop" }] };
+	await withFakeEndpoint([{ status: 200, body }], async ({ endpoint }) => {
+		const { status, stderr } = await liveRun(endpoint);
+		assert.equal(status, 1, "a parse failure keeps exit 1, the prose-review title");
+		assert.match(stderr, /no JSON array in the answer/);
+		assert.match(stderr, /I could not review this/);
+	});
+});
+
+test("the key never reaches the output, and its length is what a reader sees", async () => {
+	const body = { error: { message: `Incorrect API key provided: ${FAKE_KEY}` } };
+	await withFakeEndpoint([{ status: 401, body }], async ({ endpoint, calls }) => {
+		const { status, stdout, stderr } = await liveRun(endpoint);
+		assert.equal(status, 5);
+		assert.equal(calls[0].authorization, `Bearer ${FAKE_KEY}`, "the header is where the key belongs");
+		for (const out of [stdout, stderr]) {
+			assert.ok(!out.includes(FAKE_KEY), "the key must never appear in the output");
+		}
+		assert.match(stderr, new RegExp(`<redacted ${FAKE_KEY.length}-byte key>`));
+		assert.match(stderr, /bad key/);
+	});
+});
+
+test("the body snippet is capped, so an HTML error page cannot flood the log", () => {
+	assert.equal(MAX_BODY_CHARS, 400);
+	assert.equal(diagnose({ status: 500 }), "server error: the endpoint failed on its side");
+	assert.match(diagnose({ status: 200, payload: null, body: "<html>" }), /not JSON/);
+	assert.match(diagnose({ status: 429, body: "" }), /rate limit/);
+	assert.match(diagnose({ status: 429, body: "insufficient quota" }), /quota/);
+});
+
+test("redact replaces every occurrence and leaves the text alone without a secret", () => {
+	assert.equal(
+		redact(`a ${FAKE_KEY} b ${FAKE_KEY}`, FAKE_KEY),
+		`a <redacted ${FAKE_KEY.length}-byte key> b <redacted ${FAKE_KEY.length}-byte key>`,
+	);
+	assert.equal(redact("no secret here", FAKE_KEY), "no secret here");
+});
+
+test("a 2xx diagnosis reads the shape of the answer, not words inside it", () => {
+	// The reasoning text of a real answer can contain "does not exist" while
+	// discussing the diff. Only a >=400 body is a verdict on the request.
+	const payload = {
+		choices: [{ message: { content: "", reasoning_content: "agent/prompts/x.md does not exist" }, finish_reason: "length" }],
+		usage: { completion_tokens: 700 },
+	};
+	const body = JSON.stringify(payload);
+	assert.match(diagnose({ status: 200, body, payload, text: "", maxTokens: 700 }), /token cap/);
+	assert.match(diagnose({ status: 400, body, payload: null }), /model not found/);
+});
+
+test("the workflow titles the two failures differently", () => {
+	const workflow = readFileSync(WORKFLOW, "utf8");
+	assert.match(workflow, /::error title=prose-review-infra::the review did not run/);
+	assert.match(workflow, /::error title=prose-review::the review ran/);
+	assert.match(workflow, /^ {12}5\)$/m, "the workflow branches on exit 5");
+	assert.match(workflow, /### prose-review-infra: the review did not run/);
+	// A `*)` before `5)` swallows it: bash case takes the first match, so the
+	// infra branch has to come first or exit 5 reports as a parse failure.
+	assert.ok(
+		workflow.indexOf("            5)") < workflow.indexOf("            *)"),
+		"the exit-5 branch must be read before the catch-all",
+	);
 });
 
 test("the workflow triggers on exactly the paths the script reviews", () => {

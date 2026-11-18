@@ -26,12 +26,31 @@
 // Cost guard: a diff over 400 changed lines is refused before any request is
 // made (exit 3), and the answer is capped at MAX_OUTPUT_TOKENS.
 //
+// Two failure kinds, two exit codes, because they are two different jobs for
+// the reader:
+//
+//   exit 1  the review ran and its answer is not five findings. The prose is
+//           the question; the workflow titles this `prose-review`.
+//   exit 5  the review did not run: a non-2xx, a 2xx with an empty answer, a
+//           body that is not JSON. The message names the model, the HTTP
+//           status, the first MAX_BODY_CHARS characters of the raw body and a
+//           one-line diagnosis (model not found / bad key / quota / rate limit
+//           / refused / token cap / server error), and the workflow titles it
+//           `prose-review-infra`. Today an empty answer used to print
+//           "no JSON array in the answer:" and nothing else — a bad model name
+//           and bad prose read the same.
+//
+// Retry: one more attempt after a short pause on a 5xx, a 429, a refused
+// connection or an empty answer. A 4xx that names the request (bad model, bad
+// key, bad parameter) is not retried: repeating a config error buys nothing.
+//
 // Usage: prose-review.mjs [--dry-run] [--root DIR] [--diff FILE]
 //
 // Environment (live mode only):
-//   PROSE_REVIEW_API_KEY    required; absent means "not configured" (exit 4)
-//   PROSE_REVIEW_ENDPOINT   default https://api.openai.com/v1/chat/completions
-//   PROSE_REVIEW_MODEL      default gpt-4.1-mini
+//   PROSE_REVIEW_API_KEY        required; absent means "not configured" (exit 4)
+//   PROSE_REVIEW_ENDPOINT       default https://api.openai.com/v1/chat/completions
+//   PROSE_REVIEW_MODEL          default gpt-4.1-mini
+//   PROSE_REVIEW_RETRY_DELAY_MS default 2000; 0 in the tests so they stay fast
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
@@ -304,6 +323,142 @@ export function renderComment(answers, { model = MODEL_DEFAULT } = {}) {
 	return `${lines.join("\n")}\n`;
 }
 
+/** Raw body echoed back to a reader, never longer than this. */
+export const MAX_BODY_CHARS = 400;
+
+/** One request plus one retry. Not more: a second failure is the answer. */
+export const ATTEMPTS = 2;
+
+/** Pause between attempts. Long enough for a rate limiter, short enough to wait. */
+export const RETRY_DELAY_MS = 2000;
+
+/** A failure of the endpoint or the configuration, not of the prose. Exit 5. */
+export class InfraError extends Error {
+	constructor(message, { status = 0, diagnosis = "" } = {}) {
+		super(message);
+		this.name = "InfraError";
+		this.exitCode = 5;
+		this.status = status;
+		this.diagnosis = diagnosis;
+	}
+}
+
+/** The secret never reaches a log, an annotation or a test's output. */
+export function redact(text, secret) {
+	const body = String(text ?? "");
+	if (!secret) return body;
+	return body.split(secret).join(`<redacted ${secret.length}-byte key>`);
+}
+
+/**
+ * One line a reader can act on: which of the ways an API call fails happened.
+ * Every branch is a sentence about the request, never about the prose, because
+ * a review that did not run must not read like a review that found nothing.
+ */
+export function diagnose({ status, body = "", payload = null, text = null, maxTokens = MAX_OUTPUT_TOKENS }) {
+	const lower = String(body ?? "").toLowerCase();
+	const blank = typeof text !== "string" || text.trim() === "";
+
+	if (status === 0) return "network: the endpoint did not answer at all";
+	if (status >= 400) {
+		if (status === 401 || status === 403 || /invalid api key|invalid_api_key|incorrect api key|unauthorized/.test(lower)) {
+			return "bad key: the endpoint refused the credential";
+		}
+		if (/model_not_found|model not found|no such model|unknown model|invalid model|does not exist/.test(lower)) {
+			return "model not found: the endpoint has no model by that name";
+		}
+		if (status === 402 || /insufficient (balance|quota)|exceeded your current quota|payment required/.test(lower)) {
+			return "quota: the account has no credit left";
+		}
+		if (status === 429) return "rate limit: the endpoint asked for a slower rate";
+		if (status === 404) return "model not found: the endpoint has no such path or model";
+		if (status >= 500) return "server error: the endpoint failed on its side";
+		return "request rejected: the endpoint named this request as the problem";
+	}
+
+	// A 2xx: the words in the body are the model's answer, never a verdict on
+	// the request, so only the shape of the response is read here.
+	if (!payload) return "unparseable: the endpoint answered with a body that is not JSON";
+	const choice = payload?.choices?.[0];
+	if (choice?.finish_reason === "content_filter") return "refused: the endpoint's content filter stopped the answer";
+	if (choice?.finish_reason === "length" || payload?.usage?.completion_tokens >= maxTokens) {
+		return `token cap: the model used all ${maxTokens} output tokens before writing an answer`;
+	}
+	if (blank) return "empty answer: a 2xx with no choices[0].message.content";
+	return "unknown: a 2xx answer this check does not recognise";
+}
+
+/**
+ * The chat call, with one retry, and every failure turned into an InfraError
+ * that carries the status, the model, a redacted body snippet and a diagnosis.
+ * Exported so the tests can run it against a local server instead of the net.
+ */
+export async function askEndpoint({
+	endpoint,
+	apiKey,
+	request,
+	fetchImpl = globalThis.fetch,
+	sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+	delayMs = Number(process.env.PROSE_REVIEW_RETRY_DELAY_MS ?? RETRY_DELAY_MS),
+	attempts = ATTEMPTS,
+	log = (line) => console.error(line),
+	timeoutMs = 90_000,
+} = {}) {
+	let failure = null;
+	let used = 0;
+
+	for (let attempt = 1; attempt <= attempts; attempt += 1) {
+		used = attempt;
+		let status = 0;
+		let raw = "";
+		try {
+			const response = await fetchImpl(endpoint, {
+				method: "POST",
+				headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+				body: JSON.stringify(request),
+				signal: AbortSignal.timeout(timeoutMs),
+			});
+			status = response.status;
+			raw = await response.text();
+		} catch (err) {
+			raw = redact(err?.message ?? String(err), apiKey);
+		}
+
+		let payload = null;
+		try {
+			payload = JSON.parse(raw);
+		} catch {
+				payload = null;
+		}
+
+		const text = payload?.choices?.[0]?.message?.content;
+		const empty = typeof text !== "string" || text.trim() === "";
+		if (status >= 200 && status < 300 && !empty) return { text, model: payload?.model ?? request.model, attempts: used };
+
+		const diagnosis = diagnose({ status, body: raw, payload, text, maxTokens: request.max_tokens });
+		failure = { status, diagnosis, body: redact(raw, apiKey).slice(0, MAX_BODY_CHARS) };
+
+		// A 429, a 5xx, a dead connection or a 2xx with an empty answer can change
+		// on a second try. A 400/401/403/404 that names the request cannot, and
+		// an empty 4xx body is that 4xx talking, not an empty answer.
+		const retryable = status === 0 || status === 429 || status >= 500 || (status >= 200 && status < 300 && empty);
+		if (!retryable || attempt === attempts) break;
+		log(`prose-review: attempt ${attempt}/${attempts}: ${diagnosis} — retrying once in ${delayMs} ms`);
+		await sleep(delayMs);
+	}
+
+	throw new InfraError(
+		[
+			`the review did not run — ${failure.diagnosis}`,
+			`model: ${request.model}`,
+			`status: ${failure.status || "no response"}`,
+			`attempts: ${used}/${attempts}`,
+			`response: ${failure.body || "(empty body)"}`,
+		].join("\n"),
+		{ status: failure.status, diagnosis: failure.diagnosis },
+	);
+}
+
 function readStdin() {
 	try {
 		return readFileSync(0, "utf8");
@@ -372,27 +527,16 @@ async function main() {
 	}
 
 	const endpoint = process.env.PROSE_REVIEW_ENDPOINT || ENDPOINT_DEFAULT;
-	const response = await fetch(endpoint, {
-		method: "POST",
-		headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-		body: JSON.stringify(request),
-		signal: AbortSignal.timeout(90_000),
-	});
-	if (!response.ok) {
-		const body = await response.text();
-		throw new Error(`endpoint returned ${response.status}: ${body.slice(0, 500)}`);
-	}
-	const payload = await response.json();
-	const text = payload?.choices?.[0]?.message?.content;
-	if (typeof text !== "string") throw new Error(`endpoint returned no message content: ${JSON.stringify(payload).slice(0, 500)}`);
-
-	process.stdout.write(renderComment(parseAnswer(text), { model }));
+	const answer = await askEndpoint({ endpoint, apiKey, request });
+	process.stdout.write(renderComment(parseAnswer(answer.text), { model }));
 }
 
 const invokedDirectly = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 if (invokedDirectly) {
 	main().catch((err) => {
 		console.error(`prose-review: ${err.message}`);
-		process.exit(1);
+		// 5 is "the review did not run"; the workflow titles that annotation
+		// `prose-review-infra` so it cannot read as prose that failed.
+		process.exit(err.exitCode ?? 1);
 	});
 }
