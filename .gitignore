@@ -39,3 +39,6 @@ agent/herdr-resume/
 *.bak
 werken-met-ai.pdf
 agent/env.secret
+# Worker checkouts: `git worktree add .worktrees/SLUG` must sit inside the repo
+# (the sandbox binds the repo, not its parent), so it is scratch, not harness code.
+.worktrees/
