@@ -1,0 +1,43 @@
+# scripts/doc-facts.txt — one table: which transport serves which subject.
+#
+# Read by: bash scripts/harness-check.sh --verify-doc-facts (also in --quick).
+# Edit it by hand; nothing generates it. One line per subject, five fields,
+# tab-separated:
+#
+#   subject <TAB> must name <TAB> must NOT name <TAB> files <TAB> module
+#
+# subject     a regular expression for the thing being described (jev, the
+#             local model tool). Matched case-insensitively, as a whole word:
+#             a subject inside a path (`agent/skills/jev/SKILL.md`) is a file
+#             name, not a mention of the thing, so it is not matched.
+# must name   the transport that subject is really served by. A listed file
+#             that talks about the subject has to contain this somewhere.
+# must NOT    the transport it is not. A single sentence (or list item) that
+# name        puts the subject and this in the same clause is a FAIL, and the
+#             line is printed with the sentence so nobody has to grep.
+# files       space-separated, relative to the repo root. Only these are read:
+#             add a file the day it starts talking about the subject.
+# module      the code the "must name" value was read from. The check reads it
+#             too (comments ignored), so a transport that moves in code fails
+#             the day it moves, before anyone remembers the prose. Filenames are
+#             looked up in bin/, agent/bin/, then the delegation workspace's bin
+#             (install.sh: PI_BOSS_DIR, default ~/big-boss-pi/bin).
+#
+# A clause boundary is `;`, a dash, or `, and/but/while/whereas/yet/or`, so
+# "local-run stays on ollama ... and jev never moves to them" is one true
+# sentence, not an accusation. That is the whole point of the check: a wrong
+# sentence fails, a right one may sit next to it.
+
+# jev answers from TypeSafe over HTTPS, with a key, billed per call. The endpoint
+# is bin/jev-model.mjs:21 (`ENDPOINT = ... "https://api.typesafe.ai/v1/systemone"`).
+# It used to be a local ollama model and nothing compared the prose to the code,
+# so agent/skills/jev/SKILL.md and agent/AGENTS.md said the wrong thing for as
+# long as the code disagreed (blip 36, blip 62).
+jev	typesafe	localhost|11434|ollama	agent/AGENTS.md agent/skills/jev/SKILL.md docs/radar-conformance.md docs/agent-playbook.md scripts/README.md	jev-model.mjs
+
+# local-run and the local_llm tool stay on ollama on this host, no network, no
+# key, no cost. The endpoint is bin/local-model.mjs:14
+# (`ENDPOINT = ... "http://localhost:11434/api/chat"`); naming the local model
+# (bin/local-model.mjs:13, qwen3.8:27b) counts as naming the transport, because
+# a doc that says which model runs locally has said the transport is local.
+local-run|local_llm	11434|ollama|qwen3\.8:27b	typesafe	agent/AGENTS.md agent/skills/jev/SKILL.md docs/radar-conformance.md docs/agent-playbook.md README.md sandbox/README.md	local-model.mjs
