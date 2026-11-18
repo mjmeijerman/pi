@@ -34,7 +34,9 @@ after(() => {
 async function turn() {
 	const fake = createFakePi();
 	secretGuard(fake.pi);
-	const { ctx, notices } = createFakeCtx();
+	// The guard resolves a dotted operand against the command's cwd; this temp dir
+	// is empty, so a dotted name there has no file behind it and reads as a host.
+	const { ctx, notices } = createFakeCtx({ cwd: agentDir });
 	// The ledger lives per turn; every test starts one so state cannot leak in.
 	await fake.emit("agent_start", {}, ctx);
 	const bash = async (command: string) => {
