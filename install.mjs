@@ -47,6 +47,7 @@ import {
 	PI_WRAPPER_BEGIN,
 	PI_WRAPPER_BLOCK,
 	PI_WRAPPER_END,
+	bossClonePlan,
 	helpText,
 	homePaths,
 	parseFlags,
@@ -550,17 +551,48 @@ function runShell(command) {
 }
 
 // --- 5b/5c. the delegation workspace ---------------------------------------
+/**
+ * ghAuthed — is `gh` here AND logged in? A gh that exists but is not authed
+ * cannot clone, and asking it to is how the first attempt used to die quietly.
+ */
+function ghAuthed() {
+	return hasCmd('gh') && spawnSync('gh', ['auth', 'status'], { stdio: 'ignore' }).status === 0;
+}
+
+/**
+ * cloneBoss — try the transports in the order scripts/install-lib.mjs gives,
+ * checking each exit status here rather than through run()'s warn path.
+ *
+ * The order is the fix: https needs no key, so a public repo arrives on a bare
+ * machine; SSH is last and says why it is last. Two details keep it honest —
+ * the status is read for each attempt instead of the loop moving on regardless,
+ * and a failed clone's half-made directory is removed before the next attempt,
+ * because the check at the top of stepBoss reads "exists" as "already present"
+ * and a leftover directory would make every future run report success.
+ * Returns the transport that landed, or null.
+ */
+function cloneBoss() {
+	for (const attempt of bossClonePlan({ ghAuthed: ghAuthed(), hasNetwork: true, repo: BOSS_REPO, dir: BOSS_DIR })) {
+		note(`cloning ${BOSS_REPO} via ${attempt.transport} -> ${BOSS_DIR}`);
+		if (attempt.transport === 'ssh') {
+			warn(`${BOSS_REPO} over SSH needs a GitHub key — ${BOSS_REPO} is public, so check the network before the key`);
+		}
+		const status = run(attempt.cmd, attempt.args, { allowFail: true });
+		if (status === 0) return attempt.transport;
+		if (exists(BOSS_DIR)) fs.rmSync(BOSS_DIR, { recursive: true, force: true });
+	}
+	return null;
+}
+
 function stepBoss() {
 	if (exists(BOSS_DIR)) {
 		note(`big-boss-pi workspace already present -> ${BOSS_DIR}`);
 	} else if (SKIP_NETWORK) {
 		skipped('big-boss-pi', 'PI_SKIP_NETWORK=1 — not cloned');
-	} else if (hasCmd('gh') && spawnSync('gh', ['auth', 'status'], { stdio: 'ignore' }).status === 0) {
-		note(`cloning ${BOSS_REPO} via gh -> ${BOSS_DIR}`);
-		run('gh', ['repo', 'clone', BOSS_REPO, BOSS_DIR], { allowFail: true });
 	} else {
-		note(`cloning ${BOSS_REPO} over SSH -> ${BOSS_DIR}`);
-		run('git', ['clone', `git@github.com:${BOSS_REPO}.git`, BOSS_DIR], { allowFail: true });
+		const landed = cloneBoss();
+		if (landed) note(`big-boss-pi cloned via ${landed} -> ${BOSS_DIR}`);
+		else warn(`big-boss-pi did not arrive — clone ${BOSS_REPO} by hand into ${BOSS_DIR}`);
 	}
 
 	// The workspace's own bin/ scripts, on PATH under their bare names: AGENTS.md
