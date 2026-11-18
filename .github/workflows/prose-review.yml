@@ -62,7 +62,10 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "24"
+          # mise.toml's `node`, projected: setup-node cannot read a TOML file, and
+          # scripts/harness-check.sh FAILs when the two disagree (blip 68).
+          # Relative to the workspace root, which is how setup-node joins it.
+          node-version-file: .node-version
 
       - name: diff for the instruction files only
         id: diff
