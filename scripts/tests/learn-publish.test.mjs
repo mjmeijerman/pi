@@ -447,3 +447,92 @@ test("a sandboxed caller is refused and told to write the broker's queue file", 
 		"a refused caller is not a publish attempt",
 	);
 });
+
+// ------------------------------------------- the test a source change owes --
+// The PR gate mutates exactly the lines the diff adds and breaks at 100 (CI run
+// 44377745621 on PR 159: 16 mutants on the added lines, 5 survived, score 68.75),
+// so a learner branch that moves a source file and ships no test is a red build
+// handed to a reviewer. The prompt asks for the test; this refuses the publish
+// so the learner pays for it, instead of a second worker after the fact.
+
+/** Commit files onto the fixture's branch, with origin/trunk set so a base exists. */
+function commitOnBranch(f, files, message = "fix: the thing") {
+	const git = (...args) => {
+		const r = spawnSync("git", args, { cwd: f.dir, env: GIT_ENV, encoding: "utf8" });
+		assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+		return r.stdout;
+	};
+	git("update-ref", "refs/remotes/origin/trunk", git("rev-parse", "trunk").trim());
+	git("checkout", "-q", "learn/test-slug");
+	for (const [path, body] of Object.entries(files)) {
+		mkdirSync(dirname(join(f.dir, path)), { recursive: true });
+		writeFileSync(join(f.dir, path), body);
+	}
+	git("add", "--", ...Object.keys(files));
+	git("commit", "-q", "-m", message);
+	git("checkout", "-q", "trunk");
+}
+
+const PROPOSAL = (extra = "") =>
+	`# Refuse a learner branch that changes source and ships no test\n\n**Verdict:** change\n**Risk tier:** Medium (\`scripts/\`)\n${extra}`;
+
+test("a source change with no test is refused before any space is spawned", () => {
+	const f = fixture("after");
+	f.pane = f.publishingPane;
+	const proposal = join(f.dir, "agent", "proposals", "p.md");
+	writeFileSync(proposal, PROPOSAL());
+	commitOnBranch(f, { "scripts/learn-publish.sh": "#!/usr/bin/env bash\n# the fix\n" });
+
+	const r = run(f, ["test-slug", "--proposal", proposal]);
+
+	assert.equal(r.status, 2, "a refusal, not a publish and not a 'no PR'");
+	assert.match(r.stderr, /changes source files with no test in the diff: scripts\/learn-publish\.sh/);
+	assert.match(r.stderr, /add the test that pins scripts\/learn-publish\.sh/);
+	assert.match(r.stderr, /\*\*No test:\*\*/, "it names the escape hatch, so the learner is not stuck");
+	assert.equal(existsSync(join(f.dir, "pane-called")), false, "nothing was handed over");
+	assert.equal(
+		readdirSync(join(f.dir, "agent", "proposals")).includes("publish-log.jsonl"),
+		false,
+		"a refused branch is not a publish attempt",
+	);
+});
+
+test("the same source change with its test publishes", () => {
+	const f = fixture("after");
+	f.pane = f.publishingPane;
+	const proposal = join(f.dir, "agent", "proposals", "p.md");
+	writeFileSync(proposal, PROPOSAL());
+	commitOnBranch(f, {
+		"scripts/learn-publish.sh": "#!/usr/bin/env bash\n# the fix\n",
+		"scripts/tests/learn-publish.test.mjs": "// the test that pins it\n",
+	});
+
+	const r = run(f, ["test-slug", "--proposal", proposal]);
+
+	assert.equal(r.status, 0, r.stderr);
+	assert.match(r.stdout, /PR #42/);
+	assert.equal(f.paneCalled()[1], "test-slug-pr", "handed to the host's agent space");
+});
+
+test("a differential proof stands in for the test, and its absence does not", () => {
+	const f = fixture("after");
+	f.pane = f.publishingPane;
+	commitOnBranch(f, { "scripts/learn-publish.sh": "#!/usr/bin/env bash\n# unreachable line\n" });
+
+	// A count without the domain is not a proof; a survivor's row needs both.
+	const vague = join(f.dir, "agent", "proposals", "vague.md");
+	writeFileSync(vague, PROPOSAL("**No test:** no test can distinguish it: some inputs\n"));
+	const refused = run(f, ["test-slug", "--proposal", vague]);
+	assert.equal(refused.status, 2, "a proof with no domain and no count is refused");
+	assert.match(refused.stderr, /no test in the diff/);
+
+	const proved = join(f.dir, "agent", "proposals", "proved.md");
+	writeFileSync(
+		proved,
+		PROPOSAL("**No test:** no test can distinguish it: every queue file in agent/proposals/queue/, 2,431 cases, 0 differing verdicts\n"),
+	);
+	const published = run(f, ["test-slug", "--proposal", proved]);
+	assert.equal(published.status, 0, published.stderr);
+	assert.match(published.stderr, /No test: line is the proof taken instead/);
+	assert.match(published.stdout, /PR #42/);
+});
