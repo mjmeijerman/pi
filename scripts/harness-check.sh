@@ -574,11 +574,36 @@ check_review_freshness() {
 # --- spec deltas -----------------------------------------------------------
 # Radar blip 82 (OpenSpec, Trial): the spec a change is measured against lives beside
 # the code it describes, and the change itself is a delta — one file in specs/changes/
-# named after its branch. The only part a script can check is the link: the delta's
-# `Area:` line has to name an area spec that exists. A delta amending nothing is the
-# failure worth catching, and what the delta *says* stays a review question.
+# named after its branch. Two rows come out of that:
+#
+#   spec-delta-area    the delta's `Area:` line has to name an area spec that exists.
+#                      A delta amending nothing is the failure worth catching, and what
+#                      the delta *says* stays a review question.
+#   spec-delta-folded  a delta that reached trunk is a merged change, and merging folds
+#                      the delta into its area spec and deletes the file (README there).
+#                      So a delta still in trunk's tree is an unfolded one.
+#
+# The fold itself is a human step on purpose, and the row only makes it unmissable: with one
+# `git rm specs/changes/<file>` done without the paste, the row goes quiet while the area spec
+# says something else — so the FAIL names the area spec file rather than offering a command
+# that would bury the body at the end of it. Appending English to English mechanically is how
+# a spec ends up with two paragraphs that disagree, and no check can tell which one is true.
+
+# The ref a delta is measured against, empty when this tree has no trunk to measure against
+# (a checkout with no history at all, or a fixture from the tests).
+spec_trunk_ref() {
+	local ref
+	for ref in trunk origin/trunk main origin/main master origin/master; do
+		git -C "$ROOT" rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1 || continue
+		printf '%s' "$ref"
+		return 0
+	done
+	return 1
+}
+
 check_spec_deltas() {
-	local dir="$ROOT/specs/changes" files=() file rel area spec seen=0
+	local dir="$ROOT/specs/changes" files=() file rel area spec seen=0 trunk
+	trunk=$(spec_trunk_ref) || trunk=""
 	shopt -s nullglob
 	files=("$dir"/*.md)
 	shopt -u nullglob
@@ -599,11 +624,26 @@ check_spec_deltas() {
 		if [ -z "$area" ]; then
 			verdict spec-delta-area "$rel" 0 \
 				"no 'Area:' line naming the area spec it amends — nothing resolves to specs/areas/"
-		elif [ -f "$ROOT/$spec" ]; then
-			verdict spec-delta-area "$rel" 1 "amends $spec"
-		else
+			continue
+		fi
+		if [ ! -f "$ROOT/$spec" ]; then
 			verdict spec-delta-area "$rel" 0 \
 				"names area '$area' but $spec does not exist — add that area spec or name an existing one"
+			# No fold row: there is no file to fold into, so the row would have to name
+			# a target that does not exist. One FAIL, with the reason that blocks the
+			# fold, beats a second row guessing at where the body should have gone.
+			continue
+		fi
+		verdict spec-delta-area "$rel" 1 "amends $spec"
+		if [ -z "$trunk" ]; then
+			record WARN spec-delta-folded "$rel" \
+				"no trunk ref to compare with — cannot tell a landed delta from one still on its branch"
+		elif git -C "$ROOT" cat-file -e "$trunk:$rel" 2>/dev/null; then
+			verdict spec-delta-folded "$rel" 0 \
+				"landed on $trunk and still here — fold its body into $spec and git rm it"
+		else
+			verdict spec-delta-folded "$rel" 1 \
+				"not on $trunk yet — fold into $spec and delete it as part of the merge"
 		fi
 	done
 	if [ "$seen" -eq 0 ]; then
