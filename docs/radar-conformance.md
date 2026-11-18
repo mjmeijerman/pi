@@ -8,7 +8,7 @@ from `extensions/__tests__/*.test.ts` across 21 files / 92 suites, 175 from
 10 cases and 30 assertions), 17 extensions, 10 skills,
 `agent/AGENTS.md` 3065 bytes against the 3072-byte budget, 976 lines in
 `~/.pi/agent/suggestions.jsonl` (gitignored, so a floor), a fresh full mutation run at
-94.52% (1396 killed, 81 survived, 0 timeout, 0 no-coverage, 1477 mutants — `docs/mutation-survivors.md`),
+92.56% (1765 killed, 142 survived, 2 timeout, 0 no-coverage, 1909 mutants — `docs/mutation-survivors.md`),
 and
 `bash scripts/harness-check.sh` → 81 passed, 1 warn, 0 failed on the host (node
 v26.13.0, npm 11.21.2) — before the `mise-installed` row, which adds one WARN on a
@@ -39,7 +39,7 @@ Status values:
 | Blip | Status | Evidence | Gap |
 | --- | --- | --- | --- |
 | 1. Agent sandboxing | done | `install.sh` §4b installs a managed `pi()` shell function into `~/.bashrc` and `~/.zshrc` → `scripts/pisandbox` → `sandbox/pi-sandbox.sh` (bubblewrap); `PI_BARE=1 pi` bypasses, `pisandbox --no-net -- pi` adds isolation. `scripts/pi-bare` (symlinked into `~/.local/bin`, listed as "Pi (bare)" in Herdr's new-agent menu via `sandbox/herdr-programs.json`) is the sanctioned exit, so the choice is made before the session starts. `sandbox/pi-sandbox.sh` mounts `~/.local/bin`, `~/.local/share/pipx` and `~/.local/share/uv` read-only so `gh`, `uvx`, `gitleaks`, `semgrep`, `trivy` and `hc` exist inside, while `~/.config/gh` and the other credential directories stay masked — `gh` there reports "not logged in", which is the point. The launcher's `PI_SANDBOX_MODE`/`PI_SANDBOX_NET` markers show as the words `sandbox`/`bare` in front of the title (`agent/extensions/sandbox-badge.ts`) and in the footer status, so a contained session and a bare one are told apart at a glance (blip 42) | The wrapper is a shell function, so a launcher that skips the rc file (`env -i`, an IDE, cron) still gets the bare binary. Fallback prints one stderr line when `bwrap` is absent. |
-| 2. Mutation testing | done | `agent/stryker.conf.json`, `make mutate-full` → **94.52%** (1396 killed, 81 survived, 0 timeout, 0 no-coverage, 1477 mutants) on trunk `8dba206`, 2026-11-18, over three files: `extensions/lib/usage-format.ts` 96.00%, `extensions/merge-guard.ts` 96.78%, `extensions/secret-guard.ts` 93.68%. All 81 survivors are decided by name in `docs/mutation-survivors.md`; the previous reading was 93.30% (1337 killed, 98 survived, 28 timeout) before #151/#153/#155/#156/#157 A full score means throwing the cache away, not passing a flag: `make mutate-full` deletes `agent/reports/stryker/stryker-incremental.json` and runs `npx stryker run` unchanged. Stryker 10.1.1 spells "ignore the cached file" `--force`; `--incremental false` is eaten as a config path and dies with `ConfigReaderError: Invalid config file "false"`. `.github/workflows/test.yml` runs `npx stryker run` weekly, and `mutation-changed` per pull request on a `stryker.pr.conf.json` derived from the same config with `break: 100` | The weekly run reports, it does not gate (`break: null` in `stryker.conf.json`). 79 of the 98 survivors are in `secret-guard.ts`, 17 in `merge-guard.ts` and 2 in `usage-format.ts`, mostly branch conditions the tests do not distinguish. The score covers the extension tests only: the `command` runner copies `agent/` into `.stryker-tmp/`, so the runner command is the extension glob and not `npm test` (`scripts/tests/commit-msg-provenance.test.sh` is not in the copy), and `sandbox-binds.test.ts` finds the harness root by walking up instead of by fixed depth so it still runs there. |
+| 2. Mutation testing | done | `agent/stryker.conf.json`, `make mutate-full` → **92.56%** (1765 killed, 142 survived, 2 timeout, 0 no-coverage, 1909 mutants) on `test/guard-survivors` (trunk `8dba206`), 2026-11-18, over six files: `extensions/lib/usage-format.ts` 96.00%, `extensions/merge-guard.ts` 96.78%, `extensions/secret-guard.ts` 93.68%, `extensions/big-boss-pi-guard.ts` 83.28%, `extensions/pi-master-guard.ts` 86.67%, `extensions/config-guard.ts` 100.00%. All 142 survivors are decided by name in `docs/mutation-survivors.md`; the previous reading was 93.30% (1337 killed, 98 survived, 28 timeout) before #151/#153/#155/#156/#157 A full score means throwing the cache away, not passing a flag: `make mutate-full` deletes `agent/reports/stryker/stryker-incremental.json` and runs `npx stryker run` unchanged. Stryker 10.1.1 spells "ignore the cached file" `--force`; `--incremental false` is eaten as a config path and dies with `ConfigReaderError: Invalid config file "false"`. `.github/workflows/test.yml` runs `npx stryker run` weekly, and `mutation-changed` per pull request on a `stryker.pr.conf.json` derived from the same config with `break: 100` | The weekly run reports, it does not gate (`break: null` in `stryker.conf.json`). 79 of the 98 survivors are in `secret-guard.ts`, 17 in `merge-guard.ts` and 2 in `usage-format.ts`, mostly branch conditions the tests do not distinguish. The score covers the extension tests only: the `command` runner copies `agent/` into `.stryker-tmp/`, so the runner command is the extension glob and not `npm test` (`scripts/tests/commit-msg-provenance.test.sh` is not in the copy), and `sandbox-binds.test.ts` finds the harness root by walking up instead of by fixed depth so it still runs there. |
 | 3. Path-to-production mapping | partial | `.github/workflows/{test,secret-scan}.yml`, PR-per-change | The path exists in CI config, not as a reviewed map. Review capacity per day is unmeasured. |
 | 4. Post-quantum cryptography | n/a | — | Nothing here holds a long-lived key: model traffic terminates at the provider's TLS, and the only secrets in scope are API tokens rotated by the providers. Revisit if the harness ever stores keys it must keep for years. |
 | 5. Progressive context disclosure | done | 10 skills load on demand; `agent/AGENTS.md` is 3065 bytes under the 3072-byte budget in `scripts/harness-check.sh` | — |
@@ -142,25 +142,31 @@ Status values:
 
 ## 5. Gaps ranked by cost of leaving them open
 
-1. **Mutation survivors, now counted instead of guessed** (blip 2, Adopt, done at 94.52%).
-   Measured on trunk `8dba206`: **1477 mutants, 1396 killed, 81 survived, 0 timeout, 94.52%**
-   — `secret-guard.ts` 93.68% (1060 mutants, 67 survivors), `merge-guard.ts` 96.78% (342, 11),
-   `usage-format.ts` 96.00% (75, 3). Re-measure with
+1. **Mutation survivors, now counted instead of guessed** (blip 2, Adopt, done at 92.56%).
+   Measured on `test/guard-survivors` (trunk `8dba206`): **1909 mutants, 1765 killed, 142
+   survived, 2 timeout, 92.56%** — `secret-guard.ts` 93.68% (1060 mutants, 67 survivors),
+   `merge-guard.ts` 96.78% (342, 11), `usage-format.ts` 96.00% (75, 3), and three guards that were
+   outside the glob until this branch: `big-boss-pi-guard.ts` 83.28% (305, 51),
+   `pi-master-guard.ts` 86.67% (75, 10), `config-guard.ts` 100.00% (52, 0). Re-measure with
    `cd agent && rm -f reports/stryker/stryker-incremental.json && ./node_modules/.bin/stryker run --force`
-   (~11 minutes) and read `agent/reports/stryker/mutation.json`; the score needs `--force`, not
-   `--incremental false`. Every one of the 81 survivors is decided by name — file, line, column,
+   (~14 minutes) and read `agent/reports/stryker/mutation.json`; the score needs `--force`, not
+   `--incremental false`. Every one of the 142 survivors is decided by name — file, line, column,
    the domain it cannot be observed on, and whether that proof is inherited or new — in
-   `docs/mutation-survivors.md`. 80 are equivalent over a measured domain (60,438 numbers for
-   `usage-format.ts`, 212,850 commands for `merge-guard.ts`, 7,455 scripts for `secret-guard.ts`),
-   one is an open test gap (`secret-guard.ts:235:3`), and the three that used to be open are dead
-   (two by `secret-guard-fd-redirect.test.ts`, one by `secret-guard-flow.test.ts`). The count is
+   `docs/mutation-survivors.md`. 141 are equivalent over a measured domain (60,438 numbers for
+   `usage-format.ts`, 212,850 commands for `merge-guard.ts`, 7,455 scripts for `secret-guard.ts`,
+   and 10,228 / 51,792 / 20 observations for the three new guards), one is an open test gap
+   (`secret-guard.ts:235:3`), and the three that used to be open are dead (two by
+   `secret-guard-fd-redirect.test.ts`, one by `secret-guard-flow.test.ts`). The count is
    a measurement now, not a wobble: three consecutive runs on the fixed tree give a
    byte-identical survivor set (`reports/mutation-determinism.md`).
    Remaining gap: six locations carry more than one mutant (`153:7` and `403:12` have four and
    three), so a location is not a key — the ledger keys on line, column *and* replacement — and the
    per-PR job (`break: 100`) still only fails a *changed* file, so a survivor can sit on trunk as
-   long as nobody edits its file. Cost of closing the rest: under an hour on
-   the one open row, an afternoon if the `235:3` gap turns out to want a real test.
+   long as nobody edits its file. The new guards are the weakest files in the score (83-87%) and
+   their 60 equivalences are the cheapest next target: each is a message string or a regex
+   quantifier no test observes, so a contract change there is invisible until it bites. Cost of
+   closing the rest: under an hour on the one open row, an afternoon if the `235:3` gap turns out
+   to want a real test.
 2. **Package installs are still fetched by version range** (blips 7 and 72, partial). The
    lock file and the hidden-codepoint scan the last audit asked for now exist for skills —
    `agent/skills.lock` plus `git-hooks/scan-unicode.sh`, both offline-tested in
