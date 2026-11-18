@@ -79,7 +79,7 @@ let caseId = 0;
  * A stub host: `herdr-app` and `hc` record their argv, and `herdr-app` answers
  * space.new with the JSON the real app prints. `spaceNew` decides how it answers.
  */
-function fixture({ spaceNew = "ok", spaceClose = "ok", hc = true, herdrApp = true, banner = true } = {}) {
+function fixture({ spaceNew = "ok", spaceClose = "ok", hc = true, herdrApp = true, banner = true, status = "ok", select = "ok" } = {}) {
 	const dir = join(tmp, `case-${++caseId}`);
 	const bin = join(dir, "bin");
 	const work = join(dir, "work");
@@ -95,6 +95,19 @@ function fixture({ spaceNew = "ok", spaceClose = "ok", hc = true, herdrApp = tru
 			app,
 			`#!/usr/bin/env bash
 printf '{"bin":"herdr-app","argv":%s}\\n' "$(node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' "$@")" >> "${record}"
+# status: the space and tab on screen. Distinct from the ones space.new makes,
+# so a select with these ids can only be the saved view, never a lucky constant.
+if [ "$1" = "status" ]; then
+	if [ "${status}" = "fail" ]; then echo "no window" >&2; exit 5; fi
+	if [ "${status}" = "empty" ]; then printf '{}\\n'; exit 0; fi
+	printf '{"space":"sp-before","tab":"tb-before","focused_pane":"p1"}\\n'
+	exit 0
+fi
+if [ "$1" = "do" ] && [ "$2" = "space.select" ]; then
+	if [ "${select}" = "fail" ]; then echo "space.select: no such space" >&2; exit 4; fi
+	exit 0
+fi
+if [ "$1" = "do" ] && [ "$2" = "tab.select" ]; then exit 0; fi
 if [ "$1" = do ] && [ "$2" = space.close ]; then
 	case "${spaceClose}" in
 		ok) printf '{"closed":"s9"}\\n' ;;
@@ -103,11 +116,14 @@ if [ "$1" = do ] && [ "$2" = space.close ]; then
 	esac
 	exit 0
 fi
-case "${spaceNew}" in
-	ok) printf '{"space":"s9","tab":"t2","terminal":"t14z"}\\n' ;;
-	empty) printf '{}\\n' ;;
-	*) echo "space.new failed: no such folder" >&2; exit 3 ;;
-esac
+if [ "$1" = do ] && [ "$2" = space.new ]; then
+	case "${spaceNew}" in
+		ok) printf '{"space":"s9","tab":"t2","terminal":"t14z"}\\n' ;;
+		empty) printf '{}\\n' ;;
+		*) echo "space.new failed: no such folder" >&2; exit 3 ;;
+	esac
+	exit 0
+fi
 `,
 		);
 		chmodSync(app, 0o755);
@@ -195,6 +211,9 @@ test("the pi inside the space is started through the sandbox, with the cwd writa
 	assert.match(line, / --rw \S+ -- /, "the directory it works in is read-write");
 	assert.ok(line.includes(`--rw ${f.work} --`), "and it is the directory the worker was given");
 	assert.match(line, / -- -a$/, "only pi's own arguments follow --, so pi gets no binary path as a message");
+	// Trunk keeps the PATH export in the runner line itself, so the sandbox is told
+	// where the pi shim lives before it looks for it.
+	assert.match(line, /export PATH=\S*\/bin:\$PATH/, "the sandbox is told where the pi shim lives");
 
 	// Not the hidden path: a space and a terminal are the evidence, and `hc run --bg`
 	// would have made a terminal nobody can see.
@@ -427,4 +446,46 @@ test("the fixture PATH cannot reach the real herdr on this host", () => {
 			);
 		}
 	}
+});
+
+test("focus goes back to the space and tab that were on screen before the spawn", () => {
+	// space.new has no hidden mode: the new space is shown, which takes the person off
+	// what they were reading. Both ids are read first and selected back, explicitly —
+	// never the id of the space just made, and never a hardcoded one.
+	const f = fixture();
+	const r = f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"]);
+	assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+
+	const calls = f.calls().filter((call) => call.bin === "herdr-app");
+	const index = (word) => calls.findIndex((call) => call.argv.includes(word));
+	const newSpace = index("space.new");
+	const selectedSpace = calls.find((call) => call.argv[1] === "space.select");
+	const selectedTab = calls.find((call) => call.argv[1] === "tab.select");
+	assert.ok(selectedSpace, "the person is put back on the space they were reading");
+	assert.ok(selectedTab, "and on that space's tab, not its first tab");
+	assert.deepEqual(selectedSpace.argv, ["do", "space.select", "--id", "sp-before"]);
+	assert.deepEqual(selectedTab.argv, ["do", "tab.select", "--id", "tb-before"]);
+	assert.ok(index("space.select") > newSpace, "restored after the spawn, not before");
+	assert.notDeepEqual(selectedSpace.argv, ["do", "space.select", "--id", "s9"], "never the new space");
+	assert.equal(r.stderr.includes("could not restore focus"), false, `no warning when it worked: ${r.stderr}`);
+});
+
+test("an unreadable window warns and still starts the worker", () => {
+	// No window to read is not a reason to lose the spawn: the space is still real, and
+	// the warning names what happened instead of pretending focus was restored.
+	const f = fixture({ status: "fail" });
+	const r = f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"]);
+	assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+	assert.match(r.stderr, /could not read the space on screen before the spawn/);
+	assert.equal(f.calls().some((call) => call.argv[1] === "space.select"), false, "nothing to select back to");
+	assert.equal(JSON.parse(r.stdout.trim().split("\n").pop()).space, "s9", "the space is still made");
+});
+
+test("a restore that fails warns and leaves the spawn standing", () => {
+	const f = fixture({ select: "fail" });
+	const r = f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"]);
+	assert.equal(r.status, 0, "a view that cannot be put back is not a failed launch");
+	assert.match(r.stderr, /could not restore focus/);
+	assert.match(r.stderr, /space s9/, "and says where focus stayed");
+	assert.equal(JSON.parse(r.stdout.trim().split("\n").pop()).hidden, false);
 });

@@ -16,7 +16,8 @@
 #                                   taken away from them.
 #   spawn SLUG SPEC --visible       its own space and tab in the agents pane, which the
 #                                   person can find in `list`, watch with `show` and end
-#                                   with `close`. The self-learn learner uses this: an
+#                                   with `close`, while focus goes back to the tab they
+#                                   were reading. The self-learn learner uses this: an
 #                                   agent nobody can see is an agent nobody can stop.
 #
 # `--sandbox` runs the pi inside through scripts/pisandbox (no ssh keys, no cloud creds,
@@ -52,6 +53,30 @@ state_read() { [ -f "$STATE" ] && cat "$STATE" || echo '{}'; }
 state_write() { printf '%s\n' "$1" >"$STATE"; }
 
 json_get() { node -e 'const j=JSON.parse(require("fs").readFileSync(0,"utf8"));const v=process.argv[1].split(".").reduce((a,k)=>a?.[k],j);console.log(v??"")' "$1"; }
+
+# The space and tab the person is looking at, as "space tab", or empty when the
+# window cannot be read (no window, herdr-app error). Never dies: a view that
+# cannot be read must not stop a spawn.
+screen_state() {
+	local out space tab
+	out=$(herdr-app status 2>/dev/null) || return 0
+	space=$(printf '%s' "$out" | json_get space)
+	tab=$(printf '%s' "$out" | json_get tab)
+	[ -n "$space" ] && [ -n "$tab" ] || return 0
+	printf '%s %s' "$space" "$tab"
+}
+
+# restore_focus "space tab" — select that space, then that tab, explicitly by the
+# ids read before the spawn. Returns non-zero instead of dying: the caller warns
+# and the spawn stands.
+restore_focus() {
+	local pair=$1 space tab
+	space=${pair%% *}; tab=${pair#* }
+	[ -n "$space" ] && [ -n "$tab" ] || return 1
+	herdr-app do space.select --id "$space" >/dev/null 2>&1 || return 1
+	herdr-app do tab.select --id "$tab" >/dev/null 2>&1 || return 1
+	return 0
+}
 
 # Slug or terminal ID → "terminal borrowed" from state. A bare terminal ID
 # (t7-style) is passed through with no state lookup.
@@ -132,9 +157,13 @@ cmd_spawn() {
 		# Visible on purpose: a real space and tab, so the person finds the worker in the
 		# agents pane, can watch it and can end it. space.new has no hidden mode, so this
 		# is the path that cannot lie about existing.
-		local argv
+		local argv before=""
 		argv=$(node -e 'process.stdout.write(JSON.stringify(["sh","-lc",process.argv[1]]))' \
 			"$(runner_line "$spawn_dir" "$sandboxed")")
+		# space.new shows the new space, which takes the person off what they were
+		# reading. Note both ids first, explicitly, and put them back after — the same
+		# pair bin/delegate uses. Nobody should lose their place to a learner.
+		before=$(screen_state)
 		out=$(herdr-app do space.new --name "$name" --folder "$spawn_dir" --tab "$name" \
 			--argv "$argv" --task "Read $spec and do it" 2>&1) \
 			|| die "space.new failed for $name: $out"
@@ -143,6 +172,14 @@ cmd_spawn() {
 		terminal=$(printf '%s' "$out" | json_get terminal)
 		[ -n "$terminal" ] || terminal=$(printf '%s' "$out" | json_get result.terminal)
 		[ -n "$space" ] || die "space.new made no space: $out"
+		# Restore before the banner wait: that wait is up to 40 s, and the person must not
+		# spend it looking at the learner's space.
+		case "$before" in
+		"") printf '%s: warning: could not read the space on screen before the spawn, so focus stayed on space %s\n' \
+			"$PROG" "${space:-?}" >&2 ;;
+		*) restore_focus "$before" || printf '%s: warning: could not restore focus to the space you were on, so focus stayed on space %s\n' \
+			"$PROG" "${space:-?}" >&2 ;;
+		esac
 	else
 		# Hidden on purpose: no herdr.space / herdr.tab label, so the window shows
 		# nothing and focus cannot move. --outlive-parent keeps the worker alive
