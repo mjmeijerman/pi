@@ -71,6 +71,17 @@ inside the sandbox rather than succeed at machine scope. Neither is a provenance
 check: nothing verifies who published what, and the deferred install still happens the
 first time someone runs it bare.
 
+What is now pinned is *what is installed*: `agent/packages.lock` records, for each
+source in `packages`, the commit sha (git) or the version plus tarball integrity
+(npm) that it resolved to and the date it did, and `scripts/harness-check.sh` FAILs
+when the installed copy differs from its pin, when `settings.json` names a package
+with no entry, or when an entry names a package `settings.json` dropped. A branch
+that moves and is reinstalled is a red check instead of a silent change to the code
+this harness runs. It is a pin, not a provenance check: nothing yet says who
+published the commit, and whether upstream moved at all is a network question the
+check reports as a WARN naming `git ls-remote` rather than a FAIL that breaks
+offline runs.
+
 ### 2.3 Model-issued shell commands (Execution → Exfiltration)
 
 The `bash` tool is the primary capability and the primary risk. A command composed
@@ -177,7 +188,10 @@ This is the part that has to be read, because the sandbox looks total from insid
 9. **The launcher being skipped.** The wrapper is a shell function in the rc file. A
    script, `systemd` unit, IDE or `env -i` invocation gets the bare binary. Absence of
    `PI_SANDBOX_MODE` is the only signal, and nothing refuses to run without it.
-10. **Supply chain.** No provenance check on packages, skills or pi packages (§2.2).
+10. **Supply chain.** Provenance is still missing on packages, skills and pi packages
+    (§2.2). What is installed is pinned by hash — `agent/packages.lock`,
+    `agent/skills.lock` — so a change under the harness is loud; who published it is
+    not recorded anywhere.
 
 ## 5. Decisions
 

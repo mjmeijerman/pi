@@ -12,9 +12,10 @@
 # docs/radar-blips.tsv, so a fabricated number fails instead of reading well.
 #
 # The rule this file enforces on itself: anything a script can check must not
-# be a paragraph in AGENTS.md. Read-only — no writes, no network — with one
-# exception, named so it cannot hide: --write-skills-lock regenerates
-# agent/skills.lock and touches nothing else.
+# be a paragraph in AGENTS.md. Read-only — no writes, no network — with two
+# exceptions, both named so they cannot hide and both offline: --write-skills-lock
+# regenerates agent/skills.lock, --write-packages-lock regenerates
+# agent/packages.lock, and each touches that one path and nothing else.
 #
 # Usage:
 #   scripts/harness-check.sh              # every check, one line each
@@ -32,9 +33,14 @@
 #                                         # only the spec-delta rule, for tests
 #   scripts/harness-check.sh --write-skills-lock
 #                                         # regenerate agent/skills.lock — the
-#                                         # only mode here that writes
+#                                         # only mode here that writes it
 #   scripts/harness-check.sh --verify-skills-lock
 #                                         # only the skill pin check, for tests
+#   scripts/harness-check.sh --write-packages-lock
+#                                         # regenerate agent/packages.lock from
+#                                         # what is installed; offline
+#   scripts/harness-check.sh --verify-packages-lock
+#                                         # only the package pin check, for tests
 #   scripts/harness-check.sh --verify-doc-facts
 #                                         # only the transport table check, for
 #                                         # tests and for one honest line
@@ -58,6 +64,8 @@ VERIFY_DOC_FACTS=0
 VERIFY_SPEC_DELTAS=0
 WRITE_SKILLS_LOCK=0
 VERIFY_SKILLS_LOCK=0
+WRITE_PACKAGES_LOCK=0
+VERIFY_PACKAGES_LOCK=0
 VERIFY_MISE_PINS=0
 
 PASS_N=0
@@ -90,7 +98,11 @@ RETRO_MAX_AGE_DAYS=14
 # grace period keeps a learner's own fresh branch out of its own run (blip 11).
 LEARN_BRANCH_GRACE_MIN="${PI_LEARN_BRANCH_GRACE_MIN:-60}"
 
-usage() { sed -n '2,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# The help text is the header itself, to the closing rule: a fixed line range
+# silently truncated it the moment a usage line was added above it.
+usage() {
+	awk 'NR > 2 && /^# ======/ { exit } NR > 2' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
 die() {
 	printf 'harness-check: %s\n' "$*" >&2
 	exit 2
@@ -344,6 +356,272 @@ check_skills_lock() {
 	done < <(skills_lock_target | sort -u)
 	if [ "$bad" -eq 0 ]; then
 		verdict skills-lock "$SKILLS_LOCK_REL" 1 "$count file(s) match their locked sha256"
+	fi
+	return 0
+}
+
+# ----------------------------------------------------------- packages lock --
+# A package in `agent/settings.json` `packages` arrives by URL or branch: pi clones
+# the default branch and installs whatever it points at that day, so a branch that
+# moves changes the code this harness runs and no diff anywhere says so (blip #72
+# agent package manager, blip #7 plugin marketplace, blip #17 review tier). Every
+# other pin in this repo names a version or a hash; a package named none.
+# agent/packages.lock is the pin: one line per package — the source exactly as
+# settings.json writes it, git|npm, the commit sha (git) or version (npm) that is
+# installed, npm's tarball integrity, where it is installed, and the date the line
+# was written.
+#
+# Resolution reads the installed copy, not the network: `git rev-parse HEAD` in
+# agent/git/<host>/<owner>/<repo>, and the version plus package-lock integrity of
+# agent/npm/node_modules/<name>. That is what "actually installed" means, and it is
+# why --write-packages-lock runs offline and why the lock is committed instead of
+# generated in CI. Those trees are gitignored (.gitignore: agent/git/, agent/npm/),
+# so a run from a worktree resolves against the pi home — $PI_AGENT_HOME, else
+# ~/.pi/agent — and the lock's `where` column stays repo-relative for the reader.
+#
+# The one question that needs the network is whether the upstream head moved since
+# the line was written: `git ls-remote <url> HEAD`, `npm view <pkg> version`. That
+# is a WARN naming the command, never a FAIL: an offline run must stay green, and a
+# FAIL nobody can reproduce offline is a FAIL somebody baselines away.
+PACKAGES_LOCK_REL="agent/packages.lock"
+PACKAGES_LOCK_REGEN="bash scripts/harness-check.sh --write-packages-lock"
+
+packages_home() { # where pi installs packages — the agent directory
+	printf '%s' "${PI_AGENT_HOME:-${HOME:-/nonexistent}/.pi/agent}"
+}
+
+settings_packages() { # every source named in agent/settings.json, one per line
+	local file="$ROOT/agent/settings.json"
+	[ -f "$file" ] || return 0
+	if command -v node >/dev/null 2>&1; then
+		node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let v;try{v=JSON.parse(s)}catch(e){process.exit(1)};if(!v||!Array.isArray(v.packages))return;for(const p of v.packages)console.log(String(p))})' \
+			<"$file" 2>/dev/null
+		return 0
+	fi
+	# No node (jq is not assumed): the packages array as written. A miss here is
+	# loud in the check, not silent — a source settings.json names and the lock
+	# does not is a FAIL.
+	sed -n '/"packages"[[:space:]]*:[[:space:]]*\[/,/\]/p' "$file" |
+		sed -n 's/^[[:space:]]*"\([^"]*\)"[,]*[[:space:]]*$/\1/p'
+}
+
+package_kind() { # source -> git | npm | unknown
+	case $1 in
+	npm:*) printf 'npm' ;;
+	git:* | https://* | http://* | git@* | ssh://*) printf 'git' ;;
+	*) printf 'unknown' ;;
+	esac
+}
+
+package_url() { # git source -> what git ls-remote would be given
+	local src=${1#git:}
+	case $src in
+	git@* | ssh://* | https://* | http://*) printf '%s' "$src" ;;
+	*) printf 'https://%s' "$src" ;;
+	esac
+}
+
+package_where() { # source -> install path, repo-relative
+	local src=$1 url
+	case $(package_kind "$src") in
+	npm) printf 'agent/npm/node_modules/%s' "${src#npm:}" ;;
+	git)
+		url=$(package_url "$src")
+		url=${url%.git}
+		url=${url#https://}
+		url=${url#http://}
+		url=${url#ssh://}
+		url=${url#git@}
+		url=${url/:/\/}
+		printf 'agent/git/%s' "$url"
+		;;
+	*) printf -- '-' ;;
+	esac
+}
+
+package_install_dir() { # source -> absolute install directory
+	local where
+	where=$(package_where "$1")
+	[ "$where" = '-' ] && return 0
+	printf '%s/%s' "$(packages_home)" "${where#agent/}"
+}
+
+installed_pin() { # source -> sha (git) or version (npm) installed here, empty if none
+	local src=$1 dir
+	dir=$(package_install_dir "$src")
+	[ -n "$dir" ] || return 0
+	case $(package_kind "$src") in
+	git)
+		[ -d "$dir/.git" ] || return 0
+		git -C "$dir" rev-parse HEAD 2>/dev/null | head -1
+		;;
+	npm)
+		[ -f "$dir/package.json" ] || return 0
+		# The version as installed. Two readings because package.json is written
+		# both pretty and compact, and a miss here would silently look like "not
+		# installed" instead of "unreadable".
+		{
+			sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$dir/package.json" |
+				head -1
+			grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$dir/package.json" |
+				head -1 | sed 's/.*"\([^"]*\)"$/\1/'
+		} | head -1
+		;;
+	esac
+}
+
+installed_digest() { # source -> npm tarball integrity, '-' for git or when unrecorded
+	local src=$1 name lock
+	[ "$(package_kind "$src")" = npm ] || {
+		printf -- '-'
+		return 0
+	}
+	name=${src#npm:}
+	lock="$(packages_home)/npm/package-lock.json"
+	[ -f "$lock" ] || {
+		printf -- '-'
+		return 0
+	}
+	if command -v node >/dev/null 2>&1; then
+		node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const k=process.argv[1];let v;try{v=JSON.parse(s)}catch(e){process.exit(0)};const p=(v.packages||{})["node_modules/"+k];if(p&&p.integrity)process.stdout.write(String(p.integrity))})' \
+			"$name" <"$lock" 2>/dev/null
+		return 0
+	fi
+	awk -v key="\"node_modules/$name\":" 'index($0, key) { f = 1; next } f && /"integrity"/ { print; exit }' "$lock" |
+		sed -n 's/.*"integrity"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+package_head_check() { # source -> the command that answers "did upstream move?"
+	case $(package_kind "$1") in
+	git) printf 'git ls-remote %s HEAD' "$(package_url "$1")" ;;
+	npm) printf 'npm view %s version' "${1#npm:}" ;;
+	*) printf -- '-' ;;
+	esac
+}
+
+write_packages_lock() {
+	local lock="$ROOT/$PACKAGES_LOCK_REL" tmp src count=0
+	local -a sources=() missing=()
+	mapfile -t sources < <(settings_packages)
+	for src in "${sources[@]}"; do
+		[ -n "$src" ] || continue
+		# A pin of "-" pins nothing and would overwrite a sha with a blank: refuse
+		# the write instead of recording a package nobody resolved.
+		if [ -z "$(installed_pin "$src")" ]; then
+			missing+=("$src")
+		fi
+	done
+	if [ "${#missing[@]}" -gt 0 ]; then
+		die "nothing installed to pin for: ${missing[*]} — reconcile the packages first (pi install <source>, or pi update --extensions for all of them, on the host), then run this again: the lock would otherwise record a blank where a sha belongs"
+	fi
+	mkdir -p "$(dirname "$lock")" || die "cannot create $(dirname "$lock")"
+	tmp=$(mktemp) || die "cannot create a temporary file"
+	{
+		printf '%s\n' \
+			'# agent/packages.lock — what each package in agent/settings.json installs.' \
+			'# Generated, never hand-edited: bash scripts/harness-check.sh --write-packages-lock' \
+			'# Verified by: bash scripts/harness-check.sh (FAIL on a missing lock, on an' \
+			'# installed sha or version that differs from the pin, on a package' \
+			'# settings.json names with no entry, and on an entry settings.json dropped).' \
+			'# The upstream head needs the network, so it is a WARN naming git ls-remote,' \
+			'# never a FAIL. Fields, tab-separated: source (as written in settings.json),' \
+			'# kind, pin (commit sha for git, version for npm), integrity (npm tarball' \
+			'# hash, - for git), where it is installed, date resolved (UTC). Radar: #72' \
+			'# agent package manager, #7 plugin marketplace — a package from elsewhere is' \
+			'# pinned like a dependency.'
+		while IFS= read -r src; do
+			[ -n "$src" ] || continue
+			printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+				"$src" "$(package_kind "$src")" "$(installed_pin "$src")" \
+				"$(installed_digest "$src")" "$(package_where "$src")" "$(date -u +%F)"
+			count=$((count + 1))
+		done < <(settings_packages)
+	} >"$tmp"
+	if [ -d "$lock" ]; then
+		rm -f -- "$tmp"
+		die "cannot write $lock: the path is a directory, not the lock file"
+	fi
+	mv "$tmp" "$lock" || die "cannot write $lock (the new table is still in $tmp)"
+	printf '%s: %s entries written\n' "$PACKAGES_LOCK_REL" "$count"
+	if [ "$count" -eq 0 ]; then
+		printf 'harness-check: agent/settings.json names no package — nothing was locked\n' >&2
+		return 1
+	fi
+	return 0
+}
+
+check_packages_lock() {
+	local lock="$ROOT/$PACKAGES_LOCK_REL" src pin pin_now head_cmd='' count=0 bad=0
+	declare -A NAMED=() LOCKED=()
+	local -a sources=()
+	mapfile -t sources < <(settings_packages)
+	if [ "${#sources[@]}" -eq 0 ]; then
+		verdict packages-lock agent/settings.json 1 \
+			"names no package — nothing to pin (not a harness checkout?)"
+		return 0
+	fi
+	if [ ! -f "$lock" ]; then
+		verdict packages-lock "$PACKAGES_LOCK_REL" 0 \
+			"missing — ${#sources[@]} package(s) are unpinned; generate it: $PACKAGES_LOCK_REGEN"
+		return 0
+	fi
+	while IFS=$'\t' read -r src _ _ _ _ _; do
+		case "$src" in '' | '#'*) continue ;; esac
+		count=$((count + 1))
+	done <"$lock"
+	if [ "$count" -eq 0 ]; then
+		verdict packages-lock "$PACKAGES_LOCK_REL" 0 "holds no entries — regenerate: $PACKAGES_LOCK_REGEN"
+		return 0
+	fi
+	while IFS=$'\t' read -r src _ pin _ _ _; do
+		case "$src" in '' | '#'*) continue ;; esac
+		LOCKED["$src"]=$pin
+	done <"$lock"
+	# One side: every source settings.json names is pinned, and the pin is still
+	# what is installed. A reinstall after the branch moved is the silent change
+	# this row exists for, and it lands here as a FAIL naming both sides.
+	for src in "${sources[@]}"; do
+		[ -n "$src" ] || continue
+		NAMED["$src"]=1
+		if [ -z "${LOCKED[$src]+set}" ]; then
+			verdict packages-lock "$src" 0 \
+				"no lock entry — a package nothing pins; regenerate: $PACKAGES_LOCK_REGEN"
+			bad=$((bad + 1))
+			continue
+		fi
+		pin=${LOCKED[$src]}
+		if [ -z "$pin" ] || [ "$pin" = '-' ]; then
+			verdict packages-lock "$src" 0 \
+				"no pin recorded (the lock has '-' where a sha belongs) — install it, then regenerate: $PACKAGES_LOCK_REGEN"
+			bad=$((bad + 1))
+			continue
+		fi
+		head_cmd=${head_cmd:-$(package_head_check "$src")}
+		pin_now=$(installed_pin "$src")
+		if [ -z "$pin_now" ]; then
+			record WARN packages-lock "$(package_where "$src")" \
+				"not installed here, so ${pin:0:12}… was not compared — install it, or answer the upstream question: $(package_head_check "$src")"
+			continue
+		fi
+		if [ "$pin_now" != "$pin" ]; then
+			verdict packages-lock "$src" 0 \
+				"installed ${pin_now:0:12}… but the lock pins ${pin:0:12}… — read the diff first, then regenerate: $PACKAGES_LOCK_REGEN"
+			bad=$((bad + 1))
+		fi
+	done
+	# Other side: an entry settings.json no longer names is a package the harness
+	# stops loading, and a lock that still calls it installed is a claim nobody
+	# checked. Same rule as the skill pin's deleted-file case.
+	while IFS=$'\t' read -r src _ _ _ _ _; do
+		case "$src" in '' | '#'*) continue ;; esac
+		[ -n "${NAMED[$src]:-}" ] && continue
+		verdict packages-lock "$PACKAGES_LOCK_REL" 0 \
+			"$src is locked but agent/settings.json no longer names it — regenerate: $PACKAGES_LOCK_REGEN"
+		bad=$((bad + 1))
+	done <"$lock"
+	if [ "$bad" -eq 0 ]; then
+		verdict packages-lock "$PACKAGES_LOCK_REL" 1 \
+			"$count package(s) match their locked pin; the upstream head is a network question: ${head_cmd:-no package to check}"
 	fi
 	return 0
 }
@@ -1361,6 +1639,8 @@ while [ $# -gt 0 ]; do
 	--verify-spec-deltas) VERIFY_SPEC_DELTAS=1 ;;
 	--write-skills-lock) WRITE_SKILLS_LOCK=1 ;;
 	--verify-skills-lock) VERIFY_SKILLS_LOCK=1 ;;
+	--write-packages-lock) WRITE_PACKAGES_LOCK=1 ;;
+	--verify-packages-lock) VERIFY_PACKAGES_LOCK=1 ;;
 	--verify-mise-pins) VERIFY_MISE_PINS=1 ;;
 	--root)
 		[ $# -ge 2 ] || die "--root needs a directory"
@@ -1379,9 +1659,13 @@ done
 ROOT="$(cd "$ROOT" 2>/dev/null && pwd)" || die "no such directory"
 load_baseline
 
-# The only writing mode in this file, and it writes exactly one path.
+# The two writing modes in this file, each writing exactly one path.
 if [ "$WRITE_SKILLS_LOCK" = 1 ]; then
 	write_skills_lock || exit 1
+	exit 0
+fi
+if [ "$WRITE_PACKAGES_LOCK" = 1 ]; then
+	write_packages_lock || exit 1
 	exit 0
 fi
 
@@ -1390,6 +1674,20 @@ fi
 if [ "$VERIFY_SKILLS_LOCK" = 1 ]; then
 	section "skills — pinned content (blip #72)"
 	check_skills_lock
+	if [ "$JSON" = 1 ]; then
+		printf '{"pass":%d,"warn":%d,"fail":%d,"results":[%s]}\n' \
+			"$PASS_N" "$WARN_N" "$FAIL_N" "${JSON_ITEMS[*]}"
+	else
+		printf '\n%d passed, %d warn, %d failed\n' "$PASS_N" "$WARN_N" "$FAIL_N"
+	fi
+	[ "$FAIL_N" -eq 0 ]
+	exit $?
+fi
+
+# The package pin on its own, for the same reason as the skill pin above.
+if [ "$VERIFY_PACKAGES_LOCK" = 1 ]; then
+	section "packages — pinned by commit (blip #72)"
+	check_packages_lock
 	if [ "$JSON" = 1 ]; then
 		printf '{"pass":%d,"warn":%d,"fail":%d,"results":[%s]}\n' \
 			"$PASS_N" "$WARN_N" "$FAIL_N" "${JSON_ITEMS[*]}"
@@ -1483,6 +1781,9 @@ check_skill_lines
 # editing a skill and not regenerating the lock fails at commit time, while the
 # edit is still one fix away.
 check_skills_lock
+# Same cost and the same argument: three git rev-parse calls in the installed tree,
+# so a package list edited without a regenerated lock fails at commit time.
+check_packages_lock
 # Reading a handful of small docs costs milliseconds, and a sentence that names
 # the wrong transport is exactly the rot that survives review: this runs in
 # --quick so the commit hook says so, not a reader three months later.
