@@ -37,10 +37,14 @@ function pathWithout(fixture, missing) {
 	for (const bin of ["bash", "node", "hc", "grep", "cat", "mkdir", "dirname", "env"]) {
 		if (bin === missing) continue;
 		// `hc` comes from the fixture's own stub: the real one would kill a real terminal.
+		// `node` is the binary running this file: the stubs it starts encode their argv with
+		// `node -e`, so the PATH they get must hold a node wherever the runner put one.
 		const found =
 			bin === "hc"
 				? join(fixture.dir, "bin", "hc")
-				: spawnSync("bash", ["-c", `command -v ${bin}`], { encoding: "utf8" }).stdout.trim();
+				: bin === "node"
+					? process.execPath
+					: spawnSync("bash", ["-c", `command -v ${bin}`], { encoding: "utf8" }).stdout.trim();
 		if (found) symlinkSync(found, join(dir, bin));
 	}
 	return dir;
@@ -58,6 +62,13 @@ const SAFE_PATH = (process.env.PATH ?? "")
 	.split(":")
 	.filter((dir) => dir && !HOST_BINS.some((bin) => existsSync(join(dir, bin))))
 	.join(":");
+
+// The script under test needs node on the PATH it is given: it JSON-encodes the space
+// argv with `node -e`. On a laptop that comes free from /usr/bin, on a GitHub runner
+// node lives only in setup-node's toolcache directory, so a PATH hardcoded to
+// /usr/bin made the same case pass here and die there. The node running this file is
+// the one guaranteed to exist, wherever the runner put it.
+const NODE_BIN_DIR = dirname(process.execPath);
 
 // What a real space says when its pi cannot start: pi-sandbox.sh's own error line.
 const BANNERLESS = "pi-sandbox.sh: error: pi is not on PATH (looked for an executable named 'pi')";
@@ -127,7 +138,7 @@ esac
 			encoding: "utf8",
 			env: {
 				...process.env,
-				PATH: `${bin}:${SAFE_PATH}`,
+				PATH: `${bin}:${NODE_BIN_DIR}:${SAFE_PATH}`,
 				STATE: join(dir, "panes.json"),
 				PISANDBOX,
 				...extraEnv,
@@ -336,8 +347,26 @@ test("a runner line whose PATH has no pi directory still finds pi", () => {
 	);
 	chmodSync(sandboxStub, 0o755);
 
-	// A PATH shaped like herdr's: node and bash, a pi nowhere on it.
-	const herdrPath = `${f.bin}:${f.dir}/no-bin:/usr/bin:/bin`;
+	// A PATH shaped like herdr's: node and bash, a pi nowhere on it. /usr/bin and /bin are
+	// only there so sh and bash resolve; the node is this process's own binary, wherever
+	// the runner put it, so no user path and no toolcache layout is assumed.
+	const herdrPath = `${f.bin}:${NODE_BIN_DIR}:${f.dir}/no-bin:/usr/bin:/bin`;
+	assert.equal(
+		herdrPath.split(":").includes(piBinDir),
+		false,
+		"the pi directory is not on the PATH before the runner line adds it, or this proves nothing",
+	);
+	// /usr/bin and /bin are there for sh and bash, not as a way back to the host's herdr.
+	// The fixture's own `bin` is left out: the stub herdr-app lives there on purpose.
+	for (const dir of ["/usr/bin", "/bin", NODE_BIN_DIR]) {
+		for (const bin of HOST_BINS) {
+			assert.equal(
+				existsSync(join(dir, bin)),
+				false,
+				`the case PATH reaches a real ${bin} in ${dir}; it would make a real space`,
+			);
+		}
+	}
 	const out = f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"], {
 		PISANDBOX: sandboxStub,
 		PI_BIN: piStub,
@@ -384,12 +413,18 @@ test("the fixture PATH cannot reach the real herdr on this host", () => {
 	// This fails the day a host puts herdr-app or hc on a PATH the fixtures keep: from
 	// then on a single test can make a real space, and five leaked learn-1200 spaces is
 	// what that looked like.
+	// The node directory the fixtures now add is the other half of the PATH they hand a
+	// shell, so it is checked the same way: a host that keeps node next to herdr-app would
+	// otherwise reopen the hole this closes.
+	const paths = { "the test PATH": SAFE_PATH, "the node directory the fixtures add": `${NODE_BIN_DIR}:${SAFE_PATH}` };
 	for (const bin of HOST_BINS) {
-		const found = spawnSync("bash", ["-c", `command -v ${bin} || true`], { encoding: "utf8", env: { PATH: SAFE_PATH } });
-		assert.equal(
-			found.stdout.trim(),
-			"",
-			`${bin} is reachable from the test PATH (${found.stdout.trim()}); a fixture could spawn a real space`,
-		);
+		for (const [label, path] of Object.entries(paths)) {
+			const found = spawnSync("bash", ["-c", `command -v ${bin} || true`], { encoding: "utf8", env: { PATH: path } });
+			assert.equal(
+				found.stdout.trim(),
+				"",
+				`${bin} is reachable from ${label} (${found.stdout.trim()}); a fixture could spawn a real space`,
+			);
+		}
 	}
 });
