@@ -115,11 +115,7 @@ jobs:
   # killed by the 25-minute budget below at 65% and 68%. A few hunks are a few
   # dozen mutants. `scripts/mutate-changed.sh` derives the ranges, and the range
   # rule has its own tests, so what is mutated here is decided where it is
-  # checked. break 100 makes one surviving mutant fail the PR, and the verdict
-  # never comes from a cached run: stryker 10.1.1 spells "ignore the incremental
-  # file" `--force` (`--incremental false` is not a flag — it is read as a config
-  # path and dies with `ConfigReaderError: Invalid config file "false"`), and the
-  # derived config below sets `incremental: false` outright. Radar Vol. 35, blip 2.
+  # checked. break 100 makes one surviving mutant fail the PR.
   mutation-changed:
     name: mutation on changed files (stryker)
     runs-on: ubuntu-latest
@@ -199,15 +195,46 @@ jobs:
         if: steps.changed.outputs.skip != 'true'
         run: npm ci
 
+      # The wall time is the mutants, not the checkout: 710 of them cost 25m18s,
+      # and a re-push on the same base asks about the same mutants again. Stryker
+      # keeps their verdicts in an incremental report, and until now this job
+      # threw it away (the derived config below set `incremental: false`, because
+      # 10.1.1 has no CLI flag for it — `--incremental false` is read as a config
+      # path and dies with `ConfigReaderError: Invalid config file "false"`, and
+      # `--force` skips the file instead of trusting it). Persisting it is only
+      # sound if the key changes whenever anything that decides a verdict does:
+      #
+      #   * every TypeScript file under agent/extensions, tests included. The
+      #     command runner reports no per-test coverage, so stryker's own reuse
+      #     rule degenerates to "same mutant, same result" — a weakened test would
+      #     inherit a cache that predates it. Hashing the whole tree is what makes
+      #     a changed test a cache miss instead of a stale Killed.
+      #   * stryker.conf.json and the lockfile: a new stryker, timeout or mutator
+      #     set is a different verdict on the same code.
+      #   * the base sha, last, so a base move still restores through the
+      #     restore-key prefix; reuse is by mutant identity, which a base move
+      #     does not touch.
+      #
+      # The weekly `mutation` job has its own cache and its own key; that path is
+      # never capped and never inherits this one.
+      - name: restore incremental state
+        if: steps.changed.outputs.skip != 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: agent/reports/stryker/stryker-incremental.json
+          key: stryker-pr-${{ hashFiles('agent/extensions/**/*.ts') }}-${{ hashFiles('agent/stryker.conf.json', 'agent/package-lock.json', '.node-version') }}-${{ github.event.pull_request.base.sha }}
+          restore-keys: |
+            stryker-pr-${{ hashFiles('agent/extensions/**/*.ts') }}-${{ hashFiles('agent/stryker.conf.json', 'agent/package-lock.json', '.node-version') }}-
+
       # stryker 10's CLI has no --thresholds flag (it rejects
-      # --thresholds.break) and no boolean `--incremental` value to switch off
-      # (10.1.1 reads `--incremental false` as a config path and exits with
-      # `Invalid config file "false"`; `--force` skips the cached file but
-      # cannot express break 100), so the PR verdict is built from the weekly
-      # config with two keys changed: incremental off, so a PR never inherits a
-      # cached run, and break 100, so one surviving mutant fails the job.
-      # Derived, not copied: the two configs cannot drift.
-      - name: pr mutation config (break 100, no incremental)
+      # --thresholds.break) and no boolean `--incremental` value at all, so the PR
+      # verdict is built from the weekly config with two keys changed: break 100,
+      # so one surviving mutant fails the job, and its own report paths, so a
+      # capped PR run never overwrites the weekly run's report. `incremental`
+      # stays on — that is the cache above — and it is keyed so that nothing which
+      # decides a mutant's verdict can be older than the cache. Derived, not
+      # copied: the two configs cannot drift.
+      - name: pr mutation config (break 100, cache-friendly)
         if: steps.changed.outputs.skip != 'true'
         run: |
           set -euo pipefail
@@ -216,7 +243,6 @@ jobs:
             const base = JSON.parse(readFileSync("stryker.conf.json", "utf8"));
             writeFileSync("stryker.pr.conf.json", JSON.stringify({
               ...base,
-              incremental: false,
               thresholds: { ...base.thresholds, break: 100 },
               htmlReporter: { fileName: "reports/stryker-pr/mutation.html" },
               jsonReporter: { fileName: "reports/stryker-pr/mutation.json" },
