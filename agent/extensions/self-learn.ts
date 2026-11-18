@@ -641,13 +641,24 @@ export function workerFailuresFrom(reports: ReportText[], decisions: ReportText[
 		.sort((a, b) => b.count - a.count);
 }
 
+/** What makes a decision row evidence: an override, or a refusal. */
+const OVERRIDE_OR_REFUSAL = /overrid|refus/i;
+
 /**
  * Override and refusal rows from `state/decisions.jsonl`.
  *
  * The schema is the delegation workspace's, not this repo's, and the file is
  * absent on a machine that never ran a worker, so rows are read defensively:
- * any JSON object whose text mentions an override or a refusal counts, and the
- * row's own words are quoted instead of the whole envelope.
+ * any JSON object whose *quoted words* mention an override or a refusal counts,
+ * and the row's own words are quoted instead of the whole envelope.
+ *
+ * The quoted words, not the envelope: every row of that file carries
+ * `"overridden": false`, so matching the JSON kept all 1118 rows, and the 85
+ * rows whose only words are `"decision": "done"` were counted as 85 workers
+ * recording a failure. The loudest row in the evidence file was a list of
+ * successes, and it could never age out because the stamp is `timestamp` and
+ * this reader only knew `ts`. Both are read now: what the learner reads has to
+ * be what matched (blip 36).
  */
 export function decisionRows(raw: string, path = "state/decisions.jsonl"): ReportText[] {
 	const out: ReportText[] = [];
@@ -661,16 +672,15 @@ export function decisionRows(raw: string, path = "state/decisions.jsonl"): Repor
 			return;
 		}
 		const whole = typeof row === "string" ? row : JSON.stringify(row);
-		if (!/overrid|refus/i.test(whole)) return;
-		const words =
-			row && typeof row === "object"
-				? ["reason", "text", "detail", "decision", "note"]
-						.map((key) => (row as Record<string, unknown>)[key])
-						.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-						.join(" ")
-				: whole;
-		const at =
-			row && typeof row === "object" ? Date.parse(String((row as Record<string, unknown>).ts ?? "")) : Number.NaN;
+		const record = row && typeof row === "object" ? (row as Record<string, unknown>) : null;
+		const words = record
+			? ["reason", "text", "detail", "decision", "note"]
+					.map((key) => record[key])
+					.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+					.join(" ")
+			: whole;
+		if (!OVERRIDE_OR_REFUSAL.test(words || whole)) return;
+		const at = record ? Date.parse(String(record.ts ?? record.timestamp ?? record.at ?? "")) : Number.NaN;
 		out.push({
 			path: `${path}:${index + 1}`,
 			text: clipSample(redact(words || whole)),
@@ -2152,17 +2162,22 @@ function evidenceMarkdown(input: {
 	const unread = (prefix: string) => external.warnings.some((warning) => warning.startsWith(prefix));
 
 	lines.push("## Repeated failing CI checks", "");
-	if (unread("failing CI checks")) {
-		lines.push("Not read or not counted (see Warnings). An empty list here is not \"no failures\".");
-	} else if (external.ciFailures.length === 0) {
-		lines.push("None: no check failed on two branches or in two worker reports.");
-	} else {
+	// Rows first, and only then the reason the list is empty. A partial count
+	// ("43 of 100 counted, 57 never started") is still a count, and the old order
+	// asked the warnings first: this file's own gate said `22× pr-tier failed`
+	// while the section under it said "not counted", so the learner could not see
+	// the table the gate acted on.
+	if (external.ciFailures.length > 0) {
 		lines.push("| check | failing branches | worker reports | what it said |", "| --- | --- | --- | --- |");
 		for (const ci of external.ciFailures) {
 			lines.push(
 				`| ${cell(ci.check)} | ${ci.branches.length ? cell(ci.branches.join(", ")) : "—"} | ${ci.reports.length} | ${cell(ci.sample)} |`,
 			);
 		}
+	} else if (unread("failing CI checks")) {
+		lines.push("Not read or not counted (see Warnings). An empty list here is not \"no failures\".");
+	} else {
+		lines.push("None: no check failed on two branches or in two worker reports.");
 	}
 
 	lines.push("", "## What other workers recorded", "");

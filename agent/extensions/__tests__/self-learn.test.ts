@@ -786,6 +786,29 @@ describe("wiring", () => {
 		assert.match(body, /gh is not logged in/, "the evidence says why it could not look");
 	});
 
+	test("a partly counted CI list still prints the rows the gate acted on", async () => {
+		// This file's own gate said "22× pr-tier failed" while the section beneath it
+		// said "not counted": the warnings were consulted before the rows.
+		const { emit, ctx } = setup({
+			ciRuns: async () => ({
+				runs: [
+					{ name: "pr-tier", headBranch: "feat/a", conclusion: "failure" },
+					{ name: "pr-tier", headBranch: "feat/b", conclusion: "failure" },
+				],
+				warning: "failing CI checks: 57 of 100 failing runs ran no step and were not counted, because GitHub never started their jobs",
+			}),
+		});
+		await trip(emit, ctx);
+		await settle();
+		const before = (await readRuns()).length;
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		const run = await waitForRun((row, index) => index >= before && row.kind === "spawned");
+		const body = await readFile(run.queue, "utf8");
+		assert.match(body, /\| pr-tier \| feat\/a, feat\/b \|/, "the table the gate acted on is printed");
+		assert.ok(!body.includes("Not read or not counted"), "a counted list is not reported as uncounted");
+		assert.match(body, /57 of 100 failing runs ran no step/, "the runs that were dropped are still named in Warnings");
+	});
+
 	test("a confirmed learner whose session goes quiet without its proposal leaves a died row", async () => {
 		// The launcher (agent-pane.sh) exits as soon as the spec is sent, so an exit
 		// status says nothing about the learner: silence is the only honest death.
@@ -1223,6 +1246,30 @@ describe("what workers recorded", () => {
 		assert.equal(rows.length, 2, "only the override rows are evidence");
 		assert.equal(workerFailuresFrom([], rows).length, 1);
 		assert.equal(workerFailuresFrom([], rows.slice(0, 1)).length, 0, "one override is one worker's call");
+	});
+
+	test("a decision row that records a success is not evidence", () => {
+		// Every row of the workspace's file carries `"overridden": false`, so a scan
+		// of the whole envelope kept all 1118 rows: the 85 `"decision":"done"` rows
+		// became the loudest "worker failure" in the evidence file.
+		const raw = [
+			JSON.stringify({ timestamp: "2026-11-18T09:00:00.000Z", command: "wipe", decision: "done", reason: null, overridden: false }),
+			JSON.stringify({ timestamp: "2026-11-18T09:01:00.000Z", command: "mode", decision: "sandboxed", reason: "needs no host access", overridden: false }),
+			JSON.stringify({ timestamp: "2026-11-18T09:02:00.000Z", command: "mode", decision: "remote", reason: "the sandbox refuses systemctl --user", overridden: false }),
+		].join("\n");
+		const rows = decisionRows(raw);
+		assert.deepEqual(rows.map((row) => row.path), ["state/decisions.jsonl:3"], "only the refusal is evidence");
+		assert.equal(workerFailuresFrom([], rows).length, 0, "one refusal is one worker's call, not a pattern");
+	});
+
+	test("a decision row is stamped by `timestamp`, so a week-old one ages out", () => {
+		const at = "2026-11-13T16:49:58.589Z";
+		const raw = JSON.stringify({ timestamp: at, decision: "mode", reason: "the sandbox refused this", overridden: false });
+		const rows = decisionRows(raw);
+		assert.equal(rows[0].at, Date.parse(at), "the workspace spells it `timestamp`, not `ts`");
+		const judged = judgeOnce({ reports: [], decisions: rows }, Date.parse("2026-11-18T00:00:00.000Z"));
+		assert.equal(judged.decisions.length, 0, "a refusal from a week ago is history, not evidence");
+		assert.equal(judged.stale, 1);
 	});
 
 	test("a line that records a pass is not a failure", () => {
