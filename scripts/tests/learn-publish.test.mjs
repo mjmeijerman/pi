@@ -535,4 +535,16 @@ test("a differential proof stands in for the test, and its absence does not", ()
 	assert.equal(published.status, 0, published.stderr);
 	assert.match(published.stderr, /No test: line is the proof taken instead/);
 	assert.match(published.stdout, /PR #42/);
+
+	// The proof the gate was told to take is the proof the body carries: a branch
+	// accepted on a differential run and then published with a source-only diff
+	// and no reason is the reviewer reading an unexplained change. The label is the
+	// gate's spelling, not the proposal's markdown, and the domain and count survive.
+	const body = readFileSync(PR_BODY(f), "utf8");
+	assert.match(
+		body,
+		/^No test: no test can distinguish it: every queue file in agent\/proposals\/queue\/, 2,431 cases, 0 differing verdicts$/m,
+		"the accepted proof reaches the pull request body",
+	);
+	assert.doesNotMatch(body, /\*\*No test:\*\*/, "the body carries the label the gate reads, not the proposal's emphasis");
 });
