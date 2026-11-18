@@ -38,6 +38,8 @@
 #   scripts/harness-check.sh --verify-doc-facts
 #                                         # only the transport table check, for
 #                                         # tests and for one honest line
+#   scripts/harness-check.sh --verify-mise-pins
+#                                         # only the mise.toml projections, for tests
 #   scripts/harness-check.sh --help
 #
 # Exit 0 when nothing FAILs (a baselined violation reports WARN), 1 on any FAIL.
@@ -56,6 +58,7 @@ VERIFY_DOC_FACTS=0
 VERIFY_SPEC_DELTAS=0
 WRITE_SKILLS_LOCK=0
 VERIFY_SKILLS_LOCK=0
+VERIFY_MISE_PINS=0
 
 PASS_N=0
 WARN_N=0
@@ -87,7 +90,7 @@ RETRO_MAX_AGE_DAYS=14
 # grace period keeps a learner's own fresh branch out of its own run (blip 11).
 LEARN_BRANCH_GRACE_MIN="${PI_LEARN_BRANCH_GRACE_MIN:-60}"
 
-usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() {
 	printf 'harness-check: %s\n' "$*" >&2
 	exit 2
@@ -513,6 +516,104 @@ check_doc_facts() {
 	return 0
 }
 
+# --------------------------------------------------------- the version file --
+# Radar Vol. 35 blip 68 (mise, Adopt) and blip 38 (CI hardening). mise.toml is the
+# single source for the node and npm majors this repo demands, and nothing in a
+# workflow can read a TOML file: `actions/setup-node`'s `node-version-file`
+# understands .nvmrc, .node-version and package.json, and a matrix cannot compute a
+# value at all. So the pin is projected into `.node-version` (which the four
+# setup-node steps read) and written out once more in test.yml's matrix and in the
+# one global npm install. Each projection is compared to mise.toml here, so a bump
+# that misses one is a FAIL instead of a pipeline that tests a version nobody meant.
+# Empty output from mise_major means "missing, unreadable or silent" and every
+# caller turns that into a loud FAIL: a fallback nobody sees is how a check stops
+# checking, which is the rule the earlier mise pin was written to.
+mise_major() { # tool -> major declared in mise.toml, or empty when there is none
+	local file="$ROOT/mise.toml" raw=""
+	[ -r "$file" ] || return 0
+	# The same shape setup.sh reads, and sed for the same reason: a bare
+	# `node = "24"` is the only form mise writes, so a TOML parser is a dependency
+	# bought for four lines.
+	raw=$(sed -n 's/^[[:space:]]*'"$1"'[[:space:]]*=[[:space:]]*["'"'"']\{0,1\}\([0-9][0-9.]*\).*/\1/p' "$file" 2>/dev/null | head -n 1 || true)
+	printf '%s\n' "${raw%%.*}"
+}
+
+check_mise_pins() {
+	local node_pin npm_pin file got hits
+	node_pin=$(mise_major node)
+	if [ -z "$node_pin" ]; then
+		verdict mise-pin-node mise.toml 0 \
+			"no node major — missing, unreadable, or has no node = \"NN\" line; .node-version and the CI matrix have no source"
+		return
+	fi
+
+	# 1. the file the four setup-node steps read.
+	file=".node-version"
+	if [ ! -f "$ROOT/$file" ]; then
+		verdict mise-pin-node-version "$file" 0 \
+			"missing — actions/setup-node reads it in four jobs; write the pin: printf '%s\\n' $node_pin > .node-version"
+	else
+		got=$(sed -n '1s/^[[:space:]]*v\{0,1\}\([0-9][0-9.]*\).*/\1/p' "$ROOT/$file" 2>/dev/null)
+		if [ "${got%%.*}" = "$node_pin" ]; then
+			verdict mise-pin-node-version "$file" 1 "node $got, mise.toml pins $node_pin"
+		else
+			verdict mise-pin-node-version "$file" 0 \
+				"node ${got:-unreadable} — mise.toml pins $node_pin; write the pin: printf '%s\\n' $node_pin > .node-version"
+		fi
+	fi
+
+	# 2. the matrix in test.yml. YAML cannot read a file into a matrix and a job
+	#    output would cost a second runner, so the first axis is a write-out —
+	#    measured here rather than trusted. A missing line is a FAIL, not a pass:
+	#    a pattern that stopped matching must not read as "nothing to compare".
+	file=".github/workflows/test.yml"
+	got=$(sed -n '/^[[:space:]]*node:[[:space:]]*\[/ {
+		s/^[^[]*\[[[:space:]]*["'"'"']\{0,1\}\([0-9][0-9.]*\).*/\1/p
+		q
+	}' "$ROOT/$file" 2>/dev/null)
+	if [ -z "$got" ]; then
+		verdict mise-pin-matrix "$file" 0 \
+			"no node: [\"NN\", ...] matrix line — the drift check would otherwise pass in silence"
+	elif [ "${got%%.*}" = "$node_pin" ]; then
+		verdict mise-pin-matrix "$file" 1 "first axis $got, mise.toml pins $node_pin"
+	else
+		verdict mise-pin-matrix "$file" 0 \
+			"first axis $got — mise.toml pins $node_pin; the matrix is the one place YAML cannot derive, so it is checked here"
+	fi
+
+	# 3. and no workflow may go back to a literal, which is how the five copies
+	#    this replaced came to exist. node-version-file is the only door.
+	hits=$(grep -rnE "^[[:space:]]*node-version:[[:space:]]*[0-9\"']" "$ROOT/.github/workflows" 2>/dev/null | sed "s|^$ROOT/||" || true)
+	if [ ! -d "$ROOT/.github/workflows" ]; then
+		verdict mise-pin-workflows .github/workflows 0 \
+			"missing — nothing here can prove a workflow does not restate the major"
+	elif [ -z "$hits" ]; then
+		verdict mise-pin-workflows .github/workflows 1 \
+			"no workflow pins node with a literal; they all read node-version-file"
+	else
+		verdict mise-pin-workflows "$(printf '%s\n' "$hits" | head -n 1 | cut -d: -f1)" 0 \
+			"$(printf '%s\n' "$hits" | wc -l | tr -d ' ') node-version literal(s) — read .node-version through node-version-file, so mise.toml stays the only source"
+	fi
+
+	# 4. the one global npm install (harness-check.yml), whose major must be the
+	#    pinned one. An exact version, not a major, because that install replaces
+	#    the npm that runs `npm ci` and is pinned on purpose (blip 99).
+	npm_pin=$(mise_major npm)
+	file=".github/workflows/harness-check.yml"
+	got=$(sed -n 's/^.*npm install -g npm@\([0-9][0-9.]*\).*/\1/p' "$ROOT/$file" 2>/dev/null | head -n 1)
+	if [ -z "$npm_pin" ]; then
+		verdict mise-pin-npm mise.toml 0 \
+			"no npm major — missing, unreadable, or has no npm = \"NN\" line; the CI install has no source"
+	elif [ -z "$got" ]; then
+		verdict mise-pin-npm "$file" 0 \
+			"no npm install -g npm@X.Y.Z line — the drift check would otherwise pass in silence"
+	elif [ "${got%%.*}" = "$npm_pin" ]; then
+		verdict mise-pin-npm "$file" 1 "npm $got, mise.toml pins $npm_pin"
+	else
+		verdict mise-pin-npm "$file" 0 "npm $got — mise.toml pins npm $npm_pin"
+	fi
+}
+
 # ------------------------------------------------------------------- config --
 
 # min-release-age only exists from npm 11. An older npm still echoes the key back
@@ -536,7 +637,7 @@ npm_newer() { # a b -> true when b sorts above a (11.20.0 beats 10.9.9)
 }
 
 check_release_age() {
-	local path_npm path_version best_npm best_version candidate candidate_version value source
+	local path_npm path_version best_npm best_version candidate candidate_version value source npm_pin
 	if ! command -v npm >/dev/null 2>&1; then
 		verdict npm-min-release-age - 0 "npm not installed"
 		return
@@ -572,6 +673,18 @@ check_release_age() {
 		record WARN npm-min-release-age-path "$path_npm" \
 			"PATH npm $path_version shadows $best_npm $best_version — put $(dirname "$best_npm") first on PATH"
 	fi
+	# The number the two messages below name is the pin, not a fourth copy of it:
+	# mise.toml's `npm` is what this repo wants installed. The 11.10 floor in the
+	# comment above is npm's own fact (the release min-release-age landed in) and
+	# stays a literal, so a bump to npm 12 cannot make this check claim that npm 11
+	# ignores a setting it honours. No pin is loud, never a silent 11: the WARN
+	# names it and mise-pin-npm has already FAILed the run.
+	npm_pin=$(mise_major npm)
+	if [ -z "$npm_pin" ]; then
+		record WARN npm-pin - \
+			"mise.toml declares no npm major — the advice below falls back to npm 11 and mise-pin-npm FAILs this run"
+		npm_pin=11
+	fi
 	if [ "${best_version%%.*}" -lt 11 ]; then
 		# A dangling ~/.local/bin/npm is the fingerprint of an install that could
 		# not finish: the shim is written, the target is not, and because the
@@ -589,9 +702,9 @@ check_release_age() {
 		# paths, so telling an agent to run it costs a turn and leaves a shim
 		# behind. The host can do it; the sandbox can only ask for it.
 		if [ -n "${PI_SANDBOX_MODE:-}" ]; then
-			verdict npm-min-release-age - 0 "npm $best_version ignores min-release-age (needs npm ≥ 11) — the sandbox cannot install a global npm; from a host shell run: bash $ROOT/setup.sh$dangling"
+			verdict npm-min-release-age - 0 "npm $best_version ignores min-release-age (needs npm ≥ $npm_pin) — the sandbox cannot install a global npm; from a host shell run: bash $ROOT/setup.sh$dangling"
 		else
-			verdict npm-min-release-age - 0 "npm $best_version ignores min-release-age (needs npm ≥ 11) — install one: npm i -g --prefix ~/.local npm@11$dangling"
+			verdict npm-min-release-age - 0 "npm $best_version ignores min-release-age (needs npm ≥ $npm_pin) — install one: npm i -g --prefix ~/.local npm@$npm_pin$dangling"
 		fi
 		return
 	fi
@@ -1156,6 +1269,7 @@ while [ $# -gt 0 ]; do
 	--verify-spec-deltas) VERIFY_SPEC_DELTAS=1 ;;
 	--write-skills-lock) WRITE_SKILLS_LOCK=1 ;;
 	--verify-skills-lock) VERIFY_SKILLS_LOCK=1 ;;
+	--verify-mise-pins) VERIFY_MISE_PINS=1 ;;
 	--root)
 		[ $# -ge 2 ] || die "--root needs a directory"
 		ROOT="$2"
@@ -1184,6 +1298,21 @@ fi
 if [ "$VERIFY_SKILLS_LOCK" = 1 ]; then
 	section "skills — pinned content (blip #72)"
 	check_skills_lock
+	if [ "$JSON" = 1 ]; then
+		printf '{"pass":%d,"warn":%d,"fail":%d,"results":[%s]}\n' \
+			"$PASS_N" "$WARN_N" "$FAIL_N" "${JSON_ITEMS[*]}"
+	else
+		printf '\n%d passed, %d warn, %d failed\n' "$PASS_N" "$WARN_N" "$FAIL_N"
+	fi
+	[ "$FAIL_N" -eq 0 ]
+	exit $?
+fi
+
+# The mise.toml projections on their own, so a test can assert on them without
+# the other twenty lines: the exit status is the answer.
+if [ "$VERIFY_MISE_PINS" = 1 ]; then
+	section "versions — the pin in mise.toml, projected (blip 68)"
+	check_mise_pins
 	if [ "$JSON" = 1 ]; then
 		printf '{"pass":%d,"warn":%d,"fail":%d,"results":[%s]}\n' \
 			"$PASS_N" "$WARN_N" "$FAIL_N" "${JSON_ITEMS[*]}"
@@ -1266,6 +1395,10 @@ check_skills_lock
 # the wrong transport is exactly the rot that survives review: this runs in
 # --quick so the commit hook says so, not a reader three months later.
 check_doc_facts
+# Six greps and no subprocess that leaves the tree, so it belongs in the hook's
+# --quick run too: a bump that edits mise.toml is one command from being
+# consistent, while the edit is still the one being made.
+check_mise_pins
 
 if [ "$QUICK" = 0 ]; then
 	section "config — things an install step sets"

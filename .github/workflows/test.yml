@@ -24,6 +24,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The first axis must equal mise.toml's `node`: a matrix cannot compute it,
+        # so scripts/harness-check.sh FAILs when the two disagree (blip 68).
         node: ["24", "26"]
     defaults:
       run:
@@ -70,7 +72,10 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "24"
+          # .node-version is mise.toml's `node` projected, because this action
+          # reads no TOML; drift between the two FAILs harness-check (blip 68).
+          # Absolute, so this job's defaults.run.working-directory cannot matter.
+          node-version-file: ${{ github.workspace }}/.node-version
 
       - name: install
         run: npm ci
@@ -142,7 +147,8 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "24"
+          # mise.toml's `node`, projected: setup-node cannot read a TOML file.
+          node-version-file: ${{ github.workspace }}/.node-version
 
       # The range rule is `scripts/mutate-changed.sh`, not a copy of it: the
       # same script `make mutate-changed` runs, so the branch check a worker runs
