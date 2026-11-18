@@ -1141,7 +1141,7 @@ export function frustrationQuotes(transcript: string, cap = MAX_FRUSTRATION): Fr
  * Never throws: a missing binary and an unauthenticated `gh` are the same kind
  * of answer here, and the caller decides whether that is a warning.
  */
-function runOnce(
+export function runOnce(
 	argv: string[],
 	cwd: string,
 	timeoutMs: number,
