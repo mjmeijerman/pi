@@ -358,7 +358,9 @@ test("an unreadable value is a FAIL, not the fallback literal", () => {
 // The row the other rows assume: is the tool that owns the pin on this machine at
 // all. Blip 68 was adopted as a file, and for two released pins `command -v mise`
 // answered nothing while five rows compared mise.toml to its projections. Absent
-// is a WARN (a fresh clone, and CI, have no mise); present-but-broken is a FAIL.
+// is a WARN (a fresh clone, and CI, have no mise); present-but-broken is a FAIL,
+// and so is the binary without the pinned tool, because the host this row was
+// written on does run `mise install`.
 
 test("no mise on PATH is a WARN that says so, and not a broken repo", () => {
 	const { status, out } = check(fixture());
@@ -382,18 +384,19 @@ test("a mise that answers no --version FAILs and names the reinstall", () => {
 	assert.equal(status, 1, out);
 });
 
-test("mise installed but the pinned tool not installed WARNs and gives the command", () => {
-	// The state ./setup.sh leaves: the binary is there, and it deliberately never
-	// ran `mise install`. That is a one-command fix, not a FAIL.
+test("mise installed but the pinned tool not installed FAILs and gives the command", () => {
+	// The host installs the pin, so a binary with no tool behind it is a half-done
+	// install rather than a laptop that has not got round to it. It was a WARN
+	// before `mise install` ran here; the difference is what makes the row honest.
 	const dir = miseStub({ node: null });
 	const { status, out } = check(fixture(), {
 		PATH: `${dir}:${SYSTEM_PATH}`,
 	});
 	const row = line(out, "mise-installed");
-	assert.match(row, /WARN/);
-	assert.match(row, /node 24 is not/);
+	assert.match(row, /FAIL/);
+	assert.match(row, /resolves no node 24/);
 	assert.match(row, /mise install/);
-	assert.equal(status, 0, out);
+	assert.equal(status, 1, out);
 });
 
 test("a mise that resolves the pinned node PASSes and prints where it landed", () => {

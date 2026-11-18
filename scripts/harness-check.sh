@@ -551,9 +551,13 @@ check_mise_pins() {
 	#    Three states, and the difference is the point: absent is a WARN, because a
 	#    fresh clone is not a broken repo and CI has no mise either; a binary that
 	#    is on PATH and cannot answer `--version` is a FAIL, because that install
-	#    is broken; installed-but-no-pinned-tool is a WARN naming the one command
-	#    that fixes it. setup.sh installs the binary and deliberately never runs
-	#    `mise install`, so the middle state is the normal one on a fresh laptop.
+	#    is broken; installed-but-no-pinned-tool is a FAIL too, because this host
+	#    runs `mise install` and the pin is present here — a machine with the
+	#    binary and not the tool has an install that stopped halfway, not a laptop
+	#    that has not got round to it. That middle state was a WARN until the pin
+	#    was actually installed; it is a FAIL from the moment the tool is there to
+	#    miss, which is the only reading under which this row tells the truth in
+	#    both directions.
 	mise_path=$(command -v mise 2>/dev/null || true)
 	if [ -z "$mise_path" ]; then
 		record WARN mise-installed mise.toml \
@@ -566,8 +570,8 @@ check_mise_pins() {
 		else
 			mise_node=$(cd "$ROOT" 2>/dev/null && mise which node 2>/dev/null | head -n 1 || true)
 			if [ -z "$mise_node" ]; then
-				record WARN mise-installed mise.toml \
-					"$mise_ver is installed at $mise_path but node ${node_pin:-?} is not — run: mise install (in the repo, once)"
+				verdict mise-installed mise.toml 0 \
+					"$mise_ver at $mise_path resolves no node ${node_pin:-?} — this host installs mise.toml's pin, so the tool is missing and the install is half done: mise install (in the repo, once)"
 			else
 				verdict mise-installed mise.toml 1 \
 					"$mise_ver at $mise_path resolves the pinned node ${node_pin:-?} to $mise_node"
