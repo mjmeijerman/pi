@@ -650,7 +650,8 @@ const OVERRIDE_OR_REFUSAL = /overrid|refus/i;
  * The schema is the delegation workspace's, not this repo's, and the file is
  * absent on a machine that never ran a worker, so rows are read defensively:
  * any JSON object whose *quoted words* mention an override or a refusal counts,
- * and the row's own words are quoted instead of the whole envelope.
+ * and the row's own words are quoted instead of the whole envelope. A row with
+ * no words of its own is not evidence at all, even when its envelope says so.
  *
  * The quoted words, not the envelope: every row of that file carries
  * `"overridden": false`, so matching the JSON kept all 1118 rows, and the 85
@@ -671,19 +672,21 @@ export function decisionRows(raw: string, path = "state/decisions.jsonl"): Repor
 		} catch {
 			return;
 		}
-		const whole = typeof row === "string" ? row : JSON.stringify(row);
 		const record = row && typeof row === "object" ? (row as Record<string, unknown>) : null;
+		// The words, and only the words. A row with no words of its own is not
+		// evidence: its envelope carries `"overridden": false` on every line of that
+		// file, and reading that as a match counted 1118 successes as failures.
 		const words = record
 			? ["reason", "text", "detail", "decision", "note"]
 					.map((key) => record[key])
-					.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+					.filter((value): value is string => typeof value === "string")
 					.join(" ")
-			: whole;
-		if (!OVERRIDE_OR_REFUSAL.test(words || whole)) return;
-		const at = record ? Date.parse(String(record.ts ?? record.timestamp ?? record.at ?? "")) : Number.NaN;
+			: String(row);
+		if (!OVERRIDE_OR_REFUSAL.test(words)) return;
+		const at = record ? Date.parse(String(record.ts ?? record.timestamp ?? record.at)) : Number.NaN;
 		out.push({
 			path: `${path}:${index + 1}`,
-			text: clipSample(redact(words || whole)),
+			text: clipSample(redact(words)),
 			...(Number.isFinite(at) ? { at } : {}),
 		});
 	});
