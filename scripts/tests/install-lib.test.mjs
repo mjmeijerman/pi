@@ -1,0 +1,226 @@
+// Tests for the installer's pure half (scripts/install-lib.mjs).
+//
+// These pin the two properties the cross-platform port must not lose:
+//   1. `keep every rule` reproduces agent/AGENTS.md byte for byte, so an
+//      unfiltered setup on a working machine changes nothing.
+//   2. the per-OS differences stay in ONE table, so they cannot spread into the
+//      engine as `if (win32)` branches — the revert trigger in the spec is
+//      "per-OS special cases spreading past three places".
+//
+// Run: node --test scripts/tests/install-lib.test.mjs  (or make scripts-test)
+
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import test from 'node:test';
+
+import {
+	OS_PLAN,
+	PI_WRAPPER_BEGIN,
+	PI_WRAPPER_BLOCK,
+	PI_WRAPPER_END,
+	filterAgentsMd,
+	homePaths,
+	parseAgentsMd,
+	parseRuleSelection,
+	pickNames,
+	planFor,
+	spawnPlan,
+	ruleIds,
+	ruleSlug,
+	samePath,
+	spliceManagedBlock,
+} from '../install-lib.mjs';
+
+const AGENTS = fs.readFileSync(new URL('../../agent/AGENTS.md', import.meta.url), 'utf8');
+const SECTIONS = ['Sandbox', 'Landing changes', 'Harness sources', 'Models', 'Harness feedback', 'Herdr', 'Machine / screens'];
+
+test('agent/AGENTS.md: 17 rules, each in a named section', () => {
+	const parsed = parseAgentsMd(AGENTS);
+	assert.equal(parsed.rules.length, 17, 'setup.mjs says "rule N of 17"; a new rule means a new number');
+	for (const section of SECTIONS) {
+		assert.ok(
+			parsed.rules.some((r) => r.section === section),
+			`no rule under "## ${section}" — setup would not offer it`,
+		);
+	}
+	assert.equal(new Set(ruleIds(parsed).map((r) => r.slug)).size, 17, 'every rule needs its own slug, or one answer covers two rules');
+});
+
+test('keeping every rule reproduces AGENTS.md byte for byte', () => {
+	assert.equal(filterAgentsMd(AGENTS, () => true), AGENTS);
+});
+
+test('dropping a rule removes its bullet and keeps the others', () => {
+	const parsed = parseAgentsMd(AGENTS);
+	const target = parsed.rules[4]; // the second "Landing changes" rule
+	const filtered = filterAgentsMd(AGENTS, (rule) => rule.index !== target.index);
+	assert.equal(filtered.split('\n').filter((l) => /^- /.test(l)).length, 16);
+	assert.ok(!filtered.includes(target.text.slice(0, 40)), 'the dropped rule is still there');
+	assert.ok(filtered.includes(parsed.rules[5].text.slice(0, 40)), 'a rule after it went missing');
+});
+
+test('a section whose only rule was dropped loses its heading', () => {
+	const parsed = parseAgentsMd(AGENTS);
+	const sandbox = parsed.rules.find((r) => r.section === 'Sandbox');
+	const filtered = filterAgentsMd(AGENTS, (rule) => rule.index !== sandbox.index);
+	assert.ok(!filtered.includes('## Sandbox'), 'an empty heading is a rule nobody can follow');
+	assert.ok(filtered.includes('## Harness sources'));
+	assert.equal(filtered.endsWith('\n'), true);
+	assert.equal(filtered.includes('\n\n\n'), false, 'no double blank lines left behind');
+});
+
+test('a recorded answer survives a rule inserted above it', () => {
+	const before = parseAgentsMd(AGENTS);
+	const ruffled = AGENTS.replace('# Global rules\n\n', '# Global rules\n\n- A brand new rule nobody has answered yet, inserted at the top.\n');
+	const after = parseAgentsMd(ruffled);
+	assert.equal(after.rules.length, before.rules.length + 1);
+	for (const rule of before.rules) {
+		const match = after.rules.find((r) => r.slug === rule.slug);
+		assert.ok(match, `slug ${rule.slug} moved — answers recorded against it would be lost`);
+		assert.equal(match.index, rule.index + 1, 'indexes shift, slugs must not');
+	}
+});
+
+test('ruleSlug is derived from the rule text, not its position', () => {
+	assert.equal(ruleSlug('- Never merge, push to trunk'), ruleSlug('Never merge, push to trunk'));
+	assert.match(ruleSlug('Always respond in English, regardless of the language'), /^always-respond-in-english-regardless-of$/);
+});
+
+test('the pi wrapper block is spliced, not appended twice', () => {
+	const rc = '# my rc\n\nexport PATH="$HOME/.local/bin:$PATH"\n';
+	const once = spliceManagedBlock(rc, PI_WRAPPER_BEGIN, PI_WRAPPER_END, PI_WRAPPER_BLOCK);
+	const twice = spliceManagedBlock(once, PI_WRAPPER_BEGIN, PI_WRAPPER_END, PI_WRAPPER_BLOCK);
+	assert.equal(twice, once, 'a second install must not stack a second wrapper');
+	assert.ok(once.startsWith('# my rc\n'), 'what was outside the markers is still first');
+	assert.equal(once.split(PI_WRAPPER_BEGIN).length, 2);
+});
+
+test('an old wrapper block is replaced where it stood', () => {
+	const stale = `# rc\n${PI_WRAPPER_BEGIN}\npi() { echo old; }\n${PI_WRAPPER_END}\n# after\n`;
+	const next = spliceManagedBlock(stale, PI_WRAPPER_BEGIN, PI_WRAPPER_END, PI_WRAPPER_BLOCK);
+	assert.ok(!next.includes('echo old'), 'the stale block survived');
+	assert.ok(next.includes('# after'), 'a line after the block was eaten');
+});
+
+test('one per-OS table: three plans, and only the real differences differ', () => {
+	const n = OS_PLAN;
+	assert.deepEqual(Object.keys(n).sort(), ['darwin', 'linux', 'win32']);
+	assert.equal(n.linux.linkMode, 'symlink');
+	assert.equal(n.win32.linkMode, 'copy', 'a symlink on Windows needs elevation or Developer Mode');
+	assert.equal(n.linux.binSubdir, n.darwin.binSubdir);
+	assert.equal(n.linux.service, 'systemd');
+	assert.equal(n.darwin.service, 'launchd');
+	assert.equal(n.win32.service, 'schtasks');
+	assert.equal(n.linux.sandbox, true);
+	assert.equal(n.darwin.sandbox, false);
+	assert.equal(n.win32.sandbox, false);
+	assert.deepEqual(n.win32.rcFiles, [], 'no POSIX rc file on Windows');
+	assert.equal(n.win32.herdrInstall, 'powershell');
+	assert.equal(n.linux.herdrInstall, 'sh');
+	assert.match(planFor('win32', { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' }).herdrInstalled, /herdr-app[\\/]herdr-app\.exe$/);
+	assert.equal(planFor('plan9').platform, 'linux', 'an unknown platform reads as POSIX rather than crashing a setup');
+});
+
+test('homePaths derives every path the engine writes from HOME', () => {
+	const plan = planFor('linux');
+	const p = homePaths({ home: '/home/me', agentDir: '/home/me/.pi/agent', plan });
+	assert.equal(p.binDir, '/home/me/.local/bin');
+	assert.equal(p.stateFile, '/home/me/.pi/state/setup.json');
+	assert.equal(p.gitHooksDir, '/home/me/.pi/git-hooks');
+	assert.equal(p.serviceDir, '/home/me/.config/systemd/user');
+	assert.equal(homePaths({ home: 'C:\\Users\\me', agentDir: 'C:\\Users\\me\\.pi\\agent', plan: planFor('win32', { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' }) }).serviceDir, null);
+});
+
+test('pickNames: nothing given means everything', () => {
+	assert.deepEqual(pickNames(['a', 'b'], []), ['a', 'b']);
+	assert.deepEqual(pickNames(['a', 'b', 'c'], ['c']), ['c']);
+	assert.deepEqual(pickNames(['a', 'b'], ['zzz']), []);
+});
+
+test('--rules= parses into one answer per rule', () => {
+	assert.equal(parseRuleSelection(undefined, 17).size, 0);
+	assert.equal([...parseRuleSelection('none', 3).values()].every((v) => v === false), true);
+	assert.deepEqual([...parseRuleSelection('drop:2', 3).entries()], [
+		[1, true],
+		[2, false],
+		[3, true],
+	]);
+	assert.deepEqual([...parseRuleSelection('keep:2,3', 3).entries()], [
+		[1, false],
+		[2, true],
+		[3, true],
+	]);
+	assert.throws(() => parseRuleSelection('some', 3), /--rules wants/);
+});
+
+test('samePath: git echoes back a different spelling of the same directory', () => {
+	assert.equal(samePath('/home/me/.pi/git-hooks', '/home/me/.pi/git-hooks/'), true);
+	assert.equal(samePath('/home/me/.pi/git-hooks', '/home/other/.pi/git-hooks'), false);
+	assert.equal(samePath('/c/Users/me/.pi/git-hooks', 'C:\\Users\\me\\.pi\\git-hooks', 'win32'), true);
+	assert.equal(samePath('/c/Users/me/.pi/git-hooks', '/c/Users/me/.pi/git-hooks/', 'win32'), true);
+	assert.equal(samePath('', '/home/me', 'linux'), false);
+});
+
+// `.cmd` shims: npm, gh and the rest are .cmd files on Windows, which node
+// cannot exec directly. The fix is argv, not `shell: true` — a shell turns argv
+// into a string, and a string is one quote away from a second command. These
+// two tests pin the argv that replaces it, so nobody can quietly put the shell
+// back: semgrep: javascript.lang.security.audit.spawn-shell-true.
+test('spawnPlan: a .cmd command on win32 goes through cmd.exe, argv intact', () => {
+	const spec = spawnPlan('npm.cmd', ['install', '-g', 'pi'], { platform: 'win32', comspec: 'C:\\Windows\\system32\\cmd.exe' });
+	assert.equal(spec.file, 'C:\\Windows\\system32\\cmd.exe');
+	assert.equal(spec.args[0], '/d', '/d skips AutoRun, which a person may have pointed at anything');
+	assert.equal(spec.args[1], '/s', '/s is what makes cmd.exe keep the outer quotes as written');
+	assert.equal(spec.args[2], '/c');
+	assert.equal(spec.args[3], '"npm.cmd install -g pi"');
+	assert.equal(spec.args.length, 4, 'the command line is ONE argument: /c takes the rest of the line');
+	assert.equal(spec.windowsVerbatimArguments, true, 'node must not quote the quotes a second time');
+	// One argument with a space and one with an operator: both are quoted, and
+	// the arguments around them are left alone.
+	assert.equal(
+		spawnPlan('gh.cmd', ['pr', 'create', '--title', 'One Node installer & friends', '-R', 'a/b'], { platform: 'win32' }).args[3],
+		'"gh.cmd pr create --title "One Node installer & friends" -R a/b"',
+		'quote the argument cmd.exe would split, not the whole line',
+	);
+});
+
+test('spawnPlan: everything else is spawned directly, with no shell in sight', () => {
+	for (const platform of ['linux', 'darwin']) {
+		const spec = spawnPlan('git', ['config', '--global', 'user.name', 'Mark'], { platform });
+		assert.equal(spec.file, 'git', platform);
+		assert.deepEqual(spec.args, ['config', '--global', 'user.name', 'Mark'], platform);
+		assert.equal(spec.windowsVerbatimArguments, false, platform);
+	}
+	// A plain .exe on Windows is exec'd, not handed to cmd.exe: only CreateProcess
+	// runs there, and cmd.exe would add a parsing layer for nothing.
+	for (const command of ['gh.exe', 'C:\\Program Files\\Git\\bin\\bash.exe']) {
+		assert.equal(spawnPlan(command, ['auth', 'status'], { platform: 'win32', comspec: 'cmd.exe' }).file, command);
+	}
+});
+
+// PATHEXT is a shell feature: node's CreateProcess appends `.exe` and stops. So
+// `run('npm', …)` — the --install-pi path — cannot exec the npm.cmd shim unless
+// `npm` is routed through cmd.exe too. Dropping `shell: true` without this
+// would have fixed the scanner and broken Windows.
+test('spawnPlan: a bare name on win32 goes through cmd.exe, because PATHEXT does', () => {
+	const spec = spawnPlan('npm', ['install', '-g', 'pi'], { platform: 'win32', comspec: 'C:\\Windows\\system32\\cmd.exe' });
+	assert.equal(spec.file, 'C:\\Windows\\system32\\cmd.exe');
+	assert.deepEqual(spec.args, ['/d', '/s', '/c', '"npm install -g pi"']);
+	assert.equal(spec.windowsVerbatimArguments, true);
+	// Same for a shim named by its full path, where the space needs the quotes.
+	const viaPath = spawnPlan('C:\\Program Files\\nodejs\\npm.cmd', ['i'], { platform: 'win32', comspec: 'cmd.exe' });
+	assert.equal(viaPath.args[3], '""C:\\Program Files\\nodejs\\npm.cmd" i"');
+	// A bare name on a POSIX platform is untouched by all of this.
+	assert.equal(spawnPlan('npm', ['i'], { platform: 'linux' }).file, 'npm');
+});
+
+// The point of the two tests above is that nobody puts the shell back to make a
+// scanner quiet. That is a property of the engines, so it is read off them.
+test('the engines build argv with spawnPlan and never set a shell', () => {
+	for (const file of ['../../install.mjs', '../../setup.mjs']) {
+		const src = fs.readFileSync(new URL(file, import.meta.url), 'utf8').replace(/^\s*\/\/.*$/gm, '');
+		assert.ok(!/\bshell\s*:/.test(src), `${file} sets a child_process shell option again`);
+		assert.ok(/spawnPlan\(/.test(src), `${file} does not run commands through spawnPlan`);
+		assert.ok(!/nosemgrep/.test(src), `${file} silences a scanner finding instead of fixing it`);
+	}
+});
