@@ -2192,6 +2192,24 @@ describe("the publish request a learner writes", () => {
 		assert.equal(ok.request.proposal, join(PROPOSALS, "p.md"));
 	});
 
+	test("a proposal named the way git names it is the same file as the absolute one", () => {
+		// The sandboxed learner wrote `agent/proposals/<file>.md` on 2026-11-18 and the
+		// refusal was silent, so its branch never reached a PR. Same file, two names.
+		const parsed = parsePublishRequest(
+			JSON.stringify(request({ proposal: "agent/proposals/2026-11-18-19-12-23-145Z.md" })),
+		);
+		assert.equal(parsed.ok, true);
+		if (!parsed.ok) return;
+		assert.equal(parsed.request.proposal, join(PROPOSALS, "2026-11-18-19-12-23-145Z.md"));
+		// Still one directory, still no way out of it.
+		for (const proposal of ["agent/proposals/../x.md", "agent/proposals/", "agent/other/x.md"]) {
+			const bad = parsePublishRequest(JSON.stringify(request({ proposal })));
+			assert.equal(bad.ok, false, proposal);
+			if (bad.ok) continue;
+			assert.match(bad.why, /^proposal is not a file under /, proposal);
+		}
+	});
+
 	test("a proposal path is trimmed before it is judged", () => {
 		const parsed = parsePublishRequest(JSON.stringify(request({ proposal: `  ${join(PROPOSALS, "p.md")}  ` })));
 		assert.equal(parsed.ok, true, "spaces around a path do not make it a path outside the queue");
