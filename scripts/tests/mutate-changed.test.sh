@@ -228,6 +228,117 @@ EOF
 run --list-only
 expect_list "extensions/usage-footer.ts:4-4"
 
+# ---------------------------------------------------------------- the budget ---
+# A pull request gets a mutant budget, not a line budget: 200 mutants is about
+# five minutes at the measured 7.45 worker-seconds each, while a file's worth of
+# mutants is the rest of an afternoon. The cap has to be (a) deterministic — the
+# same diff must always test the same mutants, or a re-push scores a different
+# question — and (b) loud: the number it deferred is the difference between a
+# budget and a lie. These cases pin both, against a fixture mutant list so the
+# arithmetic is checked without starting stryker.
+# One fixture for every budget case: two files, seven mutants over four lines,
+# handed over in a deliberately unsorted order so the cap has to sort. Lines 5
+# and 20 carry more than one mutant each, so "the first N" cannot be met by
+# slicing mid-line.
+cat >"$WORK/budget.patch" <<'EOF'
+diff --git a/agent/extensions/merge-guard.ts b/agent/extensions/merge-guard.ts
+--- a/agent/extensions/merge-guard.ts
++++ b/agent/extensions/merge-guard.ts
+@@ -19,0 +20,2 @@
++	if (a && b) {
++		return "x";
+diff --git a/agent/extensions/lib/usage-format.ts b/agent/extensions/lib/usage-format.ts
+--- a/agent/extensions/lib/usage-format.ts
++++ b/agent/extensions/lib/usage-format.ts
+@@ -4,0 +5,3 @@
++const a = b * c;
++const d = 1;
++const e = a === d;
+EOF
+cat >"$WORK/mutants.jsonl" <<'EOF'
+{"file":"extensions/merge-guard.ts","line":20,"column":5,"mutatorName":"EqualityOperator","replacement":"a >= b"}
+{"file":"extensions/merge-guard.ts","line":20,"column":5,"mutatorName":"EqualityOperator","replacement":"a <= b"}
+{"file":"extensions/merge-guard.ts","line":20,"column":5,"mutatorName":"ConditionalExpression","replacement":"true"}
+{"file":"extensions/merge-guard.ts","line":21,"column":9,"mutatorName":"StringLiteral","replacement":"``"}
+{"file":"extensions/lib/usage-format.ts","line":5,"column":11,"mutatorName":"ArithmeticOperator","replacement":"b / c"}
+{"file":"extensions/lib/usage-format.ts","line":5,"column":11,"mutatorName":"ArithmeticOperator","replacement":"b - c"}
+{"file":"extensions/lib/usage-format.ts","line":7,"column":11,"mutatorName":"EqualityOperator","replacement":"a !== d"}
+EOF
+
+case_start "a cap takes mutants in file-then-line order and says what it deferred"
+run --patch-file "$WORK/budget.patch" --list-only --cap 6 --mutants-file "$WORK/mutants.jsonl"
+expect_list "$(printf 'extensions/lib/usage-format.ts:5-5\nextensions/lib/usage-format.ts:7-7\nextensions/merge-guard.ts:20-20')"
+case "$ERR" in
+*"mutation: 6 of 7 mutants on changed lines (1 deferred to the weekly full run)"*)
+	pass "the deferred count is printed, not swallowed"
+	;;
+*) fail "no budget line on stderr" "$ERR" ;;
+esac
+
+# A second run of the same diff must select the same set: a re-push that scores
+# a different 6 mutants is not a gate, it is a lottery.
+first_run="$OUT"
+run --patch-file "$WORK/budget.patch" --list-only --cap 6 --mutants-file "$WORK/mutants.jsonl"
+[ "$OUT" = "$first_run" ] && pass "a second run selects the identical set" ||
+	fail "the cap is not deterministic" "first: $first_run" "second: $OUT"
+
+case_start "a line is taken whole or not at all, so the cap is a ceiling"
+# 3 of the 7 mutants fit; the two-mutant line 20 does not, and is not sliced.
+run --patch-file "$WORK/budget.patch" --list-only --cap 4 --mutants-file "$WORK/mutants.jsonl"
+expect_list "$(printf 'extensions/lib/usage-format.ts:5-5\nextensions/lib/usage-format.ts:7-7')"
+case "$ERR" in
+*"mutation: 3 of 7 mutants on changed lines (4 deferred to the weekly full run)"*)
+	pass "a cap of 4 is reported as 3 selected, never 4"
+	;;
+*) fail "the cap overshot or did not report" "$ERR" ;;
+esac
+
+case_start "a cap larger than the mutant count takes everything and defers nothing"
+run --patch-file "$WORK/budget.patch" --list-only --cap 100 --mutants-file "$WORK/mutants.jsonl"
+expect_list "$(printf 'extensions/lib/usage-format.ts:5-5\nextensions/lib/usage-format.ts:7-7\nextensions/merge-guard.ts:20-21')"
+case "$ERR" in
+*"mutation: 7 of 7 mutants on changed lines (0 deferred to the weekly full run)"*)
+	pass "nothing deferred is said out loud"
+	;;
+*) fail "no budget line for the uncapped-in-effect run" "$ERR" ;;
+esac
+
+case_start "no cap keeps the diff's own ranges and counts nothing"
+run --patch-file "$WORK/budget.patch" --list-only --mutants-file "$WORK/mutants.jsonl"
+expect_list "$(printf 'extensions/merge-guard.ts:20-21\nextensions/lib/usage-format.ts:5-7')"
+[ -z "$ERR" ] && pass "a run with no cap prints no budget line" ||
+	fail "--cap was not asked for but something was counted" "$ERR"
+
+case_start "--cap that is not a number is refused before anything runs"
+run --patch-file "$WORK/budget.patch" --list-only --cap two --mutants-file "$WORK/mutants.jsonl"
+[ "$STATUS" -eq 2 ] && pass "exit 2 for a bad cap" || fail "expected exit 2, got $STATUS" "$ERR"
+case "$ERR" in
+*"--cap needs a whole number"*) pass "the refusal names the flag" ;;
+*) fail "refusal does not name the flag" "$ERR" ;;
+esac
+
+# ------------------------------------------- the cap lives in one job only ---
+# "The weekly full run must still sweep everything" is a property of the
+# workflow, not of this script, so it is asserted where the workflow says it:
+# exactly one --cap in test.yml, it asks for 200, and it is not in the weekly
+# `mutation` job. A second cap sneaking into the schedule path would quietly
+# stop the full sweep while every unit case above stayed green.
+case_start "the weekly job sweeps everything and only the PR job is capped"
+WF="$(cd "$(dirname "$SCRIPT")/.." && pwd)/.github/workflows/test.yml"
+# Comments name the flag too, so only real invocations count: a line that is not
+# a YAML comment and passes a numeric cap.
+cap_sites="$(grep -v '^[[:space:]]*#' "$WF" | grep -c -- '--cap [0-9]')"
+[ "$cap_sites" -eq 1 ] && pass "one place in the workflow passes a cap" ||
+	fail "expected exactly 1 capped invocation in test.yml, found $cap_sites"
+cap_value="$(grep -v '^[[:space:]]*#' "$WF" | grep -o -- '--cap [0-9]*' | head -1)"
+[ "$cap_value" = "--cap 200" ] && pass "the PR budget is 200 mutants" ||
+	fail "the cap is not 200" "got: ${cap_value:-nothing}"
+weekly="$(awk '/^  mutation:/{f=1;next} /^  [a-z-]+:/{f=0} f' "$WF")"
+case "$weekly" in
+*--cap*) fail "the weekly mutation job is capped" ;;
+*) pass "the schedule/dispatch job passes no cap, so --cap 0 there" ;;
+esac
+
 printf '\n== mutate-changed: %d case(s), %d ok, %d failed\n' \
 	"$CASE_N" "$PASS_N" "$FAIL_N"
 [ "$FAIL_N" -eq 0 ]

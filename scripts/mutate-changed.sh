@@ -34,14 +34,36 @@
 # `--force` because incremental mode would otherwise answer from the cache:
 # stryker 10.1.1 rejects `--incremental false` as a parse error, and --force is
 # the documented way to re-run despite the incremental file (see
-# specs/archive/merge-guard-mutants.md in big-boss-pi).
+# specs/archive/merge-guard-mutants.md in big-boss-pi). A person running this
+# by hand has no cache to trust, so --force stays the default here. The CI
+# pull-request job differs on purpose: it restores a cache keyed on the whole
+# agent/extensions tree, calls stryker itself without --force, and says why in
+# .github/workflows/test.yml. That key is what makes its warm run sound. A person running this
+# by hand has no cache to trust, so --force is the right default here; the CI
+# pull-request job calls stryker itself with its own restored cache and no
+# --force, and says why in .github/workflows/test.yml.
+#
+# `--cap N` is the budget: a pull request does not get to spend 25 minutes on
+# mutants nobody asked about. The cap is taken on mutants, not on lines, in a
+# fixed order (file, then line) so the same diff always tests the same N, and
+# the count it deferred is printed, never swallowed — a silent cap is a lie.
+# `--cap 0` (the default) means no cap, which is what the weekly full run wants
+# and what an uncapped invocation gets by passing nothing. The arithmetic lives
+# in scripts/mutant-list.mjs, which asks stryker's own instrumenter how many
+# mutants a range holds, so the number printed is the number stryker would have
+# reported after the run rather than an estimate of it.
 #
 # Usage: scripts/mutate-changed.sh [--list-only] [--base REF] [--patch-file FILE]
+#                                 [--cap N] [--mutants-file FILE]
 #   --list-only        print the derived --mutate values, one per line, and stop
 #                      (exit 0 even when there are none — the caller decides)
 #   --base REF         diff against REF...HEAD (default origin/trunk)
 #   --patch-file FILE  read `git diff -U0` output from FILE instead of running
 #                      git; the test seam, not for daily use
+#   --cap N            test at most N mutants, first by file then line, and
+#                      print how many were deferred to the weekly run (0 = no cap)
+#   --mutants-file FILE  read the mutant enumeration from FILE instead of
+#                      instrumenting; the test seam for --cap
 # ============================================================================
 set -uo pipefail
 
@@ -55,14 +77,18 @@ STRIP_PREFIX='agent/'
 BASE="origin/trunk"
 PATCH_FILE=""
 LIST_ONLY=0
+CAP=0
+MUTANTS_FILE=""
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	--list-only) LIST_ONLY=1; shift ;;
 	--base) BASE="${2:?--base needs a ref}"; shift 2 ;;
 	--patch-file) PATCH_FILE="${2:?--patch-file needs a path}"; shift 2 ;;
+	--cap) CAP="${2:?--cap needs a number}"; shift 2 ;;
+	--mutants-file) MUTANTS_FILE="${2:?--mutants-file needs a path}"; shift 2 ;;
 	-h | --help)
-		sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+		sed -n '2,67p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -128,7 +154,40 @@ mutate_ranges() {
 		'
 }
 
+case "$CAP" in
+'' | *[!0-9]*)
+	printf 'mutate-changed: --cap needs a whole number, not "%s"\n' "$CAP" >&2
+	exit 2
+	;;
+esac
+
 ranges="$(mutate_ranges)"
+
+# The cap, when one is asked for, replaces the range list with the ranges the
+# first N mutants of the changed lines live on. Nothing here filters the diff
+# itself: the count comes from stryker's instrumenter (scripts/mutant-list.mjs)
+# so it is the same number stryker would have reported after the run.
+CAPPED_EMPTY=0
+if [ -n "$ranges" ] && [ "$CAP" -gt 0 ]; then
+	cap_args=(--cap "$CAP")
+	if [ -n "$MUTANTS_FILE" ]; then cap_args+=(--mutants-file "$MUTANTS_FILE"); fi
+	spec_args=()
+	while IFS= read -r range; do
+		if [ -n "$range" ]; then spec_args+=("$range"); fi
+	done <<<"$ranges"
+	capped="$(node "$DIR/mutant-list.mjs" "${cap_args[@]}" "${spec_args[@]}")" || {
+		printf 'mutate-changed: --cap %s could not count the mutants (node or agent/node_modules is missing)\n' "$CAP" >&2
+		exit 1
+	}
+	ranges="$capped"
+	if [ -z "$ranges" ]; then CAPPED_EMPTY=1; fi
+fi
+
+if [ -z "$ranges" ] && [ "$CAPPED_EMPTY" -eq 1 ] && [ "$LIST_ONLY" -eq 1 ]; then
+	# Nothing under the cap: the changed lines hold no mutant at all, which is
+	# the same verdict as an empty diff — print nothing, exit green.
+	exit 0
+fi
 
 if [ -z "$ranges" ]; then
 	if [ "$LIST_ONLY" -eq 1 ]; then
@@ -141,6 +200,12 @@ if [ -z "$ranges" ]; then
 		against="the patch in $PATCH_FILE"
 	else
 		against="$BASE...HEAD"
+	fi
+	if [ "$CAPPED_EMPTY" -eq 1 ]; then
+		printf '== mutate-changed: no mutant on the changed lines of %s\n' "$against" >&2
+		printf '   the cap had nothing to keep, and an empty --mutate list would widen\n' >&2
+		printf '   to the whole stryker config, so this run is refused instead.\n' >&2
+		exit 1
 	fi
 	printf '== mutate-changed: no added line in a mutable file against %s\n' "$against" >&2
 	printf '   looked for: added lines in %s**/*.ts, *.test.ts excluded\n' "$MUTABLE_PREFIX" >&2
@@ -156,19 +221,23 @@ if [ "$LIST_ONLY" -eq 1 ]; then
 fi
 
 count="$(printf '%s\n' "$ranges" | wc -l | tr -d ' ')"
-printf '== mutate-changed: %s added range(s) against %s\n' "$count" "$BASE"
+if [ "$CAP" -gt 0 ]; then
+	printf '== mutate-changed: %s capped range(s) against %s, cap %s mutants\n' "$count" "$BASE" "$CAP"
+else
+	printf '== mutate-changed: %s added range(s) against %s\n' "$count" "$BASE"
+fi
 printf '%s\n' "$ranges" | sed 's/^/   agent\//'
-printf '== mutate-changed: npx stryker run --mutate <above> --force\n'
+printf '== mutate-changed: npx stryker run --mutate <above, comma joined> --force\n'
 
 cd "$ROOT/agent" || {
 	printf 'mutate-changed: %s/agent is missing — this is not a harness checkout, so there is nothing to run stryker in\n' "$ROOT" >&2
 	exit 1
 }
-args=()
-while IFS= read -r range; do
-	if [ -n "$range" ]; then args+=(--mutate "$range"); fi
-done <<<"$ranges"
+# One comma-separated --mutate, not one flag per range: stryker 10.1.1 splits
+# the value on commas and keeps only the last --mutate it is given, so a
+# repeated flag silently mutates one hunk and calls the rest covered.
+specs="$(printf '%s\n' "$ranges" | paste -sd, -)"
 if [ -x ./node_modules/.bin/stryker ]; then
-	exec ./node_modules/.bin/stryker run "${args[@]}" --force
+	exec ./node_modules/.bin/stryker run --mutate "$specs" --force
 fi
-exec npx stryker run "${args[@]}" --force
+exec npx stryker run --mutate "$specs" --force
