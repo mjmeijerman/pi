@@ -114,6 +114,22 @@ exit 0
 	);
 	chmodSync(publishingPane, 0o755);
 
+	// What a real publishing agent does: `spawn` returns with pi's banner up and
+	// the agent then pushes and opens the PR, which takes seconds. The PR here
+	// appears two seconds after the spawn has returned — the case that used to be
+	// recorded as a failure for every publish on 2026-11-18.
+	const slowPane = join(dir, "pane-slow.sh");
+	writeFileSync(
+		slowPane,
+		`#!/usr/bin/env bash
+printf '%s\\n' "$@" > "${dir}/pane-called"
+( sleep 2; : > "${marker}" ) >/dev/null 2>&1 &
+echo '{"slug":"'"$2"'","terminal":"t7","hidden":true}'
+exit 0
+`,
+	);
+	chmodSync(slowPane, 0o755);
+
 	// hc refuses to run: no space, so nothing was handed over at all.
 	const failingPane = join(dir, "pane-fail.sh");
 	writeFileSync(
@@ -132,6 +148,7 @@ exit 1
 		gh,
 		pane,
 		publishingPane,
+		slowPane,
 		failingPane,
 		bbp: join(dir, "bbp"),
 		log: join(dir, "agent", "proposals", "publish-log.jsonl"),
@@ -216,7 +233,12 @@ test("a run hands the branch to a big-boss-pi agent space and publishes", () => 
 
 test("a run whose agent space never produces a PR exits 1 and records it", () => {
 	const f = fixture("none");
-	const r = run(f, ["test-slug", "--proposal", join(f.dir, "agent", "proposals", "x.md")]);
+	// The window is the script's default 180 s in production; here it is closed at
+	// once so the case stays fast. `LEARN_PUBLISH_WAIT=0` is exactly the old
+	// behaviour: one ask, then the failure row.
+	const r = run(f, ["test-slug", "--proposal", join(f.dir, "agent", "proposals", "x.md")], {
+		LEARN_PUBLISH_WAIT: "0",
+	});
 	assert.equal(r.status, 1);
 	assert.match(r.stderr, /FAIL/);
 	assert.equal(f.paneCalled()[1], "test-slug-pr");
@@ -227,6 +249,24 @@ test("a run whose agent space never produces a PR exits 1 and records it", () =>
 	assert.equal(entry.slug, "test-slug");
 	assert.equal(entry.pr, null);
 	assert.match(entry.reason, /no PR after test-slug-pr was spawned/);
+	assert.match(entry.reason, /waited 0s/, "the row says how long the window was, so a short one is visible");
+});
+
+test("a PR that lands seconds after the spawn is a publish, not a failure", () => {
+	const f = fixture("none");
+	f.pane = f.slowPane;
+	const r = run(f, ["test-slug", "--proposal", join(f.dir, "agent", "proposals", "x.md")], {
+		LEARN_PUBLISH_WAIT: "20",
+		LEARN_PUBLISH_POLL: "1",
+	});
+	assert.equal(r.status, 0, `a publish reported as a failure:\n${r.stdout}${r.stderr}`);
+	assert.match(r.stdout, /PR #42/);
+	assert.doesNotMatch(r.stderr, /FAIL/, "nothing failed: the agent was still working");
+	assert.equal(
+		existsSync(f.log),
+		false,
+		"a publish writes no failure row — four of those per day is what the log had",
+	);
 });
 
 test("a run whose gh is unaskable exits 2 and does not record 'no PR'", () => {
