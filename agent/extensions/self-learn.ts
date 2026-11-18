@@ -92,6 +92,19 @@ export const MAX_PER_SESSION = 2;
  * the next push, and an idle branch has nothing left to judge.
  */
 export const CI_FAILURE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * How long a launch that never made a space stays evidence.
+ *
+ * A `spawn-failed` row has no proposal and no learner ever read it, so the
+ * `since` cutoff that silences a judged death would silence it forever: on
+ * 2026-11-18 `learn-10-59` and `learn-11-03` failed on `herdr-app is not on
+ * PATH` thirty-two minutes apart and neither could reach the next evidence file.
+ * A day is the span in which the launch path is still worth naming — a machine
+ * that cannot start a learner today is a fact about today — and it bounds the
+ * list, because a launch that has been failing for a week is old news, not a
+ * new repetition.
+ */
+export const SPAWN_FAILED_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** One repeated failure: how often, where, and a redacted sample. */
 export interface Failure {
@@ -155,7 +168,10 @@ export interface WorkerFailure {
 	sample: string;
 }
 
-/** A learner that started, and then left no proposal behind. */
+/**
+ * A learner that left no proposal behind: one that started and stopped, one that
+ * started and never wrote, or one that never started at all.
+ */
 export interface DiedLearner {
 	slug: string;
 	queue: string;
@@ -163,6 +179,11 @@ export interface DiedLearner {
 	/** When its launch was logged, in ms. */
 	at: number | null;
 	elapsedMs: number | null;
+	/**
+	 * What the launch said when it never produced a space (a `spawn-failed` row's
+	 * stderr), clipped and redacted. Null for a learner that ran.
+	 */
+	detail: string | null;
 }
 
 /** One line where the person named a repetition, with the phrase that matched. */
@@ -726,10 +747,19 @@ export function parseRuns(raw: string): unknown[] {
 /**
  * Learners that started and left no proposal behind.
  *
- * Two row shapes count: a `died` row this extension wrote when it watched the
- * learner stop, and a `spawned` row whose proposal file never appeared. The
- * second is only judged after `DEATH_GRACE_MS`, because a learner still working
- * has no proposal yet and calling it dead would be the same lie in reverse.
+ * Three row shapes count: a `died` row this extension wrote when it watched the
+ * learner stop, a `spawned` row whose proposal file never appeared, and a
+ * `spawn-failed` row that never made a space at all. The second is only judged
+ * after `DEATH_GRACE_MS`, because a learner still working has no proposal yet
+ * and calling it dead would be the same lie in reverse.
+ *
+ * The third shape is why this exists at all: on 2026-11-18 two compactions
+ * (`learn-10-59`, `learn-11-03`) were recorded as `spawn-failed` because
+ * `herdr-app` was not on PATH, and both were invisible to the next learner —
+ * this function read `died` and `spawned` only, so the evidence file said "no
+ * learners died" while the launch path had failed twice in half an hour. A
+ * learner that never started is the loudest possible form of the loop failing
+ * (learn.md: a died learner is evidence about the harness).
  * A third shape silences: a row carrying `judged`, which the spawn of a learner
  * that named this death writes, so one death trips the gate once.
  * The 2026-11-14 learner took a turn, wrote nothing, and left nothing in the
@@ -767,15 +797,25 @@ export function diedLearnersFrom(
 			launcher?: string;
 			ts?: string;
 			elapsedMs?: number;
+			stderr?: string;
 		};
-		if (entry.kind !== "died" && entry.kind !== "spawned") continue;
+		if (entry.kind !== "died" && entry.kind !== "spawned" && entry.kind !== "spawn-failed") continue;
 		if (!entry.slug || seen.has(entry.slug)) continue;
 		const at = Date.parse(entry.ts ?? "");
 		if (!Number.isFinite(at)) continue;
+		const neverStarted = entry.kind === "spawn-failed";
 		// A death a later proposal already judged is history, not evidence: the
 		// launch path it named has been looked at, and re-citing it starts a
 		// learner after every compaction forever.
-		if (since !== null && at < since) continue;
+		//
+		// A launch that never produced a space is the exception, and the reason it
+		// was invisible: no learner ever read it, so no proposal ever judged it, and
+		// `since` would swallow it forever. It ages out on its own window instead —
+		// today's failed launch is a proof of life for the launch path, last week's
+		// is history — and the `judged` list still silences the one a spawn named.
+		if (neverStarted) {
+			if (options.now - at > SPAWN_FAILED_WINDOW_MS) continue;
+		} else if (since !== null && at < since) continue;
 		const proposal = entry.proposal ?? "";
 		// A spawned row with no proposal path proves nothing either way.
 		if (entry.kind === "spawned" && !proposal) continue;
@@ -791,6 +831,7 @@ export function diedLearnersFrom(
 			launcher: entry.launcher ?? null,
 			at,
 			elapsedMs: typeof entry.elapsedMs === "number" ? entry.elapsedMs : null,
+			detail: neverStarted && entry.stderr ? clipDetail(entry.stderr) || null : null,
 		});
 	}
 	return out;
@@ -2275,7 +2316,12 @@ function evidenceMarkdown(input: {
 	else {
 		for (const learner of external.diedLearners) {
 			const elapsed = learner.elapsedMs === null ? "" : ` after ${Math.round(learner.elapsedMs / 1000)} s`;
-			lines.push(`- \`${learner.slug}\` (${learner.launcher ?? "unknown launcher"})${elapsed} — queue \`${learner.queue}\``);
+			// A launch that never made a space has no queue a learner could read, so the
+			// launcher's own words are the whole finding: "herdr-app is not on PATH" is
+			// a different repair from "the learner stopped after 40 s".
+			const where = learner.queue ? ` — queue \`${learner.queue}\`` : "";
+			const why = learner.detail ? ` — ${learner.detail.slice(0, 200)}` : "";
+			lines.push(`- \`${learner.slug}\` (${learner.launcher ?? "unknown launcher"})${elapsed}${why}${where}`);
 		}
 	}
 
@@ -2301,9 +2347,9 @@ function evidenceMarkdown(input: {
 		"",
 		"`agent/extensions/self-learn.ts` counted failed tool results in the session that just",
 		"compacted, then read four sources outside it: `gh run list --status failure` for this",
-		"repo, the delegation workspace's `reports/` and `state/decisions.jsonl`, the `died` and",
-		"proposal-less `spawned` rows of `runs.jsonl`, and the user lines of the session",
-		"transcript. Messages are hashed to a signature before they are counted, quotes are",
+		"repo, the delegation workspace's `reports/` and `state/decisions.jsonl`, the `died`,",
+		"proposal-less `spawned` and `spawn-failed` rows of `runs.jsonl`, and the user lines of",
+		"the session transcript. Messages are hashed to a signature before they are counted, quotes are",
 		"redacted and capped at five, and every source that could not be read is listed under",
 		"Warnings rather than reported as \"none\". A report or decision row written before the",
 		"newest proposal is not counted again — one finding, one learner (`judgeOnce`).",

@@ -8,7 +8,7 @@
  * so it cannot spawn a learner of its own.
  */
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile, chmod } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile, chmod, appendFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -49,6 +49,7 @@ const {
 	judgedByCode,
 	agedOut,
 	CI_FAILURE_WINDOW_MS,
+	SPAWN_FAILED_WINDOW_MS,
 	noStepRan,
 	parseRuns,
 	readWorkspace,
@@ -409,7 +410,7 @@ describe("wiring", () => {
 			...deps,
 		});
 		const { ctx, notices } = createFakeCtx({ mode: "tui", hasUI: true });
-		return { ...fake, ctx, notices, started, api, learn };
+		return { ...fake, ctx, notices, started, api, learn, now: base };
 	}
 
 	const boom = { isError: true, toolName: "bash", content: "command not found: zizmor" };
@@ -535,6 +536,40 @@ describe("wiring", () => {
 			notices.some((notice) => notice.level === "warning" && /no learner started/.test(notice.message)),
 			"the person is told in the session, not left to read runs.jsonl",
 		);
+	});
+
+	test("a launch that never started reaches the next queue file, with its reason", async () => {
+		// The failure the reader above used to drop: two `spawn-failed` rows and an
+		// evidence file that said "None." — the launch path can break and the loop
+		// that judges the launch path is the one thing that would not see it.
+		const { emit, ctx, now } = setup();
+		const runs = join(scratch, "proposals", "runs.jsonl");
+		await mkdir(join(scratch, "proposals"), { recursive: true });
+		const row = (slug: string) =>
+			JSON.stringify({
+				ts: new Date(now).toISOString(),
+				kind: "spawn-failed",
+				slug,
+				launcher: "pane",
+				status: null,
+				stderr: "herdr-app is not on PATH, so no visible space can be made — a learner you cannot see is not started here",
+			});
+		await appendFile(runs, `${row("learn-10-59")}\n${row("learn-11-03")}\n`);
+		await trip(emit, ctx);
+		await settle();
+		const before = (await readRuns()).length;
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		const launched = await waitForRun((entry, index) => index >= before && entry.kind === "spawned");
+		const body = await readFile(launched.queue, "utf8");
+		assert.match(
+			body,
+			/## Learners that died without a proposal[\s\S]{0,2000}- `learn-10-59` \(pane\) — herdr-app is not on PATH/,
+			"the section names the launch that never started, with its reason",
+		);
+		assert.ok(!/ — queue ``/.test(body), "a launch that never started cites no queue");
+		for (const slug of ["learn-10-59", "learn-11-03"]) {
+			assert.ok(launched.judged.includes(slug), `${slug} is named by the spawn, so it trips the gate once`);
+		}
 	});
 
 	test("a visible launch that does take a turn logs spawned, sandboxed and visible", async () => {
@@ -1636,6 +1671,44 @@ describe("learners that died", () => {
 			now: NOW,
 		});
 		assert.deepEqual(died, [], "the learner wrote it, under the name it was shown");
+	});
+
+	test("a launch that never made a space is evidence, not a silence", () => {
+		// 2026-11-18: learn-10-59 and learn-11-03 were recorded `spawn-failed` on
+		// `herdr-app is not on PATH`, thirty-two minutes apart. The next evidence file
+		// said "None." under this section, because only `died` and `spawned` were read.
+		const never = (over: Record<string, unknown>) =>
+			row({ kind: "spawn-failed", launcher: "pane", stderr: "herdr-app is not on PATH, so no visible space can be made", ...over });
+		const died = diedLearnersFrom([never({ slug: "learn-10-59" }), never({ slug: "learn-11-03" })], {
+			exists: () => false,
+			now: NOW,
+		});
+		assert.deepEqual(died.map((learner) => learner.slug), ["learn-10-59", "learn-11-03"]);
+		assert.match(died[0].detail ?? "", /herdr-app is not on PATH/, "the launcher's own words are the finding");
+		assert.equal(died[0].queue, "", "a launch that never started wrote no queue to cite");
+		const decision = decideLearner(evidence({ diedLearners: died }));
+		assert.equal(decision.spawn, true);
+		assert.match(decision.reason, /learn-10-59/, "the next learner is told which launch failed");
+	});
+
+	test("a failed launch ages out on its own window, and a judged one stays judged", () => {
+		const failed = (over: Record<string, unknown>) => row({ kind: "spawn-failed", launcher: "pane", slug: "learn-10-59", ...over });
+		const stale = failed({ ts: new Date(NOW - SPAWN_FAILED_WINDOW_MS - minutes(1)).toISOString() });
+		assert.equal(diedLearnersFrom([stale], { exists: () => false, now: NOW }).length, 0, "last week's launch failure is history");
+		const edge = failed({ ts: new Date(NOW - SPAWN_FAILED_WINDOW_MS).toISOString() });
+		assert.equal(diedLearnersFrom([edge], { exists: () => false, now: NOW }).length, 1, "a launch exactly a day old is still today's");
+		const fresh = failed({ ts: new Date(NOW - minutes(90)).toISOString() });
+		assert.equal(
+			diedLearnersFrom([fresh], { exists: () => false, now: NOW, since: NOW - minutes(10) }).length,
+			1,
+			"no learner ever read it, so the judged-before cutoff must not swallow it",
+		);
+		const judged = row({ kind: "spawned", slug: "learn-1200", proposal: "/p/x.md", judged: ["learn-10-59"] });
+		assert.equal(
+			diedLearnersFrom([fresh, judged], { exists: (path: string) => path === "/p/x.md", now: NOW }).length,
+			0,
+			"the spawn that named it silenced it",
+		);
 	});
 
 	test("a runs.jsonl fixture with a proposal-less launch reads as a death", () => {
