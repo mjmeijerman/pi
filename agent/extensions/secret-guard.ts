@@ -486,7 +486,6 @@ function stripComments(command: string): string {
 		}
 		out += ch;
 	}
-	if (inComment) out += "\n"; // a comment that runs to the end of the command still ends a line
 	return out;
 }
 
