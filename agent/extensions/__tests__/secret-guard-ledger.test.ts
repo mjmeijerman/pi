@@ -47,7 +47,9 @@ function refusal(step: number, command: string, path: string, earlier = 0): stri
 async function turn() {
 	const fake = createFakePi();
 	secretGuard(fake.pi);
-	const { ctx, notices } = createFakeCtx();
+	// The guard resolves a dotted operand against the command's cwd; this temp dir
+	// is empty, so a dotted name there has no file behind it and reads as a host.
+	const { ctx, notices } = createFakeCtx({ cwd: agentDir });
 	await fake.emit("agent_start", {}, ctx);
 	const step = async (toolName: string, input: Record<string, unknown>) => {
 		const [result] = await fake.emit("tool_call", { toolName, input }, ctx);

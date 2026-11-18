@@ -43,7 +43,9 @@ after(() => {
 async function bash(command: string): Promise<string | undefined> {
 	const fake = createFakePi();
 	secretGuard(fake.pi);
-	const { ctx } = createFakeCtx();
+	// The guard resolves a dotted operand against the command's cwd; this temp dir
+	// is empty, so a dotted name there has no file behind it and reads as a host.
+	const { ctx } = createFakeCtx({ cwd: agentDir });
 	const [result] = await fake.emit("tool_call", { toolName: "bash", input: { command } }, ctx);
 	return result?.block ? String(result.reason) : undefined;
 }

@@ -42,7 +42,9 @@ after(() => {
 function setup() {
 	const fake = createFakePi();
 	secretGuard(fake.pi);
-	const { ctx, notices } = createFakeCtx();
+	// The guard resolves a dotted operand against the command's cwd. This temp dir is
+	// empty, so a dotted name has no file behind it and reads as a host.
+	const { ctx, notices } = createFakeCtx({ cwd: agentDir });
 	return { ...fake, ctx, notices };
 }
 
