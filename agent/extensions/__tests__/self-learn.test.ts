@@ -20,6 +20,8 @@ import { createFakeCtx, createFakePi, waitFor } from "./helpers/fake-pi.ts";
 const scratch = await mkdtemp(join(tmpdir(), "self-learn-test-"));
 process.env.PI_CODING_AGENT_DIR = scratch;
 delete process.env.PI_SELF_LEARN;
+// A developer running `npm test` inside `pisandbox` must see the same wiring as CI.
+delete process.env.PI_SANDBOX_MODE;
 
 const mod = await import("../self-learn.ts");
 const selfLearn = mod.default;
@@ -28,6 +30,7 @@ const {
 	signatureOf,
 	redact,
 	pickLauncher,
+	sandboxBlocksSpawn,
 	paneTerminal,
 	paneLaunch,
 	verifyLaunch,
@@ -176,6 +179,20 @@ describe("redact", () => {
 	test("private key blocks are removed whole", () => {
 		const raw = `${PEM_BEGIN}\nMIIE\n${PEM_END}`;
 		assert.equal(redact(raw), "<redacted-private-key>");
+	});
+});
+
+describe("sandboxBlocksSpawn", () => {
+	test("a bare session is not blocked", () => {
+		assert.equal(sandboxBlocksSpawn({}), null);
+		assert.equal(sandboxBlocksSpawn({ PI_SANDBOX_MODE: "  " }), null, "an empty marker is not a sandbox");
+	});
+
+	test("a sandboxed one is, and says where a learner can be started", () => {
+		const why = sandboxBlocksSpawn({ PI_SANDBOX_MODE: "bwrap" }) ?? "";
+		assert.match(why, /sandboxed \(bwrap\)/);
+		assert.match(why, /never mounts herdr-app/, "the cause is the mount table, not a missing binary");
+		assert.match(why, /PI_BARE=1 pi/, "the fix is a command, not a sentence to remember");
 	});
 });
 
@@ -574,6 +591,50 @@ describe("wiring", () => {
 			notices.some((notice) => notice.level === "warning" && /no learner started/.test(notice.message)),
 			"the person is told in the session, not left to read runs.jsonl",
 		);
+	});
+
+	test("a sandboxed session skips the launch instead of writing a death", async () => {
+		// Four of these on 2026-11-18 (learn-10-59, learn-11-03, learn-13-08,
+		// learn-15-29) were `spawn-failed` rows for a space the sandbox never mounts:
+		// the gate read them as learners that died, and every one of them was a fact
+		// about herdr-app not being mounted. A skip is not a death.
+		const attempts: string[] = [];
+		const { emit, ctx, notices, now } = setup({
+			launch: (launcher: any) => {
+				attempts.push(launcher.kind);
+				return { ok: true, status: 0 };
+			},
+		});
+		await trip(emit, ctx);
+		await settle();
+		const before = (await readRuns()).length;
+		process.env.PI_SANDBOX_MODE = "bwrap";
+		try {
+			await emit("session_compact", { reason: "threshold" }, ctx);
+			const skipped = await waitForRun((row, index) => index >= before && row.kind === "spawn-skipped");
+			// A second compaction in the same session: one row, not one per event.
+			await settle();
+			await emit("session_compact", { reason: "threshold" }, ctx);
+			await settle();
+			const written = (await readRuns()).slice(before);
+			assert.deepEqual(attempts, [], "no launcher ran: the space cannot exist");
+			assert.equal(written.filter((row) => row.kind === "spawn-skipped").length, 1, "one skip per session");
+			assert.equal(written.filter((row) => row.kind === "spawn-failed").length, 0, "a skip is not a death");
+			assert.equal(written.filter((row) => row.kind === "spawned").length, 0, "nothing was started");
+			assert.match(skipped.stderr, /sandboxed \(bwrap\)/);
+			assert.match(skipped.stderr, /PI_BARE=1 pi/, "and says where a learner can be started");
+			assert.equal(
+				diedLearnersFrom(written, { exists: () => false, now }).length,
+				0,
+				"the next learner is not told a learner died here",
+			);
+			assert.ok(
+				notices.some((notice) => /no learner started/.test(notice.message) && /sandbox/.test(notice.message)),
+				"the person is told once, in the session",
+			);
+		} finally {
+			delete process.env.PI_SANDBOX_MODE;
+		}
 	});
 
 	test("a launch that never started reaches the next queue file, with its reason", async () => {
@@ -1800,6 +1861,19 @@ describe("learners that died", () => {
 		const decision = decideLearner(evidence({ diedLearners: died }));
 		assert.equal(decision.spawn, true);
 		assert.match(decision.reason, /learn-10-59/, "the next learner is told which launch failed");
+	});
+
+	test("a sandboxed skip is not a death the next learner is told about", () => {
+		const skipped = row({
+			kind: "spawn-skipped",
+			slug: "learn-15-29",
+			stderr: "this session is sandboxed (bwrap) and a sandbox never mounts herdr-app",
+		});
+		assert.deepEqual(
+			diedLearnersFrom([skipped], { exists: () => false, now: NOW }),
+			[],
+			"no learner ever started, so nothing died",
+		);
 	});
 
 	test("a failed launch ages out on its own window, and a judged one stays judged", () => {
