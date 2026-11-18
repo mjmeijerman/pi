@@ -30,6 +30,11 @@
 #   agent-pane.sh show <slug|terminal>
 #   agent-pane.sh hide <slug|terminal>
 #   agent-pane.sh close <slug|terminal> [--pane]
+#                                   exit 0: the space and the entry are gone.
+#                                   exit 1: the worker is stopped but its space is still
+#                                   open (no herdr-app here, or space.close failed); the
+#                                   entry is kept so `list` shows it and a host-side close
+#                                   can finish the job.
 #   agent-pane.sh list
 #
 # State (slug → terminal, space, borrowed pane) lives in ~/.pi/scripts/.agent-panes.json.
@@ -230,20 +235,44 @@ cmd_close() {
 	if [ -n "$borrowed" ]; then herdr-app do terminal.show --pane "$borrowed" >/dev/null 2>&1 || true; fi
 	if [ "$want_pane" = 1 ] && [ -n "$pane" ]; then herdr-app do pane.close --pane "$pane" >/dev/null 2>&1 || true; fi
 	# A visible worker owns a space; close that too, or the pane keeps an empty one.
-	# Best effort and never fatal: a close that half-works must not fail a caller's
-	# last step, and a sandboxed learner cannot reach herdr-app at all.
+	#
+	# A close that reports success without closing the space is how a space outlives the
+	# only record of it: on 2026-11-18 the person said "I see 2 learn-1200 spaces still
+	# open" while `.agent-panes.json` held no entry for either. The old code deleted the
+	# entry whatever `space.close` did (the call was `>/dev/null 2>&1 || true`), so a
+	# learner whose herdr-app could not reach the host core left an orphan tab and no
+	# trace. Keep the entry until the space is really gone, and say which space is left.
 	space=$(node -e '
 		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
 		const e=j[process.argv[2]]||{};process.stdout.write(e.space||"");' "$STATE" "$target" 2>/dev/null || true)
-	if [ -n "$space" ] && command -v herdr-app >/dev/null 2>&1; then
-		herdr-app do space.close --id "$space" --confirmed true >/dev/null 2>&1 || true
+	local space_closed=1 space_note="" close_out=""
+	if [ -n "$space" ]; then
+		if ! command -v herdr-app >/dev/null 2>&1; then
+			space_closed=0
+			space_note="space $space is still open: herdr-app is not in PATH here, so close it on the host with '$PROG close $target'"
+		elif close_out=$(herdr-app do space.close --id "$space" --confirmed true 2>&1); then
+			:
+		elif printf '%s' "$close_out" | grep -Fq "no space" && printf '%s' "$close_out" | grep -Fq "$space"; then
+			: # already gone: herdr answered `{"error":"no space \"s9\""}`, and a close
+			# that half-worked yesterday is a finished close today, not a retry forever
+		else
+			space_closed=0
+			space_note="space $space is still open: space.close said '$close_out'"
+		fi
 	fi
 	[ -n "$terminal" ] && hc kill "$terminal" >/dev/null 2>&1 || true
 	[ -n "$terminal" ] && hc rm "$terminal" >/dev/null 2>&1 || true
-	state_write "$(node -e '
-		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
-		delete j[process.argv[2]];process.stdout.write(JSON.stringify(j,null,2));' "$STATE" "$target")"
-	printf '{"closed":"%s","terminal":"%s"}\n' "$target" "$terminal"
+	if [ "$space_closed" = 1 ]; then
+		state_write "$(node -e '
+			const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+			delete j[process.argv[2]];process.stdout.write(JSON.stringify(j,null,2));' "$STATE" "$target")"
+		printf '{"closed":"%s","terminal":"%s","space":"%s","space_closed":true}\n' "$target" "$terminal" "$space"
+		return 0
+	fi
+	# The entry stays, so `list` still names the space and a host-side close can finish it.
+	printf '{"closed":"%s","terminal":"%s","space":"%s","space_closed":false}\n' "$target" "$terminal" "$space"
+	printf '%s: %s\n' "$PROG" "$space_note" >&2
+	return 1
 }
 
 cmd_list() {
