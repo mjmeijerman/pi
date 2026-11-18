@@ -64,50 +64,46 @@ Three things follow from that shape:
 ## Hand the branch over, then close yourself
 
 You cannot publish from where you run. You are sandboxed, and the sandbox has no
-`gh` login and no git credential (`gh auth status` says hosts.yml is missing), so
-a push or a `gh pr create` fails here whichever binary you start, unsandboxed
-included. Publishing is a hand-off to a big-boss-pi agent space, which runs on the
-host where the key lives. Do not try to push first; the hand-off is the step.
+`gh` login, no git credential (`gh auth status` says hosts.yml is missing) and no
+`herdr-app`, so `scripts/learn-publish.sh` refuses to run for you (exit 2, "a
+learner cannot publish") — and it would need the host anyway. Publishing is a
+request the host acts on: you write one JSON file, and the session that started
+you runs the script for you. Do not try to push first; the request is the step.
 
 The queue file carries the concrete values for this run: the slug (which is also
-your herdr space), the proposal path, the repo, and the close command. Use them;
-do not guess.
+your herdr space and your branch `learn/<slug>`), the proposal path, and the path
+of the publish request you write. Use them; do not guess.
 
 1. **Cut a worktree.** `git -C /home/mark/.pi worktree add ../selflearn-<slug>-worktree -b learn/<slug>`.
    Never `checkout`, `switch`, `stash` or `reset` in `/home/mark/.pi`: that tree is
    in use by the session that started you.
 2. **Apply your own diff** in that worktree, run the checks it names, and commit
    on `learn/<slug>` with a conventional message. Note the commit sha.
-3. **Hand the branch over, and let the script say whether it worked.** Publishing
-   is a script with a verdict, not a paragraph you can skip:
+3. **Request the hand-off with a file.** Writing the request is your last step in
+   the repo; the host does the rest.
 
-   ```sh
-   /home/mark/.pi/scripts/learn-publish.sh <slug> --proposal <proposal path>
+   Write `agent/proposals/queue/<slug>.publish.json`, one JSON object and nothing
+   else:
+
+   ```json
+   {"slug": "<slug>", "branch": "learn/<slug>", "reason": "<one line: why this branch is worth a review>", "proposal": "<absolute path to your proposal>"}
    ```
 
-   It writes a spec naming the branch, the sha, the review tier (read from your
-   proposal) and the proposal path, starts the agent space `<slug>-pr` with
-   `scripts/agent-pane.sh spawn … --cwd /home/mark/big-boss-pi`, and that agent
-   pushes, opens the pull request, appends the row to
-   `agent/proposals/publish-log.jsonl` and closes its own space. Then the script
-   asks GitHub for a pull request on `learn/<slug>`.
+   The host session that started you watches that directory, claims the file (it
+   moves to `queue/claimed/`), runs
+   `scripts/learn-publish.sh <slug> --proposal <that path>`, and records the
+   verdict in `agent/proposals/runs.jsonl` as `published` or `publish-failed`.
+   That script writes a spec naming the branch, the sha and the review tier (read
+   from your proposal), starts the agent space `<slug>-pr` in
+   `/home/mark/big-boss-pi`, and that agent pushes, opens the pull request,
+   appends the row to `agent/proposals/publish-log.jsonl` and closes its own
+   space.
 
-   **Expect exit 2 and say so.** Making a space needs `herdr-app`, which lives
-   outside your sandbox: you can read the repo, not the window manager. That is a
-   hand-off you cannot complete, not a failure of your branch — write the line in
-   the proposal ("branch `<sha>` on `learn/<slug>`, hand-off not made: the learner
-   cannot see herdr-app") and let the host do it. Never claim a PR you did not see
-   and never fake one by pushing.
-
-   - **Exit 0** means a PR exists.
-   - **Exit 1** means gh answered and there is none: write that line into the
-     proposal's *After applying* section, because the next learner reads the
-     proposal and not your scrollback.
-   - **Exit 2** means GitHub could not be asked from here. That is *unverified*,
-     not *unpublished* — say exactly that in the proposal, and do not claim a PR
-     or the lack of one.
-
-   `--check` re-asks without spawning anything; `--dry-run` prints the spec.
+   Only the branch you own is accepted: a request naming any other branch is
+   refused and recorded as `publish-refused`, so getting the object right is the
+   whole job. Do not claim a PR you did not see and never fake one by pushing.
+   When your proposal is written, read `agent/proposals/publish-log.jsonl` for the
+   row if you want to know how it went; you cannot ask GitHub from here.
 4. **Close your own space**, whatever happened above and whatever the outcome:
    `/home/mark/.pi/scripts/agent-pane.sh close <slug> || true`. A space left open
    is a worker that looks busy after it finished.
@@ -147,12 +143,13 @@ and one paragraph naming what would change your mind.
 
 - **Do not edit any file in `/home/mark/.pi` directly.** Work in the worktree from
   `git worktree add`; the boss's checkout keeps running while you work.
-- **Never publish on your own.** No `git push` from you, no `gh pr create`, not
-  even to try — the sandbox has no credentials, so the attempt costs a turn and
-  cannot succeed. `scripts/learn-publish.sh` starts the one big-boss-pi agent
-  space that pushes and opens the PR; you only name the slug and the proposal.
-- **A branch with no PR is an unfinished run.** `scripts/learn-publish.sh <slug>
-  --check` exits 1 and the attempt is appended to
+- **Never publish on your own.** No `git push` from you, no `gh pr create`, no
+  `scripts/learn-publish.sh`, not even to try — the sandbox has no credentials and
+  no `herdr-app`, so the attempt costs a turn and cannot succeed, and the script
+  refuses a learner outright. Write `agent/proposals/queue/<slug>.publish.json`
+  and the host runs it: that is the only hand-off.
+- **A branch with no PR is an unfinished run.** The request file starts the one
+  big-boss-pi agent space that pushes and opens the PR, and the verdict lands in
   `agent/proposals/publish-log.jsonl`. Three `learn/*` branches reached trunk's
   history with zero PRs before 2026-11-15: a fix nobody can review is a fix
   nobody has.
@@ -160,7 +157,7 @@ and one paragraph naming what would change your mind.
 - **No secrets.** Never read or copy `.env*`, keys, tokens, credential files. The
   queue file is already redacted; do not go looking for the raw text.
 - **No new agents** except the one big-boss-pi agent space that opens the PR,
-  and `scripts/learn-publish.sh` is what starts it.
+  and the host broker is what starts it.
 - **Silence is a valid result.** A proposal nobody needed is instruction bloat
   with extra steps. When in doubt, "nothing" plus the reason — and still close
   your space.

@@ -4,7 +4,10 @@
 //   1. a visible worker gets its own herdr space and tab, made by the host;
 //   2. the pi inside it is started through scripts/pisandbox, with the working
 //      directory read-write — the host creates the space, the sandbox runs work;
-//   3. a machine that cannot make a space fails loudly instead of starting a
+//   3. the person is put back on the space and tab they were reading, by id, and
+//      the worker stays visible in `list` regardless — nothing is hidden to get
+//      the view back;
+//   4. a machine that cannot make a space fails loudly instead of starting a
 //      hidden worker nobody can see or stop.
 //
 // Every case runs the real script against stub `herdr-app` and `hc` binaries that
@@ -30,8 +33,13 @@ let caseId = 0;
 /**
  * A stub host: `herdr-app` and `hc` record their argv, and `herdr-app` answers
  * space.new with the JSON the real app prints. `spaceNew` decides how it answers.
+ *
+ * `status` is what the window says the person is looking at: "s1" and "t1" unless
+ * a case asks for something else, which is deliberately not the space space.new
+ * makes ("s9") — a restore that selects the new space would be a hardcoded answer,
+ * not the person's.
  */
-function fixture({ spaceNew = "ok", hc = true, herdrApp = true } = {}) {
+function fixture({ spaceNew = "ok", hc = true, herdrApp = true, status = "ok", restores = true } = {}) {
 	const dir = join(tmp, `case-${++caseId}`);
 	const bin = join(dir, "bin");
 	const work = join(dir, "work");
@@ -47,6 +55,16 @@ function fixture({ spaceNew = "ok", hc = true, herdrApp = true } = {}) {
 			app,
 			`#!/usr/bin/env bash
 printf '{"bin":"herdr-app","argv":%s}\\n' "$(node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' "$@")" >> "${record}"
+if [ "$1" = "status" ]; then
+	case "${status}" in
+		ok) printf '{"space":"s1","tab":"t1","focused_pane":"p1"}\\n' ;;
+		broken) echo "herdr-app: the window is not reachable" >&2; exit 1 ;;
+		esac
+	exit 0
+fi
+case "$1:$2" in
+	do:space.select|do:tab.select) [ "${restores ? 1 : 0}" = 1 ] || exit 4; printf '{}\\n'; exit 0 ;;
+esac
 case "${spaceNew}" in
 	ok) printf '{"space":"s9","tab":"t2","terminal":"t14z"}\\n' ;;
 	empty) printf '{}\\n' ;;
@@ -65,6 +83,7 @@ esac
 printf '{"bin":"hc","argv":%s}\\n' "$(node -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' "$@")" >> "${record}"
 case "$1" in
 	read) printf 'escape interrupt   /commands\\n' ;;
+	ls) printf '{"terminals":[{"address":"t14z","status":"running","where":"agents"}]}\\n' ;;
 	send|kill|rm) printf '{}\\n' ;;
 	*) printf '{"address":"t14z"}\\n' ;;
 esac
@@ -73,13 +92,16 @@ esac
 		chmodSync(stub, 0o755);
 	}
 
+	// With no stub and no herdr-app: a PATH without the host's ~/.local/bin, so the
+	// case tests the refusal and not whatever this machine happens to have installed.
+	const basePath = herdrApp ? process.env.PATH : ["/usr/local/bin", "/usr/bin", "/bin"].join(":");
 	const run = (args, extraEnv = {}) =>
 		spawnSync("bash", [SCRIPT, ...args], {
 			cwd: dir,
 			encoding: "utf8",
 			env: {
 				...process.env,
-				PATH: `${bin}:${process.env.PATH}`,
+				PATH: `${bin}:${basePath}`,
 				STATE: join(dir, "panes.json"),
 				PISANDBOX,
 				...extraEnv,
@@ -192,6 +214,75 @@ test("no herdr-app means a loud refusal, not a hidden worker", () => {
 	assert.notEqual(r.status, 0);
 	assert.match(r.stderr, /herdr-app not found in PATH/);
 	assert.equal(f.calls().length, 0, "nothing was started");
+});
+
+test("spawn puts the person back on the space and tab they were reading", () => {
+	// space.new always shows the new space, so a visible spawn moves the view. The
+	// worker belongs in the agents pane; the person belongs where they were.
+	const f = fixture();
+	const r = f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"]);
+	assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+	assert.equal(r.stderr.trim(), "", "a restore that works says nothing");
+
+	const calls = f.calls();
+	const at = (name) => calls.findIndex((call) => call.bin === "herdr-app" && call.argv.includes(name));
+	const newSpace = at("space.new");
+	const selected = calls.filter((call) => call.bin === "herdr-app" && call.argv.includes("space.select"));
+	const tabSelected = calls.filter((call) => call.bin === "herdr-app" && call.argv.includes("tab.select"));
+
+	assert.equal(selected.length, 1, "one space is selected again, not zero and not the new one");
+	assert.deepEqual(selected[0].argv, ["do", "space.select", "--id", "s1"], "the space that was on screen before");
+	assert.deepEqual(tabSelected[0].argv, ["do", "tab.select", "--id", "t1"], "and its tab");
+	assert.ok(at("space.select") > newSpace, "after space.new, not before it");
+	assert.ok(
+		calls.some((call) => call.argv.includes("status")),
+		"the view is read from the window, so the restore is never a hardcoded space",
+	);
+	assert.ok(
+		!selected.some((call) => call.argv.includes("s9")),
+		"selecting the new space would be the bug, not the fix",
+	);
+});
+
+test("--no-restore leaves the new space in front", () => {
+	const f = fixture();
+	const r = f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox", "--no-restore"]);
+	assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+	assert.equal(
+		f.calls().some((call) => call.argv.includes("space.select") || call.argv.includes("tab.select")),
+		false,
+		"the old behaviour, for watching the worker appear",
+	);
+});
+
+test("a window that cannot be read warns and still starts the worker", () => {
+	// A view that cannot be read must not cost a worker: the spawn stands, one line
+	// says where the person's view stayed.
+	const f = fixture({ status: "broken" });
+	const r = f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"]);
+	assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+	assert.match(r.stderr, /could not read the space on screen before the spawn, so focus stayed on space s9/);
+	assert.equal(JSON.parse(r.stdout.trim().split("\n").pop()).space, "s9", "the worker exists anyway");
+});
+
+test("a restore that fails is a warning, not a failed spawn", () => {
+	const f = fixture({ restores: false });
+	const r = f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"]);
+	assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+	assert.match(r.stderr, /could not restore focus to space s1, so focus stayed on space s9/);
+	assert.equal(JSON.parse(r.stdout.trim().split("\n").pop()).terminal, "t14z");
+});
+
+test("list shows a visible worker's space, not 'hidden'", () => {
+	// The nothing-is-hidden property: a space a person cannot find is the bug this
+	// whole path replaced. Getting the view back must not make the worker look hidden.
+	const f = fixture();
+	assert.equal(f.run(["spawn", "learn-1200", f.spec, "--cwd", f.work, "--visible", "--sandbox"]).status, 0);
+	const r = f.run(["list"]);
+	assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+	assert.match(r.stdout, /learn-1200\s+t14z/);
+	assert.match(r.stdout, /space s9/, "the space is named, so it can be watched and closed");
+	assert.doesNotMatch(r.stdout, /hidden/);
 });
 
 test("a working directory with a space in it is still one argument", () => {

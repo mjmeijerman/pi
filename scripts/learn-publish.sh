@@ -91,6 +91,18 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$SLUG" ] || die "usage: learn-publish.sh <slug> [--proposal FILE] [--check|--dry-run]"
+
+# The broker is the only caller. This script needs `herdr-app` for the hand-off space
+# and `gh` for the verdict, and a learner runs sandboxed with neither; worse, a
+# learner that "tries anyway" spends a turn and then records the wall as a verdict
+# on its own branch. So a learner hands over a request file and this script is run
+# for it by the host: `agent/extensions/self-learn.ts` claims
+# `agent/proposals/queue/<slug>.publish.json` and runs exactly this command.
+# Refused on every mode, including --check: one rule, no mode that half-works.
+if [ -n "${PI_SELF_LEARN:-}" ]; then
+	die "a learner cannot publish — write agent/proposals/queue/$SLUG.publish.json ({\"slug\",\"branch\",\"reason\",\"proposal\"}) and the host broker runs this for you"
+fi
+
 BRANCH="learn/$SLUG"
 SPACE="$SLUG-pr"
 PROPOSAL_DIR="$REPO/agent/proposals"

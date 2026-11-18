@@ -267,6 +267,22 @@ test("a missing branch is an error, not a silent success", () => {
 	assert.match(r.stderr, /no branch learn\/no-such-slug/);
 });
 
+test("a learner cannot publish: the broker is the only caller", () => {
+	// The learner runs sandboxed with no herdr-app and no gh login, so the attempt
+	// used to spend a turn and then record the wall as a verdict on its own branch.
+	// The hand-off is a queue file now, and this script refuses to run inside a
+	// learner at all — no mode half-works.
+	const f = fixture("always");
+	for (const args of [["test-slug"], ["test-slug", "--check"], ["test-slug", "--dry-run"]]) {
+		const r = run(f, args, { PI_SELF_LEARN: "1" });
+		assert.equal(r.status, 2, `${args.join(" ")}: a learner must not publish`);
+		assert.match(r.stderr, /a learner cannot publish/);
+		assert.match(r.stderr, /agent\/proposals\/queue\/test-slug\.publish\.json/, "it says what to do instead");
+	}
+	assert.equal(existsSync(join(f.dir, "pane-called")), false, "nothing was handed over");
+	assert.equal(readdirSync(join(f.dir, "agent", "proposals")).includes("publish-log.jsonl"), false, "no row either");
+});
+
 // ---------------------------------------------------------------- PR body --
 // The spec used to hand the publishing agent a one-line literal,
 // `--body 'Tier: Medium. Proposal: …'`, and `scripts/pr-gate.sh` rejects that

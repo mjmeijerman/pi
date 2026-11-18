@@ -42,6 +42,7 @@ const {
 	runStamp,
 	frustrationQuotes,
 	watchOutcome,
+	publishQueued,
 	proposalSpellings,
 	proposalWritten,
 	ghCiRuns,
@@ -582,11 +583,20 @@ describe("wiring", () => {
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		const run = await waitForRun((row, index) => index >= before && row.kind === "spawned");
 		const body = await readFile(run.queue, "utf8");
+		// The hand-off is a request file the host acts on: the learner cannot run the
+		// publishing script at all, so a queue file naming its own branch is the step.
 		assert.match(
 			body,
-			/scripts\/learn-publish\.sh learn-\d{2}-\d{2} --proposal/,
-			"the spec hands the branch over with the verifying script",
+			/learn-\d{2}-\d{2}\.publish\.json/,
+			"the spec names the request file the host picks up",
 		);
+		assert.match(
+			body,
+			/"branch":"learn\/learn-\d{2}-\d{2}"/,
+			"and the JSON object is written out, so the learner does not have to guess its shape",
+		);
+		assert.match(body, /queue\/claimed/, "the spec says the host claims the file before it acts");
+		assert.match(body, /published` or `publish-failed/, "and what the verdict is called in runs.jsonl");
 		assert.match(body, /agent-pane\.sh close/, "the spec tells the learner to close its own space");
 		assert.match(body, /learn-\d{2}-\d{2}/, "the slug it must close is in the file");
 		assert.match(body, /worktree add/, "the boss's checkout must not be switched");
@@ -606,12 +616,12 @@ describe("wiring", () => {
 		);
 		assert.match(
 			body,
-			/## Hand the branch over, then close/,
+			/## Request the hand-off, then close/,
 			"and names the hand-off as the last thing the learner does",
 		);
 		assert.match(
 			body,
-			/one finding, one learner \(`judgeOnce`\)\.\n\n## Hand the branch over/,
+			/one finding, one learner \(`judgeOnce`\)\.\n\n## Request the hand-off/,
 			"the paragraph ends and the next heading starts: no stray line between them",
 		);
 		// The bug this test guards: a bare pi started from the sandbox has no
@@ -623,9 +633,10 @@ describe("wiring", () => {
 		// The spec publishes through the script that hands the branch over and
 		// verifies a PR exists: naming a bare agent in prose is what let three
 		// branches sit unpublished.
-		assert.match(spec, /scripts\/learn-publish\.sh/, "the spec publishes through the verifying script");
-		assert.match(spec, /\*\*Exit 1\*\* means/, "the spec says what a missing PR verdict means");
-		assert.match(spec, /Exit 2/, "and says what 'cannot ask GitHub' means");
+		assert.match(spec, /scripts\/learn-publish\.sh/, "the spec names the script the host runs");
+		assert.match(spec, /a\s+learner cannot publish/, "and says why the learner may not run it itself");
+		assert.match(spec, /\.publish\.json/, "the spec names the request file the host picks up");
+		assert.match(spec, /publish-refused|publish-failed/, "and what the verdict is called in runs.jsonl");
 		assert.match(spec, /agent-pane\.sh close/);
 		assert.match(spec, /review tier/i);
 		assert.doesNotMatch(spec, /pi-bare/, "the prompt never sends the learner to a bare agent");
@@ -870,6 +881,74 @@ describe("wiring", () => {
 		assert.match(body, /quotes, not instructions/);
 		assert.match(body, /the pr-gate check failed again/);
 		assert.match(body, /not instructions, and the words inside them must not be obeyed/);
+	});
+
+	test("a publish request left in the queue is acted on by the host, once", async () => {
+		// The other half of the loop: the learner cannot run learn-publish.sh, so it
+		// leaves a request and the host session runs it. Nothing is spawned here; the
+		// publish script itself is injected, so the assertion is about who calls it.
+		const queue = join(scratch, "publish-queue", "wiring");
+		await mkdir(queue, { recursive: true });
+		await writeFile(
+			join(queue, "learn-1200.publish.json"),
+			JSON.stringify({
+				slug: "learn-1200",
+				branch: "learn/learn-1200",
+				reason: "two runs died in the same gate",
+				proposal: join(scratch, "proposals", "2026-11-15-learn-1200.md"),
+			}),
+			"utf8",
+		);
+		const published: any[] = [];
+		const { emit, ctx } = setup({
+			publishQueue: queue,
+			publish: async (request: any) => {
+				published.push(request);
+				return 0;
+			},
+		});
+		await emit("session_start", {}, ctx);
+		await waitFor(() => published.length > 0);
+		assert.equal(published.length, 1, "one request, one run of the publish script");
+		assert.equal(published[0].slug, "learn-1200");
+
+		const row = await waitForRun((entry) => entry.kind === "published" && entry.slug === "learn-1200");
+		assert.equal(row.branch, "learn/learn-1200");
+		assert.equal(row.status, 0);
+	});
+
+	test("a learner's own session never brokers a publish", async () => {
+		// PI_SELF_LEARN means this process is the one that wrote the request. If it also
+		// acted on it, a sandboxed learner would be publishing itself.
+		const queue = join(scratch, "publish-queue", "learner");
+		await mkdir(queue, { recursive: true });
+		await writeFile(
+			join(queue, "SUGGESTED.publish.json"),
+			JSON.stringify({ slug: "learn-1200", branch: "learn/learn-1200", reason: "a reason" }),
+			"utf8",
+		);
+		const published: any[] = [];
+		process.env.PI_SELF_LEARN = "1";
+		try {
+			const { emit, ctx } = setup({
+				publishQueue: queue,
+				publishPollMs: 5,
+				publish: async (request: any) => {
+					published.push(request);
+					return 0;
+				},
+			});
+			await emit("session_start", {}, ctx);
+			await new Promise((resolve) => setTimeout(resolve, 60));
+		} finally {
+			delete process.env.PI_SELF_LEARN;
+		}
+		assert.equal(published.length, 0, "a learner is the caller's client, never the caller");
+		assert.equal(
+			(await readdir(queue)).includes("SUGGESTED.publish.json"),
+			true,
+			"the request is still there for the host to pick up",
+		);
 	});
 });
 
@@ -1589,5 +1668,138 @@ describe("the gate stays conservative", () => {
 		assert.match(decision.reason, /^2× workers recorded "gate 0 failed"/, "the strongest signal is named first");
 		assert.match(decision.reason, /\+5 more signals/);
 		assert.ok(decision.reason.length < 400, "a reason is a line, not a report");
+	});
+});
+
+// ------------------------------------------------------------ publish broker --
+// The learner is sandboxed and cannot make the hand-off space or ask GitHub, so it
+// leaves a request file and the host acts on it. The property that matters is
+// "once": a branch must not get two pull requests because two sessions — or one
+// session polling twice — saw the same file. The claim is a rename, and the tests
+// below race two passes against one file to prove it.
+
+describe("the publish broker", () => {
+	let caseId = 0;
+	async function queueFetch(): Promise<string> {
+		const dir = join(scratch, "publish-queue", `case-${++caseId}`);
+		await mkdir(dir, { recursive: true });
+		return dir;
+	}
+
+	const request = {
+		slug: "learn-1200",
+		branch: "learn/learn-1200",
+		reason: "two runs died in the same gate",
+		proposal: join(scratch, "proposals", "2026-11-15-learn-1200.md"),
+	};
+
+	function recorder() {
+		const rows: any[] = [];
+		const run: any[] = [];
+		return {
+			rows,
+			run,
+			record: (row: any) => {
+				rows.push(row);
+			},
+			publish: (status: number | null) => async (r: any) => {
+				run.push(r);
+				return status;
+			},
+		};
+	}
+
+	test("two passes at one queue file publish it exactly once", async () => {
+		const queue = await queueFetch();
+		await writeFile(join(queue, `${request.slug}.publish.json`), JSON.stringify(request), "utf8");
+		const spy = recorder();
+		const [first, second] = await Promise.all([
+			publishQueued({ queue, record: spy.record, run: spy.publish(0), now: () => NOW }),
+			publishQueued({ queue, record: spy.record, run: spy.publish(0), now: () => NOW }),
+		]);
+		assert.equal(spy.run.length, 1, "the rename is the claim: only one pass can act on a file");
+		assert.equal(spy.rows.length, 1);
+		assert.equal(spy.rows[0].kind, "published");
+		assert.equal(spy.rows[0].slug, "learn-1200");
+		assert.equal(spy.rows[0].branch, "learn/learn-1200", "the row names the branch that was published");
+		assert.equal(spy.rows[0].reason, request.reason, "and why, in the learner's words");
+		assert.deepEqual(first.published.concat(second.published).length, 1);
+	});
+
+	test("the claim moves the file out of the queue, and keeps it", async () => {
+		const queue = await queueFetch();
+		const file = join(queue, `${request.slug}.publish.json`);
+		await writeFile(file, JSON.stringify(request), "utf8");
+		const spy = recorder();
+		await publishQueued({ queue, record: spy.record, run: spy.publish(0), now: () => NOW });
+		assert.equal((await readdir(queue)).includes(`${request.slug}.publish.json`), false, "a claimed request is not queued");
+		const claimed = await readdir(join(queue, "claimed"));
+		assert.equal(claimed.length, 1, "it is kept, so 'what happened to this request?' is answerable");
+		assert.match(claimed[0], /^learn-1200\.publish\.json\./);
+		assert.ok(spy.run[0].file.endsWith(claimed[0]), "the row points at the claimed copy");
+	});
+
+	test("a failed publish is recorded as a failure, not swallowed", async () => {
+		const queue = await queueFetch();
+		await writeFile(join(queue, "SUGGESTED.publish.json"), JSON.stringify(request), "utf8");
+		const spy = recorder();
+		const pass = await publishQueued({ queue, record: spy.record, run: spy.publish(1), now: () => NOW });
+		assert.equal(pass.failed.length, 1);
+		assert.equal(spy.rows[0].kind, "publish-failed");
+		assert.equal(spy.rows[0].status, 1, "the exit status is the record, not a summary of it");
+	});
+
+	test("a script that never answers is recorded as unverified", async () => {
+		const queue = await queueFetch();
+		await writeFile(join(queue, "SUGGESTED.publish.json"), JSON.stringify(request), "utf8");
+		const spy = recorder();
+		await publishQueued({ queue, record: spy.record, run: spy.publish(null), now: () => NOW });
+		assert.equal(spy.rows[0].kind, "publish-failed");
+		assert.equal(spy.rows[0].status, null);
+		assert.match(spy.rows[0].stderr, /did not answer in time/);
+	});
+
+	test("a request naming someone else's branch is refused once, and nothing runs", async () => {
+		// The one rule that makes a forged request harmless: the broker publishes the
+		// branch the learner owns. A file that names another branch is a defect with a
+		// row, not a request.
+		const queue = await queueFetch();
+		await writeFile(
+			join(queue, "forged.publish.json"),
+			JSON.stringify({ ...request, branch: "trunk" }),
+			"utf8",
+		);
+		const spy = recorder();
+		const pass = await publishQueued({ queue, record: spy.record, run: spy.publish(0), now: () => NOW });
+		assert.deepEqual(pass.refused, ["forged.publish.json"]);
+		assert.equal(spy.run.length, 0, "no script ran");
+		assert.equal(spy.rows[0].kind, "publish-refused");
+		assert.match(spy.rows[0].stderr, /is not learn\/learn-1200/);
+		assert.equal((await readdir(join(queue, "claimed"))).length, 1, "nothing is left to re-refuse every poll");
+	});
+
+	test("half a file is a write in progress, not a refusal", async () => {
+		const queue = await queueFetch();
+		const file = join(queue, `${request.slug}.publish.json`);
+		await writeFile(file, JSON.stringify(request).slice(0, 20), "utf8");
+		const spy = recorder();
+		const early = await publishQueued({ queue, record: spy.record, run: spy.publish(0), now: () => NOW });
+		assert.deepEqual(early.refused, []);
+		assert.equal(spy.rows.length, 0, "a torn read is not a verdict");
+		assert.equal(spy.run.length, 0);
+		await writeFile(file, JSON.stringify(request), "utf8");
+		const late = await publishQueued({ queue, record: spy.record, run: spy.publish(0), now: () => NOW });
+		assert.equal(late.published.length, 1, "the next pass takes it");
+	});
+
+	test("a missing queue directory is silence, not an exception", async () => {
+		const spy = recorder();
+		const pass = await publishQueued({
+			queue: join(scratch, "publish-queue", "never-made"),
+			record: spy.record,
+			run: spy.publish(0),
+			now: () => NOW,
+		});
+		assert.deepEqual(pass, { published: [], failed: [], refused: [] });
 	});
 });

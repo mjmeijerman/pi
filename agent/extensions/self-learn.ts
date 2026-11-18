@@ -51,7 +51,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -1563,6 +1563,263 @@ function closeSpace(slug: string): Promise<void> {
 }
 
 /**
+ * The publish hand-off, as the sandboxed learner can actually make it: one JSON
+ * object in `agent/proposals/queue/`, named `<slug>.publish.json` (or
+ * `SUGGESTED.publish.json`; the broker takes whichever `*.publish.json` it finds).
+ *
+ * Why a file and not a call: publishing needs `herdr-app` to make the hand-off
+ * space and `gh` to ask for the pull request, and both live on the host. A
+ * sandboxed learner can reach neither, so `learn-publish.sh` stopped at the wall
+ * with exit 2 and the branch stayed unpublished by design — half a loop. The
+ * queue file is the half the sandbox can do; this extension, unsandboxed, is the
+ * only thing that reads it. A learner must never run the script itself:
+ * `learn-publish.sh` refuses when it sees `PI_SELF_LEARN`, the broker starts no
+ * watcher in a learner process, and the broker drops the learner markers from the
+ * environment it hands the script.
+ */
+export const PUBLISH_SUFFIX = ".publish.json";
+/** Where a claimed request goes: moved out of the queue before it is acted on. */
+export const PUBLISH_CLAIMED = "claimed";
+/** How often the host looks for a request. Cheap: one readdir, usually empty. */
+export const PUBLISH_POLL_MS = 15_000;
+/** learn-publish.sh waits for the hand-off space, then asks gh. Generous by four. */
+export const PUBLISH_TIMEOUT_MS = 180_000;
+const MAX_PUBLISH_REASON = 200;
+const SLUG_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/** One publish request, as the learner wrote it. */
+export interface PublishRequest {
+	/** The queue file it came from (after the claim: its claimed path). */
+	file: string;
+	slug: string;
+	/** Always `learn/<slug>`: the broker publishes the learner's own branch, nothing else. */
+	branch: string;
+	/** One line saying why this branch is worth a pull request. */
+	reason: string;
+	proposal: string | null;
+}
+
+/**
+ * What reading a queue file found: a request, a named defect, or half a file.
+ *
+ * `torn` is the difference between a write in progress and a wrong request. A
+ * learner writes the file in one call, but the broker can read it mid-write, and
+ * a torn read must wait for the next poll instead of being claimed and recorded
+ * as a refusal. A complete object that names another branch is a defect and is
+ * refused once, out loud.
+ */
+export type PublishParse =
+	| { ok: true; request: Omit<PublishRequest, "file"> }
+	| { ok: false; torn: boolean; reason: string };
+
+export function parsePublishRequest(raw: string, proposalDir: string = PROPOSAL_DIR): PublishParse {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return { ok: false, torn: true, reason: "the file is not JSON yet" };
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return { ok: false, torn: false, reason: "a publish request is one JSON object" };
+	}
+	const object = parsed as Record<string, unknown>;
+	const slug = typeof object.slug === "string" ? object.slug.trim() : "";
+	if (!SLUG_PATTERN.test(slug) || slug.includes("..")) {
+		return { ok: false, torn: false, reason: `slug ${JSON.stringify(object.slug ?? null)} is not a learner slug` };
+	}
+	const expected = `learn/${slug}`;
+	if (object.branch !== expected) {
+		// The one rule that makes a forged queue file harmless: the broker publishes
+		// the branch the learner owns, never a branch it names out of the blue.
+		return {
+			ok: false,
+			torn: false,
+			reason: `branch ${JSON.stringify(object.branch ?? null)} is not ${expected}`,
+		};
+	}
+	const reason = typeof object.reason === "string" ? redact(object.reason).replace(/\s+/g, " ").trim() : "";
+	if (!reason) return { ok: false, torn: false, reason: "the request does not say why" };
+	let proposal: string | null = null;
+	if (object.proposal !== undefined && object.proposal !== null) {
+		if (typeof object.proposal !== "string" || !object.proposal.startsWith("/")) {
+			return { ok: false, torn: false, reason: "proposal must be an absolute path, or absent" };
+		}
+		if (!object.proposal.startsWith(`${proposalDir}/`) || !object.proposal.endsWith(".md")) {
+			return { ok: false, torn: false, reason: `proposal must be a .md file in ${proposalDir}` };
+		}
+		proposal = object.proposal;
+	}
+	return {
+		ok: true,
+		request: { slug, branch: expected, reason: reason.slice(0, MAX_PUBLISH_REASON), proposal },
+	};
+}
+
+/**
+ * Take a request out of the queue, atomically. Null means someone else has it.
+ *
+ * `rename` is the claim: two host sessions looking at the same file, or one
+ * session polling twice, cannot both act on it, because only one rename finds
+ * the file. Nothing is deleted — a claimed request stays readable under
+ * `queue/claimed/` with the stamp it was taken at, so "was this published?"
+ * has an answer on disk and not only in the log.
+ */
+export async function claimPublish(queueDir: string, name: string, stamp: number): Promise<string | null> {
+	const claimed = join(queueDir, PUBLISH_CLAIMED);
+	try {
+		await mkdir(claimed, { recursive: true });
+		const target = join(claimed, `${name}.${stamp}`);
+		await rename(join(queueDir, name), target);
+		return target;
+	} catch {
+		// ENOENT: another broker claimed it, or it was never there. Either way, not ours.
+		return null;
+	}
+}
+
+/** What one pass over the queue did. */
+export interface PublishPass {
+	published: PublishRequest[];
+	failed: PublishRequest[];
+	/** Queue files refused for naming something other than a `learn/` branch. */
+	refused: string[];
+}
+
+/**
+ * One pass over the publish queue: claim each request, run it, record what
+ * happened in `runs.jsonl` the way a launch is recorded.
+ *
+ * Order is what keeps "once" true: claim first (rename), then act. A pass that
+ * dies between the two leaves a claimed file and a `publish-*` row that says so,
+ * never two pull requests for one branch.
+ */
+export async function publishQueued(input: {
+	queue?: string;
+	record: (row: Record<string, unknown>) => Promise<void> | void;
+	/** Defaults to the host script; tests inject a stub instead of spawning. */
+	run?: (request: PublishRequest) => Promise<number | null> | number | null;
+	now?: () => number;
+}): Promise<PublishPass> {
+	const queue = input.queue ?? QUEUE_DIR;
+	const now = input.now ?? (() => Date.now());
+	const run = input.run ?? runPublishScript;
+	const pass: PublishPass = { published: [], failed: [], refused: [] };
+	let names: string[];
+	try {
+		names = await readdir(queue);
+	} catch {
+		return pass;
+	}
+	for (const name of names.sort()) {
+		if (!name.endsWith(PUBLISH_SUFFIX)) continue;
+		let raw: string;
+		try {
+			raw = await readFile(join(queue, name), "utf8");
+		} catch {
+			continue;
+		}
+		const parsed = parsePublishRequest(raw);
+		if (!parsed.ok && parsed.torn) continue;
+		const stamp = now();
+		const ts = new Date(stamp).toISOString();
+		const claimed = await claimPublish(queue, name, stamp);
+		if (!claimed) continue;
+		if (!parsed.ok) {
+			pass.refused.push(name);
+			await input.record({
+				ts,
+				kind: "publish-refused",
+				slug: name.slice(0, -PUBLISH_SUFFIX.length),
+				queue: claimed,
+				stderr: clipDetail(parsed.reason),
+				reason: "a publish request names the learner's own learn/ branch, and this one does not",
+			});
+			continue;
+		}
+		const request: PublishRequest = { ...parsed.request, file: claimed };
+		let status: number | null = null;
+		let detail = "";
+		try {
+			status = await run(request);
+		} catch (error) {
+			detail = clipDetail(String(error));
+		}
+		const ok = status === 0;
+		// A non-zero status says why in its own output, which the person's terminal has;
+		// a null one is the case with nothing to read, so it gets a line of its own.
+		const stderr = detail || (ok || status !== null ? "" : "learn-publish.sh did not answer in time");
+		await input.record({
+			ts,
+			kind: ok ? "published" : "publish-failed",
+			slug: request.slug,
+			branch: request.branch,
+			status,
+			queue: request.file,
+			proposal: request.proposal,
+			reason: request.reason,
+			...(stderr ? { stderr } : {}),
+		});
+		if (ok) pass.published.push(request);
+		else pass.failed.push(request);
+	}
+	return pass;
+}
+
+/**
+ * Run `scripts/learn-publish.sh` for one request, on the host, unsandboxed.
+ *
+ * The learner markers are dropped from the environment it inherits: the broker is
+ * the caller, and a script that refuses to run inside a learner must not be told
+ * it is running inside one. Returns the exit status, or null when it never
+ * answered (killed at `timeoutMs`), which is recorded as unverified rather than
+ * as a failure of the branch.
+ */
+export function runPublishScript(
+	request: PublishRequest,
+	options: { script?: string; timeoutMs?: number } = {},
+): Promise<number | null> {
+	const argv = [options.script ?? PUBLISH_SCRIPT, request.slug];
+	if (request.proposal) argv.push("--proposal", request.proposal);
+	const env: NodeJS.ProcessEnv = { ...process.env };
+	for (const key of LEARNER_ENV_KEYS) delete env[key];
+	return new Promise<number | null>((resolve) => {
+		let settled = false;
+		const finish = (status: number | null) => {
+			if (settled) return;
+			settled = true;
+			resolve(status);
+		};
+		let child: any;
+		try {
+			child = spawn(argv[0], argv.slice(1), {
+				env,
+				stdio: ["ignore", "pipe", "pipe"],
+				cwd: REPO,
+				detached: true,
+			});
+		} catch {
+			finish(null);
+			return;
+		}
+		// Drained, not parsed: the script's own words are for the person's terminal, and
+		// leaving the pipes unread would block it once the buffer filled.
+		child.stdout?.on("data", () => undefined);
+		child.stderr?.on("data", () => undefined);
+		child.on("error", () => finish(null));
+		child.on("exit", (code: number | null) => finish(code));
+		const timer = setTimeout(() => {
+			try {
+				child.kill("SIGTERM");
+			} catch {
+				// Already gone.
+			}
+			finish(null);
+		}, options.timeoutMs ?? PUBLISH_TIMEOUT_MS);
+		timer.unref?.();
+	});
+}
+
+/**
  * Watch a confirmed learner until it either writes its proposal or stops.
  *
  * Confirming the turn is not confirming the work: the learner started for the
@@ -1684,6 +1941,12 @@ export interface SelfLearnDeps {
 	outcomePollMs?: number;
 	outcomeTimeoutMs?: number;
 	outcomeIdleMs?: number;
+	/** Run `learn-publish.sh` for one claimed request; the default shells out on the host. */
+	publish?: (request: PublishRequest) => Promise<number | null> | number | null;
+	/** Where publish requests are left. Tests point it at a scratch directory. */
+	publishQueue?: string;
+	/** How often the host looks for a publish request, in ms. */
+	publishPollMs?: number;
 	now?: () => number;
 }
 
@@ -1707,6 +1970,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			}
 		});
 	const proposalExists = deps.proposalExists ?? ((path: string) => proposalWritten(path));
+	const publish = deps.publish ?? ((request: PublishRequest) => runPublishScript(request));
 	const now = deps.now ?? (() => Date.now());
 	const countNotes = deps.countNotes ?? (async (sinceIso: string | null) => {
 		try {
@@ -1784,7 +2048,17 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 	pi.on("session_start", (_event: any, ctx: any) => {
 		reset();
 		seenCompactionsOnBranch(ctx);
+		publishCtx = ctx;
+		// A learner never brokers a publish: PI_SELF_LEARN means this process wrote the
+		// queue file, so it is not the one allowed to act on it. The guard is here as
+		// well as in learn-publish.sh because a watcher that starts is already too late.
+		if (disabled) return;
+		startPublishWatch();
+		// A request left by a learner whose own session is gone is still publishable.
+		void publishTick();
 	});
+
+	pi.on("session_shutdown", () => stopPublishWatch());
 
 	pi.on("tool_result", (event: any) => {
 		if (!event?.isError) return;
@@ -2065,6 +2339,59 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		}
 	}
 
+	/** One pass at a time: a slow publish must not stack up behind the timer. */
+	let publishing = false;
+	let publishTimer: ReturnType<typeof setInterval> | null = null;
+	let publishCtx: any = null;
+
+	/**
+	 * The publish half of the loop, run on the host: claim each `*.publish.json`,
+	 * run `learn-publish.sh` for it, and record the verdict in `runs.jsonl` the way
+	 * a launch is recorded. Every outcome is one line to the person: a learner that
+	 * fixed something and a learner whose branch nobody published are different
+	 * events, and the log says which happened.
+	 *
+	 * Why a watcher and not a check riding the outcome watch: the learner writes its
+	 * proposal, then its publish request, so the watch can return `proposal` before
+	 * the request exists — and the watch dies with the session that started it,
+	 * while a request left on disk does not. One readdir every fifteen seconds on a
+	 * directory that is almost always empty is cheaper than either failure.
+	 */
+	async function publishTick(): Promise<void> {
+		if (publishing) return;
+		publishing = true;
+		try {
+			const pass = await publishQueued({
+				queue: deps.publishQueue,
+				record,
+				run: async (request) => await publish(request),
+				now,
+			});
+			for (const request of pass.published)
+				notify(publishCtx, `published ${request.branch}: ${request.reason}`, "info");
+			for (const request of pass.failed)
+				notify(publishCtx, `publish failed for ${request.branch} — see agent/proposals/runs.jsonl`, "warning");
+			for (const name of pass.refused)
+				notify(publishCtx, `refused a publish request that does not name a learn/ branch: ${name}`, "warning");
+		} catch {
+			// A broken queue is not worth the host session that is reading it.
+		} finally {
+			publishing = false;
+		}
+	}
+
+	const startPublishWatch = () => {
+		if (publishTimer) return;
+		publishTimer = setInterval(() => void publishTick(), deps.publishPollMs ?? PUBLISH_POLL_MS);
+		publishTimer.unref?.();
+	};
+
+	const stopPublishWatch = () => {
+		if (!publishTimer) return;
+		clearInterval(publishTimer);
+		publishTimer = null;
+	};
+
 	pi.on("session_compact", async (_event: any, ctx: any) => {
 		if (disabled) return;
 		try {
@@ -2127,6 +2454,7 @@ function evidenceMarkdown(input: {
 		"",
 		`Trigger: ${trigger}. Gate: ${decision.reason}.`,
 		`Write your proposal to: \`${proposalPath}\``,
+		`Slug: \`${slug}\` — your branch is \`learn/${slug}\`, your space is \`${slug}\`, and your publish request goes in \`${join(QUEUE_DIR, `${slug}.publish.json`)}\``,
 		`Spec: \`${SPEC}\`.`,
 		"",
 		"## Failed tool calls since the last compaction",
@@ -2225,36 +2553,36 @@ function evidenceMarkdown(input: {
 		"Warnings rather than reported as \"none\". A report or decision row written before the",
 		"newest proposal is not counted again — one finding, one learner (`judgeOnce`).",
 		"",
-		"## Hand the branch over, then close: do this last, every time",
+		"## Request the hand-off, then close: do this last, every time",
 		"",
 		"You cannot publish from here, and neither can a bare `pi` started from here.",
-		"This session runs sandboxed: there is no `gh` login and no git credential on",
-		"this side of the sandbox (`gh auth status` says hosts.yml is missing), so a push",
-		"or a `gh pr create` fails no matter which binary runs it. Publishing is a",
-		"hand-off to a big-boss-pi agent space, which runs on the host where the key",
-		"lives. Concrete values for this run:",
+		"This session runs sandboxed: no `gh` login, no git credential and no `herdr-app`",
+		"on this side of the wall, so a push fails whichever binary runs it — and",
+		"`scripts/learn-publish.sh` refuses a learner outright. Publishing is a request the",
+		"host session that started you acts on. Concrete values for this run:",
 		"",
 		`- slug / herdr space: ${slug}`,
+		`- branch: learn/${slug}`,
 		`- repo (never switch this checkout): ${REPO}`,
 		`- proposal: ${proposalPath}`,
-		`- hand-off: ${PUBLISH_SCRIPT} ${slug} --proposal ${proposalPath}`,
+		`- publish request: ${join(QUEUE_DIR, `${slug}.publish.json`)}`,
 		"",
 		`1. Cut a worktree: git -C ${REPO} worktree add ../selflearn-${slug}-worktree -b learn/${slug}`,
 		"2. Apply your diff there, run the checks it names, commit on that branch.",
-		"3. Hand the branch over:",
+		"3. Write the publish request — one JSON object, nothing else:",
 		"",
-		"```sh",
-		`${PUBLISH_SCRIPT} ${slug} --proposal ${proposalPath}`,
+		"```json",
+		JSON.stringify({ slug, branch: `learn/${slug}`, reason: "<one line: why this branch is worth a review>", proposal: proposalPath }),
 		"```",
 		"",
-		`   It starts the agent space ${slug}-pr with ${PANE_SCRIPT} spawn and a spec`,
-		"   naming the branch, the commit sha, the review tier and the proposal. That agent",
-		"   pushes, opens the pull request, appends the row to",
-		"   agent/proposals/publish-log.jsonl, and closes its own space.",
-		"   Exit 0 = a PR exists. Exit 1 = none yet, and the row is already written.",
-		"   Exit 2 = GitHub could not be asked from here: unverified, not unpublished —",
-		"   say that in the proposal instead of claiming a PR or claiming none.",
-		"   --check re-asks without spawning; --dry-run prints the hand-off.",
+		"   The host session claims that file (it moves to queue/claimed/), runs",
+		"   scripts/learn-publish.sh for it, and records `published` or `publish-failed`",
+		"   in agent/proposals/runs.jsonl. That script writes a spec naming the branch, the",
+		`   commit sha and the review tier, starts a big-boss-pi agent space ${slug}-pr with`,
+		`   ${PANE_SCRIPT} spawn, and that agent pushes, opens the pull request, appends the`,
+		"   row to agent/proposals/publish-log.jsonl and closes its own space. Only the",
+		"   branch you own is accepted: a request naming any other branch is refused as",
+		"   `publish-refused`. You cannot ask GitHub from here, so never claim a PR.",
 		"4. Close your own space, whatever the outcome:",
 		"",
 		"```sh",
