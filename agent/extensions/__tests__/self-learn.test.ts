@@ -63,6 +63,9 @@ const {
 	drainPublishQueue,
 	watchPublish,
 	PUBLISH_SUFFIX,
+	PUBLISH_TIMEOUT_MS,
+	PUBLISH_WINDOW_MS,
+	PUBLISH_POLL_MS,
 } = mod;
 const REPO = join(homedir(), ".pi");
 
@@ -637,6 +640,51 @@ describe("wiring", () => {
 		// The bug this test guards: a bare pi started from the sandbox has no
 		// credentials either, so telling the learner to run one only lost turns.
 		assert.doesNotMatch(body, /pi-bare/, "no bare agent: it cannot authenticate from the sandbox");
+		// The hand-off paragraph is the part the learner acts on, so every line of
+		// it is read back word for word. Emptied by a mutation, the prompt still
+		// renders and still starts a learner — a hole a test can only see by
+		// naming the text. These are the lines stryker reported as survivors on
+		// self-learn.ts:2569-2598 (7 of them in the range the CI job mutates).
+		for (const line of [
+			"You cannot publish from here, and neither can a bare `pi` started from here.",
+			"This session runs sandboxed: there is no `gh` login and no git credential on",
+			"this side of the sandbox (`gh auth status` says hosts.yml is missing), so a push",
+			"or a `gh pr create` fails no matter which binary runs it. Do not run",
+			"`scripts/learn-publish.sh` either: it needs `herdr-app`, which lives outside every",
+			"sandbox mount, and it refuses a sandboxed caller. Ask the host instead, with one",
+			"JSON object in the publish queue. The host session that started you runs the",
+			"broker: it runs `learn-publish.sh` for that file, records the outcome in",
+			"`runs.jsonl`, and starts the big-boss-pi agent space that pushes and opens the PR.",
+			"Concrete values for this run:",
+			"3. Ask the host to publish it — one JSON object, one line, exactly these fields:",
+			"```json",
+			"   Write that file and stop there. The broker picks it up exactly once and runs",
+			"   `learn-publish.sh` on the host, which writes the PR body, gate-checks it, and",
+			"   starts the agent space that pushes and opens the pull request. One `publish`",
+			"   row lands in `agent/proposals/runs.jsonl`: `published`, `failed` (gh answered,",
+			"   no PR) or `unverified` (gh could not be asked). Do not run the script yourself,",
+			"   do not push, and do not wait for the outcome: your branch and sha are in the",
+			"   proposal, and the row is on the host.",
+		]) {
+			assert.ok(body.includes(line), `the hand-off paragraph keeps this line: ${line}`);
+		}
+		// The concrete values are what a learner copies out, so the block is read as
+		// a block: the blank lines are part of its layout, and the example has to be
+		// a request the broker would accept, not only a string that looks like one.
+		assert.match(body, /Concrete values for this run:\n\n- slug \/ herdr space: learn-\d{2}-\d{2}\n/);
+		assert.match(body, /- repo \(never switch this checkout\): .+\n/);
+		assert.match(body, /- proposal: .+\.md\n/);
+		assert.match(body, /- queue file to write: .+\.publish\.json\n\n1\. Cut a worktree: /);
+		assert.match(body, /2\. Apply your diff there, run the checks it names, commit on that branch\.\n/);
+		assert.match(body, /exactly these fields:\n\n```json\n.+\n```\n\n   Write that file/);
+		assert.match(body, /the row is on the host\.\n4\. Close your own space, whatever the outcome:/);
+		const example = body.match(/```json\n(.+)\n```/);
+		assert.ok(example, "the example request is fenced in the queue file");
+		assert.equal(
+			parsePublishRequest(example[1]).ok,
+			true,
+			"and the example a learner copies is a request the broker accepts",
+		);
 
 		// The prompt file itself, not only the generated queue file.
 		const spec = await readFile(new URL("../../prompts/learn.md", import.meta.url), "utf8");
@@ -1771,6 +1819,15 @@ describe("the publish request a learner writes", () => {
 });
 
 describe("the publish broker", () => {
+	test("a publish is bounded like a spawn, and the poll is cheap", () => {
+		// Three literals a reader has to trust otherwise: a hand-off that never
+		// returns must not hold the broker (ten minutes), the queue is looked at
+		// every five seconds while it waits, and it waits a quarter of an hour.
+		assert.equal(PUBLISH_TIMEOUT_MS, 10 * 60 * 1000, "ten minutes for one publish");
+		assert.equal(PUBLISH_POLL_MS, 5_000, "a readdir every five seconds");
+		assert.equal(PUBLISH_WINDOW_MS, 15 * 60 * 1000, "fifteen minutes of waiting, then it stops");
+	});
+
 	test("a queue file is picked up exactly once, even by two brokers at the same moment", async () => {
 		const f = await publishFixture();
 		await f.write("learn-1200.publish.json", request({ proposal: f.proposal }));
