@@ -657,6 +657,23 @@ describe("wiring", () => {
 			/Warnings rather than reported as "none"/,
 			"an unreadable source is a warning, never a silent zero",
 		);
+		// The "How this was produced" paragraph is the provenance claim: which four
+		// sources were read, and what was done to the transcript before counting.
+		// Emptied by a mutation the prompt still renders, so like the hand-off
+		// paragraph it is read back line for line — three of these lines were
+		// survivors on self-learn.ts:2623-2625 in the CI job's own range.
+		for (const line of [
+			"`agent/extensions/self-learn.ts` counted failed tool results in the session that just",
+			"compacted, then read four sources outside it: `gh run list --status failure` for this",
+			"repo, the delegation workspace's `reports/` and `state/decisions.jsonl`, the `died`,",
+			"proposal-less `spawned` and `spawn-failed` rows of `runs.jsonl`, and the user lines of",
+			"the session transcript. Messages are hashed to a signature before they are counted, quotes are",
+			'redacted and capped at five, and every source that could not be read is listed under',
+			'Warnings rather than reported as "none". A report or decision row written before the',
+			"newest proposal is not counted again — one finding, one learner (`judgeOnce`).",
+		]) {
+			assert.ok(body.includes(line), `the provenance paragraph keeps this line: ${line}`);
+		}
 		assert.match(
 			body,
 			/one finding, one learner/,
