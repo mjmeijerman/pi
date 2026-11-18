@@ -58,6 +58,7 @@ import {
 	planFor,
 	ruleAnswer,
 	skillNames,
+	spawnPlan,
 } from './scripts/install-lib.mjs';
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -346,10 +347,15 @@ function firstLine(text) {
 /**
  * writeAgentsMd — the filtered rule set, and never over an edit without asking.
  * A target that already holds the filtered text is left alone (idempotent).
+ *
+ * `apply` is what an explicit `--rules=` on the command line means: the person
+ * named the rule set in the invocation, so it is written, not offered. The
+ * confirm stays for the interactive path, where a differing AGENTS.md may be
+ * one somebody edited by hand and a default of "keep it" is the safe answer.
  */
-async function writeAgentsMd(filtered) {
+async function writeAgentsMd(filtered, { apply = false } = {}) {
 	const dst = path.join(AGENT_DIR, 'AGENTS.md');
-	if (fs.existsSync(dst) && fs.readFileSync(dst, 'utf8') !== filtered) {
+	if (!apply && fs.existsSync(dst) && fs.readFileSync(dst, 'utf8') !== filtered) {
 		const replace = await confirm(`${AGENTS_FILE_REL} exists and differs — rewrite it from your rule answers?`, false);
 		if (!replace) {
 			note('kept the existing AGENTS.md — the rule answers were recorded, not applied');
@@ -452,8 +458,11 @@ function run(cmd, args, { quiet = false } = {}) {
 		note(`[dry-run] ${cmd} ${args.join(' ')}`);
 		return 0;
 	}
-	const shell = PLAN.platform === 'win32' && /\.(cmd|bat)$/i.test(cmd);
-	return spawnSync(cmd, args, { stdio: quiet ? 'ignore' : 'inherit', shell }).status ?? 1;
+	const spec = spawnPlan(cmd, args, { platform: PLAN.platform });
+	return spawnSync(spec.file, spec.args, {
+		stdio: quiet ? 'ignore' : 'inherit',
+		windowsVerbatimArguments: spec.windowsVerbatimArguments,
+	}).status ?? 1;
 }
 
 function preflight() {
@@ -630,7 +639,7 @@ async function main() {
 			const recorded = state.rules[rule.slug];
 			return recorded === undefined ? true : Boolean(recorded);
 		};
-		await writeAgentsMd(filterAgentsMd(rules.text, keep));
+		await writeAgentsMd(filterAgentsMd(rules.text, keep), { apply: Boolean(OPT.rules) });
 	}
 
 	await askKeys(state);
