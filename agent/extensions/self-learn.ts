@@ -79,6 +79,19 @@ export const MIN_REPEATS = 2;
 export const MIN_GAP_MS = 10 * 60 * 1000;
 /** A session that keeps failing may teach twice; not more. */
 export const MAX_PER_SESSION = 2;
+/**
+ * How long a failing CI run stays evidence.
+ *
+ * `gh run list --status failure` is history, not a snapshot: it holds every run
+ * that ever failed on every branch, forever. Left unfiltered, the gate's table
+ * became the repo's failure archive — 2026-11-18 read `23× pr-tier` across 23
+ * distinct branches whose newest failure was 18 hours old and 20 of which had
+ * already merged, so the same table started a learner after every compaction and
+ * every learner could only answer "those branches are gone". A week is longer
+ * than any branch here runs red without a newer run: a real failure re-fires on
+ * the next push, and an idle branch has nothing left to judge.
+ */
+export const CI_FAILURE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** One repeated failure: how often, where, and a redacted sample. */
 export interface Failure {
@@ -462,13 +475,15 @@ export interface ReportText {
 	at?: number;
 }
 
-/** One row of `gh run list --status failure --json name,headBranch,conclusion,databaseId`. */
+/** One row of `gh run list --status failure --json name,headBranch,conclusion,databaseId,createdAt`. */
 export interface CiRun {
 	name?: string;
 	headBranch?: string;
 	conclusion?: string;
 	/** The id `gh run view` wants, used to ask whether a job ever ran. */
 	databaseId?: number;
+	/** When the run was created, as gh prints it. Absent on a fixture, and such a run is kept. */
+	createdAt?: string;
 }
 
 /** One job of `gh run view <id> --json jobs`. */
@@ -905,7 +920,17 @@ function runOnce(
  * old gate told.
  */
 export async function ghCiRuns(cwd = REPO, bin = "gh"): Promise<{ runs: CiRun[]; warning: string | null }> {
-	const argv = [bin, "run", "list", "--status", "failure", "--limit", "100", "--json", "name,headBranch,conclusion,databaseId"];
+	const argv = [
+		bin,
+		"run",
+		"list",
+		"--status",
+		"failure",
+		"--limit",
+		"100",
+		"--json",
+		"name,headBranch,conclusion,databaseId,createdAt",
+	];
 	const result = await runOnce(argv, cwd, 5_000);
 	if (result.status !== 0) {
 		const why = clipDetail(result.stderr) || `gh exited ${result.status === null ? "with no status" : result.status}`;
@@ -920,7 +945,11 @@ export async function ghCiRuns(cwd = REPO, bin = "gh"): Promise<{ runs: CiRun[];
 	if (!Array.isArray(parsed)) return { runs: [], warning: "failing CI checks not read: gh printed something that is not a list" };
 	const judged = await judgedByCode(parsed, cwd, bin);
 	if (judged.runs.length === 0 && judged.refused > 0) return { runs: [], warning: blockedWarning(judged.refused, parsed.length) };
-	return { runs: judged.runs, warning: judged.refused > 0 ? partialWarning(judged.refused, parsed.length) : null };
+	const aged = agedOut(judged.runs, Date.now());
+	const notes: string[] = [];
+	if (judged.refused > 0) notes.push(partialWarning(judged.refused, parsed.length));
+	if (aged.aged > 0) notes.push(agedWarning(aged.aged, parsed.length));
+	return { runs: aged.runs, warning: notes.length > 0 ? notes.join(" ") : null };
 }
 
 /**
@@ -1017,6 +1046,42 @@ function blockedWarning(refused: number, total: number): string {
 /** Some of the failing runs never started: count the rest, and say what was dropped. */
 function partialWarning(refused: number, total: number): string {
 	return `failing CI checks: ${refused} of ${total} failing runs ran no step and were not counted, because GitHub never started their jobs (${BILLING_HINT})`;
+}
+
+/**
+ * Some of the failing runs are older than the window: say how many, so the table
+ * shrinking is a measurement and not a silence.
+ *
+ * Deliberately not phrased as "failing CI checks not read": the table is what was
+ * read, and this one counts what aged out of it.
+ */
+function agedWarning(aged: number, total: number): string {
+	const days = Math.round(CI_FAILURE_WINDOW_MS / (24 * 60 * 60 * 1000));
+	return `older CI failures not counted: ${aged} of ${total} failing runs are older than ${days} days, so a newer run of that check is the evidence — or the branch is idle and there is nothing left to judge`;
+}
+
+/**
+ * Drop failing runs older than `CI_FAILURE_WINDOW_MS`.
+ *
+ * A run with no readable timestamp is kept: an unreadable date is not an old one,
+ * the same rule `judgeOnce` applies to a report (`blip 11`). The boundary is open —
+ * a run exactly a week old is still the newest thing that happened at that moment —
+ * and gh's `createdAt` is an ISO 8601 string, so `Date.parse` is the reader.
+ */
+export function agedOut(runs: CiRun[], now: number): { runs: CiRun[]; aged: number } {
+	const keep: CiRun[] = [];
+	let aged = 0;
+	for (const run of runs) {
+		// `Date.parse` of a missing date is NaN, so a run with no date is kept without a
+		// fallback to mutate (a second falsey string is an equivalent mutant).
+		const at = Date.parse(run.createdAt as string);
+		if (Number.isFinite(at) && now - at > CI_FAILURE_WINDOW_MS) {
+			aged += 1;
+			continue;
+		}
+		keep.push(run);
+	}
+	return { runs: keep, aged };
 }
 
 /** What the delegation workspace contributes: other workers' written failures. */
