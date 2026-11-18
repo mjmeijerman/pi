@@ -47,6 +47,8 @@ const {
 	ghCiRuns,
 	chunks,
 	judgedByCode,
+	agedOut,
+	CI_FAILURE_WINDOW_MS,
 	noStepRan,
 	parseRuns,
 	readWorkspace,
@@ -1184,6 +1186,90 @@ describe("repeated failing CI checks", () => {
 			const result = await ghCiRuns(dir, bin);
 			assert.deepEqual(result.runs, []);
 			assert.equal(result.warning, null, "nothing failed, so nothing was refused");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a failing run older than the window is history, not evidence", () => {
+		// 2026-11-18: gh holds every failure forever, so the gate read `23× pr-tier`
+		// across 23 branches whose newest failure was 18 hours old. The table has to
+		// describe now.
+		const now = Date.parse("2026-11-18T09:00:00Z");
+		const days = (n: number) => new Date(now - n * 24 * 60 * 60 * 1000).toISOString();
+		const runs = [
+			{ name: "pr-tier", headBranch: "merged-long-ago", conclusion: "failure", createdAt: days(30) },
+			{ name: "tests", headBranch: "trunk", conclusion: "failure", createdAt: days(1) },
+			{ name: "harness-check", headBranch: "no-date", conclusion: "failure" },
+			{ name: "zizmor", headBranch: "garbage", conclusion: "failure", createdAt: "not a date" },
+			{ name: "secret scan", headBranch: "boundary", conclusion: "failure", createdAt: days(7) },
+		];
+		const aged = agedOut(runs, now);
+		assert.equal(aged.aged, 1, "the 30-day-old run is the only one past the window");
+		assert.deepEqual(
+			aged.runs.map((run) => run.headBranch),
+			["trunk", "no-date", "garbage", "boundary"],
+			"an unreadable or absent date is not an old one, and a week old is still inside",
+		);
+		assert.deepEqual(agedOut([], now), { runs: [], aged: 0 }, "nothing to age is no window");
+		assert.equal(CI_FAILURE_WINDOW_MS, 7 * 24 * 60 * 60 * 1000);
+	});
+
+	test("an aged-out run leaves the table, and the count of what aged out is written down", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-aged-gh-"));
+		try {
+			const long = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+			const fresh = new Date(Date.now() - 60_000).toISOString();
+			const runs = JSON.stringify([
+				{ name: "pr-tier", headBranch: "gone", conclusion: "failure", databaseId: 1, createdAt: long },
+				{ name: "tests", headBranch: "one", conclusion: "failure", databaseId: 2, createdAt: fresh },
+				{ name: "tests", headBranch: "two", conclusion: "failure", databaseId: 3, createdAt: fresh },
+			]);
+			const bin = join(dir, "gh");
+			await writeFile(
+				bin,
+				`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '${runs}' ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;;\nesac\n`,
+				"utf8",
+			);
+			await chmod(bin, 0o755);
+			const result = await ghCiRuns(dir, bin);
+			assert.deepEqual(
+				result.runs.map((run) => run.headBranch),
+				["one", "two"],
+				"the 30-day-old pr-tier run is gone, so the check no longer has two branches and cannot fire",
+			);
+			assert.match(result.warning ?? "", /1 of 3 failing runs are older than 7 days/);
+			assert.match(result.warning ?? "", /older CI failures not counted/);
+			assert.doesNotMatch(result.warning ?? "", /not read/, "the list was read; only the window changed");
+			assert.equal(ciFailuresFrom(result.runs).length, 1, "tests on two fresh branches still fires");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a refused run and an old run are two different notes, in one warning", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-both-gh-"));
+		try {
+			const long = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+			const fresh = new Date().toISOString();
+			// Four runs: 1 never started, 1 is a month old, 2 are live evidence.
+			const runs = JSON.stringify([
+				{ name: "tests", headBranch: "refused", conclusion: "failure", databaseId: 1, createdAt: fresh },
+				{ name: "tests", headBranch: "old", conclusion: "failure", databaseId: 2, createdAt: long },
+				{ name: "tests", headBranch: "one", conclusion: "failure", databaseId: 3, createdAt: fresh },
+				{ name: "tests", headBranch: "two", conclusion: "failure", databaseId: 4, createdAt: fresh },
+			]);
+			const bin = join(dir, "gh");
+			await writeFile(
+				bin,
+				`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '${runs}' ;;\n  view) case "$3" in 1) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]}]}' ;; *) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;; esac ;;\nesac\n`,
+				"utf8",
+			);
+			await chmod(bin, 0o755);
+			const result = await ghCiRuns(dir, bin);
+			assert.equal(result.runs.length, 2);
+			assert.match(result.warning ?? "", /1 of 4 failing runs ran no step/);
+			assert.match(result.warning ?? "", /1 of 4 failing runs are older than 7 days/);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
