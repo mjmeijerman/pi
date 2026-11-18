@@ -20,21 +20,9 @@
 // dropped and only what the file does not cover gets asked again. --reask
 // ignores the record.
 //
-// Flags:
-//   -y, --yes          accept every default (installs the full set)
-//       --skills=a,b   only these skills
-//       --extensions=a,b
-//       --rules=all|none|keep:1,2|drop:3,4
-//       --no-keys      never ask for a key
-//       --dry-run      print the plan, change nothing
-//       --reask        ask again about everything the state file covers
-//       --no-apt       never call sudo apt-get (Linux only)
-//       --with-ollama  pull the local model (~17 GB)
-//       --with-dictation  build the whisper venv (~2.5 GB)
-//       --force-key    replace an existing key file
-//       --no-verify    skip the verification block
-//       --install-pi   let install.mjs install pi with npm when it is missing
-//   -h, --help         this text
+// Flags: node setup.mjs --help prints the list. It is one table
+// (scripts/install-lib.mjs, ENGINE_FLAGS.setup) that the parser reads, so the
+// printed flags are the accepted flags; docs/install.md is the human copy.
 //
 // Radar basis (Vol. 35): #1 agent sandboxing (Adopt), #36 agent instruction
 // bloat (a rule nobody wants is a rule that gets skipped), #99 Safe Chain.
@@ -50,9 +38,11 @@ import { fileURLToPath } from 'node:url';
 import {
 	extensionNames,
 	filterAgentsMd,
+	helpText,
 	homePaths,
 	nodePreflight,
 	parseAgentsMd,
+	parseFlags,
 	parseRuleSelection,
 	pinnedNodeMajor,
 	planFor,
@@ -80,58 +70,20 @@ const die = (message) => {
 };
 
 // --- flags ------------------------------------------------------------------
+// One table in scripts/install-lib.mjs (ENGINE_FLAGS.setup) drives both the
+// parser and `--help`, so the printed flags are the accepted flags.
 function parseArgs(argv) {
-	const o = { yes: false, dryRun: false, reask: false, noKeys: false, doApt: true, verify: true, forceKey: false, withOllama: false, withDictation: false, installPi: false };
-	for (const arg of argv) {
-		switch (true) {
-			case arg === '-y' || arg === '--yes':
-				o.yes = true;
-				break;
-			case arg === '--dry-run':
-				o.dryRun = true;
-				break;
-			case arg === '--reask':
-				o.reask = true;
-				break;
-			case arg === '--no-keys':
-				o.noKeys = true;
-				break;
-			case arg === '--no-apt':
-				o.doApt = false;
-				break;
-			case arg === '--no-verify':
-				o.verify = false;
-				break;
-			case arg === '--force-key':
-				o.forceKey = true;
-				break;
-			case arg === '--with-ollama':
-				o.withOllama = true;
-				break;
-			case arg === '--with-dictation':
-				o.withDictation = true;
-				break;
-			case arg === '--install-pi':
-				o.installPi = true;
-				break;
-			case arg.startsWith('--skills='):
-				o.skills = arg.slice(9).split(',');
-				break;
-			case arg.startsWith('--extensions='):
-				o.extensions = arg.slice(13).split(',');
-				break;
-			case arg.startsWith('--rules='):
-				o.rules = arg.slice(8);
-				break;
-			case arg === '-h' || arg === '--help':
-				say(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(0, 42).join('\n'));
-				process.exit(0);
-				break;
-			default:
-				die(`unknown option: ${arg} (try --help)`);
-		}
+	let opts;
+	try {
+		opts = parseFlags('setup', argv);
+	} catch (err) {
+		die(err.message);
 	}
-	return o;
+	if (opts.help) {
+		say(helpText('setup', { command: 'node setup.mjs' }));
+		process.exit(0);
+	}
+	return opts;
 }
 
 // --- prompts ----------------------------------------------------------------

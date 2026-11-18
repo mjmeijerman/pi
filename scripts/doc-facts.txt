@@ -40,4 +40,4 @@ jev	typesafe	localhost|11434|ollama	agent/AGENTS.md agent/skills/jev/SKILL.md do
 # (`ENDPOINT = ... "http://localhost:11434/api/chat"`); naming the local model
 # (bin/local-model.mjs:13, qwen3.8:27b) counts as naming the transport, because
 # a doc that says which model runs locally has said the transport is local.
-local-run|local_llm	11434|ollama|qwen3\.8:27b	typesafe	agent/AGENTS.md agent/skills/jev/SKILL.md docs/radar-conformance.md docs/agent-playbook.md README.md sandbox/README.md	local-model.mjs
+local-run|local_llm	11434|ollama|qwen3\.8:27b	typesafe	agent/AGENTS.md agent/skills/jev/SKILL.md docs/radar-conformance.md docs/agent-playbook.md README.md sandbox/README.md docs/install.md	local-model.mjs
