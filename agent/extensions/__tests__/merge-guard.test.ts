@@ -544,3 +544,81 @@ describe("merge-guard: the repository the command targets", () => {
 		assert.match(result.reason, /on trunk/);
 	});
 });
+
+/**
+ * The parser's own shapes: a hole where a segment used to be, a word that only
+ * looks like a `cd`, a `~` that is not an expansion, extra whitespace. Each one
+ * decides which directory a git command is judged in, so each one is a guard
+ * rule and not a formatting detail.
+ */
+describe("merge-guard: command shapes the parser has to survive", () => {
+	test("an empty segment is dropped, not carried", () => {
+		// A trailing `&&` leaves a hole. Kept, the hole becomes a segment that
+		// inherits the directory of the command before it.
+		assert.deepEqual(
+			gitSegments("git status &&").map((s) => s.segment),
+			["git status"],
+		);
+		assert.deepEqual(
+			gitSegments("; git status").map((s) => s.segment),
+			["git status"],
+		);
+	});
+
+	test("a cd only counts when it starts the segment", () => {
+		// `echo cd /nowhere` prints two words; it does not change directory, and
+		// it certainly does not move the next command into /nowhere.
+		assert.deepEqual(
+			gitSegments("echo cd /nowhere && git status").map((s) => s.dir),
+			[null, null],
+		);
+	});
+
+	test("-C is read after a global flag that takes its own argument", () => {
+		assert.match(
+			trunkCommitReason("git -c user.name=x -C /p commit -m y", { "/p": "trunk" }) ?? "",
+			/a commit on trunk/,
+		);
+		assert.match(
+			trunkCommitReason("git --git-dir=/r/.git -C /p commit -m x", { "/p": "trunk" }) ?? "",
+			/a commit on trunk/,
+		);
+	});
+
+	test("only a leading ~ is an expansion", () => {
+		// A directory whose name contains a tilde is a directory, not a home.
+		assert.match(
+			trunkCommitReason("git -C /tmp/a~b commit -m x", { "/tmp/a~b": "trunk" }) ?? "",
+			/a commit on trunk/,
+		);
+		assert.match(
+			trunkCommitReason("git -C ~/repo commit -m x", { [`${homedir()}/repo`]: "trunk" }) ?? "",
+			/a commit on trunk/,
+		);
+	});
+
+	test("a relative path ending in / resolves against the session cwd", () => {
+		const session = "/home/mark/big-boss-pi";
+		assert.match(
+			trunkCommitReason("git -C sub/ commit -m x", { [`${session}/sub`]: "trunk" }, session) ?? "",
+			/a commit on trunk/,
+		);
+	});
+
+	test("a path is normalised before the branch lookup", () => {
+		// `..` in a directory the command names is the same repository as the
+		// normalised path, and the lookup has to agree.
+		assert.match(
+			trunkCommitReason("git -C /tmp/a/../trunk commit -m x", { "/tmp/trunk": "trunk" }) ?? "",
+			/a commit on trunk/,
+		);
+	});
+
+	test("whitespace between `stash` and its verb is never a verb", () => {
+		// Splitting on a single space leaves an empty token in front of the verb,
+		// and an empty verb would be reported as parked work.
+		assert.equal(parkReason("git stash  list"), null);
+		assert.equal(parkReason("git stash   show"), null);
+		assert.equal(parkReason("git stash  pop"), null);
+	});
+});
