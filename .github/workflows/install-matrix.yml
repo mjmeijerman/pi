@@ -47,11 +47,10 @@ jobs:
       # A runner has no pi binary. install.mjs stops when pi is missing (that is
       # right on a laptop); this flag is the CI-shaped version of that check.
       PI_ALLOW_MISSING_PI: "1"
-      # Both spellings, because node reads USERPROFILE on Windows and git and
-      # the POSIX tools read HOME.
-      HOME: ${{ runner.temp }}/home
-      USERPROFILE: ${{ runner.temp }}/home
-      PI_AGENT_DIR: ${{ runner.temp }}/home/.pi/agent
+      # The throwaway HOME is NOT here: `runner` is one of the contexts a job-level
+      # `env` may not use, and GitHub rejects the whole file for it — the run dies
+      # in 0s with no jobs and "Invalid workflow file: Unrecognized named-value:
+      # 'runner'". It is set per step instead, where `runner.temp` is allowed.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -65,6 +64,13 @@ jobs:
         run: bash -n install.sh setup.sh
 
       - name: first install into a throwaway HOME
+        env:
+          # Both spellings, because node reads USERPROFILE on Windows and git and
+          # the POSIX tools read HOME. Step-level env, because that is where the
+          # `runner` context is available.
+          HOME: ${{ runner.temp }}/home
+          USERPROFILE: ${{ runner.temp }}/home
+          PI_AGENT_DIR: ${{ runner.temp }}/home/.pi/agent
         run: |
           set -euo pipefail
           mkdir -p "$HOME"
@@ -72,12 +78,24 @@ jobs:
           node scripts/verify-install.mjs --home "$HOME" --snapshot "$RUNNER_TEMP/before.json"
 
       - name: second install changes nothing
+        env:
+          # Both spellings, because node reads USERPROFILE on Windows and git and
+          # the POSIX tools read HOME.
+          HOME: ${{ runner.temp }}/home
+          USERPROFILE: ${{ runner.temp }}/home
+          PI_AGENT_DIR: ${{ runner.temp }}/home/.pi/agent
         run: |
           set -euo pipefail
           node setup.mjs -y --no-keys --no-apt --no-verify --rules=all
           node scripts/verify-install.mjs --home "$HOME" --snapshot "$RUNNER_TEMP/before.json"
 
       - name: a dropped rule stays dropped
+        env:
+          # Both spellings, because node reads USERPROFILE on Windows and git and
+          # the POSIX tools read HOME.
+          HOME: ${{ runner.temp }}/home
+          USERPROFILE: ${{ runner.temp }}/home
+          PI_AGENT_DIR: ${{ runner.temp }}/home/.pi/agent
         run: |
           set -euo pipefail
           node setup.mjs -y --no-keys --no-apt --no-verify --rules=drop:1 >/dev/null
