@@ -185,15 +185,33 @@ test('spawnPlan: a .cmd command on win32 goes through cmd.exe, argv intact', () 
 });
 
 test('spawnPlan: everything else is spawned directly, with no shell in sight', () => {
-	for (const platform of ['linux', 'darwin', 'win32']) {
+	for (const platform of ['linux', 'darwin']) {
 		const spec = spawnPlan('git', ['config', '--global', 'user.name', 'Mark'], { platform });
 		assert.equal(spec.file, 'git', platform);
 		assert.deepEqual(spec.args, ['config', '--global', 'user.name', 'Mark'], platform);
 		assert.equal(spec.windowsVerbatimArguments, false, platform);
 	}
-	// A plain .exe on Windows is exec'd, not handed to cmd.exe: gh and node are
-	// real executables there, and cmd.exe would only add a parsing layer.
-	assert.equal(spawnPlan('gh.exe', ['auth', 'status'], { platform: 'win32', comspec: 'cmd.exe' }).file, 'gh.exe');
+	// A plain .exe on Windows is exec'd, not handed to cmd.exe: only CreateProcess
+	// runs there, and cmd.exe would add a parsing layer for nothing.
+	for (const command of ['gh.exe', 'C:\\Program Files\\Git\\bin\\bash.exe']) {
+		assert.equal(spawnPlan(command, ['auth', 'status'], { platform: 'win32', comspec: 'cmd.exe' }).file, command);
+	}
+});
+
+// PATHEXT is a shell feature: node's CreateProcess appends `.exe` and stops. So
+// `run('npm', …)` — the --install-pi path — cannot exec the npm.cmd shim unless
+// `npm` is routed through cmd.exe too. Dropping `shell: true` without this
+// would have fixed the scanner and broken Windows.
+test('spawnPlan: a bare name on win32 goes through cmd.exe, because PATHEXT does', () => {
+	const spec = spawnPlan('npm', ['install', '-g', 'pi'], { platform: 'win32', comspec: 'C:\\Windows\\system32\\cmd.exe' });
+	assert.equal(spec.file, 'C:\\Windows\\system32\\cmd.exe');
+	assert.deepEqual(spec.args, ['/d', '/s', '/c', '"npm install -g pi"']);
+	assert.equal(spec.windowsVerbatimArguments, true);
+	// Same for a shim named by its full path, where the space needs the quotes.
+	const viaPath = spawnPlan('C:\\Program Files\\nodejs\\npm.cmd', ['i'], { platform: 'win32', comspec: 'cmd.exe' });
+	assert.equal(viaPath.args[3], '""C:\\Program Files\\nodejs\\npm.cmd" i"');
+	// A bare name on a POSIX platform is untouched by all of this.
+	assert.equal(spawnPlan('npm', ['i'], { platform: 'linux' }).file, 'npm');
 });
 
 // The point of the two tests above is that nobody puts the shell back to make a

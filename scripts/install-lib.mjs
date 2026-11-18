@@ -416,6 +416,24 @@ export function shellQuote(arg) {
 }
 
 /**
+ * windowsNeedsCmd — is this command one that only a shell can find?
+ *
+ * CreateProcess resolves a bare name by appending `.exe` and nothing else; the
+ * `.cmd`/`.bat` half of PATHEXT is a shell feature. So `npm` — a .cmd shim on
+ * Windows, no npm.exe next to it — cannot be exec'd from node at all, and the
+ * same holds for anything else that only ships a shim. Only a command that
+ * names a real executable (`.exe`) is spawned directly there. That is what
+ * `run('npm', …)` on `--install-pi` needs: with the shell option gone it would
+ * otherwise look for npm.exe and fail.
+ */
+function windowsNeedsCmd(cmd) {
+	if (/\.exe$/i.test(cmd)) return false;
+	// An explicit path is taken at its word unless it is a shim by name.
+	if (/[\\/]/.test(cmd)) return /\.(cmd|bat)$/i.test(cmd);
+	return true;
+}
+
+/**
  * cmdQuote — one argument spelled the way cmd.exe needs it.
  *
  * cmd.exe splits on whitespace and reads & | < > ^ ( ) as operators, so an
@@ -443,11 +461,11 @@ export function cmdQuote(arg) {
  * from argv with only the quoting cmd.exe actually requires. spawnSync is then
  * called with shell: false, on every platform, for every command.
  *
- * Everything else — a plain command on Windows, every command on Linux and
- * macOS — is spawned directly, with argv untouched.
+ * Everything else — an `.exe` on Windows, every command on Linux and macOS — is
+ * spawned directly, with argv untouched.
  */
 export function spawnPlan(cmd, args = [], { platform = process.platform, comspec = process.env.ComSpec } = {}) {
-	if (platform !== 'win32' || !/\.(cmd|bat)$/i.test(cmd)) return { file: cmd, args: [...args], windowsVerbatimArguments: false };
+	if (platform !== 'win32' || !windowsNeedsCmd(cmd)) return { file: cmd, args: [...args], windowsVerbatimArguments: false };
 	const line = [cmd, ...args].map(cmdQuote).join(' ');
 	return {
 		file: comspec || 'cmd.exe',
