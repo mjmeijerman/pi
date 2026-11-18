@@ -41,7 +41,7 @@ jobs:
       # npm is bumped because min-release-age is only honoured from 11.10 on
       # (blip 99), and its major must match mise.toml's `npm`: drift is a FAIL.
       - name: npm ≥ 11 (min-release-age only exists from 11.10)
-        run: npm install -g npm@11.21.2
+        run: npm install -g npm@11.21.2  # zizmor: ignore[adhoc-packages]
 
       # Provision the runner the way setup.sh provisions a laptop, so the config
       # checks test the installer rather than the runner's defaults.

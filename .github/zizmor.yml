@@ -1,18 +1,20 @@
 # Audit configuration for the zizmor gate (.github/workflows/zizmor.yml).
 #
-# adhoc-packages is clean except for one deliberate install: harness-check.yml
-# bumps npm itself because min-release-age is only honoured from npm 11.10 (blip 99)
-# and the runner's bundled npm is older than the major mise.toml pins. npm cannot
-# be installed "from a lockfile" in that spot — the whole point is to replace the
-# npm that would run `npm ci` — so the install is pinned to an exact version
-# instead and the finding is ignored for that line only. Any other ad-hoc install,
-# or a second one in this file, still fails the gate.
+# The `rules:` block is empty on purpose. The one deliberate ad-hoc install —
+# harness-check.yml bumps npm itself because min-release-age is only honoured from
+# npm 11.10 (blip 99) and the runner's bundled npm is older than the major
+# mise.toml pins — is ignored by an inline `# zizmor: ignore[adhoc-packages]`
+# comment on the install line itself, the way test.yml's optional pi-package
+# install already is. A comment travels with its line; the `harness-check.yml:NN`
+# entry this file used to carry did not, and that number has now needed editing
+# twice for the same reason: a line inserted above the install (the
+# node-version-file comment) moved it from 42 to 44 and the gate went red with the
+# finding still present, only at a different line.
 #
-# The ignore is the `npm install -g npm@11.21.2` line in harness-check.yml, which
-# is line 44 since node-version-file added two comment lines above it. Editing the
-# workflow above that line means editing this number too; the pin is the object of
-# check_mise_pins, so the install stays and the finding stays suppressed.
-rules:
-  adhoc-packages:
-    ignore:
-      - harness-check.yml:44
+# npm cannot be installed "from a lockfile" in that spot — the whole point is to
+# replace the npm that would run `npm ci` — so the install is pinned to an exact
+# version instead, and check_mise_pins holds that version to mise.toml's `npm`.
+# Nothing here suppresses by path, line or audit: any other ad-hoc install, or a
+# second one in harness-check.yml, still fails the gate.
+
+rules: {} # no rule-level ignores: see the note above
