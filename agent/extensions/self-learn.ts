@@ -1913,7 +1913,13 @@ export async function confirmTurn(input: ConfirmInput): Promise<TurnEvidence> {
 	return { ok: false, detail: `no session took the prompt within ${timeoutMs}ms${tail}` };
 }
 
-/** Close whatever the launch may have made, quietly. Never throws. */
+/**
+ * Close a learner's space on the host, quietly. Never throws.
+ *
+ * Called for a launch that produced no learner, and for a learner that finished:
+ * a visible worker owns a space, and a space nobody closes is a tab that looks
+ * busy after the work is done.
+ */
 function closeSpace(slug: string): Promise<void> {
 	return new Promise<void>((resolve) => {
 		let done = false;
@@ -2345,17 +2351,30 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			idleMs: deps.outcomeIdleMs,
 		})
 			.then(async (outcome) => {
-				// The proposal is the learner's product; the publish request is the next
-				// write it makes. Waiting for that here is what closes the loop the
-				// sandbox broke: the branch reaches a PR without the learner needing
-				// herdr-app or a git credential.
-				if (outcome !== "proposal") return;
-				await watchPublish({
-					record,
-					run: deps.publishRun,
-					pollMs: deps.publishPollMs,
-					windowMs: deps.publishWindowMs,
-				});
+				// A learner that is still working is not a finished one: its space is its
+				// proof of life, and closing it here would kill the work.
+				if (outcome === "unknown") return;
+				try {
+					if (outcome !== "proposal") return;
+					// The proposal is the learner's product; the publish request is the next
+					// write it makes. Waiting for that here is what closes the loop the
+					// sandbox broke: the branch reaches a PR without the learner needing
+					// herdr-app or a git credential.
+					await watchPublish({
+						record,
+						run: deps.publishRun,
+						pollMs: deps.publishPollMs,
+						windowMs: deps.publishWindowMs,
+					});
+				} finally {
+					// The host closes what the host made. `agent/prompts/learn.md` asks the
+					// learner to close its own space, and a sandboxed learner cannot: herdr-app
+					// is outside every sandbox mount, so `agent-pane.sh close` keeps the entry and
+					// reports `space_closed:false` — the tab the person still sees after the run.
+					// Closing here, once the learner has written everything it will write, is the
+					// only close that reaches the host.
+					await close(plan.slug);
+				}
 			})
 			.catch(() => {
 				// The watch is bookkeeping; it may never reach the host session.

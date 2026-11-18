@@ -570,6 +570,74 @@ describe("wiring", () => {
 		);
 	});
 
+	test("a learner that finished has its space closed by the host, not by the sandbox", async () => {
+		// The spec asks the learner to close its own space, and a sandboxed learner cannot:
+		// herdr-app is outside every sandbox mount, so `agent-pane.sh close` keeps the entry
+		// and reports `space_closed:false`. The person kept finding those tabs still open
+		// after the run ("why is the ci space still alive?", "I still see it").
+		const closed: string[] = [];
+		const { emit, ctx, started } = setup({
+			closeSpace: async (slug: string) => {
+				closed.push(slug);
+			},
+		});
+		await trip(emit, ctx);
+		await settle();
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		await waitFor(() => started.length === 1);
+		await waitFor(() => closed.length === 1);
+		assert.deepEqual(closed, [started[0].env.PI_SELF_LEARN_SLUG], "the space the host made is the space the host closes");
+	});
+
+	test("a learner still working after the window keeps its space", async () => {
+		// Outcome `unknown` means the watch window closed with the learner apparently
+		// still working. Closing then would kill the run the space exists to show.
+		const closed: string[] = [];
+		const { emit, ctx, started } = setup({
+			proposalExists: () => false,
+			outcomeTimeoutMs: 30,
+			closeSpace: async (slug: string) => {
+				closed.push(slug);
+			},
+		});
+		await trip(emit, ctx);
+		await settle();
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		await waitFor(() => started.length === 1);
+		await settle();
+		assert.deepEqual(closed, [], "an unfinished learner is left in its space");
+	});
+
+	test("a learner that died is closed at once, not after the publish window", async () => {
+		// A death has no request to wait for. If the close sat behind the publish watch,
+		// the tab outlives the learner by fifteen minutes on a real session — which is the
+		// same complaint, just slower.
+		const session = join(scratch, `learn-died-${process.pid}-${Date.now()}.json`);
+		await writeFile(session, "{}", "utf8");
+		const closed: string[] = [];
+		const { emit, ctx, started } = setup({
+			proposalExists: () => false,
+			confirm: async () => ({ ok: true, source: "session", detail: session }),
+			outcomePollMs: 5,
+			outcomeIdleMs: 10,
+			publishWindowMs: 400,
+			closeSpace: async (slug: string) => {
+				closed.push(slug);
+			},
+		});
+		try {
+			await trip(emit, ctx);
+			await settle();
+			await emit("session_compact", { reason: "threshold" }, ctx);
+			await waitFor(() => started.length === 1);
+			const at = Date.now();
+			await waitFor(() => closed.length === 1);
+			assert.ok(Date.now() - at < 250, "the space is closed when the learner is, not when the publish window ends");
+		} finally {
+			await rm(session, { force: true });
+		}
+	});
+
 	test("no herdr on this machine: one spawn-failed row that names the reason", async () => {
 		// The old behaviour was a detached `pi -p` that looked like a sub-agent of
 		// the host session. It is a recorded failure now, with its own line.
