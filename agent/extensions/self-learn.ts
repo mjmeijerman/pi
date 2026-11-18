@@ -874,7 +874,13 @@ function runOnce(
 			if (!stderr) stderr = String(error);
 			finish(null);
 		});
-		child.on("exit", (code: number | null) => finish(code));
+		// `close`, never `exit`: 'exit' fires while the pipes may still hold the
+		// tail of the output. Eight probes in flight lost whole JSON bodies that
+		// way (16 of 120 concurrent spawns in a standalone loop), and a lost body
+		// makes a queue refusal look like a real failure: `unreadable` instead of
+		// `refused`, so the dead run is counted against the code. `close` fires
+		// once stdio is drained, and the timeout above still bounds it.
+		child.on("close", (code: number | null) => finish(code));
 		timer = setTimeout(() => {
 			try {
 				child.kill("SIGTERM");

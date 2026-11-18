@@ -1025,6 +1025,7 @@ describe("repeated failing CI checks", () => {
 			}));
 			const judged = await judgedByCode(runs, dir, bin);
 			assert.equal(judged.refused, 10);
+			assert.equal(judged.unreadable, 0, "no probe went unanswered: a body lost in the pipe reads as doubt, not as a refusal");
 			assert.equal(judged.runs.length, 0);
 			const asked = await readFile(seen, "utf8").catch(() => "");
 			assert.equal(asked.length, 10, "one probe per run across two batches");
