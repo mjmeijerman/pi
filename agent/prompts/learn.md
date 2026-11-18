@@ -114,9 +114,11 @@ When the diff touches a **source** file — anything with a `.ts`, `.js`, `.mjs`
 or `.py` extension that is not itself a test — the same commit must carry the test
 that pins the change: name the test file in `**Test:**` and say in one line what it
 pins. If no test can tell the change apart from the code it replaced, say **that**
-instead, and prove it the way `docs/mutation-survivors.md` proves a survivor: a
-differential run over a named input domain, with the count — `2,431 cases, 0
-differing verdicts`.
+instead, on its own `**No test:**` line, and prove it the way
+`docs/mutation-survivors.md` proves a survivor: a differential run over a named
+input domain, with the count — `2,431 cases, 0 differing verdicts`. The label
+matters: the publish gate greps `**No test:**`, and the same sentence written
+inside `**Test:**` is not read as a proof.
 
 The reason is measured, not stylistic: the PR gate mutates **exactly the lines the
 diff adds** and breaks at 100, so a source line with no test is a red build waiting
@@ -126,7 +128,8 @@ the first one skipped. Pay for your own tests once, here.
 
 If the line is missing and the diff has a source file, `scripts/learn-publish.sh`
 refuses the branch before any space is spawned: you get the refusal, not a red PR,
-and you come back to `**Test:**` before the branch can go out.
+and you come back to a test — or to the `**No test:**` proof — before the
+branch can go out.
 
 ```markdown
 # <one line: what changes>
@@ -134,7 +137,8 @@ and you come back to `**Test:**` before the branch can go out.
 **Verdict:** change | nothing
 **Evidence:** <signatures + counts from the queue file, one line each>
 **Risk tier:** High | Medium | Low   (High = agent/extensions/, git-hooks/, sandbox/, .github/, agent/AGENTS.md)
-**Test:** <test file that pins it and what it pins, or "no test can distinguish it: <domain>, <N cases, 0 differing verdicts>">
+**Test:** <test file that pins it and what it pins — leave it out when the proof below is what you have>
+**No test:** <domain, N cases, 0 differing verdicts>   (only when no test can distinguish it; the publish gate reads this label)
 **Cost:** <minutes to apply>
 
 ## Why

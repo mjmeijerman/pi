@@ -276,14 +276,29 @@ test_change_line() {
 	printf '%s' "$reason"
 }
 
+# The differential proof accepted above is carried into the body: taking it as
+# the reason to publish and then printing a source-only diff with no reason is
+# the reviewer reading an unexplained change. The label is reduced to the gate's
+# spelling the same way `Test change:` is, so a body rebuilt downstream keeps it.
+no_test_line() {
+	local proof
+	no_test_proof || return 0
+	proof=$(grep -m1 -E '^\*\*No test:\*\*' "$PROPOSAL" \
+		| sed -E 's/^\*\*No test:\*\*[[:space:]]*//; s/\*\*//g; s/[[:space:]]*$//')
+	[ -n "$proof" ] || return 0
+	printf '%s' "$proof"
+}
+
 # The pull request body, as the gate reads it. Plain lines and no backticks: the
 # spec may be read in a shell, and the gate strips emphasis instead.
 pr_body_body() {
-	local reason
+	local reason proof
 	printf 'Mission: %s\n' "$(mission_line)"
 	printf 'Review tier: %s\n' "$TIER"
 	reason=$(test_change_line)
 	[ -z "$reason" ] || printf 'Test change: %s\n' "$reason"
+	proof=$(no_test_line)
+	[ -z "$proof" ] || printf 'No test: %s\n' "$proof"
 	printf 'Proposal: %s\n' "$PROPOSAL"
 	printf 'Written by a self-learn learner; published by a big-boss-pi agent.\n'
 }
