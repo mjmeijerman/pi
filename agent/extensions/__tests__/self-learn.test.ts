@@ -374,8 +374,31 @@ describe("wiring", () => {
 		}
 	}
 
-	/** Let a previous test's background launch finish writing its run row. */
-	const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+	/**
+	 * Wait until the audit trail stops moving.
+	 *
+	 * A previous test's launch is verified in the background (`outcomePollMs` 5,
+	 * `outcomeTimeoutMs` 100) and appends its row when it is done. A fixed 50 ms here was a
+	 * bet that the write had landed; on a box running 31 stryker workers the bet loses, the
+	 * late row arrives inside the *next* test and reads as "a spawned row for a learner that
+	 * never existed". Poll the file instead: quiet for two looks means the trail is done.
+	 */
+	const settle = async (): Promise<void> => {
+		// One dwell longer than the verifier's own budget (`outcomePollMs` 5 +
+		// `outcomeTimeoutMs` 100) so a launch still being watched cannot be mistaken for a
+		// finished one, then two quiet looks at the file. Longer than the old 50 ms, never
+		// shorter.
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		const deadline = Date.now() + 5000;
+		let seen = (await readRuns()).length;
+		for (;;) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			const now = (await readRuns()).length;
+			if (now === seen) return;
+			seen = now;
+			if (Date.now() > deadline) return;
+		}
+	};
 
 	/** Poll the audit trail: the launch is verified in the background. */
 	async function waitForRun(predicate: (row: any, index: number) => boolean): Promise<any> {
@@ -2689,6 +2712,35 @@ describe("the host session's half of the broker", () => {
 	const queueDir = () => join(scratch, "proposals", "queue");
 	const runsLog = () => join(scratch, "proposals", "runs.jsonl");
 
+	/** Every line of the audit trail, or none when it has not been written yet. */
+	async function readRows(): Promise<any[]> {
+		try {
+			return (await readFile(runsLog(), "utf8"))
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line));
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * Poll for a row instead of reading the log once.
+	 *
+	 * Claiming a queue file and writing its run row are two steps, so "the file is gone"
+	 * does not mean "the row is there". Reading the log straight after the claim is a bet on
+	 * the gap between them, and on a box running 31 stryker workers that bet loses.
+	 */
+	async function waitForRow(predicate: (row: any) => boolean, timeoutMs = 3000): Promise<any> {
+		const deadline = Date.now() + timeoutMs;
+		for (;;) {
+			const row = (await readRows()).find(predicate);
+			if (row) return row;
+			if (Date.now() > deadline) throw new Error(`no run row matched within ${timeoutMs} ms`);
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+
 	async function refusedFile(slug: string): Promise<string> {
 		await mkdir(queueDir(), { recursive: true });
 		const file = join(queueDir(), `${slug}${PUBLISH_SUFFIX}`);
@@ -2701,12 +2753,16 @@ describe("the host session's half of the broker", () => {
 		const { fake, ctx } = hostOnly();
 		try {
 			await fake.emit("before_agent_start", {}, ctx);
-			await waitFor(() => !existsSync(first));
-			const rows = (await readFile(runsLog(), "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
-			const refused = rows.filter((row) => row.kind === "publish" && row.slug === "learn-06-06");
-			assert.equal(refused.length, 1, "the row lands in runs.jsonl, not in the void");
-			assert.equal(refused[0].slug, "learn-06-06");
-			assert.equal(refused[0].publish, "refused");
+			const refused = await waitForRow((row) => row.kind === "publish" && row.slug === "learn-06-06");
+			assert.equal(existsSync(first), false, "the refused file was claimed, not left behind");
+			const rows = await readRows();
+			assert.equal(
+				rows.filter((row) => row.kind === "publish" && row.slug === "learn-06-06").length,
+				1,
+				"the row lands in runs.jsonl, not in the void",
+			);
+			assert.equal(refused.slug, "learn-06-06");
+			assert.equal(refused.publish, "refused");
 
 			const second = await refusedFile("learn-06-07");
 			await fake.emit("before_agent_start", {}, ctx);
