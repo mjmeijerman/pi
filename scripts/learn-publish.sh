@@ -28,6 +28,16 @@
 # it is "a pull request for that head exists" — and when this machine cannot ask
 # GitHub, the script says so (exit 2) instead of claiming there is no PR.
 #
+# Why it waits: "no PR" is only true once the agent has had time to push and
+# open one, and the version before this one asked GitHub the instant the space
+# was spawned. Every publish therefore recorded a failure it did not deserve —
+# `agent/proposals/publish-log.jsonl`, 2026-11-18: four slugs, four
+# "no PR after … was spawned" rows, each followed 12-16 s later by the row that
+# named the PR number (the PRs are 126, 132, 135 and 144). A learner reads exit 1
+# as "it never landed" and, because `agent/prompts/learn.md` says so, writes that
+# line into its proposal. The verdict is asked again over a bounded window
+# instead of once, and only the window's own expiry is recorded.
+#
 # Why the body is built here: the spec used to hand the agent a one-line literal,
 # `--body 'Tier: Medium. Proposal: …'`, and `scripts/pr-gate.sh` rejects that
 # three ways — no `Review tier:` line, no `Mission:` line, and no `Test change:`
@@ -58,6 +68,12 @@
 #   --gh CMD       gh command (default $LEARN_PUBLISH_GH or gh); tests stub it
 #   --tier T       review tier, read from the proposal when omitted
 #
+# Environment:
+#   LEARN_PUBLISH_WAIT  seconds to keep asking for the PR after a space is
+#                       spawned (default 180). 0 asks once and gives up, which
+#                       is what this script used to do unconditionally.
+#   LEARN_PUBLISH_POLL  seconds between those asks (default 5)
+#
 # This script never pushes, never opens a PR and never merges: it starts the
 # agent that may, then holds it to the PR.
 # ============================================================================
@@ -71,6 +87,8 @@ PROPOSAL=""
 TIER=""
 MODE="run"
 SLUG=""
+WAIT="${LEARN_PUBLISH_WAIT:-180}"
+POLL="${LEARN_PUBLISH_POLL:-5}"
 
 die() { echo "learn-publish: $*" >&2; exit 2; }
 
@@ -165,6 +183,25 @@ report() {
 			return 2
 			;;
 	esac
+}
+
+# The verdict, asked repeatedly for a bounded window. A space that has just
+# started has pushed nothing yet: one ask immediately after `spawn` measures the
+# latency of the hand-off, not whether the branch was published.
+# 0 = a PR exists (PR_NUM), 1 = the window expired with none, 2 = gh cannot be asked.
+wait_for_pr() {
+	local deadline rc
+	deadline=$((SECONDS + WAIT))
+	while :; do
+		rc=0
+		pr_number || rc=$?
+		case $rc in
+			0) return 0 ;;
+			2) return 2 ;;
+		esac
+		[ "$SECONDS" -lt "$deadline" ] || return 1
+		sleep "$POLL"
+	done
 }
 
 record() {
@@ -358,12 +395,12 @@ if ! "$PANE" spawn "$SPACE" "$SPEC" --cwd "$BBP"; then
 fi
 
 RC=0
-report || RC=$?
+wait_for_pr || RC=$?
 case $RC in
-	0) exit 0 ;;
+	0) echo "learn-publish: PR #$PR_NUM exists for $BRANCH — published"; exit 0 ;;
 	1)
-		record "no PR after $SPACE was spawned"
-		echo "learn-publish: FAIL — $BRANCH is still unpublished; the row is in $LOG and $SPACE may still be working: $PANE show $SPACE" >&2
+		record "no PR after $SPACE was spawned (waited ${WAIT}s)"
+		echo "learn-publish: FAIL — $BRANCH is still unpublished ${WAIT}s after $SPACE started; the row is in $LOG and $SPACE may still be working: $PANE show $SPACE" >&2
 		exit 1
 		;;
 	*)
