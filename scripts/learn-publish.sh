@@ -74,6 +74,14 @@ SLUG=""
 
 die() { echo "learn-publish: $*" >&2; exit 2; }
 
+# A sandboxed caller never publishes. It cannot see herdr-app, and a learner that
+# reaches for this script instead of asking the host is the hand-off this refuses:
+# the host's broker is the only caller. PI_SANDBOX_MODE is set by
+# sandbox/pi-sandbox.sh, so "am I contained?" has one honest answer.
+if [ -n "${PI_SANDBOX_MODE:-}" ]; then
+	die "this shell is sandboxed ($PI_SANDBOX_MODE) — do not run this script here; write {\"slug\":\"<slug>\",\"branch\":\"learn/<slug>\",\"reason\":\"<one line>\"} to ${LEARN_PUBLISH_ROOT:-/home/mark/.pi}/agent/proposals/queue/<slug>.publish.json and the host's self-learn broker runs it"
+fi
+
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--repo) [ $# -ge 2 ] || die "--repo needs a value"; REPO="$2"; [ -z "${LEARN_PUBLISH_PANE:-}" ] && PANE="$REPO/scripts/agent-pane.sh"; shift 2 ;;
