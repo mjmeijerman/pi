@@ -10,29 +10,43 @@ ask what the guard's contract at that line is, never write a vacuous test) are i
 `specs/areas/secret-guard.md` and in the sweep reports; this file only holds the verdicts.
 
 Scope: the whole mutated set, not one file — `agent/extensions/secret-guard.ts`,
-`agent/extensions/merge-guard.ts` and `agent/extensions/lib/usage-format.ts` (this is wider than
+`agent/extensions/merge-guard.ts`, `agent/extensions/lib/usage-format.ts`, and (since the
+`test/guard-survivors` sweep) `agent/extensions/big-boss-pi-guard.ts`,
+`agent/extensions/pi-master-guard.ts` and `agent/extensions/config-guard.ts` (this is wider than
 the file it replaces, which covered `secret-guard.ts` only). Widened because every count this repo
 quotes is the full run: a ledger that reconciles 80 sweep rows against a 84-mutant run has to name
-all three files or the arithmetic cannot close.
+every file in the glob or the arithmetic cannot close.
 
-Measured on trunk `8dba206`, 2026-11-18:
+Measured on `test/guard-survivors` (trunk `8dba206` + this ledger's branch), 2026-11-18:
 
 ```
 cd agent && rm -f reports/stryker/stryker-incremental.json
 ./node_modules/.bin/stryker run --force
 ```
 
-1477 mutants — **1396 killed, 81 survived, 0 timeout, 0 no-coverage, 94.52%**, 10m32s.
+1909 mutants — **1765 killed, 142 survived, 2 timeout, 0 no-coverage, 92.56%**, 13m51s.
+
+The run as reported by stryker was 1764 killed / 143 survived / 2 timeout at 92.51%; the
+`config-guard.ts` timing mutant (`58:14`, `performance.now() + started`) survived that run because
+the first version of its test only claimed "under a second" and this process had been up far
+shorter than that. The test now compares `ms` against the wall time of the same call, the follow-up
+per-file run is 52/52 killed in 41s (`config-guard.ts` 100.00%), and the totals above carry that
+one mutant as killed.
 
 | File | Mutants | Killed | Survived | Timeout | Score |
 | --- | --- | --- | --- | --- | --- |
 | `extensions/lib/usage-format.ts` | 75 | 72 | 3 | 0 | 96.00% |
 | `extensions/merge-guard.ts` | 342 | 331 | 11 | 0 | 96.78% |
 | `extensions/secret-guard.ts` | 1060 | 993 | 67 | 0 | 93.68% |
-| **all three** | **1477** | **1396** | **81** | **0** | **94.52%** |
+| `extensions/big-boss-pi-guard.ts` | 305 | 252 | 51 | 2 | 83.28% |
+| `extensions/pi-master-guard.ts` | 75 | 65 | 10 | 0 | 86.67% |
+| `extensions/config-guard.ts` | 52 | 52 | 0 | 0 | 100.00% |
+| **all six** | **1909** | **1765** | **142** | **2** | **92.56%** |
 
-A timeout counts as killed. The number to quote is **81**, measured; the earlier numbers were
-true of other trees and are reconciled below.
+A timeout counts as killed. The number to quote is **142**, measured; the earlier numbers were
+true of other trees and are reconciled below. The three guards are appended to `mutate` after the
+three older entries on purpose: stryker numbers mutants in glob order, so appending is what keeps
+every `#id` in this file pointing at the mutant it named before.
 
 ## Why 81 and not 84, and not 80
 
@@ -56,6 +70,61 @@ below, so nothing was lost going from 80 to 81.
 | `#936` | `secret-guard.ts` 383:19 | EqualityOperator — `i <= words.length` | `secret-guard-fd-redirect.test.ts` › `secret-guard: redirect operator with a stream number`; also › `a stream copy is not a redirect, even with a credential file after it`. This is ledger row #507, which the 80-row sweep left as documented |
 | `#943` | `secret-guard.ts` 384:8 | Regex — `/^\d*>>?$/` loses its `^` | `secret-guard-fd-redirect.test.ts` › `a word ending in > is a word, not an operator`; also the stream-number test. **The successor of the `381:8` finding**: the shipped regex became `/^\d*>>?$/` in #156, and the mutant that made the fd-redirect hole visible is now killed rather than open |
 | `#1151` | `secret-guard.ts` 546:13 | Regex — `/(?:--?[\w-]+=?|[\w.-]+=)?@(.+)$/` | `secret-guard-flow.test.ts` › `an \`@\` inside a user@host operand is not a file body` (#155) |
+| `#819` | `pi-master-guard.ts` 34:21 | Regex — `/(^\|[\s;&\|(])(rm\|rmdir\|mv\|cp\|dd\|tee\|truncate\|…` | `pi-master-guard-mutants.test.ts` › `shellWriteReason("bash -c echo a  > rm /home/mark/pi-master/x")` |
+| `#819` | `pi-master-guard.ts` 34:21 | Regex — `/(^\|[\s;&\|(])(rm\|rmdir\|mv\|cp\|dd\|tee\|truncate\|…` | `pi-master-guard-mutants.test.ts` › `shellWriteReason("echo 'a' > '/home/mark/pi-master/x'")` |
+| `#819` | `pi-master-guard.ts` 34:21 | Regex — `/(^\|[\s;&\|(])(rm\|rmdir\|mv\|cp\|dd\|tee\|truncate\|…` | `pi-master-guard-mutants.test.ts` › `shellWriteReason("bash -c echo a  > rm /home/mark/pi-master/x")` |
+| `#822` | `pi-master-guard.ts` 35:18 | Regex — `/^\S*(delegate\|jev\|hc\|herdr-app\|herdr)\b/` | `pi-master-guard-mutants.test.ts` › `shellWriteReason("delegate echo a  >> rm /home/mark/pi-master/x")` |
+| `#825` | `pi-master-guard.ts` 39:7 | ConditionalExpression — `true` | `pi-master-guard-mutants.test.ts` › `shellWriteReason("rm /home/mark/big-boss-pi/x")` |
+| `#828` | `pi-master-guard.ts` 40:7 | ConditionalExpression — `false` | `pi-master-guard-mutants.test.ts` › `shellWriteReason("delegate echo a  >> rm /home/mark/pi-master/x")` |
+| `#835` | `pi-master-guard.ts` 48:3 | StringLiteral — `""` | `pi-master-guard-mutants.test.ts` › `bash in /home/mark/pi-master (PI_WORKER=null)` |
+| `#834` | `pi-master-guard.ts` 47:3 | StringLiteral — `""` | `pi-master-guard-mutants.test.ts` › `bash in /home/mark/pi-master (PI_WORKER=null)` |
+| `#850` | `pi-master-guard.ts` 55:19 | StringLiteral — `""` | `pi-master-guard-mutants.test.ts` › `write in /home/mark/pi-master (PI_WORKER=null)` |
+| `#862` | `pi-master-guard.ts` 62:19 | StringLiteral — `""` | `pi-master-guard-mutants.test.ts` › `bash in /home/mark/pi-master (PI_WORKER=null)` |
+| `#863` | `pi-master-guard.ts` 62:74 | StringLiteral — `""` | `pi-master-guard-mutants.test.ts` › `bash in /home/mark/pi-master (PI_WORKER=null)` |
+| `#31` | `big-boss-pi-guard.ts` 73:40 | ConditionalExpression — `false` | `big-boss-pi-guard-mutants.test.ts` › `delegationPath("/home/mark/big-boss-pi/reports")` |
+| `#33` | `big-boss-pi-guard.ts` 73:51 | StringLiteral — ```` | `big-boss-pi-guard-mutants.test.ts` › `delegationPath("/home/mark/big-boss-pi/reports")` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<'EOF'\nrm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<'EOF'\nrm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<'EOF'\nrm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<'EOF'\nrm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<'EOF'\nrm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<'EOF'\nrm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<'EOF'\nrm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<'EOF'\nrm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<'EOF'\nrm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<'EOF'\nrm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<-EOF\n\trm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<'EOF'\nrm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<'EOF'\nrm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#56` | `big-boss-pi-guard.ts` 83:26 | Regex — `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("cat <<'EOF'\nrm /home/mark/pi-master/x\nEOF", /home/mark/big-boss-pi)` |
+| `#65` | `big-boss-pi-guard.ts` 90:10 | StringLiteral — `""` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("sudo echo a \nrm /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#68` | `big-boss-pi-guard.ts` 92:22 | MethodExpression — `segment` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("(echo a  >\| sudo rm /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#70` | `big-boss-pi-guard.ts` 97:21 | Regex — `/^(rm\|mv\|cp\|tee\|touch\|truncate\|mkdir\|rmdir\|ln…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("rmx /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#70` | `big-boss-pi-guard.ts` 97:21 | Regex — `/^(rm\|mv\|cp\|tee\|touch\|truncate\|mkdir\|rmdir\|ln…` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("xrm /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#107` | `big-boss-pi-guard.ts` 126:36 | Regex — `/^-[a-zA-Z]*c[^a-zA-Z]*$/` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("bash -lc 'rm /home/mark/pi-master/x'", /home/mark/big-boss-pi)` |
+| `#113` | `big-boss-pi-guard.ts` 130:8 | ConditionalExpression — `true` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("X=1 rm /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#115` | `big-boss-pi-guard.ts` 130:8 | EqualityOperator — `i <= 0` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("X=1 rm /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#131` | `big-boss-pi-guard.ts` 138:8 | ConditionalExpression — `true` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("bash -c echo a  > sed -i /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#136` | `big-boss-pi-guard.ts` 138:29 | ConditionalExpression — `false` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("perl -i /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#138` | `big-boss-pi-guard.ts` 138:41 | StringLiteral — `""` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("perl -i /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#137` | `big-boss-pi-guard.ts` 138:29 | EqualityOperator — `command !== "perl"` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("bash -c echo a  > sed -i /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#145` | `big-boss-pi-guard.ts` 138:86 | Regex — `/^-[^a-zA-Z]*i/` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("sed -n /home/mark/big-boss-pi/x", /home/mark/big-boss-pi)` |
+| `#145` | `big-boss-pi-guard.ts` 138:86 | Regex — `/^-[^a-zA-Z]*i/` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("perl -pi -e 's/a/b/' /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#159` | `big-boss-pi-guard.ts` 154:14 | Regex — `/>>?\s*([\s;&\|>]+)/g` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("jev echo a  >rm /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#182` | `big-boss-pi-guard.ts` 166:7 | ConditionalExpression — `false` | `big-boss-pi-guard-mutants.test.ts` › `edit in /home/mark/big-boss-pi/specs (PI_WORKER=null)` |
+| `#184` | `big-boss-pi-guard.ts` 167:20 | MethodExpression — `cleaned.endsWith("~")` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("rm ~/pi-master/x", /home/mark/big-boss-pi)` |
+| `#188` | `big-boss-pi-guard.ts` 168:10 | MethodExpression — `expanded.endsWith("/")` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("sed -i.bak 's/a/b/' /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#198` | `big-boss-pi-guard.ts` 184:25 | LogicalOperator — `segment.split(/\s+/)[0] && ""` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("sudo rm /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#200` | `big-boss-pi-guard.ts` 184:39 | Regex — `/\S+/` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("sudo rm /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#202` | `big-boss-pi-guard.ts` 184:56 | LogicalOperator — `verb?.split(/\s+/)[0] && ""` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("sudo rm /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#204` | `big-boss-pi-guard.ts` 184:68 | Regex — `/\s/` | `big-boss-pi-guard-mutants.test.ts` › `shellWriteReason("sudo rm /home/mark/pi-master/x", /home/mark/big-boss-pi)` |
+| `#277` | `big-boss-pi-guard.ts` 233:8 | ConditionalExpression — `false` | `big-boss-pi-guard-mutants.test.ts` › `bash in /home/mark/projects/bakmark (PI_WORKER=null)` |
+| `#290` | `big-boss-pi-guard.ts` 239:92 | StringLiteral — `""` | `big-boss-pi-guard-mutants.test.ts` › `write in /home/mark/big-boss-pi (PI_WORKER=null)` |
+| `#293` | `big-boss-pi-guard.ts` 243:7 | StringLiteral — `""` | `big-boss-pi-guard-mutants.test.ts` › `write in /home/mark/big-boss-pi (PI_WORKER=null)` |
+| `#296` | `big-boss-pi-guard.ts` 247:8 | ConditionalExpression — `false` | `big-boss-pi-guard-mutants.test.ts` › `read in /home/mark/big-boss-pi (PI_WORKER=null)` |
+| `#302` | `big-boss-pi-guard.ts` 250:18 | StringLiteral — `""` | `big-boss-pi-guard-mutants.test.ts` › `bash in /home/mark/big-boss-pi (PI_WORKER=null)` |
+| `#303` | `big-boss-pi-guard.ts` 250:81 | StringLiteral — `""` | `big-boss-pi-guard-mutants.test.ts` › `bash in /home/mark/big-boss-pi (PI_WORKER=null)` |
+| `#329` | `config-guard.ts` 58:14 | ArithmeticOperator — `performance.now() + started` | `config-guard-mutants.test.ts` › `the reported cost is the call's own duration, not an absolute timestamp` |
 
 The rows the `2a51509` ledger recorded as dead do not carry over by line, so each was checked
 rather than copied. The two `NET_TARGET_RE` rows (`#437`, `#438`) name an identifier that is no
@@ -171,6 +240,94 @@ first to decide it.
 | `#1441` | 768:8 | ConditionalExpression | `true` | documented ledger row; the earlier sweep's differential run found 0 differing | doc #997 |
 | `#1479` | 795:23 | StringLiteral | `"Stryker was here!"` | documented ledger row; the earlier sweep's differential run found 0 differing | doc #1035 |
 
+### `big-boss-pi-guard.ts` (new here)
+
+51 rows from a guard that had never been mutated. The domain is one catch-all: a generated shell
+corpus crossed with cwds, tool calls and `PI_WORKER` values, 51,792 observations, 0 differing
+verdicts on each row below. The 56 mutants that guard's own test file now separates are in **Dead**;
+the two timeouts (`119:27`, `131:4`, both of which hang the `commandVerb` walk) count as killed.
+
+| Id | Line:col | Mutator | Replacement | Domain it cannot be observed on | Proof |
+| --- | --- | --- | --- | --- | --- |
+| `#23` | 70:7 | ConditionalExpression | `true` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#39` | 78:26 | Regex | `/"(?:[^"\\]\|\\.)*"\|'[^']'/g` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#39` | 78:26 | Regex | `/"(?:[^"\\]\|\\.)*"\|'[^']'/g` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#56` | 83:26 | Regex | `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#56` | 83:26 | Regex | `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#56` | 83:26 | Regex | `/<<-?\s*(['"]?)(\w+)\1[\s\S]*?\n\s\2\s*(?=\n\|…` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#62` | 83:78 | StringLiteral | `""` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#64` | 87:10 | MethodExpression | `stripHeredocs(command).split(/\n/).map(unquot…` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#78` | 103:88 | StringLiteral | `""` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#80` | 106:34 | StringLiteral | `""` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#83` | 106:55 | StringLiteral | `""` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#85` | 117:17 | MethodExpression | `segment.split(/\s+/)` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#82` | 106:48 | StringLiteral | `""` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#86` | 117:31 | Regex | `/\s/` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#89` | 119:10 | EqualityOperator | `i <= words.length` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#98` | 125:33 | StringLiteral | `"Stryker was here!"` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#101` | 126:8 | LogicalOperator | `SHELL_WRAPPERS.has(word) \|\| /^-[a-zA-Z]*c[a-z…` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#107` | 126:36 | Regex | `/^-[a-zA-Z]*c[^a-zA-Z]*$/` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#107` | 126:36 | Regex | `/^-[a-zA-Z]*c[^a-zA-Z]*$/` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#107` | 126:36 | Regex | `/^-[a-zA-Z]*c[^a-zA-Z]*$/` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#123` | 130:42 | Regex | `/^[A-Za-z_][^A-Za-z0-9_]*=/` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#127` | 136:31 | StringLiteral | `"Stryker was here!"` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#139` | 138:52 | MethodExpression | `words.slice(i + 1).every(word => /^-[a-zA-Z]*…` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#150` | 149:46 | StringLiteral | `""` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#151` | 149:51 | StringLiteral | `""` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#166` | 157:8 | ConditionalExpression | `true` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#168` | 157:8 | EqualityOperator | `at <= 0` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#178` | 165:33 | Regex | `/^[\s(=:'"`]+\|[^;,)'"`]+$/g` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#178` | 165:33 | Regex | `/^[\s(=:'"`]+\|[^;,)'"`]+$/g` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#178` | 165:33 | Regex | `/^[\s(=:'"`]+\|[^;,)'"`]+$/g` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#178` | 165:33 | Regex | `/^[\s(=:'"`]+\|[^;,)'"`]+$/g` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#179` | 165:61 | StringLiteral | `"Stryker was here!"` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#183` | 166:24 | StringLiteral | `"Stryker was here!"` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#185` | 167:39 | StringLiteral | `""` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#186` | 167:62 | Regex | `/~/` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#191` | 173:10 | MethodExpression | `redirectsInto(segment).map(token => toPath(to…` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#200` | 184:39 | Regex | `/\S+/` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#201` | 184:52 | StringLiteral | `"Stryker was here!"` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#204` | 184:68 | Regex | `/\s/` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#203` | 184:56 | OptionalChaining | `verb.split` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#206` | 184:81 | StringLiteral | `"Stryker was here!"` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#207` | 185:37 | Regex | `/\s/` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#223` | 186:43 | Regex | `/^[^<>&\|]+$/` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#223` | 186:43 | Regex | `/^[^<>&\|]+$/` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#223` | 186:43 | Regex | `/^[^<>&\|]+$/` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#224` | 188:8 | ConditionalExpression | `true` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#229` | 201:23 | ConditionalExpression | `true` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#232` | 201:23 | EqualityOperator | `redirectsInto(segment).length <= 0` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#234` | 202:8 | ConditionalExpression | `false` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#254` | 225:22 | MethodExpression | `value` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+| `#285` | 237:77 | StringLiteral | `"Stryker was here!"` | the same shell corpus × 6 cwds, `insideGuarded`/`delegationPath`/`cwdIsGuarded` over 18 paths, `workerSession` over 6 `PI_WORKER` values, and the handler over 6 tools × 6 cwds × 3 `PI_WORKER` values — 51,792 observations | new here |
+
+### `pi-master-guard.ts` (new here)
+
+10 rows, 10,228 observations each, 0 differing verdicts. Everything the guard decides is reachable
+from `shellWriteReason(command)` plus the handler, and the two message strings that survive are the
+ones no test asserts — `ctx.ui.notify` text is not the contract, the `reason` is.
+
+| Id | Line:col | Mutator | Replacement | Domain it cannot be observed on | Proof |
+| --- | --- | --- | --- | --- | --- |
+| `#819` | 34:21 | Regex | `/(^\|[\s;&\|(])(rm\|rmdir\|mv\|cp\|dd\|tee\|truncate\|…` | a generated shell corpus (24 verbs × 13 paths × 12 command prefixes, both `verb path` and `prefix echo a <joint> verb path` shapes, plus 19 heredoc/quote/arrow/`sed -i`/`2>` shapes per path) and the handler over 6 tool names × 6 cwds — 10,228 observations | new here |
+| `#794` | 29:23 | StringLiteral | `"Stryker was here!"` | a generated shell corpus (24 verbs × 13 paths × 12 command prefixes, both `verb path` and `prefix echo a <joint> verb path` shapes, plus 19 heredoc/quote/arrow/`sed -i`/`2>` shapes per path) and the handler over 6 tool names × 6 cwds — 10,228 observations | new here |
+| `#797` | 29:43 | StringLiteral | `"Stryker was here!"` | a generated shell corpus (24 verbs × 13 paths × 12 command prefixes, both `verb path` and `prefix echo a <joint> verb path` shapes, plus 19 heredoc/quote/arrow/`sed -i`/`2>` shapes per path) and the handler over 6 tool names × 6 cwds — 10,228 observations | new here |
+| `#819` | 34:21 | Regex | `/(^\|[\s;&\|(])(rm\|rmdir\|mv\|cp\|dd\|tee\|truncate\|…` | a generated shell corpus (24 verbs × 13 paths × 12 command prefixes, both `verb path` and `prefix echo a <joint> verb path` shapes, plus 19 heredoc/quote/arrow/`sed -i`/`2>` shapes per path) and the handler over 6 tool names × 6 cwds — 10,228 observations | new here |
+| `#796` | 29:35 | Regex | `/\/$/` | a generated shell corpus (24 verbs × 13 paths × 12 command prefixes, both `verb path` and `prefix echo a <joint> verb path` shapes, plus 19 heredoc/quote/arrow/`sed -i`/`2>` shapes per path) and the handler over 6 tool names × 6 cwds — 10,228 observations | new here |
+| `#819` | 34:21 | Regex | `/(^\|[\s;&\|(])(rm\|rmdir\|mv\|cp\|dd\|tee\|truncate\|…` | a generated shell corpus (24 verbs × 13 paths × 12 command prefixes, both `verb path` and `prefix echo a <joint> verb path` shapes, plus 19 heredoc/quote/arrow/`sed -i`/`2>` shapes per path) and the handler over 6 tool names × 6 cwds — 10,228 observations | new here |
+| `#819` | 34:21 | Regex | `/(^\|[\s;&\|(])(rm\|rmdir\|mv\|cp\|dd\|tee\|truncate\|…` | a generated shell corpus (24 verbs × 13 paths × 12 command prefixes, both `verb path` and `prefix echo a <joint> verb path` shapes, plus 19 heredoc/quote/arrow/`sed -i`/`2>` shapes per path) and the handler over 6 tool names × 6 cwds — 10,228 observations | new here |
+| `#822` | 35:18 | Regex | `/^\S*(delegate\|jev\|hc\|herdr-app\|herdr)\b/` | a generated shell corpus (24 verbs × 13 paths × 12 command prefixes, both `verb path` and `prefix echo a <joint> verb path` shapes, plus 19 heredoc/quote/arrow/`sed -i`/`2>` shapes per path) and the handler over 6 tool names × 6 cwds — 10,228 observations | new here |
+| `#822` | 35:18 | Regex | `/^\S*(delegate\|jev\|hc\|herdr-app\|herdr)\b/` | a generated shell corpus (24 verbs × 13 paths × 12 command prefixes, both `verb path` and `prefix echo a <joint> verb path` shapes, plus 19 heredoc/quote/arrow/`sed -i`/`2>` shapes per path) and the handler over 6 tool names × 6 cwds — 10,228 observations | new here |
+| `#854` | 59:8 | ConditionalExpression | `true` | a generated shell corpus (24 verbs × 13 paths × 12 command prefixes, both `verb path` and `prefix echo a <joint> verb path` shapes, plus 19 heredoc/quote/arrow/`sed -i`/`2>` shapes per path) and the handler over 6 tool names × 6 cwds — 10,228 observations | new here |
+
+### `config-guard.ts` (new here)
+
+52 mutants, 52 killed: the one survivor this sweep found was the timing arithmetic at `58:14`, and
+the spec's suspicion was right to point at it — it survived the first test because the assertion
+was a loose "under a second". It is now killed by a comparison against the wall time of the same
+call. No row is open, so this guard has no surviving table.
+
+
 ## Reconciliation: the 80-row sweep → 81 mutants on `8dba206`
 
 Every one of the 80 rows in `reports/mutation-survivors-2.md` lands somewhere, and the number adds up:
@@ -193,6 +350,33 @@ caller's `!branch` cannot tell them apart); `#786` is **open**, below.
 mutants at that position; the sweep listed two rows for two of them, and this tree has three
 survivors there. All three carry the same verdict, so the extra one is labelled by the same row.
 
+## The three guards that had never been mutated
+
+`big-boss-pi-guard.ts`, `pi-master-guard.ts` and `config-guard.ts` were 409 lines outside the
+`mutate` glob until this branch: a survivor there meant a delegation guard could be neutered with
+every test green. They were swept per file first (`--mutate "extensions/<file>.ts"`), then added to
+the glob:
+
+| File | Mutants | Killed | Timeout | Survived (before the new tests) | Per-file sweep |
+| --- | --- | --- | --- | --- | --- |
+| `big-boss-pi-guard.ts` | 305 | 209 | 2 | 94 | 2m23s |
+| `pi-master-guard.ts` | 75 | 54 | 0 | 21 | 54s |
+| `config-guard.ts` | 52 | 51 | 0 | 1 | 41s |
+
+202 mutants, 116 survivors, and every one decided: **56 killed** by a new
+`extensions/__tests__/<guard>-mutants.test.ts` (the input that separates each one is the test name
+in **Dead**), **60 proved equivalent** over the named domain in the tables above, **2 timeouts**
+(hung mutants, killed by the timeout, not by a test).
+
+The method, once, so a later sweep can repeat it: apply each mutant's replacement at the span
+stryker reports, import shipped and mutant side by side, and compare the full observable answer
+(return value, block, reason, notices) over a generated corpus. The runner was a throwaway script,
+not a committed harness; the corpus recipe is the domain column above (24 write verbs and read
+commands × 13 paths × 12 command prefixes in two shapes, plus heredoc, quote, arrow, `sed -i` and
+`2>` shapes, crossed with cwds, tool names and `PI_WORKER` values). Rebuilding it is the cost of a
+new equivalence proof; the numbers here are what one run of it found.
+
+
 ## Open
 
 1. **`secret-guard.ts:235:3` (`#786`) — a test gap, not a decision about the guard.**
@@ -213,4 +397,7 @@ survivors there. All three carry the same verdict, so the extra one is labelled 
 ## Totals to keep in step
 
 Update the table at the top and the rows above, not the method or the rules. When the survivor
-count moves, this file's *Reconciliation* and *Why 81* sections are the parts that go stale first.
+count moves, this file's *Reconciliation* and *The three guards* sections are the parts that go
+stale first. Current totals: **1909 mutants, 1765 killed, 142 survived, 2 timeout, 92.56%**, and the
+survivor set is 81 (older files, unchanged) + 60 (the three guards, new here) + 1 open
+(`secret-guard.ts:235:3`).
