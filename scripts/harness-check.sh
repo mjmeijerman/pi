@@ -28,6 +28,8 @@
 #                                         # is the fallback when it cannot
 #   scripts/harness-check.sh --verify-config
 #                                         # only the config-file shapes (blip 102)
+#   scripts/harness-check.sh --verify-spec-deltas
+#                                         # only the spec-delta rule, for tests
 #   scripts/harness-check.sh --write-skills-lock
 #                                         # regenerate agent/skills.lock — the
 #                                         # only mode here that writes
@@ -47,6 +49,7 @@ JSON=0
 QUICK=0
 VERIFY_RELEASE_AGE=0
 VERIFY_CONFIG=0
+VERIFY_SPEC_DELTAS=0
 WRITE_SKILLS_LOCK=0
 VERIFY_SKILLS_LOCK=0
 
@@ -80,7 +83,7 @@ RETRO_MAX_AGE_DAYS=14
 # grace period keeps a learner's own fresh branch out of its own run (blip 11).
 LEARN_BRANCH_GRACE_MIN="${PI_LEARN_BRANCH_GRACE_MIN:-60}"
 
-usage() { sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() {
 	printf 'harness-check: %s\n' "$*" >&2
 	exit 2
@@ -485,10 +488,10 @@ check_git_hooks() {
 check_doc_metadata() {
 	local files=() file rel missing
 	shopt -s nullglob
-	files=("$ROOT"/docs/*.md)
+	files=("$ROOT"/docs/*.md "$ROOT"/specs/areas/*.md)
 	shopt -u nullglob
 	if [ "${#files[@]}" -eq 0 ]; then
-		verdict doc-metadata - 0 "no docs/*.md found"
+		verdict doc-metadata - 0 "no docs/*.md or specs/areas/*.md found"
 		return
 	fi
 	for file in "${files[@]}"; do
@@ -529,10 +532,10 @@ check_radar_basis() {
 check_review_freshness() {
 	local files=() file rel review due due_at today soon seen=0
 	shopt -s nullglob
-	files=("$ROOT"/docs/*.md)
+	files=("$ROOT"/docs/*.md "$ROOT"/specs/areas/*.md)
 	shopt -u nullglob
 	if [ "${#files[@]}" -eq 0 ]; then
-		verdict review-freshness docs 0 "no docs/*.md to date"
+		verdict review-freshness docs 0 "no docs/*.md or specs/areas/*.md to date"
 		return
 	fi
 	today=$(date +%s)
@@ -565,6 +568,46 @@ check_review_freshness() {
 	done
 	if [ "$seen" -eq 0 ]; then
 		record WARN review-freshness docs "no Review: date could be parsed — the check compared nothing"
+	fi
+}
+
+# --- spec deltas -----------------------------------------------------------
+# Radar blip 82 (OpenSpec, Trial): the spec a change is measured against lives beside
+# the code it describes, and the change itself is a delta — one file in specs/changes/
+# named after its branch. The only part a script can check is the link: the delta's
+# `Area:` line has to name an area spec that exists. A delta amending nothing is the
+# failure worth catching, and what the delta *says* stays a review question.
+check_spec_deltas() {
+	local dir="$ROOT/specs/changes" files=() file rel area spec seen=0
+	shopt -s nullglob
+	files=("$dir"/*.md)
+	shopt -u nullglob
+	for file in "${files[@]}"; do
+		rel="${file#"$ROOT"/}"
+		[ "${file##*/}" = README.md ] && continue
+		seen=$((seen + 1))
+		# `Area: merge-guard`, `Area: specs/areas/merge-guard.md` and a backticked
+		# name all resolve to the same file: the line is written for a reader, so the
+		# check accepts the forms a reader would write.
+		area=$(sed -n 's/^[[:space:]]*[Aa]rea:[[:space:]]*//p' "$file" | head -1)
+		area="${area%%[[:space:]]*}"
+		area="${area#\`}"
+		area="${area%\`}"
+		area="${area#specs/areas/}"
+		area="${area%.md}"
+		spec="specs/areas/$area.md"
+		if [ -z "$area" ]; then
+			verdict spec-delta-area "$rel" 0 \
+				"no 'Area:' line naming the area spec it amends — nothing resolves to specs/areas/"
+		elif [ -f "$ROOT/$spec" ]; then
+			verdict spec-delta-area "$rel" 1 "amends $spec"
+		else
+			verdict spec-delta-area "$rel" 0 \
+				"names area '$area' but $spec does not exist — add that area spec or name an existing one"
+		fi
+	done
+	if [ "$seen" -eq 0 ]; then
+		verdict spec-delta-area specs/changes 1 "no change deltas yet — nothing to resolve"
 	fi
 }
 
@@ -897,6 +940,7 @@ while [ $# -gt 0 ]; do
 	--quick) QUICK=1 ;;
 	--verify-release-age) VERIFY_RELEASE_AGE=1 ;;
 	--verify-config) VERIFY_CONFIG=1 ;;
+	--verify-spec-deltas) VERIFY_SPEC_DELTAS=1 ;;
 	--write-skills-lock) WRITE_SKILLS_LOCK=1 ;;
 	--verify-skills-lock) VERIFY_SKILLS_LOCK=1 ;;
 	--root)
@@ -968,6 +1012,21 @@ if [ "$VERIFY_CONFIG" = 1 ]; then
 	exit $?
 fi
 
+# The spec-delta rule on its own, the way the tests exercise it: a delta naming an
+# area spec that exists is the passing case, and the exit status is the answer.
+if [ "$VERIFY_SPEC_DELTAS" = 1 ]; then
+	section "specs — change deltas (blip 82)"
+	check_spec_deltas
+	if [ "$JSON" = 1 ]; then
+		printf '{"pass":%d,"warn":%d,"fail":%d,"results":[%s]}\n' \
+			"$PASS_N" "$WARN_N" "$FAIL_N" "${JSON_ITEMS[*]}"
+	else
+		printf '\n%d passed, %d warn, %d failed\n' "$PASS_N" "$WARN_N" "$FAIL_N"
+	fi
+	[ "$FAIL_N" -eq 0 ]
+	exit $?
+fi
+
 section "budgets — files that load on every turn"
 check_agents_md
 check_skill_lines
@@ -997,6 +1056,7 @@ if [ "$QUICK" = 0 ]; then
 	check_radar_basis
 	check_radar_blips
 	check_review_freshness
+	check_spec_deltas
 	# --quick runs budgets only, so it would call every other entry stale.
 	check_stale_baseline
 fi
