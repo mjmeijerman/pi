@@ -23,6 +23,7 @@ import {
 	MAX_BODY_CHARS,
 	MAX_CHANGED_LINES,
 	MAX_OUTPUT_TOKENS,
+	MIN_OUTPUT_TOKENS,
 	QUESTIONS,
 	buildRequest,
 	changedLineCount,
@@ -30,6 +31,7 @@ import {
 	diffPaths,
 	isInstructionPath,
 	parseAnswer,
+	parseMaxTokens,
 	redact,
 	renderComment,
 } from "../../.github/scripts/prose-review.mjs";
@@ -62,7 +64,7 @@ function run(args, input, env = {}) {
 		cwd: ROOT,
 		input,
 		encoding: "utf8",
-		env: { ...process.env, PROSE_REVIEW_API_KEY: "", ...env },
+		env: { ...process.env, PROSE_REVIEW_API_KEY: "", PROSE_REVIEW_MAX_TOKENS: "", ...env },
 	});
 	return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
@@ -235,6 +237,7 @@ function liveRun(endpoint, env = {}) {
 				PROSE_REVIEW_ENDPOINT: endpoint,
 				PROSE_REVIEW_MODEL: "deepseek-v4-flash",
 				PROSE_REVIEW_RETRY_DELAY_MS: "0",
+				PROSE_REVIEW_MAX_TOKENS: "",
 				...env,
 			},
 		});
@@ -389,4 +392,70 @@ test("the workflow triggers on exactly the paths the script reviews", () => {
 	assert.match(workflow, /\.github\/scripts\/prose-review\.mjs/);
 	assert.match(workflow, /not configured/);
 	assert.match(workflow, /refused/);
+});
+
+// --- the output-token cap is a variable ------------------------------------
+//
+// A DeepSeek reasoning model spends max_tokens on hidden reasoning before it
+// writes a word: 700 tokens of reasoning_content, finish_reason "length", and
+// an empty answer. The cap that fits gpt-4.1-mini therefore cannot fit the
+// review at all, and the answer is a number a human sets, not a constant.
+
+test("PROSE_REVIEW_MAX_TOKENS reaches the request body and the prompt", () => {
+	const { status, stdout, stderr } = run(["--dry-run", "--root", ROOT], DIFF, { PROSE_REVIEW_MAX_TOKENS: "4000" });
+	assert.equal(status, 0, stderr);
+	const request = JSON.parse(stdout);
+	assert.equal(request.max_tokens, 4000, "--dry-run prints the cap it would send");
+	assert.match(request.messages[0].content, /at most 4000 output tokens/i);
+});
+
+test("an unset cap keeps the default", () => {
+	assert.equal(parseMaxTokens(undefined), MAX_OUTPUT_TOKENS);
+	assert.equal(parseMaxTokens(""), MAX_OUTPUT_TOKENS);
+	assert.equal(MAX_OUTPUT_TOKENS, 700);
+	const { status, stdout, stderr } = run(["--dry-run", "--root", ROOT], DIFF, { PROSE_REVIEW_MAX_TOKENS: "" });
+	assert.equal(status, 0, stderr);
+	assert.equal(JSON.parse(stdout).max_tokens, MAX_OUTPUT_TOKENS);
+});
+
+test("a non-integer cap is a usage error, not a silent fallback", () => {
+	for (const bad of ["four thousand", "4000.5", "-4000", "4e3", "4000 tokens"]) {
+		const { status, stdout, stderr } = run(["--dry-run", "--root", ROOT], DIFF, { PROSE_REVIEW_MAX_TOKENS: bad });
+		assert.equal(status, 5, `"${bad}" should be refused`);
+		assert.equal(stdout, "", "a refused cap must not print a request");
+		assert.match(stderr, /PROSE_REVIEW_MAX_TOKENS/);
+		assert.match(stderr, /not a positive integer/);
+	}
+});
+
+test("a cap under the floor is refused: one token cannot fit five findings", () => {
+	for (const small of ["1", String(MIN_OUTPUT_TOKENS - 1)]) {
+		const { status, stderr } = run(["--dry-run", "--root", ROOT], DIFF, { PROSE_REVIEW_MAX_TOKENS: small });
+		assert.equal(status, 5, `${small} should be refused`);
+		assert.match(stderr, /below the floor/);
+		assert.match(stderr, new RegExp(`floor of ${MIN_OUTPUT_TOKENS}`));
+	}
+	assert.equal(parseMaxTokens(String(MIN_OUTPUT_TOKENS)), MIN_OUTPUT_TOKENS);
+	assert.equal(MIN_OUTPUT_TOKENS, 700, "the floor is the default that was measured as too small");
+});
+
+test("an empty answer at the new cap is still the token-cap diagnosis", async () => {
+	const body = {
+		model: "deepseek-v4-flash",
+		choices: [{ message: { role: "assistant", content: "", reasoning_content: "thinking" }, finish_reason: "length" }],
+		usage: { completion_tokens: 4000, completion_tokens_details: { reasoning_tokens: 4000 } },
+	};
+	await withFakeEndpoint([{ status: 200, body }], async ({ endpoint, calls }) => {
+		const { status, stderr } = await liveRun(endpoint, { PROSE_REVIEW_MAX_TOKENS: "4000" });
+		assert.equal(status, 5, stderr);
+		assert.match(stderr, /token cap: the model used all 4000 output tokens/);
+		assert.equal(JSON.parse(calls[0].body).max_tokens, 4000, "the cap in the request is the cap in the diagnosis");
+	});
+});
+
+test("the workflow forwards the cap variable and says why a reasoning model needs it", () => {
+	const workflow = readFileSync(WORKFLOW, "utf8");
+	assert.match(workflow, /PROSE_REVIEW_MAX_TOKENS: \$\{\{ vars\.PROSE_REVIEW_MAX_TOKENS \}\}/);
+	assert.match(workflow, /reasoning/i);
+	assert.match(workflow, /billed/);
 });

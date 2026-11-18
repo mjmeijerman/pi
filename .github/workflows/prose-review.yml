@@ -17,7 +17,13 @@
 # The job is deliberately narrow and cheap: it only triggers when those paths
 # change, it counts the instruction-file diff itself and refuses over 400
 # changed lines (exit 3 → a warning, no request), and the answer is capped in
-# `max_tokens`. A missing `PROSE_REVIEW_API_KEY` secret is an annotation that
+# `max_tokens`, forwarded from the `PROSE_REVIEW_MAX_TOKENS` repository
+# variable (default 700 in the script). A reasoning model needs that variable:
+# it spends output tokens on hidden reasoning before it writes a word, so the
+# cap that fits `gpt-4.1-mini` can be consumed entirely by thinking and return
+# an empty answer under `finish_reason: length`. Every one of those tokens is
+# billed, so raising the cap is a decision about money, not only about length.
+# A missing `PROSE_REVIEW_API_KEY` secret is an annotation that
 # says "not configured", never a silent green check. An endpoint or
 # configuration failure is `::error title=prose-review-infra` with the words
 # "the review did not run", its own step-summary heading, and the script's
@@ -88,6 +94,10 @@ jobs:
           # Empty means the script's OpenAI defaults.
           PROSE_REVIEW_ENDPOINT: ${{ vars.PROSE_REVIEW_ENDPOINT }}
           PROSE_REVIEW_MODEL: ${{ vars.PROSE_REVIEW_MODEL }}
+          # The output-token cap, same shape: a repository variable, empty means
+          # the script's default. A reasoning model spends these tokens thinking
+          # before it writes, and all of them are billed — the cap is money.
+          PROSE_REVIEW_MAX_TOKENS: ${{ vars.PROSE_REVIEW_MAX_TOKENS }}
         run: |
           set -euo pipefail
           diff="$RUNNER_TEMP/prose.diff"
