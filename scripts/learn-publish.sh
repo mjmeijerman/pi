@@ -28,6 +28,15 @@
 # it is "a pull request for that head exists" — and when this machine cannot ask
 # GitHub, the script says so (exit 2) instead of claiming there is no PR.
 #
+# The second rule: a source change carries its own test. The PR gate mutates
+# exactly the lines the diff adds and breaks at 100 (CI run 44377745621 on PR 159:
+# 16 mutants on the added lines, 5 survived, score 68.75), so a source line with
+# no test is a red build waiting for the reviewer — and the fix was a second
+# worker writing the tests the first one skipped. A branch that changes a source
+# file and adds no test is refused here, before a space is spawned. The escape
+# hatch is the one docs/mutation-survivors.md uses for a survivor: `**No test:**`
+# in the proposal with a named domain and a count (`2,431 cases, 0 differing`).
+#
 # Why it waits: "no PR" is only true once the agent has had time to push and
 # open one, and the version before this one asked GitHub the instant the space
 # was spawned. Every publish therefore recorded a failure it did not deserve —
@@ -110,7 +119,7 @@ while [ $# -gt 0 ]; do
 		--tier) [ $# -ge 2 ] || die "--tier needs a value"; TIER="$2"; shift 2 ;;
 		--check) MODE="check"; shift ;;
 		--dry-run) MODE="dry-run"; shift ;;
-		-h|--help) sed -n '2,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		-h|--help) sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
 		-*) die "unknown option $1" ;;
 		*) [ -z "$SLUG" ] || die "unexpected argument $1"; SLUG="$1"; shift ;;
 	esac
@@ -222,9 +231,12 @@ ORIGIN=$(printf '%s' "$ORIGIN" | awk -F'[/:]' 'NF >= 2 { print $(NF-1)"/"$NF }')
 # history cannot answer: "cannot tell which files changed" must not become "the
 # diff is empty" (pr-gate treats an empty list as red for the same reason).
 BASE_REV=""
-if base_try=$(git -C "$REPO" merge-base origin/trunk "$BRANCH" 2>/dev/null) && [ -n "$base_try" ]; then
+for base in origin/trunk trunk; do
+	base_try=$(git -C "$REPO" merge-base "$base" "$BRANCH" 2>/dev/null) || continue
+	[ -n "$base_try" ] || continue
 	BASE_REV="$base_try"
-fi
+	break
+done
 
 # A mission is "who is better off, and how we would see it". The proposal's H1 is
 # one line saying what changes, which is the closest thing to a mission a learner
@@ -356,6 +368,68 @@ spec_body() {
 		"Never merge. Never push onto trunk."
 }
 
+# The test a source change owes, read off the diff. A branch that changes a
+# source file and ships no test is the red mutation build the PR gate would find
+# minutes later: it mutates exactly the added lines and breaks at 100. Refusing
+# it here costs the learner a second and one turn, not a reviewer's afternoon.
+#
+# Not every change is observable, so the escape hatch is the standard
+# docs/mutation-survivors.md sets for a survivor: a differential run over a named
+# domain with a count, written in the proposal as
+#   **No test:** <domain>, 2,431 cases, 0 differing verdicts
+DIFF_FILES=""
+diff_files() {
+	[ -n "$BASE_REV" ] || return 1
+	DIFF_FILES=$(git -C "$REPO" diff --name-only "$BASE_REV".."$BRANCH" 2>/dev/null) || return 1
+	return 0
+}
+
+is_test_path() {
+	case "$1" in
+		__tests__/*|*/__tests__/*|tests/*|*/tests/*|*.test.*|*.spec.*|*_test.*|test_*|*/test_*) return 0 ;;
+	esac
+	return 1
+}
+
+is_source_path() {
+	case "$1" in
+		*.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs|*.sh|*.bash|*.py|*.rs|*.go) return 0 ;;
+	esac
+	return 1
+}
+
+# A differential proof in the proposal stands in for a test.
+no_test_proof() {
+	[ -n "$PROPOSAL" ] && [ -r "$PROPOSAL" ] || return 1
+	grep -E '^\*\*No test:\*\*' "$PROPOSAL" 2>/dev/null | grep -qiE '[0-9][0-9,]* ?cases.*0 differing'
+}
+
+# The source files that arrived without a test. Empty also means "cannot tell"
+# (no base rev, no diff): unverified is not a miss and must not block.
+untested_source() {
+	local f source="" tests=0
+	diff_files || return 0
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		if is_test_path "$f"; then tests=$((tests + 1)); continue; fi
+		is_source_path "$f" && source="$source $f"
+	done <<<"$DIFF_FILES"
+	[ "$tests" -eq 0 ] || return 0
+	printf '%s' "${source# }"
+}
+
+test_requirement() {
+	local missing
+	missing=$(untested_source)
+	[ -n "$missing" ] || return 0
+	if no_test_proof; then
+		echo "learn-publish: $BRANCH changes source without a test; the proposal's No test: line is the proof taken instead" >&2
+		return 0
+	fi
+	echo "learn-publish: $BRANCH changes source files with no test in the diff: $missing" >&2
+	die "add the test that pins $(printf '%s' "$missing" | cut -d' ' -f1), or write **No test:** <domain>, <N cases, 0 differing verdicts> in $PROPOSAL, then ask the host to publish again"
+}
+
 case "$MODE" in
 	check)
 		# Read-only: no spawn, no log row, and exit 2 when gh cannot answer.
@@ -380,6 +454,7 @@ report || RC=$?
 mkdir -p "$SPEC_DIR" 2>/dev/null || die "cannot write $SPEC_DIR"
 pr_body_body >"$BODY_FILE" || die "cannot write $BODY_FILE"
 preflight_gate
+test_requirement
 spec_body >"$SPEC" || die "cannot write $SPEC"
 
 # The publishing agent is only bare because it starts in the workspace whose gh and
