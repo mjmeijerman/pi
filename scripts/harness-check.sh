@@ -47,7 +47,8 @@
 #   scripts/harness-check.sh --verify-install-docs
 #                                         # only the install quick start: a
 #                                         # pasteable command per OS, no && in a
-#                                         # powershell block, npm spelled npm.cmd
+#                                         # powershell block, npm spelled npm.cmd,
+#                                         # and the WSL2 sandbox section present
 #   scripts/harness-check.sh --verify-mise-pins
 #                                         # only the mise.toml projections, for tests
 #   scripts/harness-check.sh --help
@@ -876,6 +877,29 @@ check_install_docs() {
 		fi
 	fi
 
+	# Sandboxing on Windows: a native install runs unsandboxed, and the section
+	# that says so has to name the one path with a real Linux kernel under it.
+	# The heading and the command are one decision. A section without
+	# `wsl --install` tells a reader to use WSL2 and gives them no way to start;
+	# the command without the heading is a stray line nobody finds.
+	file="$ROOT/docs/install.md"
+	if [ -f "$file" ]; then
+		if grep -qiE '^#{1,6}[[:space:]]*sandboxing on windows[[:space:]]*$' "$file"; then
+			verdict install-docs docs/install.md 1 "has a 'Sandboxing on Windows' section"
+		else
+			verdict install-docs docs/install.md 0 \
+				"no 'Sandboxing on Windows' heading — a Windows reader is told the sandbox is unavailable and given nowhere to look"
+			faults=$((faults + 1))
+		fi
+		if grep -qF 'wsl --install' "$file"; then
+			verdict install-docs docs/install.md 1 "names 'wsl --install', the command that creates the WSL2 path"
+		else
+			verdict install-docs docs/install.md 0 \
+				"no 'wsl --install' line — WSL2 is the recommended sandbox and the command that starts it is missing"
+			faults=$((faults + 1))
+		fi
+	fi
+
 	# `INSTALL.md` is the page a bare machine lands on, and "the version in
 	# .node-version" is a file that does not exist until after the clone. The
 	# section is a heading that names both Windows and PowerShell: a heading that
@@ -921,7 +945,7 @@ check_install_docs() {
 
 	if [ "$faults" -eq 0 ] && [ "$checked" -gt 0 ]; then
 		verdict install-docs "${INSTALL_DOCS[*]}" 1 \
-			"$checked document(s): every powershell block is pasteable, Windows leads, npm is npm.cmd, the PATH entry is there"
+			"$checked document(s): every powershell block is pasteable, Windows leads, npm is npm.cmd, the PATH entry is there, and the WSL2 sandbox section is named"
 	fi
 	return 0
 }

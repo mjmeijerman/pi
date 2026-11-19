@@ -57,9 +57,12 @@ import {
 	piInstallCommand,
 	piPreflight,
 	planFor,
+	sandboxSummary,
 	spawnPlan,
 	spliceManagedBlock,
+	systemSummary,
 	systemdUnitsIn,
+	wslMountWarnings,
 } from './scripts/install-lib.mjs';
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -318,7 +321,9 @@ function preflight() {
 	say('== preflight');
 	say(`   source : ${SOURCE_DIR}`);
 	say(`   agent  : ${AGENT_DIR}`);
-	say(`   system : ${PLAN.platform}${PLAN.sandbox ? ' (sandbox available)' : ' (no sandbox)'}`);
+	// systemSummary, not PLAN.platform: on WSL the platform is `linux` and the
+	// one thing the banner has to say about it is that it is WSL.
+	say(`   system : ${systemSummary(PLAN)}`);
 	// Same wall as setup.mjs: git installed, shell holding a PATH from before it.
 	// Every git step below would warn with no hint where the answer is.
 	if (!hasCmd('git'))
@@ -772,8 +777,10 @@ function summary() {
 	say('Verify:');
 	say('   git config --global --get core.hooksPath        # global hooks');
 	say(`   ${path.join(P.binDir, 'git-vuln-scan')} --help`);
-	if (PLAN.sandbox) say(`   ${path.join(P.piHome, 'sandbox', 'pi-sandbox.sh')} --help   # sandbox`);
-	else say(`   sandbox: unavailable on ${PLAN.platform} — pi runs unsandboxed here`);
+	if (PLAN.sandbox) {
+		const sandbox = sandboxSummary(PLAN, { piHome: P.piHome, bwrap: PLAN.wsl ? hasCmd('bwrap') : true });
+		say(sandbox.ok ? `   ${sandbox.message} --help   # sandbox` : `   sandbox: ${sandbox.message}`);
+	} else say(`   sandbox: ${sandboxSummary(PLAN).message}`);
 	say('   herdr-app --version                             # desktop app');
 	say('   jev count "split this task"                     # delegation workspace on PATH (needs the clone)');
 	if (PLAN.service === 'systemd' && systemdInstalled.length > 0) {
@@ -806,8 +813,22 @@ async function main() {
 	// Same shape as before, with one difference that matters: the pi decision is
 	// the preflight's, so a missing pi (and no npm to install it) stops here with
 	// an empty tree and the command for this OS, instead of at the tail with a
-	// half-installed one.
+	// half-installed one. It also prints the banner and the git-not-on-PATH
+	// warning, so the old banner block and its git check are gone, not repeated.
 	preflight();
+	// WSL: the plan is Linux and the sandbox is the Linux one, so nothing below
+	// changes — but a path on a Windows drive loses the mode bits the hooks need,
+	// and the fix is one move. Named path, named fix, once. It has to run after
+	// the preflight: only then are SOURCE_DIR, AGENT_DIR and BOSS_DIR known.
+	for (const w of wslMountWarnings({
+		wsl: PLAN.wsl,
+		paths: [
+			{ what: 'this pi repo', path: SOURCE_DIR },
+			{ what: 'the agent dir', path: AGENT_DIR },
+			{ what: 'PI_BOSS_DIR', path: BOSS_DIR },
+		],
+	}))
+		warn(w.message);
 	stepAgent();
 	stepRuntimeDirs();
 	stepHerdrMods();

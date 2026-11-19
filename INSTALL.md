@@ -33,6 +33,11 @@ has the four steps. The third line unblocks `npm`, which Node ships as a script
 scripts and still demands signatures on downloads, and `npm.cmd` is a batch shim
 no policy blocks.
 
+A native Windows install runs `pi` unsandboxed — there is no bubblewrap to
+install here. WSL2 runs a real Linux kernel and the sandbox with it:
+[Sandboxing on Windows](docs/install.md#sandboxing-on-windows) has the command
+and the three alternatives.
+
 ### macOS, in Terminal
 
 Do I already have it? `git --version`, `node --version`.

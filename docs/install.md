@@ -20,9 +20,10 @@ Contents:
 4. [Environment overrides](#environment-overrides)
 5. [What lands where](#what-lands-where)
 6. [Per-OS differences](#per-os-differences)
-7. [Second run, and switching things off](#second-run-and-switching-things-off)
-8. [Troubleshooting](#troubleshooting)
-9. [Secrets](#secrets)
+7. [Sandboxing on Windows](#sandboxing-on-windows)
+8. [Second run, and switching things off](#second-run-and-switching-things-off)
+9. [Troubleshooting](#troubleshooting)
+10. [Secrets](#secrets)
 
 ## Prerequisites, per OS
 
@@ -227,7 +228,7 @@ file you may have edited in place.
 
 | | Linux | macOS | Windows |
 |---|---|---|---|
-| sandbox | bubblewrap: `pi` runs under `~/.pi/sandbox/pi-sandbox.sh` | not available — one line, no failure | not available — one line, no failure |
+| sandbox | bubblewrap: `pi` runs under `~/.pi/sandbox/pi-sandbox.sh` | not available — one line, no failure | not available natively — WSL2 and Docker provide it: [Sandboxing on Windows](#sandboxing-on-windows) |
 | bin entries | symlinks | symlinks | copies; a symlink needs elevation or Developer Mode |
 | `herdr-app` | `curl … install.sh \| sh` | same | `powershell … irm … install.ps1 \| iex` |
 | guard service | systemd user unit, enabled when a user manager answers | launchd plist, only with `PI_ENABLE_SERVICES=1` | `schtasks /Create /SC ONLOGON`, only with `PI_ENABLE_SERVICES=1` |
@@ -239,6 +240,93 @@ file you may have edited in place.
 normally have it on `PATH` already (many distros do not — check `echo $PATH`); on
 Windows nothing adds it, so add `%USERPROFILE%\.local\bin` to your user `PATH`
 once.
+
+## Sandboxing on Windows
+
+A native Windows install runs `pi` unsandboxed: the installer prints one line and
+carries on. That is a fact about Windows, not a missing step in this installer —
+AppContainer and job objects sandbox a *token*, not a filesystem tree, so there is
+no bubblewrap equivalent to install, and no flag to turn on. Four ways to get a
+real boundary, in the order they buy the most for the least.
+
+### WSL2 + bubblewrap (recommended)
+
+WSL2 runs a real Linux kernel, so everything on this page is the Linux path,
+unchanged: the same `~/.pi/sandbox/pi-sandbox.sh`, the same bubblewrap, the same
+systemd user units, the same mode bits. The installer detects WSL, prints
+`system : linux (WSL, sandbox available)`, and runs the Linux plan because that
+is what the host is.
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Then inside Ubuntu — git, Node 24, bubblewrap, then the installer:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git curl bubblewrap
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
+sudo apt-get install -y nodejs
+git clone https://github.com/mjmeijerman/pi.git ~/.pi
+cd ~/.pi
+./setup.sh
+```
+
+Keep the repo, `~/.pi` and `PI_BOSS_DIR` under the **Linux** home (`~/`), never
+under `/mnt/c/`. That mount is 9p: Unix mode bits do not survive it (every file
+reads as 0777, so a hook script is "executable" whatever it says), symlinks need
+Developer Mode on the Windows side, and every write pays for a 9p round trip. The installer warns and names the offending path when it sees one; the fix
+is `mv` it under `~/` and re-run.
+
+Two costs that the Linux page shares, stated plainly:
+
+- **The network is not isolated.** The sandbox binds the filesystem; a process
+  inside it can still open a socket. `--no-net` exists for repo scripts, not for
+  agents — no network means no model.
+- **`herdr-app` sits on the other side of a filesystem wall.** An app installed
+  on Windows cannot see `/home/you` inside the distro. Either install it inside
+  WSL (WSLg puts its window on the Windows desktop), or keep the repos on `/mnt/c`
+  and lose the mode bits. One or the other; nothing can pick for you.
+
+### Docker Desktop (WSL2 backend)
+
+A stronger, disposable boundary: the host filesystem arrives only where you mount
+it, and `--rm` leaves nothing behind.
+
+```powershell
+docker run --rm -it -v "${PWD}:/work" -w /work node:24 bash
+```
+
+Inside the container, the sandbox is still bubblewrap:
+
+```bash
+apt-get update && apt-get install -y bubblewrap git
+```
+
+The cost is a second thing to keep in sync — the image is yours to rebuild when
+the Node major moves — plus a socket that has to be mounted deliberately, or not
+at all: the Docker socket is root on the host. Nothing persists past `--rm`, which
+is the point and also the annoyance.
+
+### Windows Sandbox
+
+A throwaway VM that ships with Windows: needs Pro or Enterprise and
+virtualization in the firmware, installs nothing on the host.
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName 'Containers-DisposableClientVM' -All
+```
+
+Nothing persists — no repo, no keys, no `~/.pi` — so it is the right home for one
+untrusted thing and the wrong home for a workspace you come back to on Monday.
+
+### Cloud sandbox
+
+The most isolation and the least integration: a machine you reach over the
+network. It gives up the desktop entirely — no herdr window, no local repo under
+`~/`, nothing to open in an editor here. Right for a red-team run, wrong for a day
+of work.
 
 ## Second run, and switching things off
 

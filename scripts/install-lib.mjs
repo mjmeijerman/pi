@@ -18,6 +18,7 @@
 // ============================================================================
 
 import crypto from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
 
 // The two vendor installers, named once so a moving URL is one edit.
@@ -85,14 +86,96 @@ export const OS_PLAN = {
 	},
 };
 
+// --- WSL ---------------------------------------------------------------------
+/**
+ * isWsl — is this process inside the Windows Subsystem for Linux?
+ *
+ * `process.platform` answers `linux` there, and that answer is right: WSL2 runs
+ * a real Linux kernel, so the Linux half of the plan is the correct half and
+ * the sandbox is the same bubblewrap launcher. What a bare `linux` cannot say is
+ * that the person is on Windows, and two things go wrong when nobody knows it:
+ * a repo under `/mnt/c/…` has no Unix mode bits and every write is slow, and a
+ * `herdr-app` installed on the Windows side cannot see a `~` inside the distro.
+ *
+ * Three signals, on purpose, because each alone has a hole: `WSL_DISTRO_NAME`
+ * (set for the shell a person gets), `WSL_INTEROP` (set under WSL2), and the
+ * kernel release (every WSL kernel — 1 and 2 — carries `microsoft`). Passing the
+ * three in is what makes this a property instead of a host read, so the tests
+ * can drive every case: real WSL, WSL1, plain Linux, win32, darwin.
+ */
+export function isWsl({ platform = process.platform, release = '', env = {} } = {}) {
+	if (platform !== 'linux') return false;
+	if (env.WSL_DISTRO_NAME || env.WSL_INTEROP) return true;
+	return /microsoft/i.test(String(release));
+}
+
+/** windowsMount — the Windows drive a path sits on inside WSL, or null. */
+export function windowsMount(p) {
+	const m = /^\/mnt\/[a-z](?=\/|$)/i.exec(String(p || ''));
+	return m ? m[0] : null;
+}
+
+/**
+ * wslMountWarnings — one entry per path that lives on a Windows drive while pi
+ * runs in WSL. Empty when this is not WSL or no path is on a drive.
+ *
+ * Not an error: it works, badly. Git's mode bits do not survive `DrvFs` (every
+ * file reads as 0777, so the hook scripts are "executable" whatever they say),
+ * symlinks need Developer Mode on the Windows side, and every read is a 9p round
+ * trip. So the install carries on and names the path and the fix once.
+ */
+export function wslMountWarnings({ wsl = false, paths = [] } = {}) {
+	if (!wsl) return [];
+	const out = [];
+	for (const { what, path: dir } of paths) {
+		const mount = windowsMount(dir);
+		if (!mount) continue;
+		out.push({
+			what,
+			path: String(dir),
+			mount,
+			message: `${what} lives on ${mount}, a Windows drive: Unix mode bits do not survive there, symlinks and hooks behave differently and every write is slow — move ${dir} under ~/ and re-run`,
+		});
+	}
+	return out;
+}
+
+/**
+ * systemSummary — the OS line the engines print in the preflight and the
+ * summary. WSL is named because the plan alone cannot say it: `linux` is true on
+ * a distro and on a distro under Windows, and only one of them has a `/mnt/c`.
+ */
+export function systemSummary(plan) {
+	const inner = [plan.wsl ? 'WSL' : null, plan.sandbox ? 'sandbox available' : 'no sandbox'].filter(Boolean).join(', ');
+	return `${plan.platform} (${inner})`;
+}
+
+/**
+ * sandboxSummary — where the sandbox is, or the one line that says what is
+ * missing. `ok` is whether there is a launcher to point at.
+ *
+ * In WSL the sandbox is the Linux one, so a missing bubblewrap there is
+ * "install bubblewrap" and never "unavailable on this OS": that sentence is for
+ * macOS and native Windows, where there is genuinely nothing to install.
+ */
+export function sandboxSummary(plan, { piHome = '', bwrap = true } = {}) {
+	if (!plan.sandbox) return { ok: false, message: `unavailable on ${plan.platform} — pi runs unsandboxed here` };
+	if (plan.wsl && !bwrap)
+		return { ok: false, message: 'bubblewrap is missing — install bubblewrap (sudo apt-get install -y bubblewrap) and re-run' };
+	return { ok: true, message: path.join(piHome, 'sandbox', 'pi-sandbox.sh') };
+}
+
 /** planFor — the OS plan, defaulting to the platform the process runs on. */
-export function planFor(platform = process.platform, env = process.env) {
+export function planFor(platform = process.platform, env = process.env, release = os.release()) {
 	const plan = OS_PLAN[platform] || OS_PLAN.linux;
+	// The platform asked for, not the plan's: an unknown platform falls back to
+	// the Linux plan, and a fallback is not a reason to call a host WSL.
+	const wsl = isWsl({ platform, release, env });
 	if (plan.platform === 'win32') {
 		const local = env.LOCALAPPDATA || path.join(env.USERPROFILE || env.HOME || '', 'AppData', 'Local');
-		return { ...plan, herdrInstalled: path.join(local, HERDR_INSTALLED_WIN.dir, HERDR_INSTALLED_WIN.file) };
+		return { ...plan, wsl, herdrInstalled: path.join(local, HERDR_INSTALLED_WIN.dir, HERDR_INSTALLED_WIN.file) };
 	}
-	return { ...plan };
+	return { ...plan, wsl };
 }
 
 /**
