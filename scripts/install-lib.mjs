@@ -32,6 +32,11 @@ export const HERDR_INSTALLED_WIN = { dir: 'herdr-app', file: 'herdr-app.exe' };
 //              elevation or Developer Mode for a symlink, so it copies).
 // service      which init system the guard/units target.
 // herdrInstall how the vendor installer is invoked.
+// npmBin       the npm executable this OS resolves to. Windows is the odd one: it
+//              ships `npm` as a `.cmd` shim next to an `npm.ps1`, and a default
+//              `Restricted` execution policy refuses exactly that script. Asking
+//              for `npm.cmd` by name is what keeps an install running on a
+//              machine nobody reconfigured.
 // sandbox      bubblewrap exists only on Linux; the other two say so in one line.
 export const OS_PLAN = {
 	linux: {
@@ -43,7 +48,8 @@ export const OS_PLAN = {
 		herdrConfigSubdir: path.join('.config', 'herdr-app'),
 		herdrInstall: 'sh',
 		herdrInstalled: HERDR_INSTALLED_POSIX,
-		rcFiles: ['.bashrc', '.zshrc'],
+			rcFiles: ['.bashrc', '.zshrc'],
+		npmBin: 'npm',
 		sandbox: true,
 		services: true,
 	},
@@ -57,6 +63,7 @@ export const OS_PLAN = {
 		herdrInstall: 'sh',
 		herdrInstalled: HERDR_INSTALLED_POSIX,
 		rcFiles: ['.zshrc', '.bashrc'],
+		npmBin: 'npm',
 		sandbox: false,
 		services: true,
 	},
@@ -70,6 +77,9 @@ export const OS_PLAN = {
 		herdrInstall: 'powershell',
 		herdrInstalled: null,
 		rcFiles: [],
+		// `.cmd`, never a bare `npm`: PowerShell resolves that to `npm.ps1`, and
+		// the default execution policy refuses to run a script.
+		npmBin: 'npm.cmd',
 		sandbox: false,
 		services: true,
 	},
@@ -548,8 +558,9 @@ export function shellQuote(arg) {
  * Windows, no npm.exe next to it — cannot be exec'd from node at all, and the
  * same holds for anything else that only ships a shim. Only a command that
  * names a real executable (`.exe`) is spawned directly there. That is what
- * `run('npm', …)` on `--install-pi` needs: with the shell option gone it would
- * otherwise look for npm.exe and fail.
+ * `run(NPM, …)` on `--install-pi` needs: with the shell option gone it would
+ * otherwise look for npm.exe and fail. `NPM` is `PLAN.npmBin`, which is
+ * `npm.cmd` on Windows — never the `.ps1` the default execution policy blocks.
  */
 function windowsNeedsCmd(cmd) {
 	if (/\.exe$/i.test(cmd)) return false;

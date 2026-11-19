@@ -255,6 +255,11 @@ function linkOrCopy(target, dest) {
 }
 
 // --- 0. the pi binary -------------------------------------------------------
+// npm is asked for by the name its own OS resolves: `npm.cmd` on Windows, where
+// a bare `npm` is the `npm.ps1` a default execution policy refuses. The plan
+// carries it, so no call site can spell it wrong on its own.
+const NPM = PLAN.npmBin || 'npm';
+
 function stepPi() {
 	const candidates = [
 		path.join(process.env.PNPM_HOME || path.join(HOME, '.local', 'share', 'pnpm'), 'bin', 'pi'),
@@ -276,13 +281,13 @@ function stepPi() {
 		skipped('pi binary', 'PI_ALLOW_MISSING_PI=1 — config only');
 		return;
 	}
-	if (OPT.installPi && hasCmd('npm')) {
+	if (OPT.installPi && hasCmd(NPM)) {
 		note('installing pi via npm (global)');
-		run('npm', ['install', '-g', '--ignore-scripts', '@earendil-works/pi-coding-agent']);
+		run(NPM, ['install', '-g', '--ignore-scripts', '@earendil-works/pi-coding-agent']);
 		return;
 	}
 	warn("'pi' not found on PATH. Install it first, e.g.:");
-	say('   npm install -g --ignore-scripts @earendil-works/pi-coding-agent');
+	say(`   ${NPM} install -g --ignore-scripts @earendil-works/pi-coding-agent`);
 	say('   (or: pnpm add -g @earendil-works/pi-coding-agent)');
 	say('   Then re-run this installer (add --install-pi to auto-install).');
 	process.exit(1);

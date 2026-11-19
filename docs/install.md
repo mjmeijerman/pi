@@ -14,14 +14,100 @@ Quick start: [../INSTALL.md](../INSTALL.md).
 
 Contents:
 
-1. [The questions, in order](#the-questions-in-order)
-2. [Flags](#flags)
-3. [Environment overrides](#environment-overrides)
-4. [What lands where](#what-lands-where)
-5. [Per-OS differences](#per-os-differences)
-6. [Second run, and switching things off](#second-run-and-switching-things-off)
-7. [Troubleshooting](#troubleshooting)
-8. [Secrets](#secrets)
+1. [Prerequisites, per OS](#prerequisites-per-os)
+2. [The questions, in order](#the-questions-in-order)
+3. [Flags](#flags)
+4. [Environment overrides](#environment-overrides)
+5. [What lands where](#what-lands-where)
+6. [Per-OS differences](#per-os-differences)
+7. [Second run, and switching things off](#second-run-and-switching-things-off)
+8. [Troubleshooting](#troubleshooting)
+9. [Secrets](#secrets)
+
+## Prerequisites, per OS
+
+Two things are needed before the clone exists: `git`, and Node at the major
+`.node-version` pins — 24, the same number `mise.toml` writes. Nothing here needs
+`gh`; the installer falls back to an https clone.
+
+Every block below installs, then checks itself: `git --version`, `node --version`
+and `npm` answering is the whole of "is my machine ready". **Do I already have
+it?** Run those three lines first; a `v24.x` and no error means skip this whole
+section. Reopen the shell after installing, because `PATH` is read once at start.
+
+Windows comes first because its install is the one that goes wrong: a fresh
+Windows machine has no `git`, no Node, and a policy that refuses the `npm`
+script. macOS and Linux are one package manager line each.
+
+### Windows, in PowerShell
+
+Not bash. `winget` ships with Windows 10 1809+ and 11.
+
+```powershell
+winget install --id Git.Git -e --source winget
+winget install --id OpenJS.NodeJS.LTS -e --source winget
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+git --version
+node --version
+npm.cmd --version
+where.exe git node
+```
+
+`node --version` must print `v24.x`; that number is `.node-version`'s. The third
+line exists because Node installs `npm` as `npm.ps1`, a script, and the default
+`Restricted` execution policy refuses to run any script:
+
+```
+npm.ps1 cannot be loaded because running scripts is disabled on this system.
+```
+
+`RemoteSigned` runs local scripts and still requires a signature on downloaded
+ones. Refusing it is fine: keep `Restricted`, call `npm.cmd` instead of `npm`, and
+nothing else changes — `npm.cmd` is a batch shim, which the policy does not touch.
+That is also why every line here is a separate command: Windows PowerShell 5.1,
+which is what a fresh install opens, has no `&&` and answers
+`the token && is not a valid statement separator in this version`. `&&` arrived
+in PowerShell 7. Use separate lines, or `;`, and do not paste the block below it.
+
+### macOS, in Terminal
+
+```bash
+xcode-select --install                    # git; or: brew install git
+brew install node@24
+echo 'export PATH="/opt/homebrew/opt/node@24/bin:$PATH"' >> ~/.zshrc
+```
+
+Reopen the terminal, or `source ~/.zshrc`, then check the four answers:
+
+```bash
+git --version
+node --version
+npm --version
+which git node
+```
+
+On an Intel Mac the prefix is `/usr/local/opt/node@24/bin`. `brew install node`
+installs whatever is current; `node@24` is the one that matches `.node-version`.
+
+### Linux, in bash or zsh
+
+```bash
+# Debian, Ubuntu, WSL
+sudo apt-get install -y git nodejs npm
+# Fedora, RHEL
+sudo dnf install -y git nodejs npm
+# Arch
+sudo pacman -S --needed git nodejs npm
+git --version
+node --version
+npm --version
+command -v git node
+```
+
+Only the first block applies to your machine; the other two are there so nobody
+has to translate `apt-get` by hand. A distro `nodejs` below 24 fails the
+`node --version` line: `mise use -g node@24` (or nvm) is the fix, not a second
+package manager.
 
 ## The questions, in order
 

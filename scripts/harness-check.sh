@@ -44,6 +44,10 @@
 #   scripts/harness-check.sh --verify-doc-facts
 #                                         # only the transport table check, for
 #                                         # tests and for one honest line
+#   scripts/harness-check.sh --verify-install-docs
+#                                         # only the install quick start: a
+#                                         # pasteable command per OS, no && in a
+#                                         # powershell block, npm spelled npm.cmd
 #   scripts/harness-check.sh --verify-mise-pins
 #                                         # only the mise.toml projections, for tests
 #   scripts/harness-check.sh --help
@@ -61,6 +65,7 @@ QUICK=0
 VERIFY_RELEASE_AGE=0
 VERIFY_CONFIG=0
 VERIFY_DOC_FACTS=0
+VERIFY_INSTALL_DOCS=0
 VERIFY_SPEC_DELTAS=0
 WRITE_SKILLS_LOCK=0
 VERIFY_SKILLS_LOCK=0
@@ -790,6 +795,117 @@ check_doc_facts() {
 	elif [ "$fails" -eq 0 ]; then
 		verdict doc-facts "$DOC_FACTS_REL" 1 \
 			"$rows subject(s), $checked file(s) checked, $codeok module(s) agree; no sentence names the wrong transport"
+	fi
+	return 0
+}
+
+# ------------------------------------------------- the install quick start --
+# The first real Windows install failed twice on the instructions themselves:
+# `&&` pasted into Windows PowerShell 5.1, which has none, and `npm` refused by
+# the default execution policy before git and node were even on the machine. The
+# first commands a person runs have to be pasteable, so this checks the shape of
+# those blocks instead of leaving it to a reader (blip 36, blip 39).
+INSTALL_DOCS=(INSTALL.md docs/install.md)
+
+install_docs_fenced() { # file, fence name -> line<TAB>text, one block's body
+	awk -v want="$2" '
+		/^[[:space:]]*(```|~~~)/ {
+			name = $0
+			sub(/^[[:space:]]*(```|~~~)/, "", name)
+			sub(/[[:space:]].*$/, "", name)
+			if (open) { open = 0; next }
+			open = (name == want)
+			next
+		}
+		open { printf "%d\t%s\n", NR, $0 }
+	' "$1" 2>/dev/null
+}
+
+install_docs_bare_npm() { # stdin line<TAB>text -> the lines that run npm, not npm.cmd
+	# `npm.cmd` and `npm.ps1` are the spellings that matter; both are dropped
+	# before the search, so a sentence explaining the .ps1 symptom stays quiet and
+	# a command that says `npm install` does not. Only a command counts: `npm` has
+	# to be followed by a subcommand or a flag.
+	sed -E 's/npm\.(cmd|ps1)//g' |
+		grep -E 'npm[[:space:]]+(-|install|update|exec|run|ci|i([[:space:]]|$)|version|view)'
+}
+
+check_install_docs() {
+	local rel file ln text faults=0 checked=0 prereq clone
+	for rel in "${INSTALL_DOCS[@]}"; do
+		file="$ROOT/$rel"
+		if [ ! -f "$file" ]; then
+			verdict install-docs "$rel" 0 "missing — the install instructions are not in the tree"
+			faults=$((faults + 1))
+			continue
+		fi
+		checked=$((checked + 1))
+
+		# PowerShell 5.1 has no `&&`: the line is one command per line, or `;`.
+		while IFS=$'\t' read -r ln text; do
+			record FAIL install-docs "$rel:$ln" \
+				"a powershell block joins commands with && — 5.1 rejects it, so use one line each or ';': $text"
+			faults=$((faults + 1))
+		done < <(install_docs_fenced "$file" powershell | grep -F -- '&&')
+
+		# A Windows command that says `npm` runs npm.ps1 under PowerShell, and the
+		# default Restricted policy refuses exactly that.
+		while IFS=$'\t' read -r ln text; do
+			record FAIL install-docs "$rel:$ln" \
+				"npm in a Windows context, without the .cmd form — the .ps1 it resolves to is the script the default policy blocks: $text"
+			faults=$((faults + 1))
+		done < <({
+			install_docs_fenced "$file" powershell
+			grep -niE 'windows|powershell' "$file" | sed -E 's/^([0-9]+):/\1\t/'
+		} | install_docs_bare_npm)
+	done
+
+	# `INSTALL.md` is the page a bare machine lands on, and "the version in
+	# .node-version" is a file that does not exist until after the clone. The
+	# section is a heading that names both Windows and PowerShell: a heading that
+	# says only "Windows" points a reader at prose, not at a command.
+	file="$ROOT/INSTALL.md"
+	if [ -f "$file" ]; then
+		prereq=$(grep -niE '^#{1,6}.*[[:space:]]?windows.*powershell' "$file" | head -1 | cut -d: -f1)
+		clone=$(grep -nF 'git clone' "$file" | head -1 | cut -d: -f1)
+		if [ -z "$prereq" ]; then
+			verdict install-docs INSTALL.md 0 \
+				"no Windows section — a Windows reader is told to bring Node and given no way to install it"
+			faults=$((faults + 1))
+		elif [ -n "$clone" ] && [ "$prereq" -ge "$clone" ]; then
+			verdict install-docs INSTALL.md 0 \
+				"the Windows prerequisites are at line $prereq, after the clone at line $clone — prerequisites come first"
+			faults=$((faults + 1))
+		else
+			verdict install-docs INSTALL.md 1 \
+				"Windows prerequisites at line $prereq, before the clone at line $clone"
+		fi
+		if grep -qF 'winget install' "$file"; then
+			verdict install-docs INSTALL.md 1 "names the winget command that installs git and Node"
+		else
+			verdict install-docs INSTALL.md 0 \
+				"no 'winget install' line — the Windows prerequisite is a link, not a command"
+			faults=$((faults + 1))
+		fi
+		if grep -qF 'Set-ExecutionPolicy' "$file"; then
+			verdict install-docs INSTALL.md 1 "states the execution-policy line that unblocks npm.ps1"
+		else
+			verdict install-docs INSTALL.md 0 \
+				"no 'Set-ExecutionPolicy' line — 'running scripts is disabled on this system' has no documented fix"
+			faults=$((faults + 1))
+		fi
+		if grep -qF 'npm.cmd --version' "$file"; then
+			verdict install-docs INSTALL.md 1 "its check block answers 'is my machine ready' with npm.cmd"
+		else
+			verdict install-docs INSTALL.md 0 \
+				"no 'npm.cmd --version' check line — the four-line readiness check is missing"
+			faults=$((faults + 1))
+		fi
+	fi
+
+	if [ "$faults" -eq 0 ] && [ "$checked" -gt 0 ]; then
+		verdict install-docs "${INSTALL_DOCS[*]}" 1 \
+			"$checked document(s): every powershell block is pasteable, Windows leads, npm is npm.cmd"
 	fi
 	return 0
 }
@@ -1636,6 +1752,7 @@ while [ $# -gt 0 ]; do
 	--verify-release-age) VERIFY_RELEASE_AGE=1 ;;
 	--verify-config) VERIFY_CONFIG=1 ;;
 	--verify-doc-facts) VERIFY_DOC_FACTS=1 ;;
+	--verify-install-docs) VERIFY_INSTALL_DOCS=1 ;;
 	--verify-spec-deltas) VERIFY_SPEC_DELTAS=1 ;;
 	--write-skills-lock) WRITE_SKILLS_LOCK=1 ;;
 	--verify-skills-lock) VERIFY_SKILLS_LOCK=1 ;;
@@ -1761,6 +1878,19 @@ fi
 
 # One check, on demand, for the transport table alone: tests assert on the exit
 # status, and a reader gets one line instead of the whole report.
+if [ "$VERIFY_INSTALL_DOCS" = 1 ]; then
+	section "docs — the install quick start is a command, not a reading list"
+	check_install_docs
+	if [ "$JSON" = 1 ]; then
+		printf '{"pass":%d,"warn":%d,"fail":%d,"results":[%s]}\n' \
+			"$PASS_N" "$WARN_N" "$FAIL_N" "${JSON_ITEMS[*]}"
+	else
+		printf '\n%d passed, %d warn, %d failed\n' "$PASS_N" "$WARN_N" "$FAIL_N"
+	fi
+	[ "$FAIL_N" -eq 0 ]
+	exit $?
+fi
+
 if [ "$VERIFY_DOC_FACTS" = 1 ]; then
 	section "docs — the transport each subject is served by"
 	check_doc_facts
@@ -1788,6 +1918,9 @@ check_packages_lock
 # the wrong transport is exactly the rot that survives review: this runs in
 # --quick so the commit hook says so, not a reader three months later.
 check_doc_facts
+# Same cost, same argument: a `&&` in a powershell block is a copy-paste that
+# fails on the reader's machine, and only the reader finds out.
+check_install_docs
 # Six greps and no subprocess that leaves the tree, so it belongs in the hook's
 # --quick run too: a bump that edits mise.toml is one command from being
 # consistent, while the edit is still the one being made.

@@ -224,3 +224,30 @@ test('the engines build argv with spawnPlan and never set a shell', () => {
 		assert.ok(!/nosemgrep/.test(src), `${file} silences a scanner finding instead of fixing it`);
 	}
 });
+
+// Node on Windows installs `npm` twice: `npm.cmd` for cmd.exe and `npm.ps1` for
+// PowerShell. PowerShell resolves the bare name to the `.ps1`, and the default
+// `Restricted` execution policy refuses to run a script — that is the wall the
+// first real Windows install hit while checking the npm version, before git or
+// node were even usable. The plan names the shim, and the engine takes the name
+// from the plan, so no call site can reintroduce the bare one.
+test('the win32 plan names npm.cmd, and never npm.ps1', () => {
+	assert.equal(planFor('win32').npmBin, 'npm.cmd', 'a bare npm is the .ps1 the policy blocks');
+	assert.equal(planFor('linux').npmBin, 'npm', 'no shim on Linux');
+	assert.equal(planFor('darwin').npmBin, 'npm', 'no shim on macOS');
+	// The plan value is what spawnPlan is handed, so this is the command line a
+	// Restricted machine actually runs.
+	const spec = spawnPlan(planFor('win32').npmBin, ['install', '-g', 'x'], {
+		platform: 'win32',
+		comspec: 'C:\\Windows\\system32\\cmd.exe',
+	});
+	assert.equal(spec.args[3], '"npm.cmd install -g x"');
+	assert.ok(!/npm\.ps1/.test(spec.args.join(' ')), 'the .ps1 form is the one that cannot run');
+	// And the engine reads it off the plan: the literal in the source is the
+	// regression this test exists for.
+	const src = fs
+		.readFileSync(new URL('../../install.mjs', import.meta.url), 'utf8')
+		.replace(/^\s*\/\/.*$/gm, '');
+	assert.ok(/PLAN\.npmBin/.test(src), 'install.mjs does not take npm from the per-OS plan');
+	assert.ok(!/\b(run|hasCmd|spawnSync)\(\s*'npm'/.test(src), "install.mjs spells 'npm' by hand — Windows would get npm.ps1");
+});
