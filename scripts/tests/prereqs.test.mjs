@@ -191,8 +191,37 @@ test('npm on brew: it arrives with node, and the line says so instead of "no com
 	fake.io.have = (name) => name === 'brew';
 	const result = stepPrereqs({ platform: 'darwin', pin: 24, io: fake.io, optional: [] });
 	assert.deepEqual(result.unresolved, ['npm']);
-	assert.match(fake.lines.join('\n'), /npm: missing, and node carries it/);
+	const text = fake.lines.join('\n');
+	assert.match(text, /npm: missing, and node carries it/);
+	// The line printed before this fix contradicted the branch that produced it:
+	// "node carries it, so it arrives with the node install" followed by
+	// "install it by hand: install npm". brew has no npm package, so there is
+	// nothing separate to install and nothing to print.
+	assert.doesNotMatch(text, /install it by hand:.*npm/, 'a hand-install line for a package brew does not have');
+	assert.doesNotMatch(text, /install npm/, 'the reader is told to install npm by hand on a machine where node brings it');
 	assert.deepEqual(fake.runs, ['brew install git', 'brew install node@24']);
+});
+
+test('gh is optional and a real package: the by-hand line names gh, never Node', () => {
+	// The sentence this replaces read "install gh (Node 24) with your package
+	// manager" — a node version in a gh message, because the fallback spelled the
+	// tool as a node package. It also said no manager installs gh while apt-get
+	// was on PATH.
+	const fake = mkIo({ missing: ['git', 'node', 'npm', 'gh'] });
+	fake.io.have = has('apt-get');
+	const result = stepPrereqs({ platform: 'linux', pin: 24, io: fake.io, optional: ['gh'] });
+	assert.deepEqual(result.unresolved, [], 'apt-get carries gh, so it is a step and not a shrug');
+	assert.deepEqual(fake.runs, ['sudo apt-get install -y git', 'sudo apt-get install -y nodejs', 'sudo apt-get install -y npm', 'sudo apt-get install -y gh']);
+
+	// No manager at all: the fallback must name the tool it is about, and only a
+	// node line may mention a node major.
+	const bare = mkIo({ missing: ['git', 'node', 'npm', 'gh'] });
+	bare.io.have = () => false;
+	stepPrereqs({ platform: 'linux', pin: 24, io: bare.io, optional: ['gh'] });
+	const text = bare.lines.join('\n');
+	assert.match(text, /install it by hand: install gh with your OS package manager/);
+	assert.doesNotMatch(text, /install gh \(Node/, 'a node version in a gh sentence');
+	assert.doesNotMatch(text, /install git \(Node/, 'a node version in a git sentence');
 });
 
 test('no package manager at all: every tool is named with the line that installs it by hand', () => {
@@ -247,6 +276,44 @@ test('setup.ps1 is PowerShell 5.1: no &&, and it installs both prerequisites wit
 	assert.ok(/\$env:Path = /.test(code) && /'Machine'/.test(code) && /'User'/.test(code), 'setup.ps1 does not refresh $env:Path from both blocks');
 	assert.ok(/PI_SKIP_PREREQS/.test(code), 'setup.ps1 ignores PI_SKIP_PREREQS');
 	assert.ok(/& node .*setup\.mjs/.test(code), 'setup.ps1 does not run the engine');
+});
+
+ test('setup.ps1 hands every -SetupArgs element to the engine as its own argument', () => {
+	// `powershell -File setup.ps1 -SetupArgs '--skip-prereqs','--help'` is the
+	// shape a person types, and -File does no expression parsing: the whole
+	// `'--skip-prereqs','--help'` arrives as ONE string. Splatting it unchanged is
+	// how the engine came to read `--skip-prereqs,--help` as a single unknown
+	// option on the Windows job. So the script splits and unquotes it into an
+	// array before it calls node, and this pins that shape plus the argv the three
+	// invocations produce. Only the Windows job can run the real PowerShell; what
+	// is proved here is the rule, on a host that has no PowerShell at all.
+	const src = fs.readFileSync(new URL('../../setup.ps1', import.meta.url), 'utf8');
+	const code = src
+		.split('\n')
+		.filter((line) => !/^\s*#/.test(line))
+		.join('\n');
+	assert.ok(/\$nodeArgs = @\(Get-NodeArgs \(\$SetupArgs \+ \$Rest\)\)/.test(code), 'setup.ps1 does not build $nodeArgs from -SetupArgs and the rest');
+	assert.ok(/& node \(Join-Path \$Root 'setup\.mjs'\) @nodeArgs/.test(code), 'setup.ps1 does not call node with the array');
+	assert.doesNotMatch(code, /@SetupArgs\b/, 'setup.ps1 still splats the raw -SetupArgs, which is the one-string bug');
+	assert.ok(/\$part\.Trim\(\)\.Trim\("'"\)\.Trim\('"'\)\.Trim\(\)/.test(code), 'setup.ps1 does not strip the quotes -File left on the value');
+
+	// The same rule, modeled: this is what the array holds for each invocation a
+	// person types, and it is the argv the engine gets.
+	const psSplit = (items) =>
+		items
+			.flatMap((item) => String(item).split(','))
+			.map((part) => part.trim().replace(/^['"]+|['"]+$/g, '').trim())
+			.filter(Boolean);
+	assert.deepEqual(psSplit(["'--skip-prereqs','--help'"]), ['--skip-prereqs', '--help'], 'the comma-joined -File shape');
+	assert.deepEqual(psSplit(['--skip-prereqs', '--help']), ['--skip-prereqs', '--help'], 'the real array shape');
+	assert.deepEqual(psSplit(['--help']), ['--help'], 'a single flag');
+	assert.deepEqual(psSplit([]), [], 'no flags');
+
+	// And the workflow keeps the shape this normalizes: a change there has to come
+	// with a change here.
+	const workflow = fs.readFileSync(new URL('../../.github/workflows/install-matrix.yml', import.meta.url), 'utf8');
+	assert.match(workflow, /-File \.\/setup\.ps1 -SetupArgs '--skip-prereqs','--help'/, 'the Windows job no longer runs the shape setup.ps1 normalizes');
+	assert.match(workflow, /LASTEXITCODE -ne 0/, 'the Windows job does not assert the exit code --help has to leave');
 });
 
 test('setup.sh plans the same packages as the engine (the shell table cannot drift)', () => {

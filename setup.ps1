@@ -25,8 +25,14 @@
 
 [CmdletBinding()]
 param(
+	# The shape a person types: `-SetupArgs '--skip-prereqs','--help'`. Under
+	# `powershell -File` there is no expression parsing, so that arrives as ONE
+	# string with the quotes still on it — never as two arguments.
+	[Parameter()]
+	[string[]] $SetupArgs,
+	# Everything else, positional: `setup.ps1 --dry-run --no-keys`.
 	[Parameter(ValueFromRemainingArguments = $true)]
-	[string[]] $SetupArgs
+	[string[]] $Rest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -127,5 +133,26 @@ if (-not (Have 'node')) {
 $nodeVersion = (& node --version)
 Say ''
 Say "== setup.mjs (Node $nodeVersion, pin $Pin)"
-& node (Join-Path $Root 'setup.mjs') @SetupArgs
+
+# Each element of -SetupArgs has to reach `node setup.mjs` as its OWN argument.
+# `powershell -File setup.ps1 -SetupArgs '--skip-prereqs','--help'` hands this
+# script the single string "'--skip-prereqs','--help'" — -File does no expression
+# parsing — and forwarding that string unchanged is how the engine came to read
+# "--skip-prereqs,--help" as one unknown option. So one element is split on its
+# commas, unquoted, and the result is an array node receives one element at a
+# time. Nothing here changes an argument that was already one argument.
+function Get-NodeArgs($items) {
+	$out = @()
+	foreach ($item in $items) {
+		if (-not $item) { continue }
+		foreach ($part in ($item -split ',')) {
+			$value = $part.Trim().Trim("'").Trim('"').Trim()
+			if ($value) { $out += $value }
+		}
+	}
+	return $out
+}
+
+$nodeArgs = @(Get-NodeArgs ($SetupArgs + $Rest))
+& node (Join-Path $Root 'setup.mjs') @nodeArgs
 exit $LASTEXITCODE

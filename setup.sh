@@ -81,63 +81,58 @@ pkg_for() { # manager, tool -> package name on stdout
 # its own line: `sudo` asking for a password out of nowhere is the wall that
 # makes people abandon an install.
 install_pkg() { # tool, package
-	local tool=$1 pkg=$2 file args
+	local tool=$1 pkg=$2
+	local -a argv
 	case "$MANAGER" in
-	apt-get)
-		file=sudo
-		args="apt-get install -y $pkg"
-		;;
-	dnf)
-		file=sudo
-		args="dnf install -y $pkg"
-		;;
-	pacman)
-		file=sudo
-		args="pacman -S --needed --noconfirm $pkg"
-		;;
-	brew)
-		file=brew
-		args="install $pkg"
-		;;
-	winget)
-		file=winget
-		args="install --id $pkg -e --source winget --accept-source-agreements --accept-package-agreements"
-		;;
-	mise)
-		file=mise
-		args="use -g node@$PIN"
-		;;
+	apt-get) argv=(sudo apt-get install -y "$pkg") ;;
+	dnf) argv=(sudo dnf install -y "$pkg") ;;
+	pacman) argv=(sudo pacman -S --needed --noconfirm "$pkg") ;;
+	brew) argv=(brew install "$pkg") ;;
+	winget) argv=(winget install --id "$pkg" -e --source winget --accept-source-agreements --accept-package-agreements) ;;
+	mise) argv=(mise use -g "node@$PIN") ;;
 	*) return 1 ;;
 	esac
+	# One element per word, so no expansion here is ever re-split by the shell:
+	# a package name with a space stays one argument, and the line printed is the
+	# argv that runs.
 	note "$tool: missing — installing with $MANAGER"
-	note "   run: $file $args"
-	if [ "$file" = sudo ]; then note '   note: sudo — this asks for your password'; fi
-	# Word splitting on $args is the point: it is an argv list written as text.
-	# shellcheck disable=SC2086
-	$file $args
+	note "   run: ${argv[*]}"
+	if [ "${argv[0]}" = sudo ]; then note '   note: sudo — this asks for your password'; fi
+	"${argv[@]}"
 }
 
-# A fresh install goes into a directory this shell's PATH predates. Homebrew's
-# keg-only node is the case that needs the prefix lookup; mise keeps a shim
-# directory nobody exports.
+# A fresh install goes into a directory this shell's PATH predates, and only the
+# manager that just ran can name it: Homebrew's prefix (its keg-only node needs
+# the prefix lookup), mise's shim directory, winget's Links directory. The fixed
+# list this replaces also carried /opt/homebrew/bin and /usr/local/bin for every
+# machine, which put a node the host already had ahead of the one the install
+# just produced — and made the test suite's fake PATH reachable-to-the-host, the
+# bug that broke it on a runner and not on a laptop.
+path_dirs() {
+	local prefix
+	case "${MANAGER:-}" in
+	brew)
+		for prefix in "$(brew --prefix 2>/dev/null)" "$(brew --prefix "node@$PIN" 2>/dev/null)"; do
+			[ -n "$prefix" ] && printf '%s/bin\n' "$prefix"
+		done
+		;;
+	mise) [ -n "${HOME:-}" ] && printf '%s\n' "$HOME/.local/share/mise/shims" ;;
+	winget) [ -n "${LOCALAPPDATA:-}" ] && printf '%s\n' "$LOCALAPPDATA/Microsoft/WinGet/Links" ;;
+	*) : ;;
+	esac
+	return 0
+}
+
 refresh_path() {
-	local prefix dir
-	for dir in "/opt/homebrew/bin" "/opt/homebrew/opt/node@$PIN/bin" "/usr/local/opt/node@$PIN/bin" /usr/local/bin "$HOME/.local/share/mise/shims"; do
+	local dir
+	while IFS= read -r dir; do
+		[ -n "$dir" ] || continue
 		[ -d "$dir" ] || continue
 		case ":$PATH:" in
 		*":$dir:"*) ;;
 		*) PATH="$dir:$PATH" ;;
 		esac
-	done
-	if have brew; then
-		prefix="$(brew --prefix "node@$PIN" 2>/dev/null)" || prefix=""
-		if [ -n "$prefix" ] && [ -d "$prefix/bin" ]; then
-			case ":$PATH:" in
-			*":$prefix/bin:"*) ;;
-			*) PATH="$prefix/bin:$PATH" ;;
-			esac
-		fi
-	fi
+	done <<<"$(path_dirs)"
 	export PATH
 }
 

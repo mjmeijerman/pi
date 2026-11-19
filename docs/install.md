@@ -45,7 +45,9 @@ number `mise.toml` writes — and npm, plus git where the platform lets it, thro
 the first package manager it finds: `apt-get`, `dnf`, `pacman`, `brew`, `winget`
 or `mise`. It announces every command before running it, says so before `sudo`,
 re-reads `node` from `PATH` afterwards (a fresh install is usually not in the
-`PATH` this shell inherited), and then execs the engine. A failed install prints
+`PATH` this shell inherited) — looking where the manager that ran puts its
+binaries, so a `node` that was already earlier on `PATH` cannot answer for the
+one the install just wrote — and then execs the engine. A failed install prints
 the line that does it by hand and the next prerequisite still runs. Nothing needs
 `gh`; the installer falls back to an https clone.
 

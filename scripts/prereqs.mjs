@@ -44,7 +44,7 @@ export function manualCommand(tool, manager, pin = 24) {
 		brew: `brew install ${tool}`,
 		winget: `winget install --id ${tool} -e --source winget`,
 	};
-	return table[manager] || `install ${tool} (Node ${pin}) with your package manager`;
+	return table[manager] || `install ${tool} with your OS package manager (apt-get, dnf, pacman, brew or winget) — or the lines in docs/install.md#prerequisites-per-os`;
 }
 
 /**
@@ -93,14 +93,27 @@ export function stepPrereqs({
 		if (!step) {
 			const entry = plan.unresolved.find((u) => u.tool === tool);
 			result.unresolved.push(tool);
+			// Two different silences, and only one of them has a line to print: a
+			// manager that carries the tool has a command, so reaching here means it
+			// carries nothing (npm on brew and winget, git with only mise) — and
+			// printing "install it by hand: install npm" under "node carries it"
+			// contradicts the line above it. No manager at all is the case that needs
+			// the by-hand line, and it names the tool it is about.
+			const pkg = prereqPackage(tool, manager, pin);
+			if (manager && !pkg) {
+				const why =
+					tool === 'npm'
+						? `node carries it, so the ${manager} node install brings it in`
+						: `${manager} has no package for it`;
+				note(`${tool}: missing, and ${why}`);
+				continue;
+			}
 			const why =
-				tool === 'npm'
-					? 'node carries it, so it arrives with the node install'
-					: entry && entry.manager
-						? `${entry.manager} has no command for it`
-						: 'no package manager here installs it';
+				pkg && entry && entry.manager
+					? `${entry.manager} has no command for it`
+					: 'no package manager here installs it';
 			note(`${tool}: missing, and ${why}`);
-			note(`   install it by hand: ${manualCommand(prereqPackage(tool, manager, pin) || tool, manager, pin)}`);
+			note(`   install it by hand: ${manualCommand(pkg || tool, manager, pin)}`);
 			continue;
 		}
 		note(`${tool}: missing — installing with ${step.manager}`);
