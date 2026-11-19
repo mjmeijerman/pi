@@ -5,13 +5,17 @@
 //   git clone https://github.com/mjmeijerman/pi.git ~/.pi
 //   cd ~/.pi && ./setup.sh          # = node setup.mjs
 //
-// It asks four things, with a default on every question:
-//   1. skills      — one per skill in agent/skills (+ ~/.pi/skills extras)
-//   2. extensions  — one per extension in agent/extensions
-//   3. rules       — one per bullet rule in agent/AGENTS.md, "rule 4 of 17",
+// It asks five things, with a default on every question:
+//   1. pi          — "install pi with npm?" when pi is not on PATH, with the
+//                    exact npm line as the sub-line. Default yes: pi is what
+//                    this config drives, so an install that ends without it is
+//                    an install that stopped one step short.
+//   2. skills      — one per skill in agent/skills (+ ~/.pi/skills extras)
+//   3. extensions  — one per extension in agent/extensions
+//   4. rules       — one per bullet rule in agent/AGENTS.md, "rule 4 of 17",
 //                    each shown by its own first line. The filtered AGENTS.md
 //                    is written from the answers.
-//   4. keys        — TYPESAFE_API_KEY (jev) and the DeepSeek key models.json
+//   5. keys        — TYPESAFE_API_KEY (jev) and the DeepSeek key models.json
 //                    reads. Input is hidden, a key is never echoed, never
 //                    logged, and only ever written to the file that owns it.
 // Then it runs install.mjs, reconciles the pi packages, and verifies.
@@ -44,6 +48,9 @@ import {
 	parseAgentsMd,
 	parseFlags,
 	parseRuleSelection,
+	piDiskCandidates,
+	piInstallCommand,
+	piPreflight,
 	pinnedNodeMajor,
 	planFor,
 	ruleAnswer,
@@ -397,6 +404,10 @@ function writeSecretFile(file, text) {
 }
 
 // --- preflight + system packages -------------------------------------------
+// npm is named the way its own OS resolves it: `npm.cmd` on Windows, where a
+// bare `npm` is the `npm.ps1` a default execution policy refuses.
+const NPM = PLAN.npmBin || 'npm';
+
 function have(cmd) {
 	if (PLAN.platform === 'win32') {
 		const r = spawnSync('where', [cmd], { stdio: 'ignore' });
@@ -417,7 +428,7 @@ function run(cmd, args, { quiet = false } = {}) {
 	}).status ?? 1;
 }
 
-function preflight() {
+async function preflight() {
 	step('preflight');
 	note(`source : ${SOURCE_DIR}`);
 	note(`agent  : ${AGENT_DIR}`);
@@ -430,16 +441,63 @@ function preflight() {
 	// One file owns the number: mise.toml. The messages come from install-lib, so
 	// `node --test scripts/tests/mise-pin.test.mjs` can pin the text that is
 	// really printed instead of grepping for a literal (blip 68).
+	//
+	// The version is the running process's, not a PATH lookup: this file *is*
+	// node, so `spawnSync('node', ['-v'])` is the one probe that can lie. Under a
+	// runner that starts node by absolute path (or a shim, or a fake PATH) it
+	// reports ENOENT while node is right here running the check, and the install
+	// stops on a prerequisite that is proved present.
 	const pin = pinnedNodeMajor(SOURCE_DIR, fs.readFileSync);
-	const probe = spawnSync('node', ['-v'], { encoding: 'utf8' });
 	const verdict = nodePreflight({
 		pin,
-		nodeVersion: probe.status === 0 ? probe.stdout.trim() : undefined,
-		nodeMajor: probe.status === 0 ? Number.parseInt(process.versions.node.split('.')[0], 10) : undefined,
+		nodeVersion: process.version,
+		nodeMajor: Number.parseInt(process.versions.node.split('.')[0], 10),
 	});
 	if (verdict.level === 'die') die(`${verdict.message} — docs/install.md#troubleshooting`);
 	if (verdict.level === 'warn') warn(verdict.message);
-	if (!have('pi')) note('pi is not on PATH yet; install.mjs can install it with --install-pi');
+	// The pi question belongs here, next to the checks it is about, and only when
+	// there is really no pi: on PATH, or on disk where pnpm put it (install.mjs
+	// adds that directory to PATH itself, so asking would be a question with one
+	// answer). PI_ALLOW_MISSING_PI=1 is the CI path and asks nothing; so does
+	// --no-install-pi, which is a person saying no in advance.
+	await askPi();
+}
+
+/**
+ * askPi — "install pi with npm? (default yes)", with the exact command as the
+ * sub-line. Its answer is the flag handed to install.mjs, so what the question
+ * promised is what the engine does.
+ */
+async function askPi() {
+	const onDisk = piDiskCandidates({ home: HOME, plan: PLAN, env: process.env }).find((c) => fs.existsSync(c));
+	const verdict = piPreflight({
+		onPath: have('pi'),
+		onDisk,
+		npm: have(NPM),
+		npmBin: NPM,
+		allowMissing: process.env.PI_ALLOW_MISSING_PI === '1',
+		install: OPT.installPi,
+		plan: PLAN,
+	});
+	if (verdict.action === 'present') return;
+	// On disk is not missing: install.mjs puts that directory on PATH itself, so
+	// the only honest question here would be one with a single answer.
+	if (verdict.action === 'path') {
+		note(verdict.message);
+		return;
+	}
+	if (verdict.action === 'skip') {
+		note(`pi: ${verdict.message}`);
+		return;
+	}
+	if (verdict.action === 'stop') {
+		warn(`${verdict.message} — nothing written yet`);
+		for (const line of verdict.fix || []) note(line);
+		process.exit(1);
+	}
+	note(`the command: ${piInstallCommand(NPM)}`);
+	OPT.installPi = await confirm('install pi with npm?', true);
+	if (!OPT.installPi) note('skipped — install.mjs will carry on without pi');
 }
 
 async function systemPackages() {
@@ -475,7 +533,9 @@ function runInstaller(env) {
 	step('install.mjs');
 	const args = [];
 	if (OPT.dryRun) args.push('--dry-run');
-	if (OPT.installPi) args.push('--install-pi');
+	// Default-on, so the flag that travels is the opt-out: the answer to the pi
+	// question (or --no-install-pi) is what the engine obeys.
+	if (!OPT.installPi) args.push('--no-install-pi');
 	if (env.PI_SKILLS) args.push(`--skills=${splitList(env.PI_SKILLS).join(',')}`);
 	if (env.PI_EXTENSIONS) args.push(`--extensions=${splitList(env.PI_EXTENSIONS).join(',')}`);
 	const status = spawnSync(process.execPath, [path.join(SOURCE_DIR, 'install.mjs'), ...args], {
@@ -576,7 +636,7 @@ async function main() {
 	if (OPT.dryRun) process.env.PI_DRY_RUN = '1';
 	const state = OPT.reask ? { version: 1, skills: [], extensions: [], rules: {}, keys: {} } : readState();
 
-	preflight();
+	await preflight();
 	await systemPackages();
 
 	const skills = await chooseSkills(state);

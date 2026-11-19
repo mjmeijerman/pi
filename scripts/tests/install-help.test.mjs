@@ -45,7 +45,11 @@ test('help text names every flag, and only flags the parser accepts', () => {
 });
 
 test('parseFlags: defaults, negation, lists and the unknown option', () => {
-	assert.deepEqual(parseFlags('install', []), { installPi: false, dryRun: false });
+	// Installing pi is the default (it is what the config drives), so the only
+	// flag that changes an install is the opt-out.
+	assert.deepEqual(parseFlags('install', []), { installPi: true, dryRun: false });
+	assert.equal(parseFlags('install', ['--no-install-pi']).installPi, false);
+	assert.equal(parseFlags('install', ['--install-pi']).installPi, true, 'the old flag still means what it meant');
 	assert.equal(parseFlags('install', ['--help']).help, true);
 	assert.deepEqual(parseFlags('install', ['--skills=a,b']).skills, ['a', 'b']);
 

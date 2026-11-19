@@ -344,6 +344,72 @@ pi() {
 }
 # <<< pi sandbox <<<`;
 
+// --- the pi binary -----------------------------------------------------------
+// Installing pi is the default: pi is the thing this whole config exists to
+// drive, so a run that ends with `'pi' not found on PATH` and exit 1 after every
+// question was answered is a run that did the work and then stopped one step
+// short. The decisions live here, not in the engines, so the install path, the
+// setup question and the tests read one function.
+export const PI_PACKAGE = '@earendil-works/pi-coding-agent';
+
+/**
+ * piDiskCandidates — where a pi that is NOT on PATH may sit, in search order.
+ * pnpm keeps its bin directory out of PATH on purpose, so a pi that npm or pnpm
+ * installed is otherwise "missing" to a shell that never sourced the wrapper.
+ * Both engines read this list, so setup and install agree on what missing means.
+ */
+export function piDiskCandidates({ home, plan = planFor(), env = {} } = {}) {
+	const dirs = [path.join(env.PNPM_HOME || path.join(home, '.local', 'share', 'pnpm'), 'bin'), path.join(home, '.local', 'bin')];
+	const names = plan.platform === 'win32' ? ['pi.cmd', 'pi.exe'] : ['pi'];
+	return dirs.flatMap((dir) => names.map((name) => path.join(dir, name)));
+}
+
+/** piInstallArgv — the one command line that installs pi, as argv. */
+export function piInstallArgv(npmBin = 'npm') {
+	return [npmBin, 'install', '-g', '--ignore-scripts', PI_PACKAGE];
+}
+
+/** piInstallCommand — the same line as text, for a question, a message or docs. */
+export function piInstallCommand(npmBin = 'npm') {
+	return piInstallArgv(npmBin).join(' ');
+}
+
+/**
+ * nodePrereqHint — where this OS gets Node (and with it npm), in one line.
+ * The commands are the ones docs/install.md#prerequisites-per-os carries, so a
+ * person who reads the stop message is reading the page that fixes it.
+ */
+export function nodePrereqHint(plan = planFor()) {
+	if (plan.platform === 'win32') return 'winget install --id OpenJS.NodeJS.LTS -e --source winget   (in PowerShell, then reopen the shell)';
+	if (plan.platform === 'darwin') return 'brew install node@24   (or the Node 24 installer from nodejs.org), then reopen the terminal';
+	return 'sudo apt-get install -y nodejs npm   (dnf/pacman one-liners in docs/install.md), then reopen the shell';
+}
+
+/**
+ * piPreflight — what to do about the pi binary, decided as data.
+ *
+ * Order is the policy: a pi already on PATH is nothing to do; one found on disk
+ * (pnpm keeps it out of PATH) is put on PATH; PI_ALLOW_MISSING_PI=1 is the CI
+ * escape hatch and skips without failing; --no-install-pi is a person saying
+ * "not here"; otherwise npm installs it; and with no npm at all the run stops
+ * rather than half-installing a tree around a binary that cannot start.
+ *
+ * Returns { action, message, argv?, fix? } — 'present' | 'path' | 'skip' |
+ * 'install' | 'stop'.
+ */
+export function piPreflight({ onPath = false, onDisk = null, npm = false, npmBin = 'npm', allowMissing = false, install = true, plan = planFor() } = {}) {
+	if (onPath) return { action: 'present' };
+	if (onDisk) return { action: 'path', message: `pi found on disk, added to PATH: ${onDisk}`, path: onDisk };
+	if (allowMissing) return { action: 'skip', message: 'PI_ALLOW_MISSING_PI=1 — config only' };
+	if (!install) return { action: 'skip', message: '--no-install-pi — pi is not installed; put it on PATH when you have it' };
+	if (npm) return { action: 'install', message: `installing pi with npm (global): ${piInstallCommand(npmBin)}`, argv: piInstallArgv(npmBin) };
+	return {
+		action: 'stop',
+		message: `no pi on PATH and no ${npmBin} to install it with — Node (npm ships with it) is a prerequisite`,
+		fix: [nodePrereqHint(plan), `then re-run this installer: ${piInstallCommand(npmBin)}`],
+	};
+}
+
 // --- the flags ---------------------------------------------------------------
 // One table per engine, and the parser reads it. `--help` renders the same
 // table, so a flag the code accepts cannot be a flag the help text forgets:
@@ -354,7 +420,8 @@ pi() {
 //       'text' keeps the string as written.
 export const ENGINE_FLAGS = {
 	install: [
-		{ names: ['--install-pi'], key: 'installPi', kind: 'bool', value: true, default: false, help: 'install pi with npm when it is missing' },
+		{ names: ['--install-pi'], key: 'installPi', kind: 'bool', value: true, default: true, help: 'install pi with npm when it is missing (the default; kept so old scripts keep working)' },
+		{ names: ['--no-install-pi'], key: 'installPi', kind: 'bool', value: false, help: 'never install pi, carry on without it' },
 		{ names: ['--dry-run'], key: 'dryRun', kind: 'bool', value: true, default: false, help: 'print the plan, change nothing' },
 		{ names: ['--skills='], key: 'skills', kind: 'list', help: 'only these skills (comma-separated)' },
 		{ names: ['--extensions='], key: 'extensions', kind: 'list', help: 'only these extensions (comma-separated, .ts optional)' },
@@ -373,7 +440,8 @@ export const ENGINE_FLAGS = {
 		{ names: ['--force-key'], key: 'forceKey', kind: 'bool', value: true, default: false, help: 'replace an existing key file' },
 		{ names: ['--with-ollama'], key: 'withOllama', kind: 'bool', value: true, default: false, help: 'pull the local model (~17 GB) without asking' },
 		{ names: ['--with-dictation'], key: 'withDictation', kind: 'bool', value: true, default: false, help: 'build the whisper venv (~2.5 GB) without asking' },
-		{ names: ['--install-pi'], key: 'installPi', kind: 'bool', value: true, default: false, help: 'let install.mjs install pi with npm when it is missing' },
+		{ names: ['--install-pi'], key: 'installPi', kind: 'bool', value: true, default: true, help: 'install pi with npm when it is missing (the default; kept so old scripts keep working)' },
+		{ names: ['--no-install-pi'], key: 'installPi', kind: 'bool', value: false, help: 'never install pi, and do not ask; carry on without it' },
 		{ names: ['-h', '--help'], key: 'help', kind: 'bool', value: true, help: 'print this text and exit 0' },
 	],
 };
