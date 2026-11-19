@@ -619,17 +619,26 @@ function stepPiWrapper() {
 async function stepHerdrApp() {
 	say('== herdr-app');
 	const bin = P.herdrInstalled;
-	const command = herdrInstallCommand({ platform: PLAN.platform, hasPwsh: PLAN.platform === 'win32' && hasCmd('pwsh') });
+	// The facts, looked up here and nowhere else: herdrInstallCommand is pure, so
+	// the choice can be tested without a host that has — or lacks — a `pwsh`.
+	const command = herdrInstallCommand({
+		platform: PLAN.platform,
+		hasPwsh: hasCmd('pwsh'),
+		hasPowershell: hasCmd('powershell'),
+	});
 	const present = Boolean(bin) && exists(bin);
 	note(`platform : ${PLAN.platform}`);
 	note(`bin      : ${bin || '(none — no vendor install path on this OS)'}`);
 	note(`exists   : ${present ? 'yes' : 'no'}`);
 
-	// Three reasons not to run it, each said out loud with the manual command
-	// behind it. Anything else runs the installer and says so first.
+	// Four reasons not to run it, each said out loud with the manual command
+	// behind it. Anything else runs the installer and says so first. The missing
+	// PowerShell is one of them now that the choice is a pure function: a shell
+	// the step knows is absent is named, instead of reaching spawnSync's ENOENT.
 	let whyNot = null;
 	if (present) whyNot = 'already installed';
 	else if (SKIP_NETWORK) whyNot = 'PI_SKIP_NETWORK=1 — the vendor installer was not downloaded';
+	else if (!command.available) whyNot = 'neither pwsh nor powershell is on PATH';
 	else if (PLAN.herdrInstall === 'sh' && !hasCmd('curl')) whyNot = 'curl is not on PATH';
 
 	let ran = false;

@@ -40,31 +40,53 @@ export const HERDR_INSTALLED_WIN = { dir: path.join('Programs', 'herdr-app'), fi
 /**
  * herdrInstallCommand — the argv the vendor installer is invoked with, per OS.
  *
- * Pure, and in this file, because the engine and the tests must agree on the
- * exact command and because PowerShell is not one program on Windows: `pwsh`
- * (PowerShell 7, on the PATH of a machine that installed it) is preferred and
- * `powershell` (the 5.1 that ships with the OS) is the fallback. When the step
- * asked for a name that was not there, spawnSync returned ENOENT and the step
- * printed nothing at all — the bug this table cannot hide.
+ * Pure, and it takes the facts as arguments, because the alternative was this
+ * function looking at `PATH` itself — and then the answer depended on the host
+ * that ran the tests. A runner ships PowerShell 7 as `pwsh`; this laptop does
+ * not; the same test passed here and failed there. Facts in, command out:
+ * `hasPwsh` and `hasPowershell` are passed by the step, which is the only place
+ * allowed to look at `PATH`.
+ *
+ * PowerShell is not one program on Windows: `pwsh` (7, present when someone
+ * installed it) is preferred, `powershell` (the 5.1 that ships with the OS) is
+ * the fallback, and neither means there is nothing to run — which is said with
+ * the manual line instead of an ENOENT nobody reads.
  *
  * `manual` is the line a person can paste, and it always says `powershell`:
  * that one exists on every Windows machine, so it is the copy that cannot be
  * wrong.
  */
-export function herdrInstallCommand({ platform = process.platform, hasPwsh = false } = {}) {
+export function herdrInstallCommand({ platform = process.platform, hasPwsh = false, hasPowershell = false } = {}) {
 	if (platform === 'win32') {
 		const script = `irm ${HERDR_INSTALL_PS1} | iex`;
-		const shell = hasPwsh ? 'pwsh' : 'powershell';
+		const shell = hasPwsh ? 'pwsh' : hasPowershell ? 'powershell' : null;
+		const manual = `powershell -c "irm ${HERDR_INSTALL_PS1} | iex"`;
+		if (!shell) {
+			return {
+				shell: null,
+				args: [],
+				line: null,
+				manual,
+				url: HERDR_INSTALL_PS1,
+				preferred: 'pwsh',
+				fellBack: true,
+				// Nothing to spawn. The step turns this into the manual line rather
+				// than letting spawnSync report an ENOENT for a shell it just
+				// established is not there.
+				available: false,
+			};
+		}
 		return {
 			shell,
 			args: ['-NoProfile', '-Command', script],
 			line: `${shell} -NoProfile -Command "${script}"`,
-			manual: `powershell -c "irm ${HERDR_INSTALL_PS1} | iex"`,
+			manual,
 			url: HERDR_INSTALL_PS1,
 			// Named so the engine can print it: "we picked powershell" is then a
 			// fact a person can check instead of a guess.
 			preferred: 'pwsh',
-			fellBack: !hasPwsh,
+			fellBack: shell !== 'pwsh',
+			available: true,
 		};
 	}
 	return {
@@ -75,6 +97,7 @@ export function herdrInstallCommand({ platform = process.platform, hasPwsh = fal
 		url: HERDR_INSTALL_SH,
 		preferred: null,
 		fellBack: false,
+		available: true,
 	};
 }
 

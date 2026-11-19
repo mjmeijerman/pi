@@ -11,10 +11,13 @@
 //      PATH, and the old step turned ENOENT and a non-zero exit into the same
 //      silent nothing.
 //
-// The argv decision is a pure function in scripts/install-lib.mjs, so pwsh-first
-// and the manual command are pinned here. The engine is driven with --dry-run
-// and a throwaway HOME for the lines; a real Windows machine is the only place
-// the vendor script itself can be proven, and the report says so.
+// The argv decision is a pure function in scripts/install-lib.mjs and takes the
+// facts as arguments, so every combination is pinned with no environment at
+// all. The integration case builds its own PATH: a runner ships PowerShell 7 as
+// `pwsh`, this laptop does not, and a test whose verdict depends on which one
+// runs it has no verdict. The engine is driven with --dry-run and a throwaway
+// HOME; a real Windows machine is the only place the vendor script itself can be
+// proven, and the report says so.
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -28,11 +31,34 @@ import { HERDR_INSTALL_PS1, HERDR_INSTALL_SH, herdrAttempt, herdrInstallCommand,
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const MANUAL_PS = `powershell -c "irm ${HERDR_INSTALL_PS1} | iex"`;
+const PS_ARGS = ['-NoProfile', '-Command', `irm ${HERDR_INSTALL_PS1} | iex`];
 
 function tempDir(t, prefix = 'pi-herdr-') {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 	return dir;
+}
+
+// A PATH this test builds itself: the host's, minus every directory that
+// carries a `pwsh` or a `powershell`. Whatever the machine has, the case below
+// sees exactly the shells it creates.
+function pathWithoutPowerShell() {
+	const kept = (process.env.PATH ?? '')
+		.split(path.delimiter)
+		.filter(Boolean)
+		.filter((dir) => !['pwsh', 'powershell'].some((name) => fs.existsSync(path.join(dir, name))));
+	assert.ok(kept.length > 0, 'every PATH entry carried a PowerShell — the case could not run');
+	return kept;
+}
+
+// stubShell — an executable named `name` that does nothing, so `command -v`
+// finds it and the step's choice is the only thing under test.
+function stubShell(dir, name) {
+	fs.mkdirSync(dir, { recursive: true });
+	const file = path.join(dir, name);
+	fs.writeFileSync(file, '#!/bin/sh\nexit 0\n');
+	fs.chmodSync(file, 0o755);
+	return file;
 }
 
 // Every case runs --dry-run: what is under test is the plan and the lines, not
@@ -77,30 +103,47 @@ test('POSIX detection is absolute, and honours XDG_DATA_HOME like install.sh doe
 	assert.equal(planFor('linux', { HOME: home, XDG_DATA_HOME: xdg }).herdrInstalled, path.join(xdg, 'herdr-app', 'herdr-app'));
 });
 
-test('pwsh runs first on win32, powershell is the fallback, and the manual line always names powershell', () => {
-	const pwsh = herdrInstallCommand({ platform: 'win32', hasPwsh: true });
-	assert.equal(pwsh.shell, 'pwsh');
-	assert.deepEqual(pwsh.args, ['-NoProfile', '-Command', `irm ${HERDR_INSTALL_PS1} | iex`]);
-	assert.equal(pwsh.line, `pwsh -NoProfile -Command "irm ${HERDR_INSTALL_PS1} | iex"`);
-	assert.equal(pwsh.fellBack, false);
+test('the shell is a function of the facts passed in, not of the machine running the test', () => {
+	// win32 with both: pwsh wins, and nothing is reported as a fallback.
+	const both = herdrInstallCommand({ platform: 'win32', hasPwsh: true, hasPowershell: true });
+	assert.equal(both.shell, 'pwsh');
+	assert.deepEqual(both.args, PS_ARGS);
+	assert.equal(both.line, `pwsh -NoProfile -Command "irm ${HERDR_INSTALL_PS1} | iex"`);
+	assert.equal(both.fellBack, false);
+	assert.equal(both.available, true);
 
-	const winPs = herdrInstallCommand({ platform: 'win32', hasPwsh: false });
-	assert.equal(winPs.shell, 'powershell');
-	assert.equal(winPs.fellBack, true);
-	assert.equal(winPs.preferred, 'pwsh');
+	// win32 with only the PowerShell that ships with the OS.
+	const onlyPowershell = herdrInstallCommand({ platform: 'win32', hasPwsh: false, hasPowershell: true });
+	assert.equal(onlyPowershell.shell, 'powershell');
+	assert.deepEqual(onlyPowershell.args, PS_ARGS);
+	assert.equal(onlyPowershell.fellBack, true);
+	assert.equal(onlyPowershell.preferred, 'pwsh');
+
+	// win32 with neither: nothing to run, so the manual line is the answer. No
+	// command string that would let the step print a shell it cannot spawn.
+	const neither = herdrInstallCommand({ platform: 'win32', hasPwsh: false, hasPowershell: false });
+	assert.equal(neither.available, false);
+	assert.equal(neither.shell, null);
+	assert.deepEqual(neither.args, []);
+	assert.equal(neither.line, null);
+
 	// The paste-able line does not depend on which one this machine happens to
 	// have: `powershell` is on every Windows box.
-	assert.equal(winPs.manual, MANUAL_PS);
-	assert.equal(pwsh.manual, MANUAL_PS);
+	for (const command of [both, onlyPowershell, neither]) assert.equal(command.manual, MANUAL_PS);
 
-	const posix = herdrInstallCommand({ platform: 'linux', hasPwsh: true });
-	assert.equal(posix.shell, 'sh');
-	assert.deepEqual(posix.args, ['-c', `curl -fsSL ${HERDR_INSTALL_SH} | sh`]);
-	assert.equal(posix.manual, posix.line);
+	// POSIX: curl and sh, and the PowerShell facts change nothing.
+	for (const platform of ['linux', 'darwin']) {
+		const posix = herdrInstallCommand({ platform, hasPwsh: true, hasPowershell: true });
+		assert.equal(posix.shell, 'sh');
+		assert.deepEqual(posix.args, ['-c', `curl -fsSL ${HERDR_INSTALL_SH} | sh`]);
+		assert.equal(posix.manual, posix.line);
+		assert.equal(posix.preferred, null);
+		assert.equal(herdrInstallCommand({ platform }).shell, 'sh', 'default facts still give a command on POSIX');
+	}
 });
 
 test('an ENOENT from the spawn is its own message, not a silent nothing', () => {
-	const command = herdrInstallCommand({ platform: 'win32', hasPwsh: true });
+	const command = herdrInstallCommand({ platform: 'win32', hasPwsh: true, hasPowershell: true });
 	const enoent = Object.assign(new Error('spawn pwsh ENOENT'), { code: 'ENOENT' });
 	const attempt = herdrAttempt({ command, spawn: () => ({ error: enoent, status: null }) });
 	assert.equal(attempt.ok, false);
@@ -114,9 +157,10 @@ test('an ENOENT from the spawn is its own message, not a silent nothing', () => 
 	// A non-zero exit is a different failure: the installer started and refused.
 	const refused = herdrAttempt({ command, spawn: () => ({ status: 3 }) });
 	assert.equal(refused.ok, false);
-	assert.match(refused.lines.join('\n'), /exited 3/);
-	assert.match(refused.lines.join('\n'), new RegExp(HERDR_INSTALL_PS1.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-	assert.ok(refused.lines.join('\n').includes(MANUAL_PS));
+	const refusedText = refused.lines.join('\n');
+	assert.match(refusedText, /exited 3/);
+	assert.ok(refusedText.includes(HERDR_INSTALL_PS1), `the vendor URL is named:\n${refusedText}`);
+	assert.ok(refusedText.includes(MANUAL_PS));
 
 	assert.equal(herdrAttempt({ command, spawn: () => ({ status: 0 }) }).ok, true);
 	// A dry run must not spawn at all: the throw proves it never reaches one.
@@ -131,33 +175,46 @@ test('the step prints the resolved path and the command on this host', (t) => {
 	const out = `${run.stdout}${run.stderr}`;
 	assert.equal(run.status, 0, `install.mjs exited ${run.status}:\n${out}`);
 	assert.match(out, /== herdr-app/);
-	assert.match(out, new RegExp(`== platform : ${process.platform}`));
+	assert.ok(out.includes(`== platform : ${process.platform}`), `the platform is printed:\n${out}`);
 	assert.ok(out.includes(path.join(home, '.local', 'share', 'herdr-app', 'herdr-app')), `the resolved path is printed:\n${out}`);
 	assert.match(out, /== exists   : no/);
 	assert.match(out, /== command  : .*install\.sh/);
 	assert.match(out, /not installed — run: curl -fsSL/);
 });
 
-test('win32: %LOCALAPPDATA%\\Programs\\herdr-app, pwsh when a pwsh exists, powershell when it does not', (t) => {
+test('win32: %LOCALAPPDATA%\\Programs\\herdr-app, and the shell follows the PATH the test builds', (t) => {
 	const home = tempDir(t);
 	const local = path.join(home, 'AppData', 'Local');
+	const base = pathWithoutPowerShell().join(path.delimiter);
 
-	const plain = dryRun(home, { PI_PLATFORM: 'win32', USERPROFILE: home });
-	const plainOut = `${plain.stdout}${plain.stderr}`;
-	assert.equal(plain.status, 0, `install.mjs exited ${plain.status}:\n${plainOut}`);
-	assert.ok(plainOut.includes(path.join(local, 'Programs', 'herdr-app', 'herdr-app.exe')), `the Windows path is printed:\n${plainOut}`);
-	assert.match(plainOut, /== command  : powershell -NoProfile -Command "irm https:\/\/releases\.herdr\.dev\/app\/install\.ps1 \| iex"/);
-	assert.match(plainOut, /== fallback : pwsh is not on PATH/);
-	assert.ok(plainOut.includes(`not installed — run: ${MANUAL_PS}`), `the manual command is printed:\n${plainOut}`);
+	// (a) Neither shell on PATH: the manual line, and nothing spawned.
+	const neither = dryRun(home, { PI_PLATFORM: 'win32', USERPROFILE: home, PATH: base });
+	const neitherOut = `${neither.stdout}${neither.stderr}`;
+	assert.equal(neither.status, 0, `install.mjs exited ${neither.status}:\n${neitherOut}`);
+	assert.ok(neitherOut.includes(path.join(local, 'Programs', 'herdr-app', 'herdr-app.exe')), `the Windows path is printed:\n${neitherOut}`);
+	assert.match(neitherOut, /== command  : not run — neither pwsh nor powershell is on PATH/);
+	assert.ok(neitherOut.includes(`!! not installed — run: ${MANUAL_PS}`), `the manual command is printed:\n${neitherOut}`);
 
-	// A `pwsh` on PATH must be the one chosen, or "pwsh preferred" is a claim
-	// nothing tests.
-	const bin = path.join(home, 'stub-bin');
-	fs.mkdirSync(bin, { recursive: true });
-	const pwsh = path.join(bin, 'pwsh');
-	fs.writeFileSync(pwsh, '#!/bin/sh\nexit 0\n');
-	fs.chmodSync(pwsh, 0o755);
-	const withPwsh = dryRun(home, { PI_PLATFORM: 'win32', USERPROFILE: home, PATH: `${bin}${path.delimiter}${process.env.PATH}` });
+	// (b) The PowerShell that ships with Windows, and only that one.
+	const legacy = stubShell(path.join(home, 'legacy-bin'), 'powershell');
+	const withLegacy = dryRun(home, {
+		PI_PLATFORM: 'win32',
+		USERPROFILE: home,
+		PATH: `${path.dirname(legacy)}${path.delimiter}${base}`,
+	});
+	const legacyOut = `${withLegacy.stdout}${withLegacy.stderr}`;
+	assert.equal(withLegacy.status, 0, `install.mjs exited ${withLegacy.status}:\n${legacyOut}`);
+	assert.match(legacyOut, /== command  : powershell -NoProfile -Command "irm https:\/\/releases\.herdr\.dev\/app\/install\.ps1 \| iex"/);
+	assert.match(legacyOut, /== fallback : pwsh is not on PATH/);
+
+	// (c) A `pwsh` on PATH must be the one chosen, or "pwsh preferred" is a claim
+	// nothing tests — and this is the shape of the runner that failed.
+	const modern = stubShell(path.join(home, 'modern-bin'), 'pwsh');
+	const withPwsh = dryRun(home, {
+		PI_PLATFORM: 'win32',
+		USERPROFILE: home,
+		PATH: `${path.dirname(modern)}${path.delimiter}${base}`,
+	});
 	const pwshOut = `${withPwsh.stdout}${withPwsh.stderr}`;
 	assert.equal(withPwsh.status, 0, `install.mjs exited ${withPwsh.status}:\n${pwshOut}`);
 	assert.match(pwshOut, /== command  : pwsh -NoProfile -Command "irm https:\/\/releases\.herdr\.dev\/app\/install\.ps1 \| iex"/);
@@ -178,7 +235,10 @@ test('an already-installed binary still prints the path, and the link target is 
 	assert.match(out, /== exists   : yes/);
 	assert.match(out, /== command  : not run — already installed/);
 	assert.match(out, /== installed -> /);
-	assert.match(out, new RegExp(`== herdr-app -> ${path.join(home, '.local', 'bin', 'herdr-app').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(`));
+	assert.ok(
+		out.includes(`== herdr-app -> ${path.join(home, '.local', 'bin', 'herdr-app')} (`),
+		`the bin entry line names the link it made:\n${out}`,
+	);
 
 	// win32: the same step, and the bin entry it names is herdr-app.exe.
 	const winHome = tempDir(t);
