@@ -241,7 +241,7 @@ test('the skip flag prints skip lines and reaches no package manager', () => {
 	const result = stepPrereqs({ platform: 'linux', pin: 24, io: fake.io, optional: [], skipPrereqs: true });
 	assert.equal(result.skipped, true);
 	assert.deepEqual(fake.runs, []);
-	assert.match(fake.lines.join('\n'), new RegExp(`${PREREQ_SKIP_ENV}=1`));
+	assert.ok(fake.lines.join('\n').includes(`${PREREQ_SKIP_ENV}=1`), fake.lines.join('\n'));
 });
 
 test('prereqNodePin reads .node-version, and falls back when it is missing', () => {
@@ -340,6 +340,6 @@ test('the engine with PI_SKIP_PREREQS=1 installs, and a second run changes nothi
 		return r.stdout;
 	};
 	const first = run();
-	assert.match(first, new RegExp(`prerequisites: ${PREREQ_SKIP_ENV}=1`), 'the skip is a line a person can read, not silence');
+	assert.ok(first.includes(`prerequisites: ${PREREQ_SKIP_ENV}=1`), 'the skip is a line a person can read, not silence');
 	assert.match(run(), /== done — 0 change\(s\) written/);
 });

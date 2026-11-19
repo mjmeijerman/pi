@@ -186,7 +186,8 @@ test('a missing bin/guard is named, with what to set — never a silent skip', (
 	const out = install(home, 'darwin');
 
 	assert.equal(out.status, 0, out.stderr);
-	assert.match(out.stderr, new RegExp(`${path.join(home, 'big-boss-pi', 'bin', 'guard').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} missing — nothing to register`));
+	assert.ok(out.stderr.includes(path.join(home, 'big-boss-pi', 'bin', 'guard')), out.stderr);
+	assert.match(out.stderr, /missing — nothing to register/);
 	assert.match(out.stdout, /   fix: the delegation workspace is not cloned — re-run without PI_SKIP_NETWORK=1/);
 	assert.equal(fs.existsSync(plistPath(home)), false);
 });

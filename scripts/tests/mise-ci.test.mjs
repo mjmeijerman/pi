@@ -409,6 +409,6 @@ test("a mise that resolves the pinned node PASSes and prints where it landed", (
 	assert.match(row, /PASS/);
 	assert.match(row, /2026\.11\.9/);
 	assert.match(row, /pinned node 24/);
-	assert.match(row, new RegExp(bin.replace(/\./g, "\\.")));
+	assert.ok(row.includes(bin), row);
 	assert.equal(status, 0, out);
 });

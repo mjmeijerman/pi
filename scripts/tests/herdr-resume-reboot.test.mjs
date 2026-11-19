@@ -194,7 +194,7 @@ test("a reboot resumes the same session in the same recovered terminal", { skip:
 			timeout: 120_000,
 		});
 		assert.equal(restored.status, 0, restored.stderr);
-		assert.match(restored.stdout, new RegExp(`restored terminal ${address}: exec `));
+		assert.ok(restored.stdout.includes(`restored terminal ${address}: exec `), restored.stdout);
 
 		// The same conversation, in the same tab: the marker comes from the
 		// session file the restore line named, not from a fresh session.
@@ -202,8 +202,9 @@ test("a reboot resumes the same session in the same recovered terminal", { skip:
 			const out = hc(["read", address, "--lines", "40"]).stdout;
 			return out.includes(`PI-RESUMED ${marker}`) ? out : null;
 		});
-		assert.match(screen, new RegExp(`PI-ARGV .*--session ${sessionPath}`));
-		assert.match(screen, new RegExp(`PI-RESUMED ${marker}`));
+		const resumed = screen.split("\n").find((row) => row.includes("PI-ARGV"));
+		assert.ok(resumed?.includes(`--session ${sessionPath}`), screen);
+		assert.ok(screen.includes(`PI-RESUMED ${marker}`), screen);
 
 		// Idempotent: a second run in the same boot types nothing.
 		const second = spawnSync(process.execPath, [script], {

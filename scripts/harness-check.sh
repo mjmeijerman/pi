@@ -51,6 +51,8 @@
 #                                         # and the WSL2 sandbox section present
 #   scripts/harness-check.sh --verify-mise-pins
 #                                         # only the mise.toml projections, for tests
+#   scripts/harness-check.sh --verify-test-regex
+#                                         # only the literal-regex rule, for tests
 #   scripts/harness-check.sh --help
 #
 # Exit 0 when nothing FAILs (a baselined violation reports WARN), 1 on any FAIL.
@@ -73,6 +75,7 @@ VERIFY_SKILLS_LOCK=0
 WRITE_PACKAGES_LOCK=0
 VERIFY_PACKAGES_LOCK=0
 VERIFY_MISE_PINS=0
+VERIFY_TEST_REGEX=0
 
 PASS_N=0
 WARN_N=0
@@ -1790,6 +1793,69 @@ check_sandbox_marker() {
 		"exports PI_SANDBOX_MODE and PI_SANDBOX_NET, displayed by $badge"
 }
 
+# ---------------------------------------------------------- literal regexes --
+# Radar basis: #38 CI hardening, #29 harness quality evaluation. Semgrep's
+# detect-non-literal-regexp has failed this repo's security scan three times in
+# one area — install-win-cmd-shims.test.mjs:186, install-herdr.test.mjs:181 and
+# install-guard-service.test.mjs:189 — and each time the finding surfaced only
+# after the push, on a job that costs five minutes, while the fix was three
+# lines of includes(). A rule only CI reads is a rule every next branch
+# relearns. This row reads the same shape the rule reads: RegExp( — with or
+# without new — whose argument is not a plain quoted string, in any tracked test
+# file. A comment about the shape is skipped, a quoted literal is allowed, and a
+# FAIL names file:line and what to write instead.
+check_test_regex_literals() {
+	local check=test-regex-literal
+	local files=() file rel hits hit text prose line arg first checked=0 bad=0
+	shopt -s nullglob
+	# scripts/tests only: the security job's three findings all sat here. The same
+	# shape exists in agent/extensions/__tests__ (two sites), and semgrep reads *.ts
+	# too, but that path makes a diff High tier — a separate decision, not this row.
+	files=("$ROOT"/scripts/tests/*.mjs "$ROOT"/scripts/tests/*.js)
+	shopt -u nullglob
+	if [ "${#files[@]}" -eq 0 ]; then
+		verdict "$check" - 1 "no test files to read (not a harness checkout)"
+		return 0
+	fi
+	for file in "${files[@]}"; do
+		rel="${file#"$ROOT"/}"
+		checked=$((checked + 1))
+		hits=$(grep -n 'RegExp(' "$file" || true)
+		[ -n "$hits" ] || continue
+		while IFS= read -r hit; do
+			line=${hit%%:*}
+			text=${hit#*:}
+			# Prose about the shape is not the shape: semgrep does not read a
+			# comment either, so a line saying "never build this from a path" passes.
+			prose=${text#"${text%%[![:space:]]*}"}
+			case "$prose" in
+			'//'* | '*'* | '#'*) continue ;;
+			esac
+			arg=${text#*RegExp(}
+			[ "$arg" != "$text" ] || continue
+			arg=${arg#"${arg%%[![:space:]]*}"}
+			first=${arg:0:1}
+			# An empty call has no argument to build a regex from, and a name in
+			# prose ("new RegExp() over a variable") is not a call at all: the rule
+			# this row mirrors needs an argument too.
+			case $first in
+			"'" | '"' | ')') continue ;;
+			esac
+			bad=$((bad + 1))
+			if [ -z "$first" ]; then
+				verdict "$check" "$rel:$line" 0 \
+					"RegExp( has its argument on another line — keep one call on one line, or assert on literal pieces with includes/match"
+				continue
+			fi
+			verdict "$check" "$rel:$line" 0 \
+				"RegExp( built from a value, not a quoted string — semgrep FAILs this after the push; assert on literal pieces with includes/match"
+		done <<<"$hits"
+	done
+	[ "$bad" -gt 0 ] && return 0
+	verdict "$check" scripts/tests 1 \
+		"$checked test file(s): every RegExp( takes a quoted string, or there is none"
+}
+
 # --------------------------------------------------------------------- run ---
 
 while [ $# -gt 0 ]; do
@@ -1806,6 +1872,7 @@ while [ $# -gt 0 ]; do
 	--write-packages-lock) WRITE_PACKAGES_LOCK=1 ;;
 	--verify-packages-lock) VERIFY_PACKAGES_LOCK=1 ;;
 	--verify-mise-pins) VERIFY_MISE_PINS=1 ;;
+	--verify-test-regex) VERIFY_TEST_REGEX=1 ;;
 	--root)
 		[ $# -ge 2 ] || die "--root needs a directory"
 		ROOT="$2"
@@ -1852,6 +1919,21 @@ fi
 if [ "$VERIFY_PACKAGES_LOCK" = 1 ]; then
 	section "packages — pinned by commit (blip #72)"
 	check_packages_lock
+	if [ "$JSON" = 1 ]; then
+		printf '{"pass":%d,"warn":%d,"fail":%d,"results":[%s]}\n' \
+			"$PASS_N" "$WARN_N" "$FAIL_N" "${JSON_ITEMS[*]}"
+	else
+		printf '\n%d passed, %d warn, %d failed\n' "$PASS_N" "$WARN_N" "$FAIL_N"
+	fi
+	[ "$FAIL_N" -eq 0 ]
+	exit $?
+fi
+
+# The literal-regex rule on its own, the way its test drives it: a fixture root
+# with one test file, and the exit status is the answer.
+if [ "$VERIFY_TEST_REGEX" = 1 ]; then
+	section "tests — assertions a scanner can prove"
+	check_test_regex_literals
 	if [ "$JSON" = 1 ]; then
 		printf '{"pass":%d,"warn":%d,"fail":%d,"results":[%s]}\n' \
 			"$PASS_N" "$WARN_N" "$FAIL_N" "${JSON_ITEMS[*]}"
@@ -1982,6 +2064,9 @@ if [ "$QUICK" = 0 ]; then
 	check_sandbox_marker
 	check_self_learn
 	check_learn_branch_published
+
+	section "tests — assertions a scanner can prove"
+	check_test_regex_literals
 
 	section "evals — a model graded against the harness's own rules"
 	check_eval_freshness

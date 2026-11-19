@@ -217,9 +217,9 @@ test("a run hands the branch to a big-boss-pi agent space and publishes", () => 
 
 	const spec = readFileSync(f.specPath(), "utf8");
 	assert.match(spec, /learn\/test-slug/, "the spec names the branch");
-	assert.match(spec, new RegExp(f.sha), "the spec names the commit sha");
+	assert.ok(spec.includes(f.sha), "the spec names the commit sha");
 	assert.match(spec, /review tier: High/, "the spec names the review tier");
-	assert.match(spec, new RegExp(proposal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "the spec names the proposal");
+	assert.ok(spec.includes(proposal), "the spec names the proposal");
 	assert.match(spec, /git -C .* push -u origin learn\/test-slug/, "push the branch");
 	assert.match(spec, /gh pr create/, "open the pull request");
 	assert.match(spec, /gh pr create --repo example\/pi/, "against the repo this branch belongs to, not the agent's cwd");

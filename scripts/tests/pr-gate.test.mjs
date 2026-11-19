@@ -315,7 +315,7 @@ test("BASE_SHA/HEAD_SHA from the environment decide the diff, as in CI", () => {
 	const r = gate({ body: `${MISSION}\n\nReview tier: Low\n`, cwd: dir, gateName: "tier", env: { BASE_SHA: base, HEAD_SHA: head } });
 	assert.equal(r.status, 1, r.out);
 	assert.match(r.out, /tier must be High/, r.out);
-	assert.match(r.out, new RegExp(`diff: ${base}\\.\\.\\.${head}`), r.out);
+	assert.ok(r.out.includes(`diff: ${base}...${head}`), r.out);
 });
 
 test("test change: a bash gate test beside its script needs a reason too", () => {
@@ -418,7 +418,10 @@ test("the workflow calls the shared script and keeps no copy of the gates", () =
 	const workflow = readFileSync(WORKFLOW, "utf8");
 
 	for (const name of ["tier", "mission", "test-change"]) {
-		assert.match(workflow, new RegExp(`--gate ${name}\\b`), `the workflow never runs --gate ${name}`);
+		const at = workflow.indexOf(`--gate ${name}`);
+		assert.ok(at > -1, `the workflow never runs --gate ${name}`);
+		const after = workflow.slice(at + `--gate ${name}`.length, at + `--gate ${name}`.length + 1);
+		assert.doesNotMatch(after, /\w/, `--gate ${name} runs as the prefix of another gate name`);
 	}
 	assert.match(workflow, /scripts\/pr-gate\.sh/, "the workflow does not use scripts/pr-gate.sh");
 

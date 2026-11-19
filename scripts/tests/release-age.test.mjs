@@ -141,7 +141,7 @@ test("a dangling ~/.local/bin/npm is named, with the removal command", () => {
 	assert.equal(status, 1, out);
 	const fail = line(out, "npm-min-release-age");
 	assert.match(fail, /dangling symlink/);
-	assert.match(fail, new RegExp(`rm ${shim}`));
+	assert.ok(fail.includes(`rm ${shim}`), fail);
 });
 
 test("a sandboxed FAIL asks the host, and never names a global install", () => {
@@ -175,7 +175,7 @@ test("a dangling ~/.local/bin/npm is named, with the removal command", () => {
 	assert.equal(status, 1, out);
 	const fail = line(out, "npm-min-release-age");
 	assert.match(fail, /dangling symlink/);
-	assert.match(fail, new RegExp(`rm ${shim}`));
+	assert.ok(fail.includes(`rm ${shim}`), fail);
 });
 
 test("the default candidate list reaches npm 11 through mise's shim", () => {
