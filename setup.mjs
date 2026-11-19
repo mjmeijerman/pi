@@ -67,6 +67,7 @@ import {
 	wslMountWarnings,
 } from './scripts/install-lib.mjs';
 import { prereqsSkipped, stepPrereqs } from './scripts/prereqs.mjs';
+import { DICTATION_MODULE, buildDictationVenv, dictationStatus } from './scripts/dictation.mjs';
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
@@ -652,13 +653,19 @@ async function extras() {
 	else if (OPT.withOllama || (await confirm(`pull the local model ${model} (~17 GB)?`, false))) run('ollama', ['pull', model]);
 	else note(`skipped — /local will fail until: ollama pull ${model}`);
 
-	const lock = path.join(AGENT_DIR, 'dictation', 'requirements.lock');
-	if (!fs.existsSync(lock)) note('no dictation requirements.lock — the extension reports itself unavailable');
-	else if (fs.existsSync(path.join(AGENT_DIR, 'dictation', 'venv', 'bin', 'python'))) note('dictation venv already exists');
+	const dict = dictationStatus({ agentDir: AGENT_DIR, platform: PLAN.platform });
+	// Windows has nothing to build here: dictation.ts records with `arecord`, which
+	// the OS does not ship, so a venv on win32 would be 2.5 GB nothing can call.
+	if (PLAN.platform === 'win32') note('dictation: skipped on win32 — dictation.ts records with arecord, which Windows does not have');
+	else if (!dict.hasLock) note('no dictation requirements.lock — the extension reports itself unavailable');
+	else if (dict.complete) note(`dictation venv complete -> ${dict.venv}`);
 	else if (OPT.withDictation || (await confirm('build the faster-whisper venv (~2.5 GB of wheels)?', false))) {
-		run('python3', ['-m', 'venv', path.join(AGENT_DIR, 'dictation', 'venv')]);
-	}
-	else note('skipped — re-run with --with-dictation to build it');
+		// `exists` is not `complete`: a venv with python but no faster_whisper used
+		// to read as done on every later run, which is how a broken machine stayed
+		// broken. Saying the repair out loud is what makes the second run honest.
+		if (dict.hasPython) note(`dictation venv at ${dict.venv} is missing ${DICTATION_MODULE} — repairing it`);
+		buildDictationVenv({ agentDir: AGENT_DIR, platform: PLAN.platform, dryRun: OPT.dryRun, note, warn });
+	} else note('skipped — re-run with --with-dictation to build it');
 }
 
 function verify() {
