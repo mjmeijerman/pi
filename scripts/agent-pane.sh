@@ -41,7 +41,7 @@
 # State (slug → terminal, space, borrowed pane) lives in ~/.pi/scripts/.agent-panes.json.
 set -euo pipefail
 
-PI_BIN=${PI_BIN:-/home/mark/.local/share/pnpm/bin/pi}
+PI_BIN=${PI_BIN:-$HOME/.local/share/pnpm/bin/pi}
 PISANDBOX=${PISANDBOX:-$HOME/.pi/scripts/pisandbox}
 STATE=${STATE:-$HOME/.pi/scripts/.agent-panes.json}
 PROG=${0##*/}

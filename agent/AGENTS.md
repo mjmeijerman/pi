@@ -37,4 +37,4 @@
 
 - X11, DISPLAY `:1`, root window 9840x3840 (multi-monitor, scaled). Never grab the whole root.
 - Shotcut: right-hand screen. Never hardcode coordinates — run `xwininfo -root -tree`, pick the largest window whose title contains `Shotcut`.
-- Screenshot helper: `/home/mark/projects/bakmark/scripts/shotcut-window.py [out.png] [width]`.
+- Screenshot helper: `~/projects/bakmark/scripts/shotcut-window.py [out.png] [width]`.

@@ -2,7 +2,7 @@
 # prune-sessions.sh — archive old pi sessions. Dry-run by default.
 #
 # Moves (never deletes) session JSONL files older than --older-than into
-# /home/mark/.pi/scripts/archive/<project-slug>/, preserving the project layout
+# ~/.pi/scripts/archive/<project-slug>/, preserving the project layout
 # so a file can be moved back by hand.
 #
 # Usage:

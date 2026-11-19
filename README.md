@@ -131,7 +131,7 @@ it is missing, and never a second time):
 | `3 fix merge conflicts` | merge the base branch in, keep both intents, run the tests, push |
 | `4 fix review comments` | address each comment, reply where it disagrees, push |
 
-The new agent starts in `/home/mark/big-boss-pi`, where that workspace's
+The new agent starts in `~/big-boss-pi`, where that workspace's
 `AGENTS.md` makes it hand the job to a worker in the repository's local clone
 when one can be found (a few usual roots are probed for a matching `origin`),
 and to clone it first when there is none. Every task says: never merge, never
