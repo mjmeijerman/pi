@@ -25,8 +25,93 @@ import path from 'node:path';
 export const HERDR_INSTALL_SH = 'https://releases.herdr.dev/app/install.sh';
 export const HERDR_INSTALL_PS1 = 'https://releases.herdr.dev/app/install.ps1';
 export const MISE_INSTALL_SH = 'https://mise.run';
+// Where each vendor installer actually puts the binary — read from the vendor
+// script, not guessed:
+//   install.sh  -> ${XDG_DATA_HOME:-$HOME/.local/share}/herdr-app/herdr-app, plus
+//                  a symlink named herdr-app in ~/.local/bin.
+//   install.ps1 -> %LOCALAPPDATA%\Programs\herdr-app\herdr-app.exe, that folder
+//                  on the user PATH, plus a Start-menu entry.
+// The `Programs` segment is the part that was missing: detection looked one
+// folder higher, so a machine where the installer had worked read as "not
+// installed" and the step re-ran or was skipped for good.
 export const HERDR_INSTALLED_POSIX = path.join('.local', 'share', 'herdr-app', 'herdr-app');
-export const HERDR_INSTALLED_WIN = { dir: 'herdr-app', file: 'herdr-app.exe' };
+export const HERDR_INSTALLED_WIN = { dir: path.join('Programs', 'herdr-app'), file: 'herdr-app.exe' };
+
+/**
+ * herdrInstallCommand — the argv the vendor installer is invoked with, per OS.
+ *
+ * Pure, and in this file, because the engine and the tests must agree on the
+ * exact command and because PowerShell is not one program on Windows: `pwsh`
+ * (PowerShell 7, on the PATH of a machine that installed it) is preferred and
+ * `powershell` (the 5.1 that ships with the OS) is the fallback. When the step
+ * asked for a name that was not there, spawnSync returned ENOENT and the step
+ * printed nothing at all — the bug this table cannot hide.
+ *
+ * `manual` is the line a person can paste, and it always says `powershell`:
+ * that one exists on every Windows machine, so it is the copy that cannot be
+ * wrong.
+ */
+export function herdrInstallCommand({ platform = process.platform, hasPwsh = false } = {}) {
+	if (platform === 'win32') {
+		const script = `irm ${HERDR_INSTALL_PS1} | iex`;
+		const shell = hasPwsh ? 'pwsh' : 'powershell';
+		return {
+			shell,
+			args: ['-NoProfile', '-Command', script],
+			line: `${shell} -NoProfile -Command "${script}"`,
+			manual: `powershell -c "irm ${HERDR_INSTALL_PS1} | iex"`,
+			url: HERDR_INSTALL_PS1,
+			// Named so the engine can print it: "we picked powershell" is then a
+			// fact a person can check instead of a guess.
+			preferred: 'pwsh',
+			fellBack: !hasPwsh,
+		};
+	}
+	return {
+		shell: 'sh',
+		args: ['-c', `curl -fsSL ${HERDR_INSTALL_SH} | sh`],
+		line: `curl -fsSL ${HERDR_INSTALL_SH} | sh`,
+		manual: `curl -fsSL ${HERDR_INSTALL_SH} | sh`,
+		url: HERDR_INSTALL_SH,
+		preferred: null,
+		fellBack: false,
+	};
+}
+
+/**
+ * herdrAttempt — run one command and say what happened in words a person can
+ * act on. `spawn` is passed in, so the ENOENT branch is testable off Windows:
+ * an absent PowerShell is the case that used to be silent.
+ *
+ * ENOENT and a non-zero exit are different failures and get different lines.
+ * The first means the installer never started, so nothing will be in any log;
+ * the second means it started and refused. Both name the manual command.
+ */
+export function herdrAttempt({ command, spawn, dry = false }) {
+	if (dry) return { ran: false, ok: false, dry: true, lines: [] };
+	const r = spawn(command.shell, command.args, { stdio: 'inherit' }) || {};
+	if (r.error) {
+		const code = r.error.code || r.error.message || 'unknown error';
+		return {
+			ran: true,
+			ok: false,
+			childCode: code,
+			lines: [
+				`herdr-app: could not run ${command.shell} (${code}) — the vendor installer did not run`,
+				`install it by hand: ${command.manual}`,
+			],
+		};
+	}
+	if ((r.status ?? 1) !== 0) {
+		return {
+			ran: true,
+			ok: false,
+			childCode: `exit ${r.status ?? 'n/a'}`,
+			lines: [`herdr-app installer exited ${r.status ?? 'n/a'} — ${command.url}`, `install it by hand: ${command.manual}`],
+		};
+	}
+	return { ran: true, ok: true, lines: [] };
+}
 
 // --- the one per-OS table ---------------------------------------------------
 // linkMode     how a bin entry is created: 'symlink' or 'copy' (Windows needs
@@ -175,7 +260,12 @@ export function planFor(platform = process.platform, env = process.env, release 
 		const local = env.LOCALAPPDATA || path.join(env.USERPROFILE || env.HOME || '', 'AppData', 'Local');
 		return { ...plan, wsl, herdrInstalled: path.join(local, HERDR_INSTALLED_WIN.dir, HERDR_INSTALLED_WIN.file) };
 	}
-	return { ...plan, wsl };
+	// POSIX is the vendor script's own resolution: $XDG_DATA_HOME when it is set,
+	// $HOME/.local/share when it is not. Resolved here instead of left relative,
+	// because a relative path is read against the current directory and the
+	// installer runs from the clone — which read as "not installed" every time.
+	const dataHome = env.XDG_DATA_HOME || path.join(env.HOME || env.USERPROFILE || os.homedir(), '.local', 'share');
+	return { ...plan, wsl, herdrInstalled: path.join(dataHome, 'herdr-app', 'herdr-app') };
 }
 
 /**
