@@ -314,6 +314,51 @@ installer step.
 
 ## Troubleshooting
 
+**`git` is not recognized, right after installing it (Windows).** The `winget`
+line finished, you opened a new PowerShell, and `git --version` prints
+`git : The term 'git' is not recognized as the name of a cmdlet, function,
+script file, or operable program.` The install landed; the shell did not see it.
+`winget` writes the machine `PATH`, and every process inherits the environment
+block of the Explorer that started it — a block copied at sign-in, before the
+install. A new window from the Start menu is the same Explorer, so it hands out
+the same old block. Four steps:
+
+1. Prove the files are there. `True` means the install landed:
+
+```powershell
+Test-Path 'C:\Program Files\Git\cmd\git.exe'
+Test-Path 'C:\Program Files\nodejs\node.exe'
+```
+
+2. Repair this session only. The append lasts until the window closes, which is
+long enough to finish the install:
+
+```powershell
+$env:Path += ';C:\Program Files\Git\cmd'
+git --version
+```
+
+3. Make it permanent by appending to the **user** `PATH`, not the machine one —
+the machine variable needs admin and already holds what `winget` wrote:
+
+```powershell
+$u = [Environment]::GetEnvironmentVariable('Path','User'); [Environment]::SetEnvironmentVariable('Path', "$u;C:\Program Files\Git\cmd", 'User')
+```
+
+Then sign out and back in. A new window from the Start menu is not enough:
+Explorer still hands out the block it copied before the install. Same for node —
+`C:\Program Files\nodejs` in place of `C:\Program Files\Git\cmd`.
+
+4. If step 1 printed `False`, the install did not finish. Ask what winget thinks
+it installed, then watch it run:
+
+```powershell
+winget list --id Git.Git
+winget install --id Git.Git -e --source winget
+winget list --id OpenJS.NodeJS.LTS
+winget install --id OpenJS.NodeJS.LTS -e --source winget
+```
+
 **`node` missing, or the wrong major.** `node -v` prints nothing or a number below
 24. `setup.mjs` stops with `node is not installed (pi needs Node 24 or newer)`, or
 warns `node v22.x is older than 24; pi 1.5.x expects 24 or 26` and continues.

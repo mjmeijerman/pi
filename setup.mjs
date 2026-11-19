@@ -423,7 +423,10 @@ function preflight() {
 	note(`agent  : ${AGENT_DIR}`);
 	note(`system : ${PLAN.platform}${PLAN.sandbox ? '' : ' (sandbox unavailable here)'}`);
 	if (!fs.existsSync(path.join(SOURCE_DIR, 'agent'))) die('run this from the cloned pi repo (agent/ not found)');
-	if (!have('git')) die('git is not installed');
+	// The Windows failure is not a missing git: the install landed and the shell's
+	// PATH predates it. The message names the entry that walks through it.
+	if (!have('git'))
+		die("git is not on PATH — docs/install.md#troubleshooting: 'git is not recognized' after a Windows install, and the PATH fix");
 	// One file owns the number: mise.toml. The messages come from install-lib, so
 	// `node --test scripts/tests/mise-pin.test.mjs` can pin the text that is
 	// really printed instead of grepping for a literal (blip 68).
@@ -434,7 +437,7 @@ function preflight() {
 		nodeVersion: probe.status === 0 ? probe.stdout.trim() : undefined,
 		nodeMajor: probe.status === 0 ? Number.parseInt(process.versions.node.split('.')[0], 10) : undefined,
 	});
-	if (verdict.level === 'die') die(verdict.message);
+	if (verdict.level === 'die') die(`${verdict.message} — docs/install.md#troubleshooting`);
 	if (verdict.level === 'warn') warn(verdict.message);
 	if (!have('pi')) note('pi is not on PATH yet; install.mjs can install it with --install-pi');
 }
