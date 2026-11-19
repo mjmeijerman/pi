@@ -66,7 +66,7 @@ place: Herdr mods, `herdr-app/programs.json`, anything outside the
 |---|---|---|---|
 | sandbox (`bubblewrap`) | installed and wraps `pi` | not available — one line, no failure | not available — one line, no failure |
 | bin entries in `~/.local/bin` | symlinks | symlinks | copies (a symlink needs elevation or Developer Mode) |
-| guard service | systemd user unit, enabled | launchd plist, opt-in with `PI_ENABLE_SERVICES=1` | Task Scheduler entry at logon, same opt-in, running the guard through the Git for Windows `bash.exe` it resolves |
+| guard service | systemd user unit, enabled | launchd plist, installed by default (`PI_SKIP_SYSTEMD=1` turns it off) | Task Scheduler entry at logon, installed by default, running the guard through the Git for Windows `bash.exe` it resolves |
 | weekly timers (`pi-evals`, `pi-retro`) | systemd timers | skipped, one line | skipped, one line |
 | `herdr-app` | `curl … install.sh \| sh` | same | `irm … install.ps1 \| iex` |
 
@@ -300,8 +300,11 @@ Repo-local hooks are preserved: the global wrappers chain to your repo's own `.g
 - `SKIP_VULN_SCAN=1` — skip the agent vuln scan for one push
 - Repos that set their own `core.hooksPath` (e.g. husky) bypass the global wrappers
 - Installer env flags: `PI_SKIP_NETWORK=1` (no vendor download, no
-  `big-boss-pi` clone), `PI_SKIP_SYSTEMD=1` (copy units, enable nothing),
-  `PI_ENABLE_SERVICES=1` (opt into the macOS/Windows login entry),
+  `big-boss-pi` clone), `PI_SKIP_SYSTEMD=1` or its alias `PI_SKIP_SERVICES=1`
+  (copy units, enable nothing, register no login entry — the guard is what
+  creates the `big-boss-pi` space, so this is the one way out of it),
+  `PI_ENABLE_SERVICES=1` (accepted, no longer needed: the macOS/Windows login
+  entry is the default),
   `PI_ALLOW_MISSING_PI=1` (skip pi on a box without it — CI only; the installer
   installs pi by default),
   `PI_DRY_RUN=1`, `PI_PLATFORM=win32|darwin|linux` (exercise another OS's

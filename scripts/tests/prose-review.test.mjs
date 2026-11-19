@@ -324,7 +324,7 @@ test("the key never reaches the output, and its length is what a reader sees", a
 		for (const out of [stdout, stderr]) {
 			assert.ok(!out.includes(FAKE_KEY), "the key must never appear in the output");
 		}
-		assert.match(stderr, new RegExp(`<redacted ${FAKE_KEY.length}-byte key>`));
+		assert.ok(stderr.includes(`<redacted ${FAKE_KEY.length}-byte key>`), stderr);
 		assert.match(stderr, /bad key/);
 	});
 });
@@ -433,7 +433,7 @@ test("a cap under the floor is refused: one token cannot fit five findings", () 
 		const { status, stderr } = run(["--dry-run", "--root", ROOT], DIFF, { PROSE_REVIEW_MAX_TOKENS: small });
 		assert.equal(status, 5, `${small} should be refused`);
 		assert.match(stderr, /below the floor/);
-		assert.match(stderr, new RegExp(`floor of ${MIN_OUTPUT_TOKENS}`));
+		assert.ok(stderr.includes(`floor of ${MIN_OUTPUT_TOKENS}`), stderr);
 	}
 	assert.equal(parseMaxTokens(String(MIN_OUTPUT_TOKENS)), MIN_OUTPUT_TOKENS);
 	assert.equal(MIN_OUTPUT_TOKENS, 700, "the floor is the default that was measured as too small");

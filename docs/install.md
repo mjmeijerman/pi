@@ -234,8 +234,9 @@ variable one of the two engines or `scripts/install-lib.mjs` reads.
 | `BOSS_REPO` | install | Which repo that clone comes from, default `mjmeijerman/big-boss-pi` |
 | `PI_SKIP_NETWORK=1` | both | No vendor download, no workspace clone, no package reconciliation |
 | `PI_SKIP_PREREQS=1` | both | No package manager is called: the prerequisites step prints skip lines. What CI uses, since a runner has no package manager to install for |
-| `PI_SKIP_SYSTEMD=1` | install | Copy the systemd units, do not enable them |
-| `PI_ENABLE_SERVICES=1` | install | Opt in to the macOS launchd plist / Windows scheduled task; without it the installer says the service is opt-in and skips it. Not cosmetics: the guard is what creates the `big-boss-pi` space |
+| `PI_SKIP_SYSTEMD=1` | install | The one way out of the service step: copy the systemd units without enabling them, and register no launchd plist and no scheduled task. The guard is what creates the `big-boss-pi` space, so off Linux this is what leaves Herdr with no space |
+| `PI_SKIP_SERVICES=1` | install | The same switch under a name that is honest on all three systems. Same effect, and the skip line names whichever variable you set |
+| `PI_ENABLE_SERVICES=1` | install | Accepted, and no longer needed: the macOS launchd plist and the Windows scheduled task install by default. Kept so a script written against the old opt-in flag keeps working — it changes nothing |
 | `PI_GIT_BASH` | install | The `bash.exe` the Windows scheduled task runs `bin/guard` with, and the one every `.cmd` shim in `%USERPROFILE%\.local\bin` starts, when the search does not find Git for Windows. Replaces the whole candidate list, so a wrong value is reported instead of silently ignored |
 | `PI_ALLOW_MISSING_PI=1` | both | Skip pi entirely — no question, no install — and carry on with one `== pi binary: PI_ALLOW_MISSING_PI=1 — config only` line. **CI only**: it exists so a runner with no `pi` can prove the config wires up. On a machine you are setting up, let the installer install pi instead |
 | `PI_DRY_RUN=1` | install | The same as `--dry-run`. `setup.mjs` reads the flag and sets this for the engine it calls |
@@ -262,7 +263,7 @@ variable one of the two engines or `scripts/install-lib.mjs` reads.
 | Herdr mods and menu row | `~/.config/herdr-app/mods/`, `~/.config/herdr-app/programs.json` — the config directory is created when herdr-app has not run yet, so a fresh install gets its mods and menu row before the app's first launch; an existing `programs.json` is left alone and the line says what to add by hand |
 | `herdr-app` | Linux and macOS `~/.local/share/herdr-app/herdr-app` (`$XDG_DATA_HOME` when set), Windows `%LOCALAPPDATA%\Programs\herdr-app\herdr-app.exe` — then a bin entry |
 | the delegation workspace | `~/big-boss-pi` (`gh repo clone` when `gh` is authenticated, then `git clone https://github.com/mjmeijerman/big-boss-pi.git`; the SSH remote `git@github.com:mjmeijerman/big-boss-pi.git` is the last resort and needs a key) |
-| services | Linux `~/.config/systemd/user/`, macOS `~/Library/LaunchAgents/`, Windows a Task Scheduler entry |
+| services | Linux `~/.config/systemd/user/`, macOS `~/Library/LaunchAgents/`, Windows a Task Scheduler entry — installed on all three by default. The guard is what creates the `big-boss-pi` space, so Herdr opens with that space from the first login; `PI_SKIP_SYSTEMD=1` is the one way out |
 
 Nothing here touches `~/.pi/agent/auth.json`, sessions, `models-store.json`, or a
 file you may have edited in place.
@@ -274,7 +275,7 @@ file you may have edited in place.
 | sandbox | bubblewrap: `pi` runs under `~/.pi/sandbox/pi-sandbox.sh` | not available — one line, no failure | not available natively — WSL2 and Docker provide it: [Sandboxing on Windows](#sandboxing-on-windows) |
 | bin entries | symlinks | symlinks | copies; a symlink needs elevation or Developer Mode. Every bash wrapper (the two in `scripts/`, plus `jev`, `delegate`, `local-run` from the clone) also gets a `<name>.cmd` that runs the resolved `bash.exe` on it, forwards `%*` and returns the exit status — PowerShell, `cmd.exe` and the Herdr menu row can only start a `.cmd`, and the list is read from the engine so a new wrapper is not forgotten |
 | `herdr-app` | `curl … install.sh \| sh` | same | `pwsh -NoProfile -Command "irm … install.ps1 \| iex"`, falling back to `powershell` when PowerShell 7 is not on `PATH` |
-| guard service | systemd user unit, enabled when a user manager answers | launchd plist, only with `PI_ENABLE_SERVICES=1` | `schtasks /Create /SC ONLOGON`, only with `PI_ENABLE_SERVICES=1`; the task runs `bin/guard` through the Git for Windows `bash.exe` it resolves (see below) |
+| guard service | systemd user unit, enabled when a user manager answers | launchd plist, installed by default (`PI_SKIP_SYSTEMD=1` turns it off) | `schtasks /Create /SC ONLOGON`, installed by default (same switch); the task runs `bin/guard` through the Git for Windows `bash.exe` it resolves (see below) |
 | weekly timers (`pi-evals`, `pi-retro`) | systemd timers, enabled | skipped, one line | skipped, one line |
 | shell rc files updated | `~/.bashrc`, `~/.zshrc` | `~/.zshrc`, `~/.bashrc` | none: the wrapper is POSIX shell, so nothing is written and the summary points at `pi-bare` |
 | `core.hooksPath` spelling | `~/.pi/git-hooks` | same | the node-computed path (not the `/c/Users/…` form Git Bash writes), so a second run is not a change |
@@ -436,8 +437,13 @@ the 32-bit counterpart and `%LOCALAPPDATA%\Programs\Git`, each looked for under
 both `bin` and `usr\bin`. It prints the exact command it registered — one `/TR` value, the interpreter and the guard each quoted, so
 `C:\Program Files` survives — and the delete line above. No `bash.exe` means no
 task: the step says so and names `PI_GIT_BASH` instead of registering a task that
-starts nothing. That opt-in (`PI_ENABLE_SERVICES=1`) is not cosmetics: the guard
-is what creates and repairs the `big-boss-pi` space.
+starts nothing.
+
+That login entry installs by default on macOS and Windows, like the systemd unit
+does on Linux, and `PI_SKIP_SYSTEMD=1` is the one way out. It is not cosmetics:
+the guard is what creates and repairs the `big-boss-pi` space, and an install
+that registered nothing opened Herdr with no space in it. See
+[Herdr opens with no `big-boss-pi` space](#herdr-opens-with-no-big-boss-pi-space).
 
 The systemd step copies every unit in the clone's `systemd/` directory, because it
 reads that directory instead of a list: the guard, `pi-evals.timer` with its
@@ -575,6 +581,41 @@ copied but nothing is enabled, and the installer prints
 `== enable: no systemd user session — start it, then: systemctl --user enable --now pi-evals.timer pi-retro.timer && systemctl --user enable herdr-resume.service`.
 Fix: after logging into a real user session, run exactly those lines. The five unit
 files are already in `~/.config/systemd/user/`, so nothing else has to be copied.
+
+**Herdr opens with no `big-boss-pi` space.** The space is not the app's to create:
+`bin/guard` creates and repairs it, and the guard runs from a login entry — a
+systemd user unit on Linux, a launchd plist on macOS, a Task Scheduler task on
+Windows. Three causes, in the order they happen; each prints its own line in the
+install transcript:
+
+1. **The service step was turned off.** `PI_SKIP_SYSTEMD=1` (or
+   `PI_SKIP_SERVICES=1`) was in the environment, and the transcript says
+   `== guard service (launchd / Task Scheduler): PI_SKIP_SYSTEMD=1 — no login entry registered`.
+   Re-run without it.
+2. **`bin/guard` is missing because the workspace was not cloned** —
+   `PI_SKIP_NETWORK=1`, or no `git` and no network at clone time. The transcript
+   says `!! guard service: ~/big-boss-pi/bin/guard missing — nothing to register`.
+   Re-run without `PI_SKIP_NETWORK=1`.
+3. **No Git Bash on Windows.** The guard is a bash script and Task Scheduler runs
+   a command line, never a shebang, so with no `bash.exe` to name the step says
+   `!! no Git Bash found` and registers nothing. Install Git for Windows, or set
+   `PI_GIT_BASH` to a `bash.exe`, then re-run.
+
+Start it once by hand until the entry is back. It runs in the foreground and
+polls, so give it its own terminal:
+
+```bash
+# Linux, macOS, Git Bash
+"$HOME/big-boss-pi/bin/guard"
+```
+
+```powershell
+# Windows: the guard is bash, so it is started through Git Bash
+& "C:\Program Files\Git\bin\bash.exe" "$env:USERPROFILE\big-boss-pi\bin\guard"
+```
+
+The space appears in Herdr within one poll, and `~/big-boss-pi/state/guard.log`
+has one line per action it took.
 
 ## Secrets
 

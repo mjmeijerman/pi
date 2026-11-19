@@ -14,9 +14,10 @@
 //
 // What the manifest holds is what the OS dictates: a skills directory, the
 // extensions that were picked, the config files, the global hooks and the git
-// keys that point at them, the bin entries, and the guard unit where the OS has
-// one. Anything skipped on purpose (herdr-app without network, the delegation
-// workspace, a launchd entry nobody opted into) is asserted as absent, so a
+// keys that point at them, the bin entries, and the guard login entry where the
+// OS has one. Anything skipped on purpose (herdr-app without network, the
+// delegation workspace, a login entry the person turned off with
+// PI_SKIP_SYSTEMD=1) is asserted as absent or passed with the reason named, so a
 // silent half-install cannot pass.
 //
 // Exit 0 when every row holds, 1 otherwise, one line per row.
@@ -139,10 +140,29 @@ if (fs.existsSync(agentsMd)) {
 	else fail('agent rules', 'AGENTS.md carries no bullet rules');
 }
 
-// Guard service: present where the OS has an init system, and only opted into
-// off Linux, so a matrix run does not register a login item on a shared mac.
+// Guard login entry: the guard is what creates and repairs the `big-boss-pi`
+// space, so it installs by default on all three systems — a unit on Linux, a
+// launchd plist on macOS, a Task Scheduler entry on Windows. Two reasons make a
+// row a named skip rather than a failure, and both are decisions the person made
+// at install time: PI_SKIP_SYSTEMD=1 (or its alias PI_SKIP_SERVICES=1) turns the
+// entry off, and PI_SKIP_NETWORK=1 means there is no clone for it to point at.
+const guardSkip =
+	process.env.PI_SKIP_SYSTEMD === '1' ? 'PI_SKIP_SYSTEMD=1' : process.env.PI_SKIP_SERVICES === '1' ? 'PI_SKIP_SERVICES=1' : '';
+const noClone = process.env.PI_SKIP_NETWORK === '1';
+
+/** programArguments — the strings inside a plist's ProgramArguments array. */
+function programArguments(plist) {
+	const text = fs.readFileSync(plist, 'utf8');
+	const block = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1] || '';
+	return [...block.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]);
+}
+
 if (PLAN.service === 'systemd') {
 	mustExist('guard unit', path.join(P.serviceDir, 'herdr-resume.service'));
+	// Named skip, not a silent pass: without the clone there is no bin/guard, and
+	// the engine says the same thing in its own transcript.
+	if (noClone) pass('big-boss-pi guard unit', 'not checked — PI_SKIP_NETWORK=1 skips the clone, so there is no bin/guard to point a unit at');
+	else mustExist('big-boss-pi guard unit', path.join(P.serviceDir, 'big-boss-pi-guard.service'));
 	// A timer without the unit its `Unit=` names is the failure this row exists
 	// for: both files are copied by the same step, so nothing notices until the
 	// schedule fires weeks later. Read off the installed timers, not a list.
@@ -155,9 +175,46 @@ if (PLAN.service === 'systemd') {
 		}
 	}
 } else if (PLAN.service === 'launchd') {
-	mustBeAbsent('launchd login item', path.join(P.serviceDir, 'dev.herdr.big-boss-pi-guard.plist'), 'PI_ENABLE_SERVICES was not set');
+	const plist = path.join(P.serviceDir, 'dev.herdr.big-boss-pi-guard.plist');
+	if (guardSkip) pass('launchd login item', `not checked — ${guardSkip} turns the entry off`);
+	else if (noClone) pass('launchd login item', 'not checked — PI_SKIP_NETWORK=1 skips the clone the entry points at');
+	else if (!fs.existsSync(plist)) fail('launchd login item', `${plist} missing — the guard is what creates the big-boss-pi space`);
+	else {
+		pass('launchd login item', plist);
+		// The plist is only a login item if its ProgramArguments name a program that
+		// is on disk: a file pointing at a path this machine does not have launches
+		// nothing, and launchd would say so in a log nobody reads.
+		const [program] = programArguments(plist);
+		if (program && fs.existsSync(program)) pass('launchd login item program', program);
+		else fail('launchd login item program', `${program || 'no ProgramArguments'} does not exist`);
+	}
+} else if (guardSkip) {
+	pass('scheduled task', `not checked — ${guardSkip} turns the entry off`);
+} else if (noClone) {
+	pass('scheduled task', 'not checked — PI_SKIP_NETWORK=1 skips the clone the entry points at');
 } else {
-	pass('scheduled task', 'not registered without PI_ENABLE_SERVICES=1');
+	// Asked of Task Scheduler, not of a file: the registration lives in the task
+	// store, and "the .cmd is there" answers a different question.
+	const exe = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'schtasks.exe') : 'schtasks';
+	const query = spawnSync(exe, ['/Query', '/TN', 'big-boss-pi-guard', '/FO', 'LIST'], { encoding: 'utf8' });
+	if (query.error) pass('scheduled task', `not checked — no schtasks on this host (${query.error.code || 'unknown'})`);
+	else if (query.status !== 0) fail('scheduled task', `schtasks /Query /TN big-boss-pi-guard exited ${query.status} — not registered, and the guard is what creates the big-boss-pi space`);
+	else {
+		pass('scheduled task', 'big-boss-pi-guard is registered');
+		// "Task To Run" is where the interpreter and the guard are, both quoted:
+		// the task runs Git Bash on a bash script, and a bare path would break at the
+		// first space in `C:\Program Files`.
+		const toRun = (/Task To Run:\s*\r?\n?\s*(.+)/i.exec(query.stdout)?.[1] || '').trim();
+		const named = [...toRun.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+		if (named.length < 2) fail('scheduled task program', `the registered command line names no quoted interpreter and guard: ${toRun || 'nothing'}`);
+		else {
+			const [bash, guard] = named;
+			if (fs.existsSync(bash)) pass('scheduled task interpreter', bash);
+			else fail('scheduled task interpreter', `${bash} does not exist`);
+			if (fs.existsSync(guard)) pass('scheduled task guard', guard);
+			else fail('scheduled task guard', `${guard} does not exist`);
+		}
+	}
 }
 
 // Herdr config: written at sections 1c and 4, before herdr-app's first launch,
