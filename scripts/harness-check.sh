@@ -1139,7 +1139,7 @@ npm_newer() { # a b -> true when b sorts above a (11.20.0 beats 10.9.9)
 }
 
 check_release_age() {
-	local path_npm path_version best_npm best_version candidate candidate_version value source npm_pin
+	local path_npm path_version best_npm best_version candidate candidate_version value source npm_pin npm_candidates
 	if ! command -v npm >/dev/null 2>&1; then
 		verdict npm-min-release-age - 0 "npm not installed"
 		return
@@ -1158,11 +1158,18 @@ check_release_age() {
 		;;
 	esac
 	# The newest readable npm wins: whatever PATH resolves, then setup.sh's install
-	# target and the system prefix. The list is overridable so a test can control
-	# the machine's other npm installs instead of hoping they are absent.
+	# target, the system prefix, and mise's shim. mise is the last one because
+	# mise.toml is where this repo pins node and npm: the 11.x the installer
+	# produces is reachable only through that shim, and the sandbox binds
+	# ~/.local/share/mise read-only so the shim answers there too. Leaving it out
+	# is what made a finished install read as a FAIL no agent could repair from
+	# inside bwrap — two workers reported the same line (blip 99, blip 68,
+	# blip 1 agent sandboxing). Still overridable, so a test controls the
+	# machine's other npm installs instead of hoping they are absent.
+	npm_candidates=${PI_NPM_CANDIDATES-$HOME/.local/bin/npm:/usr/local/bin/npm:$HOME/.local/share/mise/shims/npm}
 	best_npm=$path_npm
 	best_version=$path_version
-	for candidate in $(printf '%s' "${PI_NPM_CANDIDATES-$HOME/.local/bin/npm:/usr/local/bin/npm}" | tr ':' ' '); do
+	for candidate in $(printf '%s' "$npm_candidates" | tr ':' ' '); do
 		[ -n "$candidate" ] || continue
 		[ "$candidate" = "$path_npm" ] && continue
 		candidate_version=$(npm_version_at "$candidate") || continue
@@ -1195,7 +1202,7 @@ check_release_age() {
 		# the removal, so the next attempt is not the same attempt (blip 99,
 		# blip 1 agent sandboxing).
 		local dangling=""
-		for candidate in $(printf '%s' "${PI_NPM_CANDIDATES-$HOME/.local/bin/npm:/usr/local/bin/npm}" | tr ':' ' '); do
+		for candidate in $(printf '%s' "$npm_candidates" | tr ':' ' '); do
 			[ -n "$candidate" ] && [ -L "$candidate" ] && [ ! -e "$candidate" ] || continue
 			dangling=" — $candidate is a dangling symlink; remove it: rm $candidate"
 			break

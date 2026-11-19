@@ -55,7 +55,8 @@ esac
 // One release-age-only run, in a scratch HOME and a PATH that holds the stub
 // first and the tools the script needs behind it. PI_NPM_CANDIDATES pins the
 // other installs the gate may look at, so the machine's /usr/local/bin/npm
-// cannot change the verdict of a test.
+// cannot change the verdict of a test. `candidates: null` leaves the variable
+// unset on purpose: that is the only way to test the script's own default list.
 function check({
 	pathNpm,
 	candidates = "",
@@ -67,8 +68,8 @@ function check({
 	const env = {
 		HOME: home,
 		PATH: `${bin}:/usr/bin:/bin`,
-		PI_NPM_CANDIDATES: candidates,
 	};
+	if (candidates !== null) env.PI_NPM_CANDIDATES = candidates;
 	if (age !== undefined) env.NPM_CONFIG_MIN_RELEASE_AGE = age;
 	if (sandbox !== undefined) env.PI_SANDBOX_MODE = sandbox;
 	const res = spawnSync("bash", [CHECK, "--verify-release-age"], {
@@ -175,6 +176,30 @@ test("a dangling ~/.local/bin/npm is named, with the removal command", () => {
 	const fail = line(out, "npm-min-release-age");
 	assert.match(fail, /dangling symlink/);
 	assert.match(fail, new RegExp(`rm ${shim}`));
+});
+
+test("the default candidate list reaches npm 11 through mise's shim", () => {
+	// The repeated FAIL two workers reported: PATH npm 10.9.9, a dangling
+	// ~/.local/bin/npm, and the npm 11 that mise.toml pins sitting behind
+	// ~/.local/share/mise/shims/npm — present, readable inside bwrap (the store
+	// is bound read-only), and skipped by the gate. No PI_NPM_CANDIDATES here:
+	// the script's own list has to find it. 11.99.0 so a CI runner's global
+	// npm@11 at /usr/local/bin cannot win the comparison instead.
+	const home = join(tmp, `home-${n++}`);
+	const shim = join(home, ".local/share/mise/shims/npm");
+	mkdirSync(dirname(shim), { recursive: true });
+	symlinkSync(stubNpm("11.99.0", "2"), shim);
+	const { status, out } = check({
+		pathNpm: stubNpm("10.9.9", "2"),
+		candidates: null,
+		age: "2",
+		home,
+	});
+	assert.equal(status, 0, out);
+	assert.match(line(out, "npm-min-release-age "), /PASS/);
+	assert.match(line(out, "npm-min-release-age"), /11\.99\.0/);
+	assert.match(line(out, "npm-min-release-age-path"), /shadows/);
+	assert.match(line(out, "npm-min-release-age-path"), /mise\/shims\/npm/);
 });
 
 test("an unreadable config with no forwarded value is a FAIL, not a pass", () => {
