@@ -6,9 +6,12 @@ Review: 2027-05-20 — whenever the flag table in `scripts/install-lib.mjs`
 match, and `scripts/tests/install-help.test.mjs` holds the help text to the parser.
 
 `setup.mjs` asks, then installs. `install.mjs` is the non-interactive engine that
-does the installing. `install.sh` and `setup.sh` are 12/13-line shims that exec
-them, so both spellings work on Linux and macOS; on Windows call node directly
-(`node setup.mjs`, `node install.mjs`) — there is no shell shim there.
+does the installing. `setup.sh` and `setup.ps1` are the bootstraps: they install
+what the engine needs (Node, and git where they can) before `node setup.mjs` can
+run at all, because a shim that starts with `exec node` cannot install node.
+`install.sh` stays a five-line shim over `install.mjs`. Windows has no bash, so
+`setup.ps1` is the entry point there and `node install.mjs` the non-interactive
+one.
 
 Quick start: [../INSTALL.md](../INSTALL.md).
 
@@ -27,22 +30,44 @@ Contents:
 
 ## Prerequisites, per OS
 
-Two things are needed before the clone exists: `git`, and Node at the major
-`.node-version` pins — 24, the same number `mise.toml` writes. Nothing here needs
+One of these, and the installer does the rest:
+
+```bash
+./setup.sh              # Linux, macOS, Git Bash
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File setup.ps1   # Windows
+```
+
+Each bootstrap installs Node at the major `.node-version` pins — 24, the same
+number `mise.toml` writes — and npm, plus git where the platform lets it, through
+the first package manager it finds: `apt-get`, `dnf`, `pacman`, `brew`, `winget`
+or `mise`. It announces every command before running it, says so before `sudo`,
+re-reads `node` from `PATH` afterwards (a fresh install is usually not in the
+`PATH` this shell inherited) — looking where the manager that ran puts its
+binaries, so a `node` that was already earlier on `PATH` cannot answer for the
+one the install just wrote — and then execs the engine. A failed install prints
+the line that does it by hand and the next prerequisite still runs. Nothing needs
 `gh`; the installer falls back to an https clone.
 
-Every block below installs, then checks itself: `git --version`, `node --version`
-and `npm` answering is the whole of "is my machine ready". **Do I already have
-it?** Run those three lines first; a `v24.x` and no error means skip this whole
-section. Reopen the shell after installing, because `PATH` is read once at start.
+`PI_SKIP_PREREQS=1` or `--skip-prereqs` turns the whole step into skip lines —
+CI, and anyone who manages node with mise/nvm/asdf on purpose.
+
+The blocks below are what the bootstraps run, and the manual answer when a machine
+has no package manager at all or a policy blocks the install. Each one checks
+itself: `git --version`, `node --version` and npm answering is the whole of "is my
+machine ready". Reopen the shell after installing by hand, because `PATH` is read
+once at start; the bootstraps do that re-read for you.
 
 Windows comes first because its install is the one that goes wrong: a fresh
-Windows machine has no `git`, no Node, and a policy that refuses the `npm`
-script. macOS and Linux are one package manager line each.
+Windows machine has no `git`, no Node, and a policy that refuses npm's script.
+macOS and Linux are one package manager line each.
 
 ### Windows, in PowerShell
 
-Not bash. `winget` ships with Windows 10 1809+ and 11.
+Not bash. `winget` ships with Windows 10 1809+ and 11, and is what `setup.ps1`
+uses for both packages. By hand — git first, because the clone needs it:
 
 ```powershell
 winget install --id Git.Git -e --source winget
@@ -54,23 +79,29 @@ npm.cmd --version
 where.exe git node
 ```
 
-`node --version` must print `v24.x`; that number is `.node-version`'s. The third
-line exists because Node installs `npm` as `npm.ps1`, a script, and the default
-`Restricted` execution policy refuses to run any script:
+`node --version` must print `v24.x`; that number is `.node-version`'s. Put the
+`PATH` block a fresh winget wrote in front of this window before the check lines,
+or use `setup.ps1`, which does it: `$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')`.
+The third line exists because Node installs its npm entry points as scripts
+(`npm.ps1`), and the default `Restricted` execution policy refuses to run any
+script:
 
 ```
 npm.ps1 cannot be loaded because running scripts is disabled on this system.
 ```
 
 `RemoteSigned` runs local scripts and still requires a signature on downloaded
-ones. Refusing it is fine: keep `Restricted`, call `npm.cmd` instead of `npm`, and
-nothing else changes — `npm.cmd` is a batch shim, which the policy does not touch.
-That is also why every line here is a separate command: Windows PowerShell 5.1,
-which is what a fresh install opens, has no `&&` and answers
+ones. Refusing it is fine: keep `Restricted`, call the `.cmd` form instead, and
+nothing else changes — a batch shim is not a script, so the policy does not touch
+it. `setup.ps1` sidesteps the policy entirely with `-ExecutionPolicy Bypass` on
+the invocation. That is also why every line here is a separate command: Windows
+PowerShell 5.1, which is what a fresh install opens, has no `&&` and answers
 `the token && is not a valid statement separator in this version`. `&&` arrived
 in PowerShell 7. Use separate lines, or `;`, and do not paste the block below it.
 
 ### macOS, in Terminal
+
+`setup.sh` installs node@24 with brew when brew is there. By hand:
 
 ```bash
 xcode-select --install                    # git; or: brew install git
@@ -89,8 +120,11 @@ which git node
 
 On an Intel Mac the prefix is `/usr/local/opt/node@24/bin`. `brew install node`
 installs whatever is current; `node@24` is the one that matches `.node-version`.
+Without brew, `mise use -g node@24` is the other answer the bootstrap knows.
 
 ### Linux, in bash or zsh
+
+`setup.sh` picks the first of `apt-get`, `dnf`, `pacman`; by hand:
 
 ```bash
 # Debian, Ubuntu, WSL
@@ -108,23 +142,26 @@ command -v git node
 Only the first block applies to your machine; the other two are there so nobody
 has to translate `apt-get` by hand. A distro `nodejs` below 24 fails the
 `node --version` line: `mise use -g node@24` (or nvm) is the fix, not a second
-package manager.
+package manager. WSL is this block, not the Windows one — the bootstraps follow
+the platform they run on.
 
 ## The questions, in order
 
-`node setup.mjs`, or `./setup.sh`. Run it from the clone. Every question has a
-default and `-y` takes all of them; with no terminal (`stdin` not a TTY) the
-defaults are used and each line says so.
+`node setup.mjs`, or `./setup.sh` (Windows: `powershell -ExecutionPolicy Bypass
+-File setup.ps1`). Run it from the clone. Every question has a default and `-y`
+takes all of them; with no terminal (`stdin` not a TTY) the defaults are used and
+each line says so.
 
 | # | Step | What it asks | Default |
 |---|---|---|---|
-| 1 | pi | `install pi with npm?`, asked only when no `pi` is on PATH (a pi found on disk under pnpm or `/usr/local/bin` is put on `PATH` instead of asked about); the sub-line is the exact command that will run | **yes** |
-| 2 | system packages | `sudo apt-get install -y` for the binaries missing from `bwrap`, `jq`, `arecord`, `curl`, `gh` — Linux only, other OSes print one line | **no** |
-| 3 | skills | one question per skill directory in `agent/skills/`, plus anything already in `~/.pi/skills` that the repo does not carry. Description read from the skill's `SKILL.md` | **keep** |
-| 4 | extensions | one question per `agent/extensions/*.ts`, description read from the file's first comment | **keep** |
-| 5 | agent rules | one question per bullet rule in `agent/AGENTS.md`, shown as `rule 4 of 17 — <first line>`, walked through the 7 sections in file order | **keep** |
-| 6 | keys | the DeepSeek key, then `TYPESAFE_API_KEY` for jev | empty **skips** |
-| 7 | optional extras | pull the local model `qwen3.8:27b` (~17 GB) with ollama; build the faster-whisper venv (~2.5 GB) | **no**, both |
+| 1 | prerequisites | git, node and npm: whatever is missing is installed with the first package manager found, each command printed before it runs. No question — it happens before the questions, and `--skip-prereqs` turns it into skip lines | **install** |
+| 2 | pi | `install pi with npm?`, asked only when no `pi` is on PATH (a pi found on disk under pnpm or `/usr/local/bin` is put on `PATH` instead of asked about); the sub-line is the exact command that will run | **yes** |
+| 3 | system packages | `sudo apt-get install -y` for the binaries missing from `bwrap`, `jq`, `arecord`, `curl`, `gh` — Linux only, other OSes print one line | **no** |
+| 4 | skills | one question per skill directory in `agent/skills/`, plus anything already in `~/.pi/skills` that the repo does not carry. Description read from the skill's `SKILL.md` | **keep** |
+| 5 | extensions | one question per `agent/extensions/*.ts`, description read from the file's first comment | **keep** |
+| 6 | agent rules | one question per bullet rule in `agent/AGENTS.md`, shown as `rule 4 of 17 — <first line>`, walked through the 7 sections in file order | **keep** |
+| 7 | keys | the DeepSeek key, then `TYPESAFE_API_KEY` for jev | empty **skips** |
+| 8 | optional extras | pull the local model `qwen3.8:27b` (~17 GB) with ollama; build the faster-whisper venv (~2.5 GB) | **no**, both |
 
 A 17-rule answer set has 17 answers, and the installed `AGENTS.md` is written from
 them: drop a rule and its paragraph goes with it, and a section whose rules are
@@ -136,7 +173,7 @@ rule's first six words. A second run asks only about what that file does not
 cover, so a dropped rule stays dropped. `--reask` ignores the record and asks
 about everything again.
 
-Between the questions and the install, the keys (step 5) are the only interactive
+Between the questions and the install, the keys (step 6) are the only interactive
 part: input echo is off (`setRawMode`), a value is never printed and never logged,
 and it is written only to the file that owns it. With `--no-keys`, or with no
 terminal, nothing is asked and the missing key is stated once.
@@ -166,6 +203,7 @@ the parser and by `--help`, and
 | `--dry-run` | both | Print what would be written (and each command), change nothing — including the state file |
 | `--reask` | setup | Ask again about everything the state file records, and overwrite the answers |
 | `--no-apt` | setup | Never call `sudo apt-get`, even on Linux |
+| `--skip-prereqs` | both | Never check or install git, node and npm — the same as `PI_SKIP_PREREQS=1` |
 | `--no-verify` | setup | Skip the verification block |
 | `--force-key` | setup | Replace an existing `deepseek.key` instead of leaving it alone |
 | `--with-ollama` | setup | Pull the local model without asking |
@@ -192,6 +230,7 @@ variable one of the two engines or `scripts/install-lib.mjs` reads.
 | `PI_BOSS_DIR` | install | Where the delegation workspace clone lives, default `~/big-boss-pi` |
 | `BOSS_REPO` | install | Which repo that clone comes from, default `mjmeijerman/big-boss-pi` |
 | `PI_SKIP_NETWORK=1` | both | No vendor download, no workspace clone, no package reconciliation |
+| `PI_SKIP_PREREQS=1` | both | No package manager is called: the prerequisites step prints skip lines. What CI uses, since a runner has no package manager to install for |
 | `PI_SKIP_SYSTEMD=1` | install | Copy the systemd units, do not enable them |
 | `PI_ENABLE_SERVICES=1` | install | Opt in to the macOS launchd plist / Windows scheduled task; without it the installer says the service is opt-in and skips it |
 | `PI_ALLOW_MISSING_PI=1` | both | Skip pi entirely — no question, no install — and carry on with one `== pi binary: PI_ALLOW_MISSING_PI=1 — config only` line. **CI only**: it exists so a runner with no `pi` can prove the config wires up. On a machine you are setting up, let the installer install pi instead |
@@ -338,9 +377,9 @@ prints `== done — N change(s) written`, and a run over an untouched install pr
 ```bash
 # assert that, rather than trust it, into a throwaway HOME:
 export H=$(mktemp -d)
-HOME=$H PI_SKIP_NETWORK=1 PI_ALLOW_MISSING_PI=1 node setup.mjs -y --no-keys --no-apt --no-verify
+HOME=$H PI_SKIP_NETWORK=1 PI_ALLOW_MISSING_PI=1 PI_SKIP_PREREQS=1 node setup.mjs -y --no-keys --no-apt --no-verify
 HOME=$H node scripts/verify-install.mjs --home "$H" --snapshot /tmp/before.json
-HOME=$H PI_SKIP_NETWORK=1 PI_ALLOW_MISSING_PI=1 node setup.mjs -y --no-keys --no-apt --no-verify
+HOME=$H PI_SKIP_NETWORK=1 PI_ALLOW_MISSING_PI=1 PI_SKIP_PREREQS=1 node setup.mjs -y --no-keys --no-apt --no-verify
 HOME=$H node scripts/verify-install.mjs --home "$H" --snapshot /tmp/before.json   # fails if one byte moved
 ```
 
@@ -404,8 +443,10 @@ installer step.
 
 ## Troubleshooting
 
-**`git` is not recognized, right after installing it (Windows).** The `winget`
-line finished, you opened a new PowerShell, and `git --version` prints
+**`git` is not recognized, right after installing it (Windows).** `setup.ps1`
+does not have this problem: it re-reads the machine and user `PATH` blocks after
+winget runs and before it calls node, so the window that installed can use what
+it installed. This entry is the by-hand install — the `winget` line finished, you opened a new PowerShell, and `git --version` prints
 `git : The term 'git' is not recognized as the name of a cmdlet, function,
 script file, or operable program.` The install landed; the shell did not see it.
 `winget` writes the machine `PATH`, and every process inherits the environment
@@ -450,10 +491,21 @@ winget install --id OpenJS.NodeJS.LTS -e --source winget
 ```
 
 **`node` missing, or the wrong major.** `node -v` prints nothing or a number below
-24. `setup.mjs` stops with `node is not installed (pi needs Node 24 or newer)`, or
-warns `node v22.x is older than 24; pi 1.5.x expects 24 or 26` and continues.
-Fix: install Node 24 (`mise install node@24`, or your package manager), reopen the
-shell, re-run. The number comes from `mise.toml`, not from this page.
+24. Both engines install a missing node first now, so this is the case the
+install could not fix: no package manager answered, or the shell still holds a
+`PATH` from before. `setup.mjs` stops with
+`git is not on PATH — install it, reopen the shell, and re-run` when git is still
+missing after the step, and warns `node v22.x is older than 24; pi 1.5.x expects
+24 or 26` and continues when the major is only old. Fix: install Node 24
+(`mise use -g node@24`, or your package manager), reopen the shell, re-run. The
+number comes from `mise.toml`, not from this page.
+
+**The prerequisites step is about to run `sudo`.** That is `apt-get`, `dnf` or
+`pacman` on Linux, and the line above it says so before it happens — it is the
+only prompt in the step that is not the OS asking for a password. `--skip-prereqs`
+(or `PI_SKIP_PREREQS=1`) turns the whole step into skip lines and installs
+nothing. On macOS and Windows nothing in the step uses root; `brew` and `winget`
+install per user where they can.
 
 **`pi` not found.** The installer installs it for you: when no `pi` is on PATH it
 runs `npm install -g --ignore-scripts @earendil-works/pi-coding-agent` in the

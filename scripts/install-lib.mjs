@@ -505,6 +505,7 @@ export const ENGINE_FLAGS = {
 	install: [
 		{ names: ['--install-pi'], key: 'installPi', kind: 'bool', value: true, default: true, help: 'install pi with npm when it is missing (the default; kept so old scripts keep working)' },
 		{ names: ['--no-install-pi'], key: 'installPi', kind: 'bool', value: false, help: 'never install pi, carry on without it' },
+		{ names: ['--skip-prereqs'], key: 'skipPrereqs', kind: 'bool', value: true, default: false, help: 'never check or install git, node and npm' },
 		{ names: ['--dry-run'], key: 'dryRun', kind: 'bool', value: true, default: false, help: 'print the plan, change nothing' },
 		{ names: ['--skills='], key: 'skills', kind: 'list', help: 'only these skills (comma-separated)' },
 		{ names: ['--extensions='], key: 'extensions', kind: 'list', help: 'only these extensions (comma-separated, .ts optional)' },
@@ -519,6 +520,7 @@ export const ENGINE_FLAGS = {
 		{ names: ['--dry-run'], key: 'dryRun', kind: 'bool', value: true, default: false, help: 'print the plan, change nothing' },
 		{ names: ['--reask'], key: 'reask', kind: 'bool', value: true, default: false, help: 'ask again about everything the state file records' },
 		{ names: ['--no-apt'], key: 'doApt', kind: 'bool', value: false, default: true, help: 'never call sudo apt-get (Linux only)' },
+		{ names: ['--skip-prereqs'], key: 'skipPrereqs', kind: 'bool', value: true, default: false, help: 'never check or install git, node and npm' },
 		{ names: ['--no-verify'], key: 'verify', kind: 'bool', value: false, default: true, help: 'skip the verification block' },
 		{ names: ['--force-key'], key: 'forceKey', kind: 'bool', value: true, default: false, help: 'replace an existing key file' },
 		{ names: ['--with-ollama'], key: 'withOllama', kind: 'bool', value: true, default: false, help: 'pull the local model (~17 GB) without asking' },
@@ -714,6 +716,143 @@ export function nodePreflight({ pin, nodeVersion, nodeMajor }) {
 		return { level: 'warn', message: `node ${nodeVersion} is older than ${pin}; pi 1.5.x expects ${pin} or 26` };
 	}
 	return { level: 'ok', message: `node ${nodeVersion}, mise.toml pins ${pin}` };
+}
+
+// --- prerequisites -----------------------------------------------------------
+/**
+ * The install used to start by telling a person to install git and Node by hand
+ * (`INSTALL.md` carried the by-hand lines) and `setup.sh` was `exec node …`,
+ * which made node a precondition for installing node. The two bootstrap
+ * scripts (`setup.sh`, `setup.ps1`) and the engine's prerequisites step read the
+ * table below, so the command a person is shown and the command the engine runs
+ * cannot drift apart.
+ *
+ * Everything here is pure: `has` is a caller-supplied `command -v`, so a test can
+ * plan for winget, brew, apt-get, dnf, pacman and mise on any host.
+ */
+
+/** The tools the installer needs. `gh` is checked, never required. */
+export const PREREQ_TOOLS = ['git', 'node', 'npm'];
+export const PREREQ_OPTIONAL = ['gh'];
+
+/**
+ * The package managers to try, per platform, in order. `mise` is last because it
+ * installs node and nothing else (Radar Vol. 35 blip 68, mise, Adopt), so it is
+ * a node answer for a machine that has no system package manager at all.
+ */
+export const PACKAGE_MANAGERS = {
+	linux: ['apt-get', 'dnf', 'pacman', 'brew', 'mise'],
+	darwin: ['brew', 'mise'],
+	win32: ['winget', 'mise'],
+};
+
+/**
+ * What each manager calls each package. `null` means that manager has nothing
+ * for the tool — npm ships with node on brew and winget, and mise installs node
+ * only. `${pin}` is the node major `mise.toml` pins, substituted by
+ * prereqPackage().
+ */
+export const PREREQ_PACKAGES = {
+	git: { 'apt-get': 'git', dnf: 'git', pacman: 'git', brew: 'git', winget: 'Git.Git', mise: null },
+	node: { 'apt-get': 'nodejs', dnf: 'nodejs', pacman: 'nodejs', brew: 'node@${pin}', winget: 'OpenJS.NodeJS.LTS', mise: 'node' },
+	npm: { 'apt-get': 'npm', dnf: 'npm', pacman: 'npm', brew: null, winget: null, mise: null },
+	gh: { 'apt-get': 'gh', dnf: 'gh', pacman: 'github-cli', brew: 'gh', winget: 'GitHub.cli', mise: null },
+};
+
+/** pickPackageManager — the first manager on PATH for this platform, or null. */
+export function pickPackageManager({ platform = process.platform, has = () => false } = {}) {
+	for (const manager of PACKAGE_MANAGERS[platform] || PACKAGE_MANAGERS.linux) {
+		if (has(manager)) return manager;
+	}
+	return null;
+}
+
+/** prereqPackage — the package name for one tool, or null when the manager has none. */
+export function prereqPackage(tool, manager, pin = 24) {
+	const row = PREREQ_PACKAGES[tool];
+	if (!row) return null;
+	const value = row[manager];
+	if (typeof value !== 'string') return null;
+	return value.replace('${pin}', String(pin));
+}
+
+/**
+ * installCommand — the argv one package install needs, as data.
+ *
+ * `sudo` is a field, not a spelling: apt-get, dnf and pacman need root and the
+ * step says so before it runs anything, while `brew` and `winget` must not run
+ * as root. winget's two `--accept-*` flags are what keep it from opening a
+ * prompt nobody sees on a bare machine.
+ */
+export function installCommand(manager, pkg, { pin = 24 } = {}) {
+	switch (manager) {
+		case 'apt-get':
+			return { file: 'sudo', args: ['apt-get', 'install', '-y', pkg], sudo: true };
+		case 'dnf':
+			return { file: 'sudo', args: ['dnf', 'install', '-y', pkg], sudo: true };
+		case 'pacman':
+			return { file: 'sudo', args: ['pacman', '-S', '--needed', '--noconfirm', pkg], sudo: true };
+		case 'brew':
+			return { file: 'brew', args: ['install', pkg], sudo: false };
+		case 'winget':
+			return {
+				file: 'winget',
+				args: ['install', '--id', pkg, '-e', '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements'],
+				sudo: false,
+			};
+		case 'mise':
+			// mise installs node and nothing else; asking it for another tool would
+			// print a command that cannot work.
+			return pkg === 'node' ? { file: 'mise', args: ['use', '-g', `node@${pin}`], sudo: false } : null;
+		default:
+			return null;
+	}
+}
+
+/**
+ * prereqPlan — every missing tool, with the command that installs it.
+ *
+ * `skip` is `PI_SKIP_PREREQS=1` / `--skip-prereqs`: the CI matrix already has
+ * git and node and must never call a package manager, so the plan comes back
+ * empty instead of being computed and then ignored.
+ * `unresolved` is the honest half: a tool is missing and no manager here has a
+ * command for it (npm on brew, git with only mise), so the step prints the
+ * manual line instead of pretending.
+ */
+export function prereqPlan({ platform = process.platform, has = () => false, pin = 24, skip = false, optional = [] } = {}) {
+	const tools = [...PREREQ_TOOLS, ...optional];
+	const missing = tools.filter((tool) => !has(tool));
+	if (skip) return { manager: null, missing, steps: [], unresolved: [] };
+	const manager = missing.length === 0 ? null : pickPackageManager({ platform, has });
+	const steps = [];
+	const unresolved = [];
+	for (const tool of missing) {
+		const pkg = manager ? prereqPackage(tool, manager, pin) : null;
+		const command = pkg ? installCommand(manager, pkg, { pin }) : null;
+		if (!command) {
+			unresolved.push({ tool, manager });
+			continue;
+		}
+		steps.push({ tool, package: pkg, manager, ...command, line: [command.file, ...command.args].join(' ') });
+	}
+	return { manager, missing, steps, unresolved };
+}
+
+/**
+ * prereqNodePin — the node major `.node-version` pins.
+ *
+ * `.node-version` is the file `actions/setup-node` and every bootstrap reads (it
+ * is a projection of mise.toml, held together by scripts/tests/mise-ci.test.mjs);
+ * the fallback keeps a tree without one working.
+ */
+export function prereqNodePin(root, readFileSync, fallback = 24) {
+	try {
+		const raw = readFileSync(path.join(root, '.node-version'), 'utf8').trim();
+		const m = /^v?([0-9]+)/.exec(raw);
+		return m ? Number.parseInt(m[1], 10) : fallback;
+	} catch {
+		return fallback;
+	}
 }
 
 /** shellQuote — a command line the summary can print for any OS. */

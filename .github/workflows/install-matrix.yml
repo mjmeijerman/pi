@@ -47,6 +47,10 @@ jobs:
       # A runner has no pi binary. install.mjs stops when pi is missing (that is
       # right on a laptop); this flag is the CI-shaped version of that check.
       PI_ALLOW_MISSING_PI: "1"
+      # The prerequisites step would look for a package manager and, on a runner,
+      # find one and try to install into it. Nothing here needs installing —
+      # setup-node did it — so the step runs as its skip line.
+      PI_SKIP_PREREQS: "1"
       # The throwaway HOME is NOT here: `runner` is one of the contexts a job-level
       # `env` may not use, and GitHub rejects the whole file for it — the run dies
       # in 0s with no jobs and "Invalid workflow file: Unrecognized named-value:
@@ -62,6 +66,19 @@ jobs:
 
       - name: shims still parse
         run: bash -n install.sh setup.sh
+
+      # The only place setup.ps1 is executed. windows-latest's `shell: powershell`
+      # is Windows PowerShell 5.1, the version a fresh Windows opens and the one
+      # that has no `&&`, so this proves the bootstrap parses and forwards its
+      # arguments there. PI_SKIP_PREREQS keeps it from touching winget, and
+      # --help ends it after the engine prints its flag list.
+      - name: setup.ps1 runs on Windows PowerShell 5.1
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./setup.ps1 -SetupArgs '--skip-prereqs','--help'
+          if ($LASTEXITCODE -ne 0) { throw "setup.ps1 exited $LASTEXITCODE" }
 
       - name: first install into a throwaway HOME
         env:

@@ -5,7 +5,12 @@
 //   git clone https://github.com/mjmeijerman/pi.git ~/.pi
 //   cd ~/.pi && ./setup.sh          # = node setup.mjs
 //
-// It asks five things, with a default on every question:
+// Before the first question, the one step that asks nothing: the prerequisites.
+// git, node and npm are installed with the first package manager this platform
+// has when they are missing (skip with --skip-prereqs or PI_SKIP_PREREQS=1), and
+// the exact command is printed before it runs.
+//
+// It then asks five things, with a default on every question:
 //   1. pi          — "install pi with npm?" when pi is not on PATH, with the
 //                    exact npm line as the sub-line. Default yes: pi is what
 //                    this config drives, so an install that ends without it is
@@ -53,6 +58,7 @@ import {
 	piPreflight,
 	pinnedNodeMajor,
 	planFor,
+	prereqNodePin,
 	ruleAnswer,
 	sandboxSummary,
 	skillNames,
@@ -60,6 +66,7 @@ import {
 	systemSummary,
 	wslMountWarnings,
 } from './scripts/install-lib.mjs';
+import { prereqsSkipped, stepPrereqs } from './scripts/prereqs.mjs';
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
@@ -514,6 +521,33 @@ async function askPi() {
 	if (!OPT.installPi) note('skipped — install.mjs will carry on without pi');
 }
 
+/**
+ * prerequisites — git, node and npm before the first question.
+ *
+ * This is why `node` is no longer a precondition for installing node: on a
+ * machine where git is missing the engine installs it through the platform's
+ * package manager (scripts/prereqs.mjs, planned by prereqPlan in
+ * scripts/install-lib.mjs), and only a machine it could not fix stops here.
+ * The git wall is the one that stays fatal — every step of the install sets a
+ * git config value, so a git that is still missing has to be named once,
+ * loudly, with the line that fixes it, instead of six warnings below.
+ */
+function prerequisites() {
+	step('prerequisites');
+	const pin = prereqNodePin(SOURCE_DIR, fs.readFileSync);
+	// The running process's version, not `spawnSync('node', ['-v'])`: this file is
+	// node, so a PATH probe can report ENOENT while node is right here (#175).
+	stepPrereqs({
+		platform: PLAN.platform,
+		pin,
+		skipPrereqs: prereqsSkipped({ skipPrereqs: OPT.skipPrereqs === true }),
+		io: { have, run: (cmd, args) => run(cmd, args, { quiet: true }), say, note, warn },
+		nodeVersion: process.version,
+		nodeMajor: Number.parseInt(process.versions.node.split('.')[0], 10),
+	});
+	if (!have('git')) die('git is not on PATH — install it, reopen the shell, and re-run (docs/install.md#prerequisites-per-os)');
+}
+
 async function systemPackages() {
 	step('system packages');
 	if (PLAN.platform !== 'linux') {
@@ -656,6 +690,12 @@ async function main() {
 	if (OPT.dryRun) process.env.PI_DRY_RUN = '1';
 	const state = OPT.reask ? { version: 1, skills: [], extensions: [], rules: {}, keys: {} } : readState();
 
+	// Run from the clone, checked before the prerequisites: the answer is "go and
+	// clone it", which no package manager can do for you.
+	if (!fs.existsSync(path.join(SOURCE_DIR, 'agent'))) die('run this from the cloned pi repo (agent/ not found)');
+	// Prerequisites first, before the pi decision and before the first question:
+	// this is what makes `node` not a precondition for installing node.
+	prerequisites();
 	await preflight();
 	await systemPackages();
 
