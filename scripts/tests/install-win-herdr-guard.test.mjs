@@ -187,7 +187,7 @@ test('--dry-run prints what it would write and writes nothing', (t) => {
 	assert.match(out.stdout, /^== herdr menu: "Pi \(bare\)" entry installed -> /m);
 });
 
-test('the guard task is registered with Git Bash, and the opt-in line says why it matters', (t) => {
+test('the guard task is registered with Git Bash, and the default is the entry itself', (t) => {
 	const home = tempHome(t);
 	// A workspace clone with the one file the step looks for; the guard is
 	// another repo's, and this test only needs the path to exist.
@@ -198,8 +198,8 @@ test('the guard task is registered with Git Bash, and the opt-in line says why i
 
 	// PI_GIT_BASH is the resolution's override, which is also the only way this
 	// runs on a host without Git for Windows.
-	// PI_SKIP_SYSTEMD is the other opt-out on this branch; cleared, so the gate
-	// under test is PI_ENABLE_SERVICES and nothing else.
+	// PI_SKIP_SYSTEMD is the opt-out on this branch; cleared, so the gate under
+	// test is the default and nothing else.
 	const on = { PI_ENABLE_SERVICES: '1', PI_GIT_BASH: '/usr/bin/bash', PI_SKIP_SYSTEMD: '' };
 	const out = install(home, ['--dry-run'], on);
 	assert.equal(out.status, 0, out.stderr);
@@ -215,7 +215,16 @@ test('the guard task is registered with Git Bash, and the opt-in line says why i
 	assert.doesNotMatch(none.stdout, /guard: registering a Task Scheduler entry/);
 	assert.match(none.stdout, /   fix: install Git for Windows, or set PI_GIT_BASH/);
 
-	// The gate stays; the sentence names the consequence.
-	const gated = install(home, ['--dry-run'], { PI_SKIP_SYSTEMD: '' });
-	assert.match(gated.stdout, /guard service \(launchd \/ Task Scheduler\): opt-in on win32: the guard is what creates the big-boss-pi space/);
+	// A default run registers it: PI_ENABLE_SERVICES getting in the way was the bug,
+	// because the guard is what creates the big-boss-pi space. No flag here at all.
+	const byDefault = install(home, ['--dry-run'], { PI_SKIP_SYSTEMD: '', PI_GIT_BASH: '/usr/bin/bash' });
+	assert.equal(byDefault.status, 0, byDefault.stderr);
+	assert.match(byDefault.stdout, /^== guard: registering a Task Scheduler entry at logon/m);
+	assert.match(byDefault.stdout, /^Disable: schtasks \/Delete \/TN big-boss-pi-guard \/F$/m);
+
+	// The one way out names the variable that did it, and the line that starts the
+	// guard once by hand.
+	const gated = install(home, ['--dry-run'], { PI_SKIP_SYSTEMD: '1', PI_GIT_BASH: '/usr/bin/bash' });
+	assert.match(gated.stdout, /guard service \(launchd \/ Task Scheduler\): PI_SKIP_SYSTEMD=1 — no login entry registered, and the guard is what creates the big-boss-pi space/);
+	assert.doesNotMatch(gated.stdout, /guard: registering a Task Scheduler entry/);
 });

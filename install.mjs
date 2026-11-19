@@ -24,9 +24,12 @@
 //   5  herdr-app (vendor installer) per OS
 //   5b big-boss-pi workspace clone, 5c its bin links
 //   5d the guard service: systemd on Linux, launchd on macOS, Task Scheduler on
-//      Windows — plus the weekly timers, which need systemd and say so. The Task
-//      Scheduler entry names the Git for Windows bash.exe it resolved: Task
-//      Scheduler runs a command line, never a shebang.
+//      Windows — installed by default on all three, because `bin/guard` is what
+//      creates and repairs the `big-boss-pi` space: an install that registers no
+//      login entry opens Herdr with no space in it. Plus the weekly timers, which
+//      need systemd and say so. The Task Scheduler entry names the Git for
+//      Windows bash.exe it resolved: Task Scheduler runs a command line, never a
+//      shebang.
 //
 // Idempotent: a second run changes nothing. Never touches auth.json, sessions,
 // models-store.json. Never prints a key. Never overwrites a file a person may
@@ -34,11 +37,12 @@
 // outside its markers, an existing AGENTS.md rule set).
 //
 // Env: PI_AGENT_DIR, PI_SKILLS, PI_EXTENSIONS, PI_BOSS_DIR, BOSS_REPO,
-//      PI_SKIP_SYSTEMD=1 (copy units, do not enable), PI_SKIP_NETWORK=1 (no
-//      vendor downloads, no clone), PI_ENABLE_SERVICES=1 (opt in to a launchd
-//      plist / scheduled task on macOS and Windows), PI_SKIP_PREREQS=1 (never
-//      call a package manager), PI_GIT_BASH (the bash.exe a Windows scheduled
-//      task and every .cmd shim run the bash wrappers with), HERDR_MODS.
+//      PI_SKIP_SYSTEMD=1 (copy units on Linux, register no login entry anywhere)
+//      and its alias PI_SKIP_SERVICES=1, PI_SKIP_NETWORK=1 (no vendor downloads,
+//      no clone), PI_SKIP_PREREQS=1 (never call a package manager), PI_GIT_BASH
+//      (the bash.exe a Windows scheduled task and every .cmd shim run the bash
+//      wrappers with), HERDR_MODS. PI_ENABLE_SERVICES=1 is still accepted and
+//      changes nothing: the login entry is the default now.
 //
 // Step 0 is the prerequisites: git, node and npm, installed with the first
 // package manager this platform has when they are missing. It runs before the
@@ -96,11 +100,21 @@ const BOSS_DIR = process.env.PI_BOSS_DIR || path.join(HOME, 'big-boss-pi');
 const HERDR_MODS = process.env.HERDR_MODS || path.join(P.herdrConfigDir, 'mods');
 let DRY = process.env.PI_DRY_RUN === '1';
 const SKIP_NETWORK = process.env.PI_SKIP_NETWORK === '1';
-const SKIP_SERVICES = process.env.PI_SKIP_SYSTEMD === '1';
+// One way out of the service step, spelled for the platform that reads it: the
+// original Linux name, and an alias that is honest on macOS and Windows too.
+// The variable is named in the skip line, so nobody has to guess which one they
+// set.
+const SKIP_SYSTEMD = process.env.PI_SKIP_SYSTEMD === '1';
+const SKIP_SERVICES = process.env.PI_SKIP_SERVICES === '1';
+// The old way in. Accepted and no longer gates anything, so a script written
+// against it keeps working — it just does not have to ask again.
 const ENABLE_SERVICES = process.env.PI_ENABLE_SERVICES === '1';
 
 let OPT = { installPi: true };
 let changed = 0;
+// What stepServices registered, so the summary can say it and say how to undo
+// it: a skip must not print a Disable line for an entry that is not there.
+let guardService = null;
 // Every unit stepSystemd copied, so the summary's disable lines name what is
 // really there instead of a list that can drift from the directory.
 let systemdInstalled = [];
@@ -790,19 +804,44 @@ function stepBoss() {
 }
 
 // --- 5d. the guard service, per init system ---------------------------------
+// The same default on all three systems: `bin/guard` is what creates and
+// repairs the `big-boss-pi` space, so a macOS or Windows install that registers
+// no login entry opens Herdr with no space in it and no error to read. It used
+// to be opt-in there while systemd on Linux needed no flag, which made the
+// documented one-liner install everything except the thing that is visible.
+// PI_SKIP_SYSTEMD=1 (or PI_SKIP_SERVICES=1) is the one way out.
+function skipServicesVar() {
+	if (SKIP_SYSTEMD) return 'PI_SKIP_SYSTEMD';
+	if (SKIP_SERVICES) return 'PI_SKIP_SERVICES';
+	return null;
+}
+
+/** guardByHand — the line that starts the guard once, for the OS at hand. */
+function guardByHand() {
+	const guard = path.join(BOSS_DIR, 'bin', 'guard');
+	if (PLAN.platform !== 'win32') return `"${guard}" &`;
+	const bash = resolveGitBash();
+	return bash ? `"${bash}" "${guard}"` : `"<git-bash>\\bin\\bash.exe" "${guard}"`;
+}
+
 function stepServices() {
 	if (!PLAN.services) return;
 	if (PLAN.service === 'systemd') return stepSystemd();
-	if (SKIP_SERVICES || !ENABLE_SERVICES) {
+	if (ENABLE_SERVICES) note('guard service: PI_ENABLE_SERVICES=1 is accepted — the login entry is the default now, so it changes nothing');
+	const skipVar = skipServicesVar();
+	if (skipVar) {
 		skipped(
 			'guard service (launchd / Task Scheduler)',
-			`opt-in on ${PLAN.platform}: the guard is what creates the big-boss-pi space, so this is not cosmetics — re-run with PI_ENABLE_SERVICES=1 to install a login entry`,
+			`${skipVar}=1 — no login entry registered, and the guard is what creates the big-boss-pi space; start it by hand: ${guardByHand()}`,
 		);
 		return;
 	}
 	const guard = path.join(BOSS_DIR, 'bin', 'guard');
 	if (!exists(guard)) {
-		skipped('guard service', `${guard} missing — inside the delegation workspace`);
+		// A skip that names itself is not a silent skip: no clone (PI_SKIP_NETWORK=1)
+		// means no guard, and registering a task that points nowhere is worse.
+		warn(`guard service: ${guard} missing — nothing to register, so no big-boss-pi space at logon`);
+		say('   fix: the delegation workspace is not cloned — re-run without PI_SKIP_NETWORK=1 (or point PI_BOSS_DIR at the clone)');
 		return;
 	}
 	if (PLAN.service === 'launchd') {
@@ -810,6 +849,7 @@ function stepServices() {
 		writeText(plist, launchdPlist('dev.herdr.big-boss-pi-guard', guard), { mode: 0o644 });
 		note(`guard login item -> ${plist}`);
 		run('launchctl', ['load', '-w', plist], { allowFail: true });
+		guardService = { label: `launchd login item ${plist}`, remove: `launchctl unload -w ${plist}` };
 		say(`   disable: launchctl unload -w ${plist} && rm ${plist}`);
 		return;
 	}
@@ -835,6 +875,7 @@ function stepServices() {
 	// task.exe, not task.program: a bare name goes through cmd.exe, whose quotes
 	// would double the ones inside /TR and register a different command line.
 	else run(task.exe, task.args, { allowFail: true });
+	guardService = { label: `Task Scheduler entry big-boss-pi-guard (${bash})`, remove: task.remove };
 	say(`   disable: ${task.remove}`);
 }
 
@@ -940,8 +981,8 @@ function stepSystemd() {
 	if (units.length === 0) return;
 	const enableable = units.filter((u) => u.enable);
 
-	if (SKIP_SERVICES) {
-		say('== PI_SKIP_SYSTEMD=1 — units copied, none enabled');
+	if (skipServicesVar()) {
+		say(`== ${skipServicesVar()}=1 — units copied, none enabled`);
 	} else if (!systemdUserUp()) {
 		// A container or a bare tty has the files and no user manager; enabling
 		// there prints systemd's own error and looks like an installer bug.
@@ -983,10 +1024,18 @@ function summary() {
 			say(`   # ${unit.name}: started by its timer — nothing to disable`);
 		}
 	} else if (PLAN.service === 'launchd') {
-		say(`Disable: launchctl unload -w ${path.join(P.serviceDir, 'dev.herdr.big-boss-pi-guard.plist')}`);
-		say('Disable: launchctl unload -w ~/Library/LaunchAgents/*.plist   # every pi login item');
+		if (!guardService) say('Guard login item: not registered — the line above says why, and Herdr will open with no big-boss-pi space');
+		else {
+			say(`${DRY ? 'Would install' : 'Installed'}: ${guardService.label}`);
+			say(`Disable: ${guardService.remove}`);
+			say('Disable: launchctl unload -w ~/Library/LaunchAgents/*.plist   # every pi login item');
+		}
 	} else {
-		say('Disable: schtasks /Delete /TN big-boss-pi-guard /F');
+		if (!guardService) say('Guard task: not registered — the line above says why, and Herdr will open with no big-boss-pi space');
+		else {
+			say(`${DRY ? 'Would install' : 'Installed'}: ${guardService.label}`);
+			say(`Disable: ${guardService.remove}`);
+		}
 	}
 	say('');
 	say('Done. Restart pi (or run /reload) to load the extensions.');
