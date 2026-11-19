@@ -161,7 +161,7 @@ each line says so.
 | 5 | extensions | one question per `agent/extensions/*.ts`, description read from the file's first comment | **keep** |
 | 6 | agent rules | one question per bullet rule in `agent/AGENTS.md`, shown as `rule 4 of 17 — <first line>`, walked through the 7 sections in file order | **keep** |
 | 7 | keys | the DeepSeek key, then `TYPESAFE_API_KEY` for jev | empty **skips** |
-| 8 | optional extras | pull the local model `qwen3.8:27b` (~17 GB) with ollama; build the faster-whisper venv (~2.5 GB) | **no**, both |
+| 8 | optional extras | pull the local model `qwen3.8:27b` (~17 GB) with ollama; build the faster-whisper venv (~2.5 GB) and install `dictation/requirements.lock` into it — skipped on Windows, where `dictation.ts` records with `arecord` | **no**, both |
 
 A 17-rule answer set has 17 answers, and the installed `AGENTS.md` is written from
 them: drop a rule and its paragraph goes with it, and a section whose rules are
@@ -256,7 +256,7 @@ variable one of the two engines or `scripts/install-lib.mjs` reads.
 | bin entries | `~/.local/bin/` — `git-vuln-scan` (copied), `pisandbox` and `pi-bare` (linked; copied on Windows), `herdr-app`, and `jev`, `delegate`, `local-run` from the workspace clone |
 | `pi` itself, sandboxed | a `pi()` wrapper block, marked `# >>> pi sandbox >>>`, in `~/.bashrc` and `~/.zshrc` (Linux and macOS only) |
 | Herdr mods and menu row | `~/.config/herdr-app/mods/`, `~/.config/herdr-app/programs.json` — an existing `programs.json` is left alone and the line says what to add by hand |
-| `herdr-app` | `~/.local/share/herdr-app/herdr-app`, then a bin entry |
+| `herdr-app` | Linux and macOS `~/.local/share/herdr-app/herdr-app` (`$XDG_DATA_HOME` when set), Windows `%LOCALAPPDATA%\Programs\herdr-app\herdr-app.exe` — then a bin entry |
 | the delegation workspace | `~/big-boss-pi` (`gh repo clone` when `gh` is authenticated, then `git clone https://github.com/mjmeijerman/big-boss-pi.git`; the SSH remote `git@github.com:mjmeijerman/big-boss-pi.git` is the last resort and needs a key) |
 | services | Linux `~/.config/systemd/user/`, macOS `~/Library/LaunchAgents/`, Windows a Task Scheduler entry |
 
@@ -269,7 +269,7 @@ file you may have edited in place.
 |---|---|---|---|
 | sandbox | bubblewrap: `pi` runs under `~/.pi/sandbox/pi-sandbox.sh` | not available — one line, no failure | not available natively — WSL2 and Docker provide it: [Sandboxing on Windows](#sandboxing-on-windows) |
 | bin entries | symlinks | symlinks | copies; a symlink needs elevation or Developer Mode |
-| `herdr-app` | `curl … install.sh \| sh` | same | `powershell … irm … install.ps1 \| iex` |
+| `herdr-app` | `curl … install.sh \| sh` | same | `pwsh -NoProfile -Command "irm … install.ps1 \| iex"`, falling back to `powershell` when PowerShell 7 is not on `PATH` |
 | guard service | systemd user unit, enabled when a user manager answers | launchd plist, only with `PI_ENABLE_SERVICES=1` | `schtasks /Create /SC ONLOGON`, only with `PI_ENABLE_SERVICES=1` |
 | weekly timers (`pi-evals`, `pi-retro`) | systemd timers, enabled | skipped, one line | skipped, one line |
 | shell rc files updated | `~/.bashrc`, `~/.zshrc` | `~/.zshrc`, `~/.bashrc` | none: the wrapper is POSIX shell, so nothing is written and the summary points at `pi-bare` |
@@ -530,11 +530,13 @@ deliberately install without pi — a config-only box, a CI runner — pass
 prompt): the rest of the install runs and `pi` stays missing.
 
 **herdr-app download skipped.** With `PI_SKIP_NETWORK=1`, or on a machine with no
-`curl`/no network, the installer prints
-`== herdr-app: PI_SKIP_NETWORK=1 — vendor installer not downloaded` and continues
-without a bin entry. Fix: re-run without `PI_SKIP_NETWORK`, or install it from
-`https://releases.herdr.dev/app/install.sh` (`install.ps1` on Windows). Every other
-step still runs.
+`curl`/no network, the step prints its platform, the path it looks at, whether
+that path exists and why it did not run — for example
+`== command  : not run — PI_SKIP_NETWORK=1 — the vendor installer was not downloaded`
+and then `== !! not installed — run: curl -fsSL https://releases.herdr.dev/app/install.sh | sh` —
+and continues without a bin entry. Fix: re-run without `PI_SKIP_NETWORK`, or run
+that paste-able line (`powershell -c "irm https://releases.herdr.dev/app/install.ps1 | iex"`
+on Windows). Every other step still runs.
 
 **A read-only `~/.git-templates` line from `git-hooks/install-hooks.sh`.** Inside
 the sandbox `$HOME` is read-only except the paths the launcher binds, so the hook

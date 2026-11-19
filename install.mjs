@@ -51,12 +51,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-	HERDR_INSTALL_PS1,
-	HERDR_INSTALL_SH,
 	PI_WRAPPER_BEGIN,
 	PI_WRAPPER_BLOCK,
 	PI_WRAPPER_END,
 	bossClonePlan,
+	herdrAttempt,
+	herdrInstallCommand,
 	helpText,
 	homePaths,
 	isRuntimeState,
@@ -602,42 +602,72 @@ function stepPiWrapper() {
 }
 
 // --- 5. herdr-app -----------------------------------------------------------
+/**
+ * stepHerdrApp — the vendor installer, and the step that is not allowed to say
+ * nothing.
+ *
+ * On the machine this was found on the vendor installer never ran and the
+ * transcript held no `herdr-app` line of any kind, so nothing pointed here.
+ * Every run now prints the platform, the path it looks at, whether that path is
+ * there, and the exact command, before it can decide to do nothing.
+ *
+ * The verdict afterwards is read from the disk, not from an exit status: a
+ * vendor script can exit 0 and install somewhere else, and that is exactly what
+ * made a working install read as missing. The bin link comes last, so it is
+ * never the only place a failure shows up.
+ */
 async function stepHerdrApp() {
+	say('== herdr-app');
 	const bin = P.herdrInstalled;
-	if (bin && exists(bin)) {
-		note(`herdr-app already installed -> ${bin}`);
-	} else if (SKIP_NETWORK) {
-		skipped('herdr-app', 'PI_SKIP_NETWORK=1 — vendor installer not downloaded');
-	} else if (PLAN.herdrInstall === 'sh') {
-		if (!hasCmd('curl')) {
-			warn('curl not found — cannot install herdr-app, skipping');
-		} else {
-			note(`installing herdr-app from ${HERDR_INSTALL_SH}`);
-			const r = await runShell(`curl -fsSL ${HERDR_INSTALL_SH} | sh`);
-			if (r !== 0) warn(`herdr-app installer failed — install it by hand from ${HERDR_INSTALL_SH}`);
-		}
-	} else {
-		note(`installing herdr-app from ${HERDR_INSTALL_PS1}`);
-		const r = await runShell(`powershell -NoProfile -Command "irm ${HERDR_INSTALL_PS1} | iex"`);
-		if (r !== 0) warn(`herdr-app installer failed — install it by hand from ${HERDR_INSTALL_PS1}`);
-	}
-	if (bin && exists(bin)) {
-		const how = linkOrCopy(bin, path.join(P.binDir, PLAN.platform === 'win32' ? 'herdr-app.exe' : 'herdr-app'));
-		note(`herdr-app -> ${path.join(P.binDir, 'herdr-app')} (${how})`);
-	} else {
-		skipped('herdr-app', `${bin || 'installer'} missing — skipped the bin entry`);
-	}
-}
+	// The facts, looked up here and nowhere else: herdrInstallCommand is pure, so
+	// the choice can be tested without a host that has — or lacks — a `pwsh`.
+	const command = herdrInstallCommand({
+		platform: PLAN.platform,
+		hasPwsh: hasCmd('pwsh'),
+		hasPowershell: hasCmd('powershell'),
+	});
+	const present = Boolean(bin) && exists(bin);
+	note(`platform : ${PLAN.platform}`);
+	note(`bin      : ${bin || '(none — no vendor install path on this OS)'}`);
+	note(`exists   : ${present ? 'yes' : 'no'}`);
 
-function runShell(command) {
-	if (DRY) {
-		say(`   [dry-run] ${command}`);
-		return 0;
+	// Four reasons not to run it, each said out loud with the manual command
+	// behind it. Anything else runs the installer and says so first. The missing
+	// PowerShell is one of them now that the choice is a pure function: a shell
+	// the step knows is absent is named, instead of reaching spawnSync's ENOENT.
+	let whyNot = null;
+	if (present) whyNot = 'already installed';
+	else if (SKIP_NETWORK) whyNot = 'PI_SKIP_NETWORK=1 — the vendor installer was not downloaded';
+	else if (!command.available) whyNot = 'neither pwsh nor powershell is on PATH';
+	else if (PLAN.herdrInstall === 'sh' && !hasCmd('curl')) whyNot = 'curl is not on PATH';
+
+	let ran = false;
+	if (whyNot) {
+		note(`command  : not run — ${whyNot}`);
+	} else {
+		note(`command  : ${command.line}`);
+		if (command.fellBack) note(`fallback : ${command.preferred} is not on PATH — ${command.shell} runs the same script`);
+		const attempt = herdrAttempt({ command, spawn: spawnSync, dry: DRY });
+		if (attempt.dry) note(`[dry-run] ${command.line}`);
+		for (const line of attempt.lines) warn(line);
+		ran = attempt.ran;
 	}
-	const shell = PLAN.platform === 'win32' ? 'powershell' : 'sh';
-	const args = PLAN.platform === 'win32' ? ['-NoProfile', '-Command', command.replace(/^powershell -NoProfile -Command /, '')] : ['-c', command];
-	const r = spawnSync(shell, args, { stdio: 'inherit' });
-	return r.status ?? 1;
+
+	const after = Boolean(bin) && exists(bin);
+	if (after) {
+		note(`installed -> ${bin}`);
+	} else if (ran) {
+		warn(`!! not installed — run: ${command.manual}`);
+	} else {
+		note(`!! not installed — run: ${command.manual}`);
+	}
+	if (!after) {
+		note(`bin entry : not linked — ${bin || 'the binary'} is not there`);
+		return;
+	}
+	const dest = path.join(P.binDir, PLAN.platform === 'win32' ? 'herdr-app.exe' : 'herdr-app');
+	const how = linkOrCopy(bin, dest);
+	note(`herdr-app -> ${dest} (${how})`);
 }
 
 // --- 5b/5c. the delegation workspace ---------------------------------------
