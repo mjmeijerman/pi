@@ -183,7 +183,13 @@ test('every wrapper the installer puts on PATH gets a .cmd built from the resolv
 		assert.ok(shim.includes(`"${bash}"`), shim);
 		assert.ok(shim.includes(path.join(binDir, wrapper.name).replace(/\\/g, '/')), shim);
 		assert.match(shim, / %\*\r\nexit \/b %ERRORLEVEL%\r\n$/);
-		assert.match(out.stdout, new RegExp(`^== ${wrapper.name}\\.cmd -> .* \\(runs ${bash.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)$`, 'm'));
+		// No computed regex: semgrep's detect-non-literal-regexp flagged this line and
+		// cost a CI round, and the check does not need a pattern. The reported path
+		// is mid-line and the interpreter is the end of it, so exact substrings say
+		// the same thing and cannot be wrong about escaping.
+		const shimLine = out.stdout.split('\n').find((line) => line.startsWith(`== ${wrapper.name}.cmd -> `));
+		assert.ok(shimLine, `no "== ${wrapper.name}.cmd ->" line in:\n${out.stdout}`);
+		assert.ok(shimLine.endsWith(`(runs ${bash})`), shimLine);
 		// The POSIX file stays beside it: Git Bash and every POSIX consumer runs
 		// that one, and #182's `.pi/scripts` copy is not a substitute.
 		assert.ok(fs.existsSync(path.join(binDir, wrapper.name)), `${wrapper.name} itself was removed`);
@@ -203,6 +209,41 @@ test('the Herdr menu row runs the .cmd that was actually written', (t) => {
 	// row appeared and launched nothing.
 	assert.ok(fs.existsSync(run[0]), `the menu row points at ${run[0]}, which does not exist`);
 	assert.ok(fs.readFileSync(run[0], 'utf8').includes(`"${bash}"`));
+});
+
+test('sandbox/herdr-programs.json holds a wrapper name, never a path', () => {
+	// The file ships to every machine. The absolute path it used to hold was one
+	// person's home: every Linux install copied the template verbatim, so the
+	// menu row pointed at a file that is not there. The bug was a path in this
+	// file, so the test names paths rather than pinning the file byte for byte.
+	const template = path.join(ROOT, 'sandbox', 'herdr-programs.json');
+	const programs = JSON.parse(fs.readFileSync(template, 'utf8')).programs;
+	for (const [key, entry] of Object.entries(programs)) {
+		for (const program of entry.run || []) {
+			assert.equal(path.isAbsolute(program), false, key + ': run holds the absolute path ' + program);
+			assert.doesNotMatch(program, /[\\/]|^[A-Za-z]:/, key + ': run holds a path (' + program + ') — the engine resolves the name');
+		}
+	}
+	// The engine turns this word into binDir/pi-bare on every platform; a second
+	// copy of the resolved path in the template is a second thing to forget.
+	assert.deepEqual(programs['pi-bare'].run, ['pi-bare']);
+});
+
+test('on Linux the menu row names the pi-bare under this HOME, not the source tree', (t) => {
+	const home = tempHome(t);
+	// PI_PLATFORM=linux is the branch that inherited the template verbatim, so a
+	// Linux install wrote a row pointing at whoever committed it. The plan is
+	// forced rather than read from the host, so this says the same thing anywhere.
+	const out = install(home, [], { PI_PLATFORM: 'linux' });
+	assert.equal(out.status, 0, out.stderr);
+
+	const programs = JSON.parse(fs.readFileSync(path.join(home, '.config', 'herdr-app', 'programs.json'), 'utf8'));
+	const run = programs.programs['pi-bare'].run;
+	assert.deepEqual(run, [path.join(home, '.local', 'bin', 'pi-bare')]);
+	// Under the throwaway HOME, and a file that is really there: the row has to
+	// launch something on the machine that reads it, not only on the author's.
+	assert.ok(fs.existsSync(run[0]), 'the menu row points at ' + run[0] + ', which does not exist');
+	assert.equal(run[0].startsWith(ROOT + path.sep), false, 'the row points into the source tree: ' + run[0]);
 });
 
 test('no bash: one message naming PI_GIT_BASH, and not a single .cmd written', (t) => {
@@ -258,7 +299,7 @@ test('--dry-run prints the shim lines and writes nothing', (t) => {
 	const out = install(home, ['--dry-run'], { PI_GIT_BASH: bash });
 	assert.equal(out.status, 0, out.stderr);
 	for (const wrapper of POSIX_WRAPPERS.filter((w) => w.from === 'scripts')) {
-		assert.match(out.stdout, new RegExp(`^== ${wrapper.name}\\.cmd -> `, 'm'));
+		assert.ok(out.stdout.includes(`== ${wrapper.name}.cmd -> `), out.stdout);
 	}
 	assert.deepEqual(cmdFiles(binDir), [], 'a dry run wrote a shim');
 	assert.match(out.stdout, /\(dry run: nothing written\)/);

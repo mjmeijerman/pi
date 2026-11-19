@@ -55,7 +55,10 @@ pi-bare            # unsandboxed; the session title starts with "bare"
 Herdr's new-agent menu (`+`, top right) lists agents from
 `~/.config/herdr-app/programs.json`. `sandbox/herdr-programs.json` is the entry
 that puts "Pi (bare)" next to "Pi" in that menu; `install.sh` copies it when the
-file is absent and leaves an existing one alone. Menu and terminal are the same
+file is absent and leaves an existing one alone. It is a template and holds the
+wrapper name (`pi-bare`), never a path: the installer splits that word into the
+machine's own bin directory (`pi-bare.cmd` on Windows), because a path written
+into the repo is one person's home and everybody else's dead menu row. Menu and terminal are the same
 choice: `Pi` → sandboxed, `Pi (bare)` → not, and both sessions say which one
 they are.
 

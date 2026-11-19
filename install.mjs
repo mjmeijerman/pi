@@ -596,7 +596,12 @@ function stepBins() {
 		} else {
 			const entry = JSON.parse(read(programsSrc));
 			const key = Object.keys(entry.programs || {})[0];
-			if (key && entry.programs[key].run && PLAN.platform !== 'linux') {
+			// The template says `pi-bare` and never a path: a repo cannot know where
+			// a machine keeps its bin directory, and the one absolute path it once
+			// held was that person's home — every other install inherited a menu row
+			// pointing at a file that is not there. This is the only code that knows
+			// `P.binDir`, so it resolves the name on every platform, Linux included.
+			if (key && entry.programs[key].run) {
 				entry.programs[key].run = [path.join(P.binDir, PLAN.platform === 'win32' ? 'pi-bare.cmd' : 'pi-bare')];
 			}
 			writeText(programsDst, `${JSON.stringify(entry, null, 2)}\n`);
