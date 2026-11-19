@@ -15,14 +15,17 @@
 //                           installed with npm before anything is written
 //   1  agent config: skills, extensions, settings/*.json, dictation, AGENTS.md
 //   1b sandbox/ and scripts/ next to the agent dir (AGENTS.md names them by path)
-//   1c herdr-app mods (never overwrites a folder the person may have edited)
+//   1c herdr-app mods (never overwrites a folder the person may have edited),
+//      into a config directory created here when the app has not run yet
 //   2  global git hooks (§core.hooksPath) + the init template layer
 //   3  global gitignore
 //   4  git-vuln-scan, pisandbox, pi-bare, herdr menu entry, the pi wrapper
 //   5  herdr-app (vendor installer) per OS
 //   5b big-boss-pi workspace clone, 5c its bin links
 //   5d the guard service: systemd on Linux, launchd on macOS, Task Scheduler on
-//      Windows — plus the weekly timers, which need systemd and say so
+//      Windows — plus the weekly timers, which need systemd and say so. The Task
+//      Scheduler entry names the Git for Windows bash.exe it resolved: Task
+//      Scheduler runs a command line, never a shebang.
 //
 // Idempotent: a second run changes nothing. Never touches auth.json, sessions,
 // models-store.json. Never prints a key. Never overwrites a file a person may
@@ -33,7 +36,8 @@
 //      PI_SKIP_SYSTEMD=1 (copy units, do not enable), PI_SKIP_NETWORK=1 (no
 //      vendor downloads, no clone), PI_ENABLE_SERVICES=1 (opt in to a launchd
 //      plist / scheduled task on macOS and Windows), PI_SKIP_PREREQS=1 (never
-//      call a package manager), HERDR_MODS.
+//      call a package manager), PI_GIT_BASH (the bash.exe a Windows scheduled
+//      task runs the guard with), HERDR_MODS.
 //
 // Step 0 is the prerequisites: git, node and npm, installed with the first
 // package manager this platform has when they are missing. It runs before the
@@ -55,6 +59,8 @@ import {
 	PI_WRAPPER_BLOCK,
 	PI_WRAPPER_END,
 	bossClonePlan,
+	gitBashCandidates,
+	guardTaskCommand,
 	herdrAttempt,
 	herdrInstallCommand,
 	helpText,
@@ -458,10 +464,31 @@ function stepRuntimeDirs() {
 	}
 }
 
+/**
+ * ensureHerdrConfigDir — `~/.config/herdr-app` (or `%USERPROFILE%\.config\herdr-app`,
+ * which is the app's config dir on Windows too), created when it is not there.
+ *
+ * The directory used to arrive with the first launch of herdr-app, and that is
+ * section 5 — after the mods (1c) and the menu row (4). So on a fresh machine
+ * both steps took their skip branch, silently: no `mods/`, no `Pi (bare)` entry,
+ * and a second run did not fix it either, because nothing had opened the app in
+ * between. It is plain JSON and folders on disk, so it is written before the app
+ * exists and read by the app's first launch.
+ * Returns what the caller should say it did.
+ */
+function ensureHerdrConfigDir() {
+	if (exists(P.herdrConfigDir)) return 'found';
+	if (DRY) return 'would create';
+	fs.mkdirSync(P.herdrConfigDir, { recursive: true });
+	return 'created';
+}
+
 // --- 1c. herdr-app mods (never overwrite an edited folder) ------------------
 function stepHerdrMods() {
 	const src = path.join(SOURCE_DIR, 'herdr-mods');
-	if (!exists(src) || !exists(P.herdrConfigDir)) return;
+	if (!exists(src)) return;
+	note(`herdr config dir ${ensureHerdrConfigDir()}: ${P.herdrConfigDir}`);
+	let added = 0;
 	for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
 		if (!entry.isDirectory()) continue;
 		const dst = path.join(HERDR_MODS, entry.name);
@@ -469,9 +496,13 @@ function stepHerdrMods() {
 			say(`== kept existing herdr mod: ${entry.name}`);
 			continue;
 		}
+		// In a dry run copyTree writes nothing, and the line still prints: the
+		// point of --dry-run is to show what a fresh install would put there.
 		copyTree(path.join(src, entry.name), dst);
 		note(`installed herdr mod: ${entry.name} -> ${dst}`);
+		added++;
 	}
+	if (added > 0) note(`${added} herdr mod(s) new in ${HERDR_MODS} — in place before herdr-app is first opened`);
 }
 
 // --- 2. git hooks -----------------------------------------------------------
@@ -544,7 +575,10 @@ function stepBins() {
 	// Herdr has none, never overwrite one somebody edited.
 	const programsSrc = path.join(SOURCE_DIR, 'sandbox', 'herdr-programs.json');
 	const programsDst = path.join(P.herdrConfigDir, 'programs.json');
-	if (exists(programsSrc) && exists(P.herdrConfigDir)) {
+	if (exists(programsSrc)) {
+		// Same reason as stepHerdrMods: the config dir is created here rather than
+		// waited for, because section 5 is where the app would have made it.
+		ensureHerdrConfigDir();
 		if (exists(programsDst)) {
 			say('== herdr programs.json exists — add the pi-bare entry from sandbox/herdr-programs.json by hand');
 		} else {
@@ -741,7 +775,7 @@ function stepServices() {
 	if (SKIP_SERVICES || !ENABLE_SERVICES) {
 		skipped(
 			'guard service (launchd / Task Scheduler)',
-			`opt-in on ${PLAN.platform}: re-run with PI_ENABLE_SERVICES=1 to install a login entry`,
+			`opt-in on ${PLAN.platform}: the guard is what creates the big-boss-pi space, so this is not cosmetics — re-run with PI_ENABLE_SERVICES=1 to install a login entry`,
 		);
 		return;
 	}
@@ -758,9 +792,36 @@ function stepServices() {
 		say(`   disable: launchctl unload -w ${plist} && rm ${plist}`);
 		return;
 	}
-	note('guard: registering a Task Scheduler entry at logon');
-	run('schtasks', ['/Create', '/F', '/SC', 'ONLOGON', '/TN', 'big-boss-pi-guard', '/TR', guard], { allowFail: true });
-	say('   disable: schtasks /Delete /TN big-boss-pi-guard /F');
+	// The guard is bash (`#!/usr/bin/env bash`), and Task Scheduler runs a command
+	// line, not a shebang: registering the file itself started nothing, which is
+	// why the `big-boss-pi` space never appeared on Windows. Git for Windows is
+	// already the one prerequisite this platform has (INSTALL.md), so its bash is
+	// the interpreter — resolved, never assumed, because `C:\Program Files` is not
+	// where a per-user Git for Windows lands and a task gets no useful PATH.
+	const bash = resolveGitBash();
+	if (!bash) {
+		warn('no Git Bash found — a task pointing at bin/guard starts nothing, so none was registered');
+		say('   fix: install Git for Windows, or set PI_GIT_BASH to bash.exe, then re-run');
+		return;
+	}
+	const task = guardTaskCommand({ bashPath: bash, guardPath: guard });
+	note('guard: registering a Task Scheduler entry at logon (this is what creates the big-boss-pi space)');
+	note(`interpreter: ${bash}`);
+	say(`   command: ${task.registered}`);
+	// Printed above as the pasteable line, so run()'s own `[dry-run] cmd args`
+	// echo would be a second, differently-quoted spelling of the same thing.
+	if (DRY) say('   [dry-run] not registered');
+	// task.exe, not task.program: a bare name goes through cmd.exe, whose quotes
+	// would double the ones inside /TR and register a different command line.
+	else run(task.exe, task.args, { allowFail: true });
+	say(`   disable: ${task.remove}`);
+}
+
+/** resolveGitBash — the first Git for Windows bash.exe that is really there. */
+function resolveGitBash() {
+	const probe = spawnSync('git', ['--exec-path'], { encoding: 'utf8' });
+	const execPath = probe.status === 0 ? (probe.stdout || '').trim() : '';
+	return gitBashCandidates({ platform: PLAN.platform, env: process.env, execPath }).find((p) => exists(p)) || null;
 }
 
 function launchdPlist(label, program, args = []) {

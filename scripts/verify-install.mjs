@@ -137,6 +137,24 @@ if (PLAN.service === 'systemd') {
 	pass('scheduled task', 'not registered without PI_ENABLE_SERVICES=1');
 }
 
+// Herdr config: written at sections 1c and 4, before herdr-app's first launch,
+// because the app's config directory used to be the app's to create — and on a
+// fresh machine that skipped the mods and the menu row silently. Asserted here
+// so the matrix proves it on all three OSes instead of trusting the transcript.
+mustExist('herdr config dir', P.herdrConfigDir);
+mustExist('herdr menu row', path.join(P.herdrConfigDir, 'programs.json'));
+// Counted, not named: the mods come from herdr-mods/ and a verifier that spells
+// one of them turns a rename into a red matrix for no reason.
+const herdrMods = process.env.HERDR_MODS || path.join(P.herdrConfigDir, 'mods');
+let modCount = 0;
+try {
+	modCount = fs.readdirSync(herdrMods, { withFileTypes: true }).filter((e) => e.isDirectory()).length;
+} catch {
+	modCount = 0;
+}
+if (modCount > 0) pass('herdr mods', `${modCount} in ${herdrMods}`);
+else fail('herdr mods', `none in ${herdrMods} — a fresh install must write them before herdr-app runs`);
+
 // Deliberately skipped in CI: the vendor download, the private workspace.
 if (process.env.PI_SKIP_NETWORK === '1') {
 	mustBeAbsent('herdr-app', path.join(P.binDir, PLAN.platform === 'win32' ? 'herdr-app.exe' : 'herdr-app'), 'PI_SKIP_NETWORK=1 skipped the vendor installer');
