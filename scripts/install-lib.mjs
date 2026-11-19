@@ -18,6 +18,7 @@
 // ============================================================================
 
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -343,6 +344,12 @@ export const GUARD_TASK_NAME = 'big-boss-pi-guard';
  * than quietly register whichever bash happened to be found instead. The value
  * is returned verbatim — a path outside the default layout is the reason to set
  * it, so normalising it is how it stops matching.
+ *
+ * The order is the one a person would try: the override, then `bash.exe` as
+ * PATH has it, then the Git for Windows directories. The WSL launcher
+ * (`%SystemRoot%\System32\bash.exe`) is filtered out of PATH: it is named bash
+ * and it is not Git Bash, so a shim or a task built on it would start a Linux
+ * shell that cannot run a `C:\...` script path.
  */
 export function gitBashCandidates({ platform = process.platform, env = process.env, execPath = '' } = {}) {
 	if (platform !== 'win32') return [];
@@ -353,6 +360,13 @@ export function gitBashCandidates({ platform = process.platform, env = process.e
 		if (!p || out.includes(p)) return;
 		out.push(p);
 	};
+	const systemRoot = win.normalize(env.SystemRoot || 'C:\\Windows').toLowerCase();
+	for (const dir of `${env.PATH || env.Path || ''}`.split(';')) {
+		if (!dir.trim()) continue;
+		const candidate = win.join(dir, 'bash.exe');
+		if (win.normalize(win.dirname(candidate)).toLowerCase() === win.join(systemRoot, 'System32').toLowerCase()) continue;
+		add(candidate);
+	}
 	if (execPath) {
 		let dir = win.dirname(win.normalize(execPath));
 		for (let up = 0; up < 5 && dir; up++) {
@@ -362,10 +376,75 @@ export function gitBashCandidates({ platform = process.platform, env = process.e
 			dir = parent;
 		}
 	}
-	add(win.join(env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe'));
-	add(win.join(env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git', 'bin', 'bash.exe'));
-	if (env.LOCALAPPDATA) add(win.join(env.LOCALAPPDATA, 'Programs', 'Git', 'bin', 'bash.exe'));
+	const gitRoots = [win.join(env.ProgramFiles || 'C:\\Program Files', 'Git'), win.join(env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git')];
+	if (env.LOCALAPPDATA) gitRoots.push(win.join(env.LOCALAPPDATA, 'Programs', 'Git'));
+	// `bin` is what Git Bash puts on PATH; `usr\bin` is the same bash one level
+	// down, and the only one there on an install that kept PATH bare.
+	for (const root of gitRoots) {
+		add(win.join(root, 'bin', 'bash.exe'));
+		add(win.join(root, 'usr', 'bin', 'bash.exe'));
+	}
 	return out;
+}
+
+/**
+ * resolveGitBash — the one answer to "where is bash" on Windows.
+ *
+ * Both the guard's `schtasks /TR` and every `.cmd` shim are built from this, so
+ * there is one lookup and one override (`PI_GIT_BASH`) to learn. `exists` is a
+ * parameter because a test needs to answer it without a Windows disk.
+ */
+export function resolveGitBash({ platform = process.platform, env = process.env, execPath = '', exists = (p) => fs.existsSync(p) } = {}) {
+	return gitBashCandidates({ platform, env, execPath }).find((p) => exists(p)) || null;
+}
+
+/**
+ * POSIX_WRAPPERS — every bin entry the installer puts on PATH that is really a
+ * bash program (`#!/usr/bin/env bash`), with the directory its source lives in.
+ *
+ * One list, because two facts depend on it: the copy loop in install.mjs, and
+ * the `.cmd` shim written next to each copy on win32. Spelled twice, a sixth
+ * wrapper would arrive as a file Windows cannot start and nobody would notice
+ * until they typed its name in PowerShell.
+ */
+export const POSIX_WRAPPERS = [
+	{ name: 'pi-bare', from: 'scripts' },
+	{ name: 'pisandbox', from: 'scripts' },
+	{ name: 'jev', from: 'bin' },
+	{ name: 'delegate', from: 'bin' },
+	{ name: 'local-run', from: 'bin' },
+];
+
+/**
+ * cmdShim — the `.cmd` a person (and Herdr) actually runs on Windows.
+ *
+ * Windows has no shebang: the POSIX wrapper copied onto PATH does nothing when
+ * typed in PowerShell or put in a menu row. So each wrapper gets a `.cmd` whose
+ * whole job is to name the resolved bash, hand it the script, forward `%*`
+ * verbatim and pass the exit status through — `%ERRORLEVEL%` is read after the
+ * program ran, which is why `exit /b` is its own line.
+ *
+ * The bash path is written in, not `%PI_GIT_BASH%`: a menu row and a scheduled
+ * task inherit no useful environment, and a shim that only works in a prompt
+ * where a variable was set is the bug this replaces. Moving Git means re-running
+ * the installer — which is already how every other path in here behaves.
+ *
+ * Two path spellings on purpose. bash.exe is executed by cmd.exe, so it keeps
+ * its native backslashes; the script path is handed to Git Bash, which reads
+ * `C:/Users/...` without asking whether a backslash was an escape, so it is
+ * written with forward slashes. `scripts/tests/install-win-cmd-shims.test.mjs`
+ * pins both.
+ */
+export function cmdShim({ bashPath, scriptPath }) {
+	if (!bashPath) throw new Error('cmdShim needs the absolute path of bash.exe');
+	if (!scriptPath) throw new Error('cmdShim needs the absolute path of the POSIX wrapper it starts');
+	return [
+		'@echo off',
+		'rem Generated by ~/.pi/install.mjs. Edit the source there and re-run it.',
+		`"${bashPath}" "${scriptPath.replace(/\\/g, '/')}" %*`,
+		'exit /b %ERRORLEVEL%',
+		'',
+	].join('\r\n');
 }
 
 /**

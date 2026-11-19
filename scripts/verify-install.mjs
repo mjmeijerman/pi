@@ -27,7 +27,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { homePaths, planFor, samePath } from './install-lib.mjs';
+import { POSIX_WRAPPERS, homePaths, planFor, samePath } from './install-lib.mjs';
 
 const HOME = process.env.HOME || process.env.USERPROFILE;
 let agentDirArg = null;
@@ -103,6 +103,29 @@ else pass('core.excludesFile', P.gitignoreGlobal);
 mustExist('pisandbox', path.join(P.binDir, 'pisandbox'));
 mustExist('pi-bare', path.join(P.binDir, 'pi-bare'));
 
+// Every bash wrapper that landed on PATH also needs its Windows entry point: a
+// file starting `#!/usr/bin/env bash` is a text file to PowerShell, and the
+// Herdr menu row launches exactly this name. Read off the engine's list, and
+// only for the wrappers whose POSIX file is there — `jev` and friends need the
+// private clone, which CI skips on purpose.
+for (const wrapper of POSIX_WRAPPERS) {
+	const posix = path.join(P.binDir, wrapper.name);
+	if (!fs.existsSync(posix)) continue;
+	if (PLAN.platform === 'win32') {
+		const shim = `${posix}.cmd`;
+		mustExist(`${wrapper.name}.cmd`, shim);
+		if (!fs.existsSync(shim)) continue;
+		const text = fs.readFileSync(shim, 'utf8');
+		const bash = /^"([^"]+)" "/m.exec(text)?.[1] || '';
+		if (bash && fs.existsSync(bash)) pass(`${wrapper.name}.cmd interpreter`, bash);
+		else fail(`${wrapper.name}.cmd interpreter`, `does not name a bash.exe that exists: ${bash || 'none'}`);
+		if (text.includes(`"${posix.replace(/\\/g, '/')}"`)) pass(`${wrapper.name}.cmd target`, posix);
+		else fail(`${wrapper.name}.cmd target`, `does not run ${posix}`);
+	} else {
+		mustBeAbsent(`${wrapper.name}.cmd`, `${posix}.cmd`, 'bash reads the shebang here');
+	}
+}
+
 if (state) {
 	for (const skill of state.skills || []) mustExist(`skill ${skill}`, path.join(AGENT_DIR, 'skills', skill, 'SKILL.md'));
 	for (const ext of state.extensions || []) mustExist(`extension ${ext}`, path.join(AGENT_DIR, 'extensions', ext));
@@ -143,6 +166,17 @@ if (PLAN.service === 'systemd') {
 // so the matrix proves it on all three OSes instead of trusting the transcript.
 mustExist('herdr config dir', P.herdrConfigDir);
 mustExist('herdr menu row', path.join(P.herdrConfigDir, 'programs.json'));
+// The row is only a row if the program it names is on disk — that is the whole
+// Windows hole: #182 wrote the row and nothing wrote `pi-bare.cmd`.
+try {
+	const programs = JSON.parse(fs.readFileSync(path.join(P.herdrConfigDir, 'programs.json'), 'utf8'));
+	const run = Object.values(programs.programs || {})[0]?.run?.[0];
+	if (run && fs.existsSync(run)) pass('herdr menu program', run);
+	else if (run) fail('herdr menu program', `${run} does not exist — the row launches nothing`);
+	else fail('herdr menu program', 'the entry names no program');
+} catch (err) {
+	fail('herdr menu program', `programs.json is not readable JSON: ${err.message}`);
+}
 // Counted, not named: the mods come from herdr-mods/ and a verifier that spells
 // one of them turns a rename into a red matrix for no reason.
 const herdrMods = process.env.HERDR_MODS || path.join(P.herdrConfigDir, 'mods');
