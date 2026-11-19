@@ -240,8 +240,10 @@ Two things worth knowing:
 | Ollama model weights | 17 GB | `--with-ollama` |
 | `werken-met-ai.pdf` | 15 MB third party | Radar site |
 
-`install.sh` alone (config + hooks, no interactivity) still works: `./install.sh --install-pi`.
-It is idempotent — re-run it any time, including when you suspect the hooks are gone.
+`install.sh` alone (config + hooks, no interactivity) still works, and installs pi
+when it is missing: `./install.sh`, or `./install.sh --no-install-pi` to leave pi
+out. It is idempotent — re-run it any time, including when you suspect the hooks
+are gone.
 
 ## Following the Technology Radar
 
@@ -299,7 +301,8 @@ Repo-local hooks are preserved: the global wrappers chain to your repo's own `.g
 - Installer env flags: `PI_SKIP_NETWORK=1` (no vendor download, no
   `big-boss-pi` clone), `PI_SKIP_SYSTEMD=1` (copy units, enable nothing),
   `PI_ENABLE_SERVICES=1` (opt into the macOS/Windows login entry),
-  `PI_ALLOW_MISSING_PI=1` (a config-only install on a box without `pi`),
+  `PI_ALLOW_MISSING_PI=1` (skip pi on a box without it — CI only; the installer
+  installs pi by default),
   `PI_DRY_RUN=1`, `PI_PLATFORM=win32|darwin|linux` (exercise another OS's
   branches from one host — the CI matrix and the tests use it)
 

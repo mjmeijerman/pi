@@ -89,18 +89,22 @@ means, flags, troubleshooting, secrets: [docs/install.md](docs/install.md).
 
 Every question has a default, and `-y` takes all of them:
 
-1. **system packages** with `sudo apt-get` — Linux only, default **no**
-2. **skills**, one per skill in `agent/skills/` — default **keep**
-3. **extensions**, one per `agent/extensions/*.ts` — default **keep**
-4. **agent rules**, shown as `rule 4 of 17` and grouped in the 7 sections of
+1. **pi** — `install pi with npm?`, asked only when no `pi` is on PATH, with
+   the exact npm line as the sub-line — default **yes**
+2. **system packages** with `sudo apt-get` — Linux only, default **no**
+3. **skills**, one per skill in `agent/skills/` — default **keep**
+4. **extensions**, one per `agent/extensions/*.ts` — default **keep**
+5. **agent rules**, shown as `rule 4 of 17` and grouped in the 7 sections of
    `agent/AGENTS.md` — default **keep**; the installed `AGENTS.md` is written from
    your answers
-5. **keys**, typed with the terminal echo off: the DeepSeek key, then
+6. **keys**, typed with the terminal echo off: the DeepSeek key, then
    `TYPESAFE_API_KEY` for jev — empty skips, `--no-keys` never asks
-6. **optional extras**: the local model (~17 GB) and the dictation venv
+7. **optional extras**: the local model (~17 GB) and the dictation venv
    (~2.5 GB) — default **no**
 
-It then installs, reconciles the pi packages declared in `settings.json`, and
-prints a verification block (skills, extensions, rules, hooks, sandbox, key).
+It then installs (pi included, when it was missing), reconciles the pi packages
+declared in `settings.json`, and prints a verification block (skills, extensions,
+rules, hooks, sandbox, key).
 
-`node setup.mjs --help` prints every flag.
+`--no-install-pi` skips pi and carries on without it; `node setup.mjs --help`
+prints every flag.

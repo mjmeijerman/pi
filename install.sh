@@ -2,7 +2,7 @@
 # install.sh — thin shim; the engine is install.mjs (Linux, macOS and Windows).
 #
 #   ./install.sh                     config + hooks, non-interactive, no prompts
-#   ./install.sh --install-pi        install pi with npm first when it is missing
+#   ./install.sh --no-install-pi     skip pi, install the rest (pi is installed by default)
 #   ./install.sh --dry-run           print the plan, change nothing
 #   ./install.sh --skills=a,b --extensions=c.ts
 #

@@ -3,13 +3,14 @@
 // install.mjs — the single installer engine, for Linux, macOS and Windows.
 //
 // Usage (run from anywhere, in the clone):
-//   node install.mjs                     # machine where ~/.pi already exists
-//   node install.mjs --install-pi        # install pi with npm first when missing
+//   node install.mjs                     # install pi with npm when it is missing
+//   node install.mjs --no-install-pi     # deliberately not: carry on without it
 //   node setup.mjs                       # the interactive pass, then this
 //
 // This replaces install.sh, and its sections keep the old numbering so a reader
 // can map one onto the other:
-//   0  the pi binary
+//   0  the pi binary      — the preflight: found on PATH, found on disk, or
+//                           installed with npm before anything is written
 //   1  agent config: skills, extensions, settings/*.json, dictation, AGENTS.md
 //   1b sandbox/ and scripts/ next to the agent dir (AGENTS.md names them by path)
 //   1c herdr-app mods (never overwrites a folder the person may have edited)
@@ -51,6 +52,9 @@ import {
 	helpText,
 	homePaths,
 	parseFlags,
+	piDiskCandidates,
+	piInstallCommand,
+	piPreflight,
 	planFor,
 	spawnPlan,
 	spliceManagedBlock,
@@ -72,7 +76,7 @@ const SKIP_NETWORK = process.env.PI_SKIP_NETWORK === '1';
 const SKIP_SERVICES = process.env.PI_SKIP_SYSTEMD === '1';
 const ENABLE_SERVICES = process.env.PI_ENABLE_SERVICES === '1';
 
-let OPT = { installPi: false };
+let OPT = { installPi: true };
 let changed = 0;
 // Every unit stepSystemd copied, so the summary's disable lines name what is
 // really there instead of a list that can drift from the directory.
@@ -254,43 +258,71 @@ function linkOrCopy(target, dest) {
 	return useCopy ? 'copy' : 'link';
 }
 
-// --- 0. the pi binary -------------------------------------------------------
+// --- 0. the pi binary, in the preflight --------------------------------------
 // npm is asked for by the name its own OS resolves: `npm.cmd` on Windows, where
 // a bare `npm` is the `npm.ps1` a default execution policy refuses. The plan
 // carries it, so no call site can spell it wrong on its own.
 const NPM = PLAN.npmBin || 'npm';
 
-function stepPi() {
-	const candidates = [
-		path.join(process.env.PNPM_HOME || path.join(HOME, '.local', 'share', 'pnpm'), 'bin', 'pi'),
-		path.join(HOME, '.local', 'bin', 'pi'),
-	];
-	const binName = PLAN.platform === 'win32' ? ['pi.cmd', 'pi.exe'] : ['pi'];
-	const onDisk = candidates
-		.flatMap((c) => (PLAN.platform === 'win32' ? binName.map((b) => path.join(path.dirname(c), b)) : [c]))
-		.find((c) => exists(c));
-	if (hasCmd('pi')) return;
-	if (onDisk) {
-		process.env.PATH = `${path.dirname(onDisk)}${path.delimiter}${process.env.PATH}`;
-		note(`pi found on disk, added to PATH: ${onDisk}`);
+/** piOnDisk — a pi npm or pnpm installed but not on PATH (pnpm keeps it out). */
+function piOnDisk() {
+	return piDiskCandidates({ home: HOME, plan: PLAN, env: process.env }).find((c) => exists(c));
+}
+
+/**
+ * preflightPi — the pi decision, before a single file is written.
+ *
+ * It used to run at the tail, after the config, hooks and services had landed:
+ * a machine with no pi and no npm got a half-installed tree and exit 1. The
+ * decision itself is data (piPreflight in scripts/install-lib.mjs), so setup.mjs
+ * asks the same question with the same words and the tests drive one function.
+ */
+function preflightPi() {
+	const verdict = piPreflight({
+		onPath: hasCmd('pi'),
+		onDisk: piOnDisk(),
+		npm: hasCmd(NPM),
+		npmBin: NPM,
+		allowMissing: process.env.PI_ALLOW_MISSING_PI === '1',
+		install: OPT.installPi,
+		plan: PLAN,
+	});
+	if (verdict.action === 'present') return;
+	if (verdict.action === 'path') {
+		process.env.PATH = `${path.dirname(verdict.path)}${path.delimiter}${process.env.PATH}`;
+		note(verdict.message);
 		return;
 	}
-	// CI provisions a runner with no pi on purpose: the installer has to prove it
-	// wires the config without one, so the check is a skip there and a stop here.
-	if (process.env.PI_ALLOW_MISSING_PI === '1') {
-		skipped('pi binary', 'PI_ALLOW_MISSING_PI=1 — config only');
+	if (verdict.action === 'skip') {
+		skipped('pi binary', verdict.message);
 		return;
 	}
-	if (OPT.installPi && hasCmd(NPM)) {
-		note('installing pi via npm (global)');
-		run(NPM, ['install', '-g', '--ignore-scripts', '@earendil-works/pi-coding-agent']);
+	if (verdict.action === 'install') {
+		note(verdict.message);
+		if (run(NPM, verdict.argv.slice(1)) !== 0) {
+			// Stopping here is the point: nothing has been written yet, so the tree
+			// is untouched and the message is the one line that fixes it.
+			warn(`installing pi failed — nothing written yet. Run it yourself: ${piInstallCommand(NPM)}`);
+			process.exit(1);
+		}
 		return;
 	}
-	warn("'pi' not found on PATH. Install it first, e.g.:");
-	say(`   ${NPM} install -g --ignore-scripts @earendil-works/pi-coding-agent`);
-	say('   (or: pnpm add -g @earendil-works/pi-coding-agent)');
-	say('   Then re-run this installer (add --install-pi to auto-install).');
+	warn(`${verdict.message} — nothing written yet`);
+	for (const line of verdict.fix || []) say(`   ${line}`);
 	process.exit(1);
+}
+
+/** preflight — everything that has to hold before the first write. */
+function preflight() {
+	say('== preflight');
+	say(`   source : ${SOURCE_DIR}`);
+	say(`   agent  : ${AGENT_DIR}`);
+	say(`   system : ${PLAN.platform}${PLAN.sandbox ? ' (sandbox available)' : ' (no sandbox)'}`);
+	// Same wall as setup.mjs: git installed, shell holding a PATH from before it.
+	// Every git step below would warn with no hint where the answer is.
+	if (!hasCmd('git'))
+		warn("git is not on PATH — docs/install.md#troubleshooting: 'git is not recognized' after a Windows install, and the PATH fix");
+	preflightPi();
 }
 
 // --- 1. agent config --------------------------------------------------------
@@ -766,16 +798,11 @@ async function main() {
 		DRY = true;
 		process.env.PI_DRY_RUN = '1';
 	}
-	// Same wall as setup.mjs: git installed, shell holding a PATH from before it.
-	// Every git step below would warn with no hint where the answer is.
-	if (!hasCmd('git'))
-		warn("git is not on PATH — docs/install.md#troubleshooting: 'git is not recognized' after a Windows install, and the PATH fix");
-	say('== pi installer ==');
-	say(`   source : ${SOURCE_DIR}`);
-	say(`   agent  : ${AGENT_DIR}`);
-	say(`   system : ${PLAN.platform}${PLAN.sandbox ? ' (sandbox available)' : ' (no sandbox)'}`);
-
-	stepPi();
+	// Same shape as before, with one difference that matters: the pi decision is
+	// the preflight's, so a missing pi (and no npm to install it) stops here with
+	// an empty tree and the command for this OS, instead of at the tail with a
+	// half-installed one.
+	preflight();
 	stepAgent();
 	stepRuntimeDirs();
 	stepHerdrMods();

@@ -117,12 +117,13 @@ defaults are used and each line says so.
 
 | # | Step | What it asks | Default |
 |---|---|---|---|
-| 1 | system packages | `sudo apt-get install -y` for the binaries missing from `bwrap`, `jq`, `arecord`, `curl`, `gh` — Linux only, other OSes print one line | **no** |
-| 2 | skills | one question per skill directory in `agent/skills/`, plus anything already in `~/.pi/skills` that the repo does not carry. Description read from the skill's `SKILL.md` | **keep** |
-| 3 | extensions | one question per `agent/extensions/*.ts`, description read from the file's first comment | **keep** |
-| 4 | agent rules | one question per bullet rule in `agent/AGENTS.md`, shown as `rule 4 of 17 — <first line>`, walked through the 7 sections in file order | **keep** |
-| 5 | keys | the DeepSeek key, then `TYPESAFE_API_KEY` for jev | empty **skips** |
-| 6 | optional extras | pull the local model `qwen3.8:27b` (~17 GB) with ollama; build the faster-whisper venv (~2.5 GB) | **no**, both |
+| 1 | pi | `install pi with npm?`, asked only when no `pi` is on PATH (a pi found on disk under pnpm or `/usr/local/bin` is put on `PATH` instead of asked about); the sub-line is the exact command that will run | **yes** |
+| 2 | system packages | `sudo apt-get install -y` for the binaries missing from `bwrap`, `jq`, `arecord`, `curl`, `gh` — Linux only, other OSes print one line | **no** |
+| 3 | skills | one question per skill directory in `agent/skills/`, plus anything already in `~/.pi/skills` that the repo does not carry. Description read from the skill's `SKILL.md` | **keep** |
+| 4 | extensions | one question per `agent/extensions/*.ts`, description read from the file's first comment | **keep** |
+| 5 | agent rules | one question per bullet rule in `agent/AGENTS.md`, shown as `rule 4 of 17 — <first line>`, walked through the 7 sections in file order | **keep** |
+| 6 | keys | the DeepSeek key, then `TYPESAFE_API_KEY` for jev | empty **skips** |
+| 7 | optional extras | pull the local model `qwen3.8:27b` (~17 GB) with ollama; build the faster-whisper venv (~2.5 GB) | **no**, both |
 
 A 17-rule answer set has 17 answers, and the installed `AGENTS.md` is written from
 them: drop a rule and its paragraph goes with it, and a section whose rules are
@@ -168,7 +169,8 @@ the parser and by `--help`, and
 | `--force-key` | setup | Replace an existing `deepseek.key` instead of leaving it alone |
 | `--with-ollama` | setup | Pull the local model without asking |
 | `--with-dictation` | setup | Build the dictation venv without asking |
-| `--install-pi` | both | Install pi with npm when no `pi` is on PATH (`npm install -g --ignore-scripts @earendil-works/pi-coding-agent`) |
+| `--install-pi` | both | Accepted and does what it always did — installing pi is the default now, so passing it changes nothing and an old script keeps working |
+| `--no-install-pi` | both | Never install pi and never ask: the install carries on without it, and `pi` stays missing. Setup stops asking about it too |
 | `-h`, `--help` | both | Print the flag list and exit 0 |
 
 An option neither engine knows is an error, not a silently ignored argument:
@@ -191,7 +193,7 @@ variable one of the two engines or `scripts/install-lib.mjs` reads.
 | `PI_SKIP_NETWORK=1` | both | No vendor download, no workspace clone, no package reconciliation |
 | `PI_SKIP_SYSTEMD=1` | install | Copy the systemd units, do not enable them |
 | `PI_ENABLE_SERVICES=1` | install | Opt in to the macOS launchd plist / Windows scheduled task; without it the installer says the service is opt-in and skips it |
-| `PI_ALLOW_MISSING_PI=1` | install | Warn and carry on when no `pi` is on PATH, instead of stopping with the npm line. This is what CI uses |
+| `PI_ALLOW_MISSING_PI=1` | both | Skip pi entirely — no question, no install — and carry on with one `== pi binary: PI_ALLOW_MISSING_PI=1 — config only` line. **CI only**: it exists so a runner with no `pi` can prove the config wires up. On a machine you are setting up, let the installer install pi instead |
 | `PI_DRY_RUN=1` | install | The same as `--dry-run`. `setup.mjs` reads the flag and sets this for the engine it calls |
 | `PI_PLATFORM` | both | Override the OS the per-OS plan comes from (`linux`, `darwin`, `win32`) — it exists so one host can exercise all three branches; a real install reads the platform it runs on |
 | `PI_SKILLS=a b` | install | The skills to copy, space- or comma-separated. `setup.mjs` sets it from your answers |
@@ -365,12 +367,27 @@ warns `node v22.x is older than 24; pi 1.5.x expects 24 or 26` and continues.
 Fix: install Node 24 (`mise install node@24`, or your package manager), reopen the
 shell, re-run. The number comes from `mise.toml`, not from this page.
 
-**`pi` not found.** `install.mjs` exits 1 with
-`'pi' not found on PATH. Install it first, e.g.: npm install -g --ignore-scripts
-@earendil-works/pi-coding-agent`. Fix: run that line, or re-run setup with
-`--install-pi` and let it do it. A pi installed under pnpm
-(`~/.local/share/pnpm/bin/pi`) is found on disk and put on `PATH` for the rest of
-the run.
+**`pi` not found.** The installer installs it for you: when no `pi` is on PATH it
+runs `npm install -g --ignore-scripts @earendil-works/pi-coding-agent` in the
+preflight, before the first file is written, and continues. A pi installed under
+pnpm (`~/.local/share/pnpm/bin/pi`) is found on disk and put on `PATH` for the
+rest of the run — nothing to fix.
+
+The one case it cannot handle is a machine with neither `pi` nor `npm`, because
+Node is the thing that would have installed it. The run stops before anything is
+written and names the command for that OS:
+
+```
+!! no pi on PATH and no npm to install it with — Node (npm ships with it) is a prerequisite — nothing written yet
+   sudo apt-get install -y nodejs npm   (dnf/pacman one-liners in docs/install.md), then reopen the shell
+   then re-run this installer: npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+```
+
+Fix: install Node 24 from
+[Prerequisites, per OS](#prerequisites-per-os), reopen the shell, re-run. To
+deliberately install without pi — a config-only box, a CI runner — pass
+`--no-install-pi` (or set `PI_ALLOW_MISSING_PI=1` where nobody can answer a
+prompt): the rest of the install runs and `pi` stays missing.
 
 **herdr-app download skipped.** With `PI_SKIP_NETWORK=1`, or on a machine with no
 `curl`/no network, the installer prints
