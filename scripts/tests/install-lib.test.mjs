@@ -11,6 +11,7 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 
 import {
@@ -20,6 +21,7 @@ import {
 	PI_WRAPPER_END,
 	filterAgentsMd,
 	homePaths,
+	isRuntimeState,
 	parseAgentsMd,
 	parseRuleSelection,
 	pickNames,
@@ -250,4 +252,22 @@ test('the win32 plan names npm.cmd, and never npm.ps1', () => {
 		.replace(/^\s*\/\/.*$/gm, '');
 	assert.ok(/PLAN\.npmBin/.test(src), 'install.mjs does not take npm from the per-OS plan');
 	assert.ok(!/\b(run|hasCmd|spawnSync)\(\s*'npm'/.test(src), "install.mjs spells 'npm' by hand — Windows would get npm.ps1");
+});
+
+// The installer copies scripts/ into ~/.pi/scripts, and agent-pane.sh writes its
+// pane map in the same folder. That file is state, not config: carrying it into
+// a fresh HOME claims panes nobody opened there, and copy-then-delete counted a
+// written file on every run, so "the second run writes nothing" was false on any
+// machine that had used agent-pane. The list is what the copy skips.
+test('isRuntimeState: the agent-pane map is state, the script next to it is not', () => {
+	assert.equal(isRuntimeState(path.join('/h/.pi', 'scripts', '.agent-panes.json')), true);
+	assert.equal(isRuntimeState('.agent-panes.json'), true, 'a bare name is the same file');
+	assert.equal(isRuntimeState(path.join('/repo', 'scripts', 'agent-pane.sh')), false, 'the script is shipped');
+	assert.equal(isRuntimeState(path.join('/repo', 'scripts', 'tests', 'harness-check.sh')), false);
+	// The engine has to hand the list to its copy: a correct list nobody uses
+	// leaves the bug in place.
+	const src = fs
+		.readFileSync(new URL('../../install.mjs', import.meta.url), 'utf8')
+		.replace(/^\s*\/\/.*$/gm, '');
+	assert.ok(/copyTree\(src, dst, \(p\) => isRuntimeState\(p\)\)/.test(src), 'install.mjs copies scripts/ without skipping runtime state');
 });
