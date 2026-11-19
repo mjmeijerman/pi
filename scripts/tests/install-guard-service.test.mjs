@@ -58,6 +58,9 @@ function install(home, platform, args = [], extra = {}) {
 		PI_SKIP_PREREQS: '1',
 		PI_ALLOW_MISSING_PI: '1',
 		PI_BOSS_DIR: path.join(home, 'big-boss-pi'),
+		// The step waits up to 20s for the space; a test does not. The wait itself
+		// is driven with a fake clock in scripts/tests/guard-start.test.mjs.
+		PI_GUARD_SPACE_WAIT_MS: '0',
 		...extra,
 	};
 	// Any of these would decide the answer before the test does: the host's
@@ -106,6 +109,40 @@ test('Windows: a default run registers the Task Scheduler entry', (t) => {
 	assert.ok(registered[1].includes(`"\\"/usr/bin/bash\\" \\"${guard}\\""`), registered[1]);
 	assert.match(out.stdout, /^Would install: Task Scheduler entry big-boss-pi-guard \(.*\)$/m);
 	assert.match(out.stdout, /^Disable: schtasks \/Delete \/TN big-boss-pi-guard \/F$/m);
+});
+
+// Registering is not starting: `/SC ONLOGON` is a promise about the next logon,
+// and the Windows run that found no space was exactly that promise, unkept. So
+// the start comes after the registration, on the same entry — and never when
+// nothing was registered, because there is nothing to start.
+test('Windows: the entry is started after it is registered, in that order', (t) => {
+	const home = tempHome(t);
+	cloneWithGuard(home);
+
+	const out = install(home, 'win32', ['--dry-run'], { PI_GIT_BASH: '/usr/bin/bash' });
+	assert.equal(out.status, 0, out.stderr);
+	const created = out.stdout.indexOf('   command: schtasks /Create');
+	const started = out.stdout.indexOf('   start: schtasks /Run /TN big-boss-pi-guard');
+	assert.ok(created >= 0, 'no /Create line: ' + out.stdout);
+	assert.ok(started >= 0, 'no /Run line: ' + out.stdout);
+	assert.ok(created < started, 'the entry was started before it was registered');
+	assert.match(out.stdout, /^   \[dry-run\] not started$/m);
+});
+
+test('nothing is started when no entry was registered', (t) => {
+	const home = tempHome(t);
+	cloneWithGuard(home);
+
+	// Skipped on purpose, and the honest failure (no Git Bash): neither
+	// registered an entry, so neither may claim to have started one.
+	const skippedOut = install(home, 'win32', ['--dry-run'], { PI_SKIP_SYSTEMD: '1', PI_GIT_BASH: '/usr/bin/bash' });
+	assert.doesNotMatch(skippedOut.stdout, /schtasks \/Run/);
+	// A task that points at no interpreter was never registered, so there is
+	// nothing to /Run: the step must not start a task it did not create.
+	const noBash = install(home, 'win32', ['--dry-run'], { PI_GIT_BASH: path.join(home, 'no-such-bash.exe') });
+	assert.doesNotMatch(noBash.stdout, /schtasks \/Run/);
+	const macSkip = install(home, 'darwin', [], { PI_SKIP_SYSTEMD: '1' });
+	assert.doesNotMatch(macSkip.stdout, /launchctl kickstart/);
 });
 
 test('Linux: a default run copies the guard unit', (t) => {

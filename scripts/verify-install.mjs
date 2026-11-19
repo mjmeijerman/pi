@@ -28,7 +28,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { POSIX_WRAPPERS, homePaths, planFor, samePath } from './install-lib.mjs';
+import { GUARD_LABEL, GUARD_SPACE_NAME, POSIX_WRAPPERS, homePaths, planFor, samePath, spaceIdIn } from './install-lib.mjs';
 
 const HOME = process.env.HOME || process.env.USERPROFILE;
 let agentDirArg = null;
@@ -188,6 +188,7 @@ if (PLAN.service === 'systemd') {
 		if (program && fs.existsSync(program)) pass('launchd login item program', program);
 		else fail('launchd login item program', `${program || 'no ProgramArguments'} does not exist`);
 	}
+	assertGuardSpace();
 } else if (guardSkip) {
 	pass('scheduled task', `not checked — ${guardSkip} turns the entry off`);
 } else if (noClone) {
@@ -206,6 +207,17 @@ if (PLAN.service === 'systemd') {
 		// first space in `C:\Program Files`.
 		const toRun = (/Task To Run:\s*\r?\n?\s*(.+)/i.exec(query.stdout)?.[1] || '').trim();
 		const named = [...toRun.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+		// Registered is not started. `/SC ONLOGON` alone leaves the task Ready until
+		// the next logon, which is the install that finished with no space: so the
+		// row asks Task Scheduler for the status, and Ready is a failure that says
+		// which command starts it.
+		const status = (/Status:\s*\r?\n?\s*(.+)/i.exec(query.stdout)?.[1] || '').trim();
+		if (/^running$/i.test(status)) pass('scheduled task status', 'Running');
+		else
+			fail(
+				'scheduled task status',
+				`${status || 'no Status line'} — registered but not started, so the big-boss-pi space waits for the next logon; start it: schtasks /Run /TN big-boss-pi-guard`,
+			);
 		if (named.length < 2) fail('scheduled task program', `the registered command line names no quoted interpreter and guard: ${toRun || 'nothing'}`);
 		else {
 			const [bash, guard] = named;
@@ -215,6 +227,34 @@ if (PLAN.service === 'systemd') {
 			else fail('scheduled task guard', `${guard} does not exist`);
 		}
 	}
+	assertGuardSpace();
+}
+
+/**
+ * assertGuardSpace — did the space the guard exists to create actually appear?
+ *
+ * The same question the installer now asks at the end of its own run, asked
+ * again of a finished install: a green manifest over an empty Herdr window is
+ * the bug this row exists for. `herdr-app` not answering is a named pass — CI has
+ * no desktop app, and the guard creates the space when one starts. A running app
+ * that shows no `big-boss-pi` space is a failure with the three commands that say
+ * why, not a "check your setup".
+ */
+function assertGuardSpace() {
+	const ls = spawnSync('herdr-app', ['ls'], { encoding: 'utf8' });
+	if (ls.error || ls.status !== 0) {
+		pass('big-boss-pi space', `not checked — herdr-app is not running here (${ls.error?.code || `exit ${ls.status}`}); the guard creates the space when it starts`);
+		return;
+	}
+	const id = spaceIdIn(ls.stdout || '', GUARD_SPACE_NAME);
+	if (id) pass('big-boss-pi space', id);
+	else
+		fail(
+			'big-boss-pi space',
+			`herdr-app is running and has no ${GUARD_SPACE_NAME} space — ` +
+				`the entry: ${PLAN.platform === 'win32' ? 'schtasks /Query /TN big-boss-pi-guard /V /FO LIST' : `launchctl print gui/${typeof process.getuid === 'function' ? process.getuid() : 0}/${GUARD_LABEL}`}; ` +
+				`the guard log: ${path.join(home, 'big-boss-pi', 'state', 'guard.log')}; the app: herdr-app ls`,
+		);
 }
 
 // Herdr config: written at sections 1c and 4, before herdr-app's first launch,

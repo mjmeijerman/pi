@@ -504,6 +504,173 @@ export function guardTaskCommand({ bashPath, guardPath, taskName = GUARD_TASK_NA
 	};
 }
 
+// --- starting the guard now, and saying whether the space appeared ------------
+// Registering the login entry is not the same as running the guard. `schtasks
+// /SC ONLOGON` starts at the *next logon*, so on the Windows box the person ran
+// the installer, Herdr opened, and the space was missing with nothing to read:
+// "install finished" promised something the entry had not done yet. So the step
+// starts the entry once, then waits a bounded time for the space and says what
+// it saw — a green install that names the task, the log and the app.
+export const GUARD_LABEL = 'dev.herdr.big-boss-pi-guard';
+export const GUARD_SPACE_NAME = 'big-boss-pi';
+/** How long the step waits for the space before it says it did not appear. */
+export const GUARD_SPACE_WAIT_MS = 20000;
+
+/**
+ * guardStartCommand — the argv that starts the entry that was just registered.
+ *
+ * `launchctl load` installs and, with RunAtLoad, starts — but a reload of an
+ * already-loaded label is a no-op, so the explicit `kickstart -k` is what makes
+ * this install start the guard rather than the previous boot's one. Task
+ * Scheduler needs `/Run`, always: `/SC ONLOGON` alone is a promise about the
+ * next logon.
+ */
+export function guardStartCommand({ platform, taskName = GUARD_TASK_NAME, label = GUARD_LABEL, uid = 0 } = {}) {
+	if (platform === 'win32') {
+		const args = ['/Run', '/TN', taskName];
+		// The absolute exe for the same quoting reason as schtasksExe: a bare name is
+		// sent through cmd.exe.
+		return { program: `schtasks ${args.join(' ')}`, exe: schtasksExe(), args };
+	}
+	if (platform === 'darwin') {
+		const args = ['kickstart', '-k', `gui/${uid}/${label}`];
+		return { program: `launchctl ${args.join(' ')}`, exe: 'launchctl', args };
+	}
+	return null;
+}
+
+/**
+ * spaceIdIn — the id of the space called `name` in a `herdr-app ls` snapshot.
+ *
+ * The same predicate as `bin/guard`'s `space_id`, which is the parser this
+ * mirrors: `(j.spaces || []).find(s => s.name === SPACE_NAME)`. It lives here
+ * too because the two readers of that snapshot are a bash script and a node
+ * installer, and the alternative — a second, differently-worded matcher — is how
+ * the installer and the guard start disagreeing about whether the space exists.
+ * Null when the snapshot is not JSON or names no such space.
+ */
+export function spaceIdIn(lsText, name = GUARD_SPACE_NAME) {
+	let snapshot;
+	try {
+		snapshot = JSON.parse(lsText);
+	} catch {
+		return null;
+	}
+	const hit = (snapshot.spaces || []).find((s) => s && s.name === name);
+	return hit ? String(hit.id ?? '') : null;
+}
+
+/**
+ * waitForSpace — poll until the space exists, the app stops answering, or time
+ * runs out. Bounded on purpose: an install must not hang on a desktop app, and
+ * "not there yet" is not "broken".
+ *
+ * `probe` answers `{ running, id }`: a herdr-app that is not up yet is not a
+ * failure (the guard creates the space when the app starts), so the first
+ * not-running answer ends the wait as `app-down` instead of burning the budget.
+ * `now`/`sleep` are parameters so a test drives twenty seconds in a few calls.
+ */
+export async function waitForSpace({
+	probe,
+	timeoutMs = GUARD_SPACE_WAIT_MS,
+	intervalMs = 500,
+	now = () => Date.now(),
+	sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+	const deadline = now() + timeoutMs;
+	for (;;) {
+		const answer = probe();
+		if (!answer || !answer.running) return { state: 'app-down', id: null };
+		if (answer.id) return { state: 'found', id: answer.id };
+		const left = deadline - now();
+		if (left <= 0) return { state: 'missing', id: null };
+		await sleep(Math.min(intervalMs, left));
+	}
+}
+
+/**
+ * guardDoor — the three commands to look at when the space did not appear.
+ *
+ * This list is the point of the whole step: the Windows run ended with "install
+ * finished, Herdr is empty" and no next move. A failure that names where to look
+ * costs one line at install time and saves the person a support thread.
+ */
+export function guardDoor({ platform, bossDir, label = GUARD_LABEL, uid = 0, taskName = GUARD_TASK_NAME }) {
+	const how = platform === 'win32' ? `schtasks /Query /TN ${taskName} /V /FO LIST` : `launchctl print gui/${uid}/${label}`;
+	// The platform's own join, not the host's: a Windows line has to read
+	// `...\state\guard.log` even when the test that prints it runs on Linux.
+	const log = (platform === 'win32' ? path.win32 : path).join(bossDir, 'state', 'guard.log');
+	return [
+		`   the entry: ${how}`,
+		`   the guard log: ${log}   (tail -n 20 it)`,
+		`   the app: herdr-app ls`,
+	];
+}
+
+/**
+ * startAndVerifyGuard — start the entry, then answer in one of four ways.
+ *
+ * Every effect is injected (`run`, `probe`, `say`, `sleep`, `now`) so the five
+ * outcomes are testable without a desktop app, a Task Scheduler or a sleep:
+ *   - `dry`: nothing is started, the plan is printed;
+ *   - `start-failed`: the start command failed — said loudly, and the install
+ *     does not abort (the entry is registered; the next logon still gets a try);
+ *   - `found`: the space is there, said in one line;
+ *   - `app-down`: herdr-app is not running yet — not a failure, and the line says
+ *     when the space will appear;
+ *   - `missing`: the app is running and the space is not — the loud line plus the
+ *     three commands above.
+ */
+export async function startAndVerifyGuard({
+	platform,
+	bossDir,
+	taskName = GUARD_TASK_NAME,
+	label = GUARD_LABEL,
+	uid = 0,
+	name = GUARD_SPACE_NAME,
+	dry = false,
+	run,
+	probe,
+	timeoutMs = GUARD_SPACE_WAIT_MS,
+	intervalMs = 500,
+	now,
+	sleep,
+	out = {},
+} = {}) {
+	const say = out.say || (() => {});
+	const note = out.note || (() => {});
+	const start = guardStartCommand({ platform, taskName, label, uid });
+	if (!start) return { started: false, state: 'no-entry' };
+
+	say(`   start: ${start.program}`);
+	if (dry) {
+		say('   [dry-run] not started');
+		return { started: false, state: 'dry' };
+	}
+
+	const exit = run ? run(start.exe, start.args) : 0;
+	if (exit !== 0) {
+		say(`== guard: registered, but starting it failed (exit ${exit ?? 'n/a'}) — the entry is there, so the next logon still gets a try`);
+		for (const line of guardDoor({ platform, bossDir, label, uid, taskName })) say(line);
+		return { started: false, state: 'start-failed' };
+	}
+	note(`guard: started the ${platform === 'win32' ? 'scheduled task' : 'login item'} — waiting up to ${Math.round(timeoutMs / 1000)}s for the ${name} space`);
+
+	if (platform !== 'win32' && platform !== 'darwin') return { started: true, state: 'started' };
+	if (typeof probe !== 'function') return { started: true, state: 'started' };
+
+	const answer = await waitForSpace({ probe, timeoutMs, intervalMs, now, sleep });
+	if (answer.state === 'found') {
+		note(`guard: the ${name} space is there (${answer.id})`);
+	} else if (answer.state === 'app-down') {
+		note(`guard: registered and started — Herdr is not running yet, so the guard creates the ${name} space when it starts`);
+	} else {
+		say(`== guard: registered and started, but no ${name} space appeared`);
+		for (const line of guardDoor({ platform, bossDir, label, uid, taskName })) say(line);
+	}
+	return { started: true, state: answer.state };
+}
+
 // --- the delegation workspace clone ------------------------------------------
 export const BOSS_REPO_DEFAULT = 'mjmeijerman/big-boss-pi';
 

@@ -60,6 +60,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+	GUARD_LABEL,
+	GUARD_SPACE_NAME,
+	GUARD_SPACE_WAIT_MS,
 	PI_WRAPPER_BEGIN,
 	PI_WRAPPER_BLOCK,
 	PI_WRAPPER_END,
@@ -81,7 +84,9 @@ import {
 	resolveGitBash as resolveGitBashAt,
 	sandboxSummary,
 	spawnPlan,
+	spaceIdIn,
 	spliceManagedBlock,
+	startAndVerifyGuard,
 	systemSummary,
 	systemdUnitsIn,
 	wslMountWarnings,
@@ -845,13 +850,13 @@ function stepServices() {
 		return;
 	}
 	if (PLAN.service === 'launchd') {
-		const plist = path.join(P.serviceDir, 'dev.herdr.big-boss-pi-guard.plist');
-		writeText(plist, launchdPlist('dev.herdr.big-boss-pi-guard', guard), { mode: 0o644 });
+		const plist = path.join(P.serviceDir, `${GUARD_LABEL}.plist`);
+		writeText(plist, launchdPlist(GUARD_LABEL, guard), { mode: 0o644 });
 		note(`guard login item -> ${plist}`);
 		run('launchctl', ['load', '-w', plist], { allowFail: true });
 		guardService = { label: `launchd login item ${plist}`, remove: `launchctl unload -w ${plist}` };
 		say(`   disable: launchctl unload -w ${plist} && rm ${plist}`);
-		return;
+		return startGuardNow();
 	}
 	// The guard is bash (`#!/usr/bin/env bash`), and Task Scheduler runs a command
 	// line, not a shebang: registering the file itself started nothing, which is
@@ -877,6 +882,41 @@ function stepServices() {
 	else run(task.exe, task.args, { allowFail: true });
 	guardService = { label: `Task Scheduler entry big-boss-pi-guard (${bash})`, remove: task.remove };
 	say(`   disable: ${task.remove}`);
+	return startGuardNow();
+}
+
+/**
+ * startGuardNow — the entry is registered; now run it, and say whether the
+ * space appeared.
+ *
+ * `/SC ONLOGON` is a promise about the *next* logon, and that is exactly what
+ * the Windows box reported: install finished, Herdr opened, no `big-boss-pi`
+ * space, no error. So the install starts the entry once and waits a bounded time
+ * for the space, and a failure names the task, the guard's log and the app
+ * instead of leaving a green transcript over an empty window. A failing start
+ * does not abort the install: the entry is registered, the next logon gets a try.
+ */
+function startGuardNow() {
+	const waitMs = Number(process.env.PI_GUARD_SPACE_WAIT_MS ?? GUARD_SPACE_WAIT_MS);
+	return startAndVerifyGuard({
+		platform: PLAN.platform,
+		bossDir: BOSS_DIR,
+		uid: typeof process.getuid === 'function' ? process.getuid() : 0,
+		dry: DRY,
+		timeoutMs: Number.isFinite(waitMs) ? waitMs : GUARD_SPACE_WAIT_MS,
+		run: (cmd, args) => run(cmd, args, { allowFail: true }),
+		probe: probeSpace,
+		out: { say, note },
+	});
+}
+
+/** probeSpace — what `herdr-app ls` says about the big-boss-pi space right now.
+ * A herdr-app that is not installed or not answering yet is `running: false`,
+ * which the wait reads as "not a failure yet" rather than as a missing space. */
+function probeSpace() {
+	const r = spawnSync('herdr-app', ['ls'], { encoding: 'utf8', env: process.env });
+	if (r.error || r.status !== 0) return { running: false, id: null };
+	return { running: true, id: spaceIdIn(r.stdout || '', GUARD_SPACE_NAME) };
 }
 
 /** resolveGitBash — the first bash.exe that is really there (install-lib does
@@ -997,6 +1037,14 @@ function stepSystemd() {
 		for (const unit of enableable) {
 			run('systemctl', ['--user', 'enable', ...(unit.now ? ['--now'] : []), unit.name], { allowFail: true });
 		}
+		// `enable --now` starts a unit that was stopped; a guard that was already
+		// running still holds the process from before this install, so restart it —
+		// "install finished" means the guard now runs this checkout's bin/guard.
+		const guardUnit = enableable.find((u) => u.name === 'big-boss-pi-guard.service');
+		if (guardUnit) {
+			say(`   start: systemctl --user restart ${guardUnit.name}`);
+			run('systemctl', ['--user', 'restart', guardUnit.name], { allowFail: true });
+		}
 	}
 }
 
@@ -1080,7 +1128,7 @@ async function main() {
 	stepBins();
 	await stepHerdrApp();
 	stepBoss();
-	stepServices();
+	await stepServices();
 	summary();
 }
 
