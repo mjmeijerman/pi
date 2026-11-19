@@ -67,5 +67,11 @@ test('a second run over that HOME is still 0 changes', { skip: process.platform 
 		return r.stdout;
 	};
 	once(1);
+	// A HOME an older installer already put the pane map in: dropping it is a
+	// cleanup, not a change this run wrote — the copy skips state files, so the
+	// count has to stay 0 and the file has to be gone.
+	const state = path.join(home, '.pi', 'scripts', '.agent-panes.json');
+	fs.writeFileSync(state, '{}\n');
 	assert.match(once(2), /== done — 0 change\(s\) written/);
+	assert.equal(fs.existsSync(state), false, 'the agent-pane map was carried into the new HOME');
 });

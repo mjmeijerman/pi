@@ -51,6 +51,7 @@ import {
 	bossClonePlan,
 	helpText,
 	homePaths,
+	isRuntimeState,
 	parseFlags,
 	piDiskCandidates,
 	piInstallCommand,
@@ -399,7 +400,11 @@ function stepRuntimeDirs() {
 		const src = path.join(SOURCE_DIR, sub);
 		const dst = path.join(P.piHome, sub);
 		if (!exists(src) || path.resolve(src) === path.resolve(dst)) continue;
-		const wrote = copyTree(src, dst);
+		// Machine-local state is never carried over (scripts/install-lib.mjs
+		// RUNTIME_STATE_FILES): skipping it in the copy is what makes a second run
+		// write nothing, and the delete below is only for a HOME an older installer
+		// already put it in.
+		const wrote = copyTree(src, dst, (p) => isRuntimeState(p));
 		if (exists(path.join(dst, '.agent-panes.json')) && !DRY) fs.rmSync(path.join(dst, '.agent-panes.json'), { force: true });
 		note(wrote ? `copied ${sub} -> ${dst}` : `${sub} up to date -> ${dst}`);
 	}

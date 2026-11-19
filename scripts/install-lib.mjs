@@ -529,6 +529,26 @@ export function systemdUnitsIn(dir, { readdirSync, readFileSync }) {
 		});
 }
 
+/**
+ * RUNTIME_STATE_FILES — files a running pi writes into the repo's own folders.
+ *
+ * `scripts/agent-pane.sh` keeps its slug -> pane map in
+ * `scripts/.agent-panes.json`: gitignored, machine-local, and different on every
+ * machine that has opened a pane. Copying it hands a fresh HOME panes that were
+ * never opened there; copying it and deleting it afterwards (the shape before
+ * this list) also counted a written file on every run, because the copy wrote it
+ * and the delete made the next run write it again — so `== done — 0 change(s)
+ * written` was unreachable on any machine that had used agent-pane, and
+ * `scripts/tests/git-paths-install.test.mjs` ("a second run ... is still 0
+ * changes") failed there while passing on a clean CI clone.
+ */
+export const RUNTIME_STATE_FILES = ['.agent-panes.json'];
+
+/** isRuntimeState — true for a path a directory copy must not carry over. */
+export function isRuntimeState(file) {
+	return RUNTIME_STATE_FILES.includes(path.basename(file));
+}
+
 /** pickNames — "all" when nothing is given, the named subset otherwise. */
 export function pickNames(all, wanted) {
 	if (!wanted || wanted.length === 0) return [...all];
