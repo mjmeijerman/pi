@@ -19,7 +19,7 @@
 # missing), so a push from there cannot succeed — which is exactly what the old
 # version asked `pi-bare` to do, and then recorded the network failure as "the
 # agent did not open a PR". The hand-off is now a big-boss-pi agent space
-# (`scripts/agent-pane.sh spawn <slug>-pr`) started in `/home/mark/big-boss-pi`,
+# (`scripts/agent-pane.sh spawn <slug>-pr`) started in `~/big-boss-pi`,
 # where `gh` and the ssh key live: that agent pushes, opens the PR, appends the
 # publish-log row and closes its own space. The learner closes its own space
 # after the hand-off and never needs host access.
@@ -69,11 +69,11 @@
 #
 # Options:
 #   --repo DIR     checkout holding the branch (default $LEARN_PUBLISH_ROOT or
-#                  /home/mark/.pi)
+#                  ~/.pi)
 #   --pane SCRIPT  agent-pane.sh (default $LEARN_PUBLISH_PANE or
 #                  <repo>/scripts/agent-pane.sh); tests stub it
 #   --bbp DIR      where the publishing agent starts (default
-#                  $LEARN_PUBLISH_BBP or /home/mark/big-boss-pi)
+#                  $LEARN_PUBLISH_BBP or ~/big-boss-pi)
 #   --gh CMD       gh command (default $LEARN_PUBLISH_GH or gh); tests stub it
 #   --tier T       review tier, read from the proposal when omitted
 #
@@ -88,8 +88,8 @@
 # ============================================================================
 set -uo pipefail
 
-REPO="${LEARN_PUBLISH_ROOT:-/home/mark/.pi}"
-BBP="${LEARN_PUBLISH_BBP:-/home/mark/big-boss-pi}"
+REPO="${LEARN_PUBLISH_ROOT:-$HOME/.pi}"
+BBP="${LEARN_PUBLISH_BBP:-$HOME/big-boss-pi}"
 PANE="${LEARN_PUBLISH_PANE:-$REPO/scripts/agent-pane.sh}"
 GH_CMD="${LEARN_PUBLISH_GH:-gh}"
 PROPOSAL=""
@@ -106,7 +106,7 @@ die() { echo "learn-publish: $*" >&2; exit 2; }
 # the host's broker is the only caller. PI_SANDBOX_MODE is set by
 # sandbox/pi-sandbox.sh, so "am I contained?" has one honest answer.
 if [ -n "${PI_SANDBOX_MODE:-}" ]; then
-	die "this shell is sandboxed ($PI_SANDBOX_MODE) — do not run this script here; write {\"slug\":\"<slug>\",\"branch\":\"learn/<slug>\",\"reason\":\"<one line>\"} to ${LEARN_PUBLISH_ROOT:-/home/mark/.pi}/agent/proposals/queue/<slug>.publish.json and the host's self-learn broker runs it"
+	die "this shell is sandboxed ($PI_SANDBOX_MODE) — do not run this script here; write {\"slug\":\"<slug>\",\"branch\":\"learn/<slug>\",\"reason\":\"<one line>\"} to ${LEARN_PUBLISH_ROOT:-$HOME/.pi}/agent/proposals/queue/<slug>.publish.json and the host's self-learn broker runs it"
 fi
 
 while [ $# -gt 0 ]; do

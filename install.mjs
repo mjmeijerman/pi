@@ -69,6 +69,8 @@ import {
 	POSIX_WRAPPERS,
 	bossClonePlan,
 	cmdShim,
+	deepseekApiKey,
+	deepseekKeyState,
 	guardTaskCommand,
 	herdrAttempt,
 	herdrInstallCommand,
@@ -81,6 +83,7 @@ import {
 	piPreflight,
 	planFor,
 	prereqNodePin,
+	resolveApiKey,
 	resolveGitBash as resolveGitBashAt,
 	sandboxSummary,
 	spawnPlan,
@@ -447,6 +450,15 @@ function stepAgent() {
 	for (const name of configFiles) {
 		wrote = copyFile(path.join(SOURCE_DIR, 'agent', name), path.join(AGENT_DIR, name)) || wrote;
 	}
+	// models.json reads the key with a `!command`, so the same question a person
+	// asks ("will pi authenticate?") can be answered here, in one line, without
+	// printing the key: the command is run the way pi runs it, against the file
+	// the wizard writes. Printed every run, not only on change, because it is a
+	// state and not a write.
+	const apiKey = deepseekApiKey(exists(path.join(AGENT_DIR, 'models.json')) ? read(path.join(AGENT_DIR, 'models.json')) : '');
+	const keyFile = exists(path.join(AGENT_DIR, 'deepseek.key'));
+	const resolved = keyFile ? resolveApiKey({ apiKey, platform: PLAN.platform }) : { ok: false };
+	note(`deepseek key: ${deepseekKeyState({ keyFile, apiKey, resolves: resolved.ok })}`);
 	// AGENTS.md is the rule set a person answers questions about in setup.mjs, so
 	// this engine never replaces an existing one: that would undo their answers.
 	const agentsSrc = path.join(SOURCE_DIR, 'agent', 'AGENTS.md');

@@ -26,7 +26,7 @@ into it (`scripts/pisandbox:15`, the exec at `:38`). Options (`pi-sandbox.sh:17-
 
 `scripts/pi-bare` is the sanctioned unsandboxed start: the same binary, `PI_BARE=1`
 (`scripts/pi-bare:26`), and the session title starts with `bare` for as long as it runs. Herdr's
-new-agent menu gets the row `Pi (bare)`, running `/home/mark/.local/bin/pi-bare`
+new-agent menu gets the row `Pi (bare)`, running `~/.local/bin/pi-bare`
 (`sandbox/herdr-programs.json`). The point is that a default with no sanctioned exit gets bypassed
 in a worse way (`scripts/pi-bare:6-11`).
 

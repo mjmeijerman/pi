@@ -73,8 +73,8 @@ The queue file carries the concrete values for this run: the slug (which is also
 your herdr space), the proposal path, the repo, the publish queue file, and the
 close command. Use them; do not guess.
 
-1. **Cut a worktree.** `git -C /home/mark/.pi worktree add ../selflearn-<slug>-worktree -b learn/<slug>`.
-   Never `checkout`, `switch`, `stash` or `reset` in `/home/mark/.pi`: that tree is
+1. **Cut a worktree.** `git -C ~/.pi worktree add ../selflearn-<slug>-worktree -b learn/<slug>`.
+   Never `checkout`, `switch`, `stash` or `reset` in `~/.pi`: that tree is
    in use by the session that started you.
 2. **Apply your own diff** in that worktree, run the checks it names, and commit
    on `learn/<slug>` with a conventional message. Note the commit sha.
@@ -101,7 +101,7 @@ close command. Use them; do not guess.
    "refused"` row with the reason and moves on. It never publishes trunk, and it
    never publishes a branch that is not `learn/<slug>`.
 4. **Close your own space**, whatever happened above and whatever the outcome:
-   `/home/mark/.pi/scripts/agent-pane.sh close <slug> || true`. A space left open
+   `~/.pi/scripts/agent-pane.sh close <slug> || true`. A space left open
    is a worker that looks busy after it finished.
 
 If your verdict is "nothing", skip 1-3 and still close your space.
@@ -148,7 +148,7 @@ branch can go out.
 ## Diff
 
 ```diff
-git apply-able diff against /home/mark/.pi, or "no diff — nothing warrants a change"
+git apply-able diff against ~/.pi, or "no diff — nothing warrants a change"
 ```
 
 ## After applying
@@ -162,7 +162,7 @@ and one paragraph naming what would change your mind.
 
 ## Hard rules
 
-- **Do not edit any file in `/home/mark/.pi` directly.** Work in the worktree from
+- **Do not edit any file in `~/.pi` directly.** Work in the worktree from
   `git worktree add`; the boss's checkout keeps running while you work.
 - **Never publish on your own.** No `git push` from you, no `gh pr create`, not
   even to try — the sandbox has no credentials, so the attempt costs a turn and

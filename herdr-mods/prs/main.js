@@ -96,7 +96,7 @@ const DEL_TINT = "52";
  * worker with the clone as the worker's cwd. The mod adds a tab to that space and
  * creates the space only when it is missing, so there is never a second boss.
  */
-const AGENT_FOLDER = "/home/mark/big-boss-pi";
+const AGENT_FOLDER = `${home()}/big-boss-pi`;
 /** The name the one boss space is made with, and what marks it as that space. */
 const BOSS_SPACE = "big-boss-pi";
 

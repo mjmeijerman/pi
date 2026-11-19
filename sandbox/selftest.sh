@@ -75,7 +75,7 @@ else
 fi
 
 # 3. ~/.ssh is empty or absent.
-out=$(inside --exec -- sh -c 'ls -A /home/mark/.ssh 2>&1')
+out=$(inside --exec -- sh -c 'ls -A "$HOME/.ssh" 2>&1')
 rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
 	ok "~/.ssh is hidden ($([ "$rc" -ne 0 ] && echo absent || echo empty))"
@@ -95,8 +95,8 @@ else
 fi
 
 # 5. other credential stores are gone too.
-out=$(inside --exec -- sh -c 'ls -A /home/mark/.gnupg /home/mark/.aws /home/mark/.config/gh 2>&1')
-entries=$(printf '%s\n' "$out" | grep -v -e 'No such file or directory' -e '^$' -e '^Cannot access' | grep -v -E '^/home/mark/\.(gnupg|aws|config/gh):?$' || true)
+out=$(inside --exec -- sh -c 'ls -A "$HOME/.gnupg" "$HOME/.aws" "$HOME/.config/gh" 2>&1')
+entries=$(printf '%s\n' "$out" | grep -v -e 'No such file or directory' -e '^$' -e '^Cannot access' | grep -v -E "^$HOME/[.]?(gnupg|aws|config/gh):?$" || true)
 if [ -z "$entries" ]; then
 	ok "~/.gnupg, ~/.aws and ~/.config/gh are hidden"
 else
@@ -104,7 +104,7 @@ else
 fi
 
 # 6. dotenv files are visible as empty files.
-host_env=/home/mark/projects/jurysysteem/.env
+host_env=$HOME/projects/jurysysteem/.env
 if [ -s "$host_env" ]; then
 	out=$(inside --exec -- sh -c "wc -c < '$host_env' 2>&1")
 	rc=$?
@@ -156,7 +156,7 @@ fi
 
 # 11. the rest of the home directory simply is not there. big-boss-pi appears as a
 #     mountpoint for its bin directory (see 17); only that subdirectory is real.
-out=$(inside --exec -- sh -c 'ls /home/mark' 2>&1)
+out=$(inside --exec -- sh -c 'ls "$HOME"' 2>&1)
 allowed='^(achterhoek-uitagenda|pi-projects|projects|git-templates|gitconfig|pi|big-boss-pi)$'
 unexpected=$(printf '%s\n' "$out" | sed 's/^\.//' | grep -v -E "$allowed" || true)
 if [ -z "$unexpected" ]; then
@@ -244,7 +244,7 @@ esac
 
 # 18. ... and the rest of that repo stays hidden: binding the bin directory must
 #     not become binding ~/big-boss-pi.
-out=$(inside --exec -- sh -c 'ls -A /home/mark/big-boss-pi 2>&1' 2>&1)
+out=$(inside --exec -- sh -c 'ls -A "$HOME/big-boss-pi" 2>&1' 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] && [ "$out" = bin ]; then
 	ok "only ~/big-boss-pi/bin is mounted, not the repo"

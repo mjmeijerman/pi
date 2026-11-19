@@ -122,14 +122,14 @@ Everything else is under [What it protects](#what-it-protects) and
 ## Launch
 
 ```
-/home/mark/.pi/sandbox/pi-sandbox.sh [--no-net] [--rw DIR]... -- [pi arguments...]
-/home/mark/.pi/sandbox/pi-sandbox.sh -- -p "review this repo"
-/home/mark/.pi/sandbox/pi-sandbox.sh --no-net -- --continue
+~/.pi/sandbox/pi-sandbox.sh [--no-net] [--rw DIR]... -- [pi arguments...]
+~/.pi/sandbox/pi-sandbox.sh -- -p "review this repo"
+~/.pi/sandbox/pi-sandbox.sh --no-net -- --continue
 ```
 
 Every argument after `--` goes to pi. Always use `--`, otherwise the launcher
 refuses the argument as unknown. `install.sh` symlinks `pisandbox` into
-`~/.local/bin`; if it is missing, add `alias pisandbox='/home/mark/.pi/sandbox/pi-sandbox.sh'`.
+`~/.local/bin`; if it is missing, add `alias pisandbox='~/.pi/sandbox/pi-sandbox.sh'`.
 
 New shell, then `pisandbox -- --version`. Run `selftest.sh` to re-check the policy.
 It is cwd-independent: it creates a temp work directory under `$HOME/.pi`, prints
