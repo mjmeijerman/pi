@@ -19,7 +19,7 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 | `docs/` | Radar conformance audit and the agent working playbook |
 | `install.mjs` | the installer engine, one file for Linux, macOS and Windows (config, hooks, bin entries, services) |
 | `setup.mjs` | the interactive pass: per skill, per extension, per AGENT rule and per key, then `install.mjs` |
-| `install.sh`, `setup.sh` | thin shims so the old commands still work: they exec the Node entry points |
+| `install.sh`, `setup.sh`, `setup.ps1` | the entry points: `install.sh` execs the engine, `setup.sh` and `setup.ps1` install Node (and git) first, then exec `setup.mjs` |
 | `INSTALL.md` | quick start on a bare machine: prerequisites, one command per OS, the questions in order |
 | `docs/install.md` | the install reference: every flag, the environment overrides, what lands where, per-OS facts, uninstall, troubleshooting, secrets |
 | `Makefile` | `setup` / `bootstrap` / `verify` / `hooks` / `update` / `uninstall`, plus `mutate` / `mutate-full` for mutation testing (blip 2) |
@@ -33,9 +33,10 @@ cd ~/.pi
 pi
 ```
 
-`setup.sh` and `install.sh` are one-line shims now: the work happens in
-`setup.mjs` (the questions) and `install.mjs` (the install), both plain Node 24
-with no dependencies. They run on **Linux, macOS and Windows**.
+`setup.sh` installs Node 24 (and git) through the OS package manager when it is
+missing, then runs `setup.mjs` (the questions) and `install.mjs` (the install) —
+both plain Node 24 with no dependencies. On Windows `setup.ps1` is that first
+step. They run on **Linux, macOS and Windows**.
 
 Quick start for a bare machine: [INSTALL.md](INSTALL.md). The reference — what it
 asks in which order, every flag, the per-OS differences, uninstall and
