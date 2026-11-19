@@ -133,6 +133,14 @@ landed; the shell holds the PATH Explorer copied before it.
 ```powershell
 $u = [Environment]::GetEnvironmentVariable('Path','User'); [Environment]::SetEnvironmentVariable('Path', "$u;C:\Program Files\Git\cmd", 'User')
 ```
+
+## Sandboxing on Windows
+
+WSL2 runs a real Linux kernel and the same bubblewrap sandbox as Linux.
+
+```powershell
+wsl --install -d Ubuntu
+```
 DOC
 }
 
@@ -385,6 +393,56 @@ git --version
 DOC
 check
 expect_fail_with 'FAIL install-docs' "'git is not recognized' + 'SetEnvironmentVariable' pair"
+
+# ------------------------------------------------- the WSL sandbox section ---
+# The one line a Windows reader got was "sandbox unavailable", which is true and
+# useless: it named no path with a real kernel under it. The heading and the
+# command are planted separately, because each half alone leaves the reader
+# without the thing they need — a section that says "use WSL2" and no command, or
+# a command with no section to find it in.
+case_start "deleting the 'Sandboxing on Windows' heading is a FAIL, even with the command left behind"
+good
+doc docs/install.md <<'DOC'
+# Install reference
+
+## Prerequisites, per OS
+
+```bash
+wsl --install -d Ubuntu
+```
+
+## Troubleshooting
+
+**`git` is not recognized, right after installing it (Windows).** The install
+landed; the shell holds the PATH Explorer copied before it.
+
+```powershell
+$u = [Environment]::GetEnvironmentVariable('Path','User'); [Environment]::SetEnvironmentVariable('Path', "$u;C:\Program Files\Git\cmd", 'User')
+```
+DOC
+check
+expect_fail_with 'FAIL install-docs' "no 'Sandboxing on Windows' heading"
+
+case_start "deleting 'wsl --install' from that section is a FAIL: the recommended path loses its first command"
+good
+doc docs/install.md <<'DOC'
+# Install reference
+
+## Troubleshooting
+
+**`git` is not recognized, right after installing it (Windows).** The install
+landed; the shell holds the PATH Explorer copied before it.
+
+```powershell
+$u = [Environment]::GetEnvironmentVariable('Path','User'); [Environment]::SetEnvironmentVariable('Path', "$u;C:\Program Files\Git\cmd", 'User')
+```
+
+## Sandboxing on Windows
+
+WSL2 runs a real Linux kernel and the same bubblewrap sandbox as Linux.
+DOC
+check
+expect_fail_with 'FAIL install-docs' "no 'wsl --install' line"
 
 # --------------------------------------------------- the real tree stays green --
 case_start "this checkout passes the check, so the guard and the docs agree"

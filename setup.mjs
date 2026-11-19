@@ -54,8 +54,11 @@ import {
 	pinnedNodeMajor,
 	planFor,
 	ruleAnswer,
+	sandboxSummary,
 	skillNames,
 	spawnPlan,
+	systemSummary,
+	wslMountWarnings,
 } from './scripts/install-lib.mjs';
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -432,7 +435,18 @@ async function preflight() {
 	step('preflight');
 	note(`source : ${SOURCE_DIR}`);
 	note(`agent  : ${AGENT_DIR}`);
-	note(`system : ${PLAN.platform}${PLAN.sandbox ? '' : ' (sandbox unavailable here)'}`);
+	note(`system : ${systemSummary(PLAN)}`);
+	// WSL: the Linux plan is the right one, but a path on a Windows drive is the
+	// one thing that quietly breaks — no mode bits, no symlinks, slow writes.
+	for (const w of wslMountWarnings({
+		wsl: PLAN.wsl,
+		paths: [
+			{ what: 'this pi repo', path: SOURCE_DIR },
+			{ what: 'the agent dir', path: AGENT_DIR },
+			{ what: 'PI_BOSS_DIR', path: process.env.PI_BOSS_DIR || path.join(HOME, 'big-boss-pi') },
+		],
+	}))
+		warn(w.message);
 	if (!fs.existsSync(path.join(SOURCE_DIR, 'agent'))) die('run this from the cloned pi repo (agent/ not found)');
 	// The Windows failure is not a missing git: the install landed and the shell's
 	// PATH predates it. The message names the entry that walks through it.
@@ -519,6 +533,12 @@ async function systemPackages() {
 		return;
 	}
 	for (const [bin, pkg] of missing) note(`missing: ${bin}  (apt: ${pkg})`);
+	// In WSL the sandbox is the Linux one — a real kernel, bubblewrap and
+	// pi-sandbox.sh. So the message is "install bubblewrap", never "unavailable
+	// on this OS": that sentence is for macOS and native Windows, where nothing
+	// can be installed to fix it.
+	if (PLAN.wsl && missing.some(([bin]) => bin === 'bwrap'))
+		note('WSL: the sandbox is the same one Linux uses — install bubblewrap (sudo apt-get install -y bubblewrap) and pi runs under pi-sandbox.sh');
 	const pkgs = [...new Set(missing.map(([, pkg]) => pkg))];
 	note(`install with: sudo apt-get install -y ${pkgs.join(' ')}`);
 	if (OPT.doApt && have('apt-get') && (await confirm('install them now with sudo apt-get?', false))) {
@@ -618,7 +638,7 @@ function verify() {
 	note(`hooksPath   : ${config('core.hooksPath')}`);
 	note(`excludesFile: ${config('core.excludesFile')}`);
 	note(`templateDir : ${config('init.templateDir')}`);
-	note(`sandbox     : ${PLAN.sandbox ? path.join(P.piHome, 'sandbox', 'pi-sandbox.sh') : `unavailable on ${PLAN.platform}`}`);
+	note(`sandbox     : ${sandboxSummary(PLAN, { piHome: P.piHome, bwrap: have('bwrap') }).message}`);
 	note(`api key     : ${fs.existsSync(path.join(AGENT_DIR, 'deepseek.key')) ? 'present' : 'MISSING'}`);
 	const harness = path.join(P.piHome, 'scripts', 'harness-check.sh');
 	if (fs.existsSync(harness) && have('bash')) {

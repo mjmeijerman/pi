@@ -22,11 +22,16 @@ import {
 	filterAgentsMd,
 	homePaths,
 	isRuntimeState,
+	isWsl,
 	parseAgentsMd,
 	parseRuleSelection,
 	pickNames,
 	planFor,
+	sandboxSummary,
 	spawnPlan,
+	systemSummary,
+	windowsMount,
+	wslMountWarnings,
 	ruleIds,
 	ruleSlug,
 	samePath,
@@ -270,4 +275,70 @@ test('isRuntimeState: the agent-pane map is state, the script next to it is not'
 		.readFileSync(new URL('../../install.mjs', import.meta.url), 'utf8')
 		.replace(/^\s*\/\/.*$/gm, '');
 	assert.ok(/copyTree\(src, dst, \(p\) => isRuntimeState\(p\)\)/.test(src), 'install.mjs copies scripts/ without skipping runtime state');
+});
+
+// --- WSL ---------------------------------------------------------------------
+// `process.platform` answers `linux` inside WSL, and that answer is right: WSL2
+// has a real kernel, so the Linux plan and the Linux bubblewrap launcher are what
+// should run. What the platform cannot say is that the person is on Windows, and
+// both things that break there — a repo on `/mnt/c`, a `herdr-app` installed on
+// the other side of a filesystem wall — only exist once the installer knows it.
+test('isWsl: real WSL env, WSL1, plain Linux, win32, darwin', () => {
+	const real = { WSL_DISTRO_NAME: 'Ubuntu', WSL_INTEROP: '/run/WSL/8_interop' };
+	assert.equal(isWsl({ platform: 'linux', release: '5.15.90.1-microsoft-standard-WSL2', env: real }), true, 'a WSL2 shell is WSL');
+	assert.equal(
+		isWsl({ platform: 'linux', release: '5.15.90.1-microsoft-standard-WSL2', env: {} }),
+		true,
+		'a cron or systemd unit carries no env; the kernel still says so',
+	);
+	assert.equal(isWsl({ platform: 'linux', release: '4.4.0-19041-Microsoft', env: { WSL_DISTRO_NAME: 'Debian' } }), true, 'WSL1 has no WSL_INTEROP and must still be caught');
+	assert.equal(isWsl({ platform: 'linux', release: '4.4.0-19041-Microsoft', env: {} }), true);
+	assert.equal(isWsl({ platform: 'linux', release: '6.8.0-45-generic', env: {} }), false, 'plain Linux is not WSL');
+	assert.equal(isWsl({ platform: 'linux', release: '6.8.0-45-generic', env: real }), true, 'a shell that kept the variables is still WSL');
+	assert.equal(isWsl({ platform: 'win32', release: '10.0.26100', env: real }), false, 'a Windows shell is not a Linux host, whatever it exports');
+	assert.equal(isWsl({ platform: 'darwin', release: '23.6.0', env: {} }), false);
+});
+
+test('planFor carries the WSL flag, and only a Linux host can be WSL', () => {
+	assert.equal(planFor('linux', {}, '6.8.0-45-generic').wsl, false);
+	const wsl = planFor('linux', { WSL_DISTRO_NAME: 'Ubuntu' }, '6.8.0-45-generic');
+	assert.equal(wsl.wsl, true);
+	assert.equal(wsl.sandbox, true, 'WSL keeps the Linux sandbox — the kernel is real, not emulated');
+	assert.equal(planFor('win32', {}, '10.0.26100').wsl, false);
+	assert.equal(planFor('darwin', {}, '23.6.0').wsl, false);
+	assert.equal(planFor('plan9', {}, '6.8.0-45-generic').wsl, false, 'falling back to the Linux plan is not a WSL host');
+});
+
+test('the /mnt/ warning names the path and stays quiet on ~/', () => {
+	const paths = [
+		{ what: 'this pi repo', path: '/mnt/c/Users/me/pi' },
+		{ what: 'the agent dir', path: '/home/me/.pi/agent' },
+		{ what: 'PI_BOSS_DIR', path: '/mnt/d/boss' },
+	];
+	const out = wslMountWarnings({ wsl: true, paths });
+	assert.deepEqual(out.map((w) => w.what), ['this pi repo', 'PI_BOSS_DIR'], 'only the Windows-drive paths, in order');
+	assert.equal(out[0].mount, '/mnt/c');
+	assert.match(out[0].message, /\/mnt\/c\/Users\/me\/pi/);
+	assert.match(out[0].message, /move \/mnt\/c\/Users\/me\/pi under ~\//);
+	assert.deepEqual(wslMountWarnings({ wsl: false, paths }), [], 'a Linux host has no /mnt/ warning to give');
+	assert.deepEqual(wslMountWarnings({ wsl: true, paths: [{ what: 'the agent dir', path: '/home/me/.pi/agent' }] }), []);
+	// A path that merely starts with /mnt is not a drive mount: /mnt/wsl is tmpfs.
+	assert.equal(windowsMount('/mnt/wsl/docker'), null);
+	assert.equal(windowsMount('/mnt/c'), '/mnt/c');
+	assert.equal(windowsMount('/mnt/c/foo'), '/mnt/c');
+	assert.equal(windowsMount('/home/me'), null);
+});
+
+test('the summary prints the WSL flag, and the sandbox line never says "unavailable" in WSL', () => {
+	assert.equal(systemSummary({ platform: 'linux', wsl: true, sandbox: true }), 'linux (WSL, sandbox available)');
+	assert.equal(systemSummary({ platform: 'win32', wsl: false, sandbox: false }), 'win32 (no sandbox)');
+	assert.equal(systemSummary({ platform: 'linux', wsl: false, sandbox: true }), 'linux (sandbox available)');
+	const ok = sandboxSummary({ platform: 'linux', wsl: true, sandbox: true }, { piHome: '/home/me/.pi', bwrap: true });
+	assert.equal(ok.ok, true);
+	assert.equal(ok.message, '/home/me/.pi/sandbox/pi-sandbox.sh');
+	const missing = sandboxSummary({ platform: 'linux', wsl: true, sandbox: true }, { piHome: '/home/me/.pi', bwrap: false });
+	assert.equal(missing.ok, false);
+	assert.match(missing.message, /install bubblewrap/, 'in WSL a missing bwrap is an apt line, not a missing feature');
+	assert.doesNotMatch(missing.message, /unavailable on this OS/);
+	assert.match(sandboxSummary({ platform: 'win32', wsl: false, sandbox: false }).message, /unavailable on win32/);
 });
