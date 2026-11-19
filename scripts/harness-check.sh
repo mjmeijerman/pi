@@ -860,6 +860,22 @@ check_install_docs() {
 		} | install_docs_bare_npm)
 	done
 
+	# The Windows PATH wall: winget wrote the machine PATH, the shell holds the
+	# block Explorer copied before it, and `git --version` answers "not
+	# recognized". The entry is only a fix while both halves are there — the
+	# symptom and the SetEnvironmentVariable repair — so deleting either fails.
+	file="$ROOT/docs/install.md"
+	if [ -f "$file" ]; then
+		if grep -qF 'is not recognized' "$file" && grep -qF 'SetEnvironmentVariable' "$file"; then
+			verdict install-docs docs/install.md 1 \
+				"names 'git is not recognized' and the SetEnvironmentVariable PATH repair"
+		else
+			verdict install-docs docs/install.md 0 \
+				"no 'git is not recognized' + 'SetEnvironmentVariable' pair — a Windows install that lands but stays off PATH has no documented fix"
+			faults=$((faults + 1))
+		fi
+	fi
+
 	# `INSTALL.md` is the page a bare machine lands on, and "the version in
 	# .node-version" is a file that does not exist until after the clone. The
 	# section is a heading that names both Windows and PowerShell: a heading that
@@ -905,7 +921,7 @@ check_install_docs() {
 
 	if [ "$faults" -eq 0 ] && [ "$checked" -gt 0 ]; then
 		verdict install-docs "${INSTALL_DOCS[*]}" 1 \
-			"$checked document(s): every powershell block is pasteable, Windows leads, npm is npm.cmd"
+			"$checked document(s): every powershell block is pasteable, Windows leads, npm is npm.cmd, the PATH entry is there"
 	fi
 	return 0
 }

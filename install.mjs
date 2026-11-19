@@ -766,6 +766,10 @@ async function main() {
 		DRY = true;
 		process.env.PI_DRY_RUN = '1';
 	}
+	// Same wall as setup.mjs: git installed, shell holding a PATH from before it.
+	// Every git step below would warn with no hint where the answer is.
+	if (!hasCmd('git'))
+		warn("git is not on PATH — docs/install.md#troubleshooting: 'git is not recognized' after a Windows install, and the PATH fix");
 	say('== pi installer ==');
 	say(`   source : ${SOURCE_DIR}`);
 	say(`   agent  : ${AGENT_DIR}`);

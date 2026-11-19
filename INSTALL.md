@@ -26,12 +26,12 @@ npm.cmd --version
 where.exe git node
 ```
 
-`node --version` has to print `v24.x`. The third line fixes the usual Windows
-failure: Node ships `npm` as `npm.ps1`, a script, and the default `Restricted`
-policy refuses it — `running scripts is disabled on this system`. `RemoteSigned`
-runs local scripts and still demands a signature on downloads. Prefer keeping
-`Restricted`? Skip that line and type `npm.cmd` for `npm`; `npm.cmd` is a batch
-shim, which no policy blocks.
+`node --version` has to print `v24.x`. `git` saying `is not recognized` is a
+stale `PATH`, not a missing install: [troubleshooting](docs/install.md#troubleshooting)
+has the four steps. The third line unblocks `npm`, which Node ships as a script
+`npm.ps1` that the default `Restricted` policy refuses; `RemoteSigned` runs local
+scripts and still demands signatures on downloads, and `npm.cmd` is a batch shim
+no policy blocks.
 
 ### macOS, in Terminal
 

@@ -7,7 +7,10 @@
 # Linux/macOS block carries `&&`, which Windows PowerShell 5.1 rejects with
 # `the token && is not a valid statement separator`. A third failure was one step
 # behind them: PowerShell resolves `npm` to `npm.ps1`, and the default
-# `Restricted` execution policy refuses to run it.
+# `Restricted` execution policy refuses to run it. Then the next wall: `winget`
+# wrote the machine PATH, the shell held the block Explorer copied before it, and
+# `git --version` said `not recognized` — so `docs/install.md` has to carry that
+# symptom and the `SetEnvironmentVariable` repair, both.
 #
 # Same shape as doc-facts.test.sh: every case plants the two documents it argues
 # about in a throwaway tree, runs the real check against it with --root, and the
@@ -120,6 +123,15 @@ macOS and Linux, in bash or zsh:
 
 ```bash
 git --version && node --version
+```
+
+## Troubleshooting
+
+**`git` is not recognized, right after installing it (Windows).** The install
+landed; the shell holds the PATH Explorer copied before it.
+
+```powershell
+$u = [Environment]::GetEnvironmentVariable('Path','User'); [Environment]::SetEnvironmentVariable('Path', "$u;C:\Program Files\Git\cmd", 'User')
 ```
 DOC
 }
@@ -339,6 +351,40 @@ case_start "naming npm.ps1 as the symptom is not a fault — that is the sentenc
 good
 check
 expect_pass_with 'PASS install-docs'
+
+# ----------------------------------- the Windows PATH entry cannot be deleted --
+case_start "a troubleshooting entry without the symptom is a FAIL: the fix has no name"
+good
+doc docs/install.md <<'DOC'
+# Install reference
+
+## Troubleshooting
+
+**`git` is not found on Windows.** Append to the user PATH and sign out.
+
+```powershell
+$u = [Environment]::GetEnvironmentVariable('Path','User'); [Environment]::SetEnvironmentVariable('Path', "$u;C:\Program Files\Git\cmd", 'User')
+```
+DOC
+check
+expect_fail_with 'FAIL install-docs' "'git is not recognized' + 'SetEnvironmentVariable' pair"
+
+case_start "a troubleshooting entry without the repair is a FAIL: the symptom has no fix"
+good
+doc docs/install.md <<'DOC'
+# Install reference
+
+## Troubleshooting
+
+**`git` is not recognized on Windows.** The shell holds the PATH Explorer copied
+before the install; open a new window from the Start menu.
+
+```powershell
+git --version
+```
+DOC
+check
+expect_fail_with 'FAIL install-docs' "'git is not recognized' + 'SetEnvironmentVariable' pair"
 
 # --------------------------------------------------- the real tree stays green --
 case_start "this checkout passes the check, so the guard and the docs agree"
