@@ -5,6 +5,9 @@ agent/models-store.json
 agent/bin/
 agent/dictation/recording.wav
 agent/dictation/venv/
+# The wizard's answers: ~/.pi/state/setup.json; re-running with --reask starts over.
+# A fresh install used to leave this folder untracked in the repo it just cloned.
+state/
 
 # IDE
 .idea/
