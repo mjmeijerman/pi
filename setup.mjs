@@ -441,12 +441,17 @@ async function preflight() {
 	// One file owns the number: mise.toml. The messages come from install-lib, so
 	// `node --test scripts/tests/mise-pin.test.mjs` can pin the text that is
 	// really printed instead of grepping for a literal (blip 68).
+	//
+	// The version is the running process's, not a PATH lookup: this file *is*
+	// node, so `spawnSync('node', ['-v'])` is the one probe that can lie. Under a
+	// runner that starts node by absolute path (or a shim, or a fake PATH) it
+	// reports ENOENT while node is right here running the check, and the install
+	// stops on a prerequisite that is proved present.
 	const pin = pinnedNodeMajor(SOURCE_DIR, fs.readFileSync);
-	const probe = spawnSync('node', ['-v'], { encoding: 'utf8' });
 	const verdict = nodePreflight({
 		pin,
-		nodeVersion: probe.status === 0 ? probe.stdout.trim() : undefined,
-		nodeMajor: probe.status === 0 ? Number.parseInt(process.versions.node.split('.')[0], 10) : undefined,
+		nodeVersion: process.version,
+		nodeMajor: Number.parseInt(process.versions.node.split('.')[0], 10),
 	});
 	if (verdict.level === 'die') die(`${verdict.message} — docs/install.md#troubleshooting`);
 	if (verdict.level === 'warn') warn(verdict.message);
