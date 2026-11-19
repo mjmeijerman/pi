@@ -233,7 +233,7 @@ variable one of the two engines or `scripts/install-lib.mjs` reads.
 | `PI_SKIP_PREREQS=1` | both | No package manager is called: the prerequisites step prints skip lines. What CI uses, since a runner has no package manager to install for |
 | `PI_SKIP_SYSTEMD=1` | install | Copy the systemd units, do not enable them |
 | `PI_ENABLE_SERVICES=1` | install | Opt in to the macOS launchd plist / Windows scheduled task; without it the installer says the service is opt-in and skips it. Not cosmetics: the guard is what creates the `big-boss-pi` space |
-| `PI_GIT_BASH` | install | The `bash.exe` a Windows scheduled task runs `bin/guard` with, when the search does not find Git for Windows. Replaces the whole candidate list, so a wrong value is reported instead of silently ignored |
+| `PI_GIT_BASH` | install | The `bash.exe` the Windows scheduled task runs `bin/guard` with, and the one every `.cmd` shim in `%USERPROFILE%\.local\bin` starts, when the search does not find Git for Windows. Replaces the whole candidate list, so a wrong value is reported instead of silently ignored |
 | `PI_ALLOW_MISSING_PI=1` | both | Skip pi entirely — no question, no install — and carry on with one `== pi binary: PI_ALLOW_MISSING_PI=1 — config only` line. **CI only**: it exists so a runner with no `pi` can prove the config wires up. On a machine you are setting up, let the installer install pi instead |
 | `PI_DRY_RUN=1` | install | The same as `--dry-run`. `setup.mjs` reads the flag and sets this for the engine it calls |
 | `PI_PLATFORM` | both | Override the OS the per-OS plan comes from (`linux`, `darwin`, `win32`) — it exists so one host can exercise all three branches; a real install reads the platform it runs on |
@@ -254,7 +254,7 @@ variable one of the two engines or `scripts/install-lib.mjs` reads.
 | answer record | `~/.pi/state/setup.json` |
 | global git hooks | `~/.pi/git-hooks/`, plus `core.hooksPath` pointing at it and an `init.templateDir` layer at `~/.git-templates` |
 | global gitignore | `~/.pi/gitignore_global`, plus `core.excludesFile` pointing at it |
-| bin entries | `~/.local/bin/` — `git-vuln-scan` (copied), `pisandbox` and `pi-bare` (linked; copied on Windows), `herdr-app`, and `jev`, `delegate`, `local-run` from the workspace clone |
+| bin entries | `~/.local/bin/` — `git-vuln-scan` (copied), `pisandbox` and `pi-bare` (linked; copied on Windows), `herdr-app`, and `jev`, `delegate`, `local-run` from the workspace clone; on Windows each bash wrapper also gets a `<name>.cmd` beside it |
 | `pi` itself, sandboxed | a `pi()` wrapper block, marked `# >>> pi sandbox >>>`, in `~/.bashrc` and `~/.zshrc` (Linux and macOS only) |
 | Herdr mods and menu row | `~/.config/herdr-app/mods/`, `~/.config/herdr-app/programs.json` — the config directory is created when herdr-app has not run yet, so a fresh install gets its mods and menu row before the app's first launch; an existing `programs.json` is left alone and the line says what to add by hand |
 | `herdr-app` | Linux and macOS `~/.local/share/herdr-app/herdr-app` (`$XDG_DATA_HOME` when set), Windows `%LOCALAPPDATA%\Programs\herdr-app\herdr-app.exe` — then a bin entry |
@@ -269,7 +269,7 @@ file you may have edited in place.
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | sandbox | bubblewrap: `pi` runs under `~/.pi/sandbox/pi-sandbox.sh` | not available — one line, no failure | not available natively — WSL2 and Docker provide it: [Sandboxing on Windows](#sandboxing-on-windows) |
-| bin entries | symlinks | symlinks | copies; a symlink needs elevation or Developer Mode |
+| bin entries | symlinks | symlinks | copies; a symlink needs elevation or Developer Mode. Every bash wrapper (the two in `scripts/`, plus `jev`, `delegate`, `local-run` from the clone) also gets a `<name>.cmd` that runs the resolved `bash.exe` on it, forwards `%*` and returns the exit status — PowerShell, `cmd.exe` and the Herdr menu row can only start a `.cmd`, and the list is read from the engine so a new wrapper is not forgotten |
 | `herdr-app` | `curl … install.sh \| sh` | same | `pwsh -NoProfile -Command "irm … install.ps1 \| iex"`, falling back to `powershell` when PowerShell 7 is not on `PATH` |
 | guard service | systemd user unit, enabled when a user manager answers | launchd plist, only with `PI_ENABLE_SERVICES=1` | `schtasks /Create /SC ONLOGON`, only with `PI_ENABLE_SERVICES=1`; the task runs `bin/guard` through the Git for Windows `bash.exe` it resolves (see below) |
 | weekly timers (`pi-evals`, `pi-retro`) | systemd timers, enabled | skipped, one line | skipped, one line |
@@ -279,7 +279,8 @@ file you may have edited in place.
 `~/.local/bin` is where the bin entries land on all three systems. Linux and macOS
 normally have it on `PATH` already (many distros do not — check `echo $PATH`); on
 Windows nothing adds it, so add `%USERPROFILE%\.local\bin` to your user `PATH`
-once.
+once. On Windows, run the `.cmd` name (`pi-bare.cmd`, and `pi-bare` also works
+because `cmd.exe` appends the extension); Git Bash runs either one.
 
 ## Sandboxing on Windows
 
@@ -424,10 +425,12 @@ The Windows entry names its interpreter, because Task Scheduler has no shebang:
 `bin/guard` starts `#!/usr/bin/env bash`, and a task pointing at the file itself
 started nothing at all — which is why the `big-boss-pi` space never appeared on
 the first real Windows install. The installer resolves `bash.exe` instead of
-assuming it: `PI_GIT_BASH` when set, otherwise `git --exec-path` walked up to the
-install root that holds `bin\bash.exe`, then `%ProgramFiles%\Git`, the 32-bit
-counterpart and `%LOCALAPPDATA%\Programs\Git`. It prints the exact command it
-registered — one `/TR` value, the interpreter and the guard each quoted, so
+assuming it, and the `.cmd` shims use the same one answer: `PI_GIT_BASH` when
+set, otherwise `bash.exe` as `PATH` has it (skipping `%SystemRoot%\System32`,
+which is the WSL `bash.exe` and not Git Bash), then `git --exec-path` walked up
+to the install root that holds `bin\bash.exe`, then `%ProgramFiles%\Git`,
+the 32-bit counterpart and `%LOCALAPPDATA%\Programs\Git`, each looked for under
+both `bin` and `usr\bin`. It prints the exact command it registered — one `/TR` value, the interpreter and the guard each quoted, so
 `C:\Program Files` survives — and the delete line above. No `bash.exe` means no
 task: the step says so and names `PI_GIT_BASH` instead of registering a task that
 starts nothing. That opt-in (`PI_ENABLE_SERVICES=1`) is not cosmetics: the guard

@@ -19,7 +19,8 @@
 //      into a config directory created here when the app has not run yet
 //   2  global git hooks (§core.hooksPath) + the init template layer
 //   3  global gitignore
-//   4  git-vuln-scan, pisandbox, pi-bare, herdr menu entry, the pi wrapper
+//   4  git-vuln-scan, pisandbox, pi-bare (+ their .cmd shims), herdr menu
+//      entry, the pi wrapper
 //   5  herdr-app (vendor installer) per OS
 //   5b big-boss-pi workspace clone, 5c its bin links
 //   5d the guard service: systemd on Linux, launchd on macOS, Task Scheduler on
@@ -37,7 +38,7 @@
 //      vendor downloads, no clone), PI_ENABLE_SERVICES=1 (opt in to a launchd
 //      plist / scheduled task on macOS and Windows), PI_SKIP_PREREQS=1 (never
 //      call a package manager), PI_GIT_BASH (the bash.exe a Windows scheduled
-//      task runs the guard with), HERDR_MODS.
+//      task and every .cmd shim run the bash wrappers with), HERDR_MODS.
 //
 // Step 0 is the prerequisites: git, node and npm, installed with the first
 // package manager this platform has when they are missing. It runs before the
@@ -58,8 +59,9 @@ import {
 	PI_WRAPPER_BEGIN,
 	PI_WRAPPER_BLOCK,
 	PI_WRAPPER_END,
+	POSIX_WRAPPERS,
 	bossClonePlan,
-	gitBashCandidates,
+	cmdShim,
 	guardTaskCommand,
 	herdrAttempt,
 	herdrInstallCommand,
@@ -72,6 +74,7 @@ import {
 	piPreflight,
 	planFor,
 	prereqNodePin,
+	resolveGitBash as resolveGitBashAt,
 	sandboxSummary,
 	spawnPlan,
 	spliceManagedBlock,
@@ -558,17 +561,26 @@ function stepBins() {
 		note(`git-vuln-scan -> ${path.join(P.binDir, 'git-vuln-scan')}`);
 	}
 
-	// pisandbox and pi-bare: the sandbox without the absolute path (blip 1), and
-	// the sanctioned way out of it, as a program a menu can launch.
-	for (const name of ['pisandbox', 'pi-bare']) {
-		const src = path.join(P.piHome, 'scripts', name);
+	// The bash wrappers: pisandbox and pi-bare are the sandbox without the absolute
+	// path (blip 1) and the sanctioned way out of it, as a program a menu can
+	// launch. The list is scripts/install-lib.mjs `POSIX_WRAPPERS`, because each
+	// copy on win32 also needs the `.cmd` next to it — see installWrapper.
+	for (const wrapper of POSIX_WRAPPERS.filter((w) => w.from === 'scripts')) {
+		const name = wrapper.name;
+		// The installed copy is what a real run links; `--dry-run` on a fresh HOME
+		// has none, because the step that copies it is dry too, so the repo's copy
+		// is the honest answer to "what would land here".
+		const installed = path.join(P.piHome, 'scripts', name);
+		const src = exists(installed) ? installed : path.join(SOURCE_DIR, 'scripts', name);
 		if (!exists(src)) {
 			warn(`scripts/${name} not found — skipped`);
 			continue;
 		}
 		if (!DRY) fs.chmodSync(src, 0o755);
-		const how = linkOrCopy(src, path.join(P.binDir, name));
-		note(`${name} -> ${path.join(P.binDir, name)} (${how})`);
+		const dest = path.join(P.binDir, name);
+		const how = linkOrCopy(src, dest);
+		note(`${name} -> ${dest} (${how})`);
+		installWrapper(name, dest);
 	}
 
 	// The Herdr menu row is app config, not harness config: install the file when
@@ -584,7 +596,12 @@ function stepBins() {
 		} else {
 			const entry = JSON.parse(read(programsSrc));
 			const key = Object.keys(entry.programs || {})[0];
-			if (key && entry.programs[key].run && PLAN.platform !== 'linux') {
+			// The template says `pi-bare` and never a path: a repo cannot know where
+			// a machine keeps its bin directory, and the one absolute path it once
+			// held was that person's home — every other install inherited a menu row
+			// pointing at a file that is not there. This is the only code that knows
+			// `P.binDir`, so it resolves the name on every platform, Linux included.
+			if (key && entry.programs[key].run) {
 				entry.programs[key].run = [path.join(P.binDir, PLAN.platform === 'win32' ? 'pi-bare.cmd' : 'pi-bare')];
 			}
 			writeText(programsDst, `${JSON.stringify(entry, null, 2)}\n`);
@@ -750,13 +767,16 @@ function stepBoss() {
 	}
 
 	// The workspace's own bin/ scripts, on PATH under their bare names: AGENTS.md
-	// and every spec call them as `jev`, `delegate` and `local-run`.
+	// and every spec call them as `jev`, `delegate` and `local-run`. Same list as
+	// above, so the `.cmd` shims cannot be forgotten for one of them.
 	const binDir = path.join(BOSS_DIR, 'bin');
+	const wrappers = POSIX_WRAPPERS.filter((w) => w.from === 'bin');
 	if (!exists(binDir)) {
-		skipped('jev/delegate/local-run', `${binDir} missing`);
+		skipped(wrappers.map((w) => w.name).join('/'), `${binDir} missing`);
 		return;
 	}
-	for (const name of ['jev', 'delegate', 'local-run']) {
+	for (const wrapper of wrappers) {
+		const name = wrapper.name;
 		const src = path.join(binDir, name);
 		if (!exists(src)) {
 			warn(`${src} missing — skipped its bin entry`);
@@ -765,6 +785,7 @@ function stepBoss() {
 		const dest = path.join(P.binDir, name);
 		const how = linkOrCopy(src, dest);
 		note(`${name} -> ${dest} (${how})`);
+		installWrapper(name, dest);
 	}
 }
 
@@ -817,11 +838,45 @@ function stepServices() {
 	say(`   disable: ${task.remove}`);
 }
 
-/** resolveGitBash — the first Git for Windows bash.exe that is really there. */
+/** resolveGitBash — the first bash.exe that is really there (install-lib does
+ * the order and the PI_GIT_BASH override; both the guard task and the `.cmd`
+ * shims are built from this one answer). */
 function resolveGitBash() {
 	const probe = spawnSync('git', ['--exec-path'], { encoding: 'utf8' });
 	const execPath = probe.status === 0 ? (probe.stdout || '').trim() : '';
-	return gitBashCandidates({ platform: PLAN.platform, env: process.env, execPath }).find((p) => exists(p)) || null;
+	return resolveGitBashAt({ platform: PLAN.platform, env: process.env, execPath, exists });
+}
+
+// The shim resolution, asked for once per run: a run with five wrappers and no
+// Git Bash must say so once, not five times, and must write no `.cmd` at all.
+let shimBash;
+let shimBashSaid = false;
+function shimInterpreter() {
+	if (shimBash !== undefined) return shimBash;
+	shimBash = resolveGitBash();
+	return shimBash;
+}
+
+/**
+ * installWrapper — the POSIX wrapper stays, and on win32 a `<name>.cmd` lands
+ * next to it: Windows has no shebang, so a copy named `pi-bare` starts nothing
+ * from PowerShell or a Herdr menu row. Git Bash keeps using the file itself.
+ *
+ * No bash anywhere is said once, names the override, and writes no shim: a
+ * `.cmd` with a path that is not there would be the same broken menu row in a
+ * new file.
+ */
+function installWrapper(name, scriptPath) {
+	if (PLAN.platform !== 'win32') return;
+	const bash = shimInterpreter();
+	if (!bash) {
+		if (shimBashSaid) return;
+		shimBashSaid = true;
+		warn('no Git Bash found — no .cmd shim written for any wrapper, so pi-bare and the rest start nothing outside Git Bash; install Git for Windows or set PI_GIT_BASH to bash.exe, then re-run');
+		return;
+	}
+	const file = `${scriptPath}.cmd`;
+	if (writeText(file, cmdShim({ bashPath: bash, scriptPath }))) note(`${name}.cmd -> ${file} (runs ${bash})`);
 }
 
 function launchdPlist(label, program, args = []) {
