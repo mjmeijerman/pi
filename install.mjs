@@ -9,7 +9,9 @@
 //
 // This replaces install.sh, and its sections keep the old numbering so a reader
 // can map one onto the other:
-//   0  the pi binary      — the preflight: found on PATH, found on disk, or
+//   0  prerequisites: git, node and npm, installed through the package manager
+//      when missing — before the first question, so node is not a precondition
+//   0b the pi binary      — the preflight: found on PATH, found on disk, or
 //                           installed with npm before anything is written
 //   1  agent config: skills, extensions, settings/*.json, dictation, AGENTS.md
 //   1b sandbox/ and scripts/ next to the agent dir (AGENTS.md names them by path)
@@ -30,7 +32,13 @@
 // Env: PI_AGENT_DIR, PI_SKILLS, PI_EXTENSIONS, PI_BOSS_DIR, BOSS_REPO,
 //      PI_SKIP_SYSTEMD=1 (copy units, do not enable), PI_SKIP_NETWORK=1 (no
 //      vendor downloads, no clone), PI_ENABLE_SERVICES=1 (opt in to a launchd
-//      plist / scheduled task on macOS and Windows), HERDR_MODS.
+//      plist / scheduled task on macOS and Windows), PI_SKIP_PREREQS=1 (never
+//      call a package manager), HERDR_MODS.
+//
+// Step 0 is the prerequisites: git, node and npm, installed with the first
+// package manager this platform has when they are missing. It runs before the
+// pi binary check because everything after it needs git, and the command is
+// printed before it runs — see scripts/prereqs.mjs, which setup.mjs shares.
 //
 // Radar basis (Vol. 35): #1 agent sandboxing (Adopt), #68 mise (Adopt),
 // #99 Safe Chain.
@@ -57,6 +65,7 @@ import {
 	piInstallCommand,
 	piPreflight,
 	planFor,
+	prereqNodePin,
 	sandboxSummary,
 	spawnPlan,
 	spliceManagedBlock,
@@ -64,6 +73,7 @@ import {
 	systemdUnitsIn,
 	wslMountWarnings,
 } from './scripts/install-lib.mjs';
+import { prereqsSkipped, stepPrereqs } from './scripts/prereqs.mjs';
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
@@ -262,7 +272,38 @@ function linkOrCopy(target, dest) {
 	return useCopy ? 'copy' : 'link';
 }
 
-// --- 0. the pi binary, in the preflight --------------------------------------
+// --- 0. prerequisites -------------------------------------------------------
+/**
+ * stepPrerequisites — git, node and npm, before anything else the engine does.
+ *
+ * This is the step that makes `node install.mjs` work on a machine where nobody
+ * read INSTALL.md: the tools are installed through the platform's package
+ * manager instead of being a precondition. It runs first because every step
+ * after it (hooks, the clone, the bin entries) needs git.
+ *
+ * The node version is the running process's, never `spawnSync('node', ['-v'])`:
+ * this file *is* node, so the probe is the one check that can lie — under a
+ * runner that starts node by absolute path it reports ENOENT while node runs the
+ * check (#175's CI bug).
+ */
+function stepPrerequisites() {
+	const pin = prereqNodePin(SOURCE_DIR, fs.readFileSync);
+	const result = stepPrereqs({
+		platform: PLAN.platform,
+		pin,
+		skipPrereqs: prereqsSkipped({ skipPrereqs: OPT.skipPrereqs }),
+		io: { have: hasCmd, run: (cmd, args) => run(cmd, args, { allowFail: true }), say, note, warn },
+		nodeVersion: process.version,
+		nodeMajor: Number.parseInt(process.versions.node.split('.')[0], 10),
+	});
+	// Same wall the docs document: git installed, the shell holding a PATH from
+	// before it. Every git step below would warn with no hint where the answer is.
+	if (!result.skipped && !hasCmd('git'))
+		warn("git is still not on PATH — docs/install.md#troubleshooting: 'git is not recognized' after a Windows install, and the four-step PATH repair");
+	return result;
+}
+
+// --- 0b. the pi binary, in the preflight -------------------------------------
 // npm is asked for by the name its own OS resolves: `npm.cmd` on Windows, where
 // a bare `npm` is the `npm.ps1` a default execution policy refuses. The plan
 // carries it, so no call site can spell it wrong on its own.
@@ -317,7 +358,7 @@ function preflightPi() {
 }
 
 /** preflight — everything that has to hold before the first write. */
-function preflight() {
+function preflight({ prereqs = {} } = {}) {
 	say('== preflight');
 	say(`   source : ${SOURCE_DIR}`);
 	say(`   agent  : ${AGENT_DIR}`);
@@ -325,8 +366,10 @@ function preflight() {
 	// one thing the banner has to say about it is that it is WSL.
 	say(`   system : ${systemSummary(PLAN)}`);
 	// Same wall as setup.mjs: git installed, shell holding a PATH from before it.
-	// Every git step below would warn with no hint where the answer is.
-	if (!hasCmd('git'))
+	// Every git step below would warn with no hint where the answer is. The step
+	// above already said it when it tried to install git and could not, so this
+	// only speaks for the run that skipped the step on purpose.
+	if (prereqs.skipped && !hasCmd('git'))
 		warn("git is not on PATH — docs/install.md#troubleshooting: 'git is not recognized' after a Windows install, and the PATH fix");
 	preflightPi();
 }
@@ -810,12 +853,17 @@ async function main() {
 		DRY = true;
 		process.env.PI_DRY_RUN = '1';
 	}
+	// Prerequisites first: git, node and npm through this OS's package manager,
+	// before the pi decision and before the first write. `--skip-prereqs` /
+	// PI_SKIP_PREREQS=1 prints the skip lines and calls no package manager.
+	const prereqs = stepPrerequisites();
 	// Same shape as before, with one difference that matters: the pi decision is
 	// the preflight's, so a missing pi (and no npm to install it) stops here with
 	// an empty tree and the command for this OS, instead of at the tail with a
 	// half-installed one. It also prints the banner and the git-not-on-PATH
-	// warning, so the old banner block and its git check are gone, not repeated.
-	preflight();
+	// warning for a run that skipped the prerequisite step on purpose, so the old
+	// banner block and its own git check are gone, not repeated.
+	preflight({ prereqs });
 	// WSL: the plan is Linux and the sandbox is the Linux one, so nothing below
 	// changes — but a path on a Windows drive loses the mode bits the hooks need,
 	// and the fix is one move. Named path, named fix, once. It has to run after

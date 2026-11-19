@@ -193,10 +193,14 @@ test('no pi and no npm: non-zero exit, and the throwaway HOME is still empty', {
 test('the pi decision is in the preflight, before the first file is written', { skip: !POSIX && 'PATH shims are POSIX-only' }, () => {
 	const box = scratch({ npm: true });
 	const r = runEngine('install', box);
+	const prereqs = r.stdout.indexOf('== prerequisites');
 	const preflight = r.stdout.indexOf('== preflight');
 	const pi = r.stdout.indexOf('installing pi with npm');
 	const firstWrite = r.stdout.indexOf('copied skills/extensions/settings');
-	assert.equal(preflight, 0, 'the preflight is not the first thing the engine prints');
+	// The prerequisites step is the one block allowed ahead of the preflight: it
+	// installs the git the rest of the engine needs, and it asks nothing (#177).
+	assert.ok(prereqs >= 0, 'the prerequisites step printed nothing');
+	assert.ok(prereqs < preflight, 'the prerequisites do not run before the preflight');
 	assert.ok(pi > preflight, 'the pi decision is not in the preflight');
 	// Before the copy, not after every step: that is what makes the stop cheap.
 	assert.ok(pi < firstWrite, 'pi is still decided after the config was written');

@@ -47,7 +47,7 @@ test('help text names every flag, and only flags the parser accepts', () => {
 test('parseFlags: defaults, negation, lists and the unknown option', () => {
 	// Installing pi is the default (it is what the config drives), so the only
 	// flag that changes an install is the opt-out.
-	assert.deepEqual(parseFlags('install', []), { installPi: true, dryRun: false });
+	assert.deepEqual(parseFlags('install', []), { installPi: true, skipPrereqs: false, dryRun: false });
 	assert.equal(parseFlags('install', ['--no-install-pi']).installPi, false);
 	assert.equal(parseFlags('install', ['--install-pi']).installPi, true, 'the old flag still means what it meant');
 	assert.equal(parseFlags('install', ['--help']).help, true);
@@ -55,6 +55,7 @@ test('parseFlags: defaults, negation, lists and the unknown option', () => {
 
 	const setup = parseFlags('setup', []);
 	assert.equal(setup.doApt, true, 'apt is on unless --no-apt says otherwise');
+	assert.equal(setup.skipPrereqs, false, 'prerequisites are checked unless --skip-prereqs says otherwise');
 	assert.equal(setup.verify, true);
 	assert.equal(setup.yes, false);
 	assert.equal(parseFlags('setup', ['--no-apt']).doApt, false);
