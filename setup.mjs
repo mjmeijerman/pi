@@ -45,6 +45,8 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import {
+	deepseekApiKey,
+	deepseekKeyState,
 	extensionNames,
 	filterAgentsMd,
 	helpText,
@@ -59,6 +61,7 @@ import {
 	pinnedNodeMajor,
 	planFor,
 	prereqNodePin,
+	resolveApiKey,
 	ruleAnswer,
 	sandboxSummary,
 	skillNames,
@@ -346,8 +349,11 @@ const AGENTS_FILE_REL = 'AGENTS.md';
 
 // --- 4. keys ----------------------------------------------------------------
 /**
- * The DeepSeek key is read by models.json (`!cat ~/.pi/agent/deepseek.key`); the
- * jev key is read from the TYPESAFE_API_KEY= line of ~/.pi/agent/env.secret.
+ * The DeepSeek key is read by models.json with a `!command` (see
+ * DEEPSEEK_API_KEY_COMMAND in scripts/install-lib.mjs) that reads
+ * `PI_CODING_AGENT_DIR/deepseek.key`, else `~/.pi/agent/deepseek.key` — the same
+ * file this step writes, on every platform, with nothing exported. The jev key
+ * is read from the TYPESAFE_API_KEY= line of ~/.pi/agent/env.secret.
  * Both are written mode 600 and never printed, echoed or logged.
  */
 async function askKeys(state) {
@@ -680,7 +686,15 @@ function verify() {
 	note(`excludesFile: ${config('core.excludesFile')}`);
 	note(`templateDir : ${config('init.templateDir')}`);
 	note(`sandbox     : ${sandboxSummary(PLAN, { piHome: P.piHome, bwrap: have('bwrap') }).message}`);
-	note(`api key     : ${fs.existsSync(path.join(AGENT_DIR, 'deepseek.key')) ? 'present' : 'MISSING'}`);
+	// The answer to the key question and the thing that reads it have to agree on
+	// every platform: the file was written above or was already there, and
+	// models.json (copied by install.mjs just now) has to read that file. Said as
+	// one line, without the key, because that is what a person can check.
+	const modelsText = fs.existsSync(path.join(AGENT_DIR, 'models.json')) ? fs.readFileSync(path.join(AGENT_DIR, 'models.json'), 'utf8') : '';
+	const apiKey = deepseekApiKey(modelsText);
+	const keyFile = fs.existsSync(path.join(AGENT_DIR, 'deepseek.key'));
+	const resolved = keyFile ? resolveApiKey({ apiKey, platform: PLAN.platform }) : { ok: false };
+	note(`api key     : ${deepseekKeyState({ keyFile, apiKey, resolves: resolved.ok })}`);
 	const harness = path.join(P.piHome, 'scripts', 'harness-check.sh');
 	if (fs.existsSync(harness) && have('bash')) {
 		const out = spawnSync('bash', [harness], { encoding: 'utf8' });

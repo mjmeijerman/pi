@@ -17,6 +17,7 @@
 // #99 Safe Chain — the npm quarantine is set by the installer, not remembered.
 // ============================================================================
 
+import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -316,6 +317,92 @@ export function homePaths({ home, agentDir, plan }) {
 
 function dirname(p) {
 	return path.dirname(p);
+}
+
+// --- the DeepSeek key models.json reads --------------------------------------
+/**
+ * The one `apiKey` string `agent/models.json` ships, in one place, so the file,
+ * the installer, the wizard and the tests cannot drift apart.
+ *
+ * It is the `!command` form `docs/models-configuration.md` names, and it is a
+ * node one-liner on purpose: pi runs it through `sh -c` on POSIX and through
+ * `cmd.exe` on Windows (dist/core/resolve-config-value.js — `execSync`, and
+ * Git Bash when it is there), so the command has to mean the same thing in
+ * both. It therefore carries no double quotes of its own, no `$`, no `%` and no
+ * `&`/`|`/`<`/`>`: nothing either shell would read as syntax rather than text.
+ * `PI_CODING_AGENT_DIR` is honoured first because that is where pi looks for
+ * its agent directory; otherwise it is `~/.pi/agent`, the path the wizard
+ * writes the key to. No absolute home in a tracked file, and no variable that
+ * somebody has to export before starting pi.
+ */
+export const DEEPSEEK_KEY_FILE = 'deepseek.key';
+export const DEEPSEEK_API_KEY_COMMAND =
+	`!node -e "const f=require('fs'),p=require('path'),a=process.env.PI_CODING_AGENT_DIR??p.join(require('os').homedir(),'.pi','agent');process.stdout.write(f.readFileSync(p.join(a,'deepseek.key'),'utf8').trim())"`;
+
+/**
+ * apiKeyCommandBody — the shell command inside an `apiKey` value, or null when
+ * the value is not a command (a literal, `$NAME` interpolation, or `$$!`/`$!`
+ * which pi unescapes to a literal).
+ */
+export function apiKeyCommandBody(apiKey) {
+	if (typeof apiKey !== 'string') return null;
+	const value = apiKey.trim();
+	if (!value.startsWith('!')) return null;
+	if (value.startsWith('$!')) return null;
+	return value.slice(1);
+}
+
+/** deepseekApiKey — the deepseek `apiKey` string of a models.json body, or null. */
+export function deepseekApiKey(text) {
+	try {
+		return JSON.parse(text)?.providers?.deepseek?.apiKey ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * apiKeyShell — the argv pi itself would run for `!command`, per platform.
+ * POSIX: `sh -c`, which is what execSync() does. Windows: `cmd.exe /d /s /c`,
+ * which is what execSync() does there — and the reason the command may not use
+ * POSIX shell syntax.
+ */
+export function apiKeyShell(command, { platform = process.platform, comspec = process.env.ComSpec || 'cmd.exe' } = {}) {
+	return platform === 'win32'
+		? { file: comspec, args: ['/d', '/s', '/c', command] }
+		: { file: '/bin/sh', args: ['-c', command] };
+}
+
+/**
+ * resolveApiKey — run the `apiKey` command the way pi runs it and answer
+ * whether it returned anything. `key` is for comparing two answers, never for
+ * printing: every caller in this repo prints `ok` only.
+ */
+export function resolveApiKey({ apiKey, platform = process.platform, env = process.env, run } = {}) {
+	const body = apiKeyCommandBody(apiKey);
+	if (body === null) return { ok: false, reason: 'apiKey is not a command' };
+	const { file, args } = apiKeyShell(body, { platform });
+	const spawn = run || spawnSync;
+	let out;
+	try {
+		out = spawn(file, args, { encoding: 'utf8', timeout: 10000, windowsHide: true, env });
+	} catch {
+		return { ok: false, reason: 'the shell could not run' };
+	}
+	if (!out || out.status !== 0) return { ok: false, reason: 'the command failed' };
+	const key = String(out.stdout || '').trim();
+	return key ? { ok: true, key } : { ok: false, reason: 'the command printed nothing' };
+}
+
+/**
+ * deepseekKeyState — one line for install and setup output, pure so a test can
+ * pin it: is the key file there, does models.json read it, and does reading it
+ * work. Never the key itself.
+ */
+export function deepseekKeyState({ keyFile = false, apiKey = null, resolves = false } = {}) {
+	if (!keyFile) return 'MISSING — ./setup.sh asks for it; models.json needs deepseek.key';
+	if (apiKeyCommandBody(apiKey) === null) return 'present, but models.json does not read a command — re-run ./install.sh';
+	return resolves ? 'present, models.json reads it' : 'present, but models.json cannot read it — re-run ./install.sh';
 }
 
 // --- the Windows guard task --------------------------------------------------

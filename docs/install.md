@@ -641,12 +641,50 @@ Two files hold keys, both written by `setup.mjs` at mode 600, both under
 
 | File | Holds | Read by |
 |---|---|---|
-| `deepseek.key` | the DeepSeek API key, one line | `models.json` (`!cat ~/.pi/agent/deepseek.key`) |
+| `deepseek.key` | the DeepSeek API key, one line | `models.json`, with a `!command` (below) |
 | `env.secret` | `TYPESAFE_API_KEY=…` for jev | the shell / pi environment, exported at load |
 
 A key is asked for with the terminal echo off, never printed, never logged, and
 written only to its own file. `--no-keys` skips both questions; an existing file is
 left alone unless you pass `--force-key`.
+
+### How the key reaches pi, on each platform
+
+`agent/models.json` carries pi's `!command` form as the `deepseek` `apiKey` — not a
+tracked path, and not a variable somebody has to export first:
+
+```json
+"apiKey": "!node -e \"…reads PI_CODING_AGENT_DIR/deepseek.key, else ~/.pi/agent/deepseek.key…\""
+```
+
+pi runs a `!command` through `sh -c` on Linux and macOS, through Git Bash when it
+is installed on Windows, and through `cmd.exe` when it is not — so the command is a
+node one-liner with nothing either shell reads as syntax, and node is present by
+then because pi is a node program. It reads `$PI_CODING_AGENT_DIR/deepseek.key`
+when that variable is set, and `~/.pi/agent/deepseek.key` otherwise: the same file
+the wizard writes, on every platform, with no export and nothing substituted at
+install time. A key therefore never lands in the clone — `models.json` is a
+committed file.
+
+One command per platform says whether the key is where `models.json` looks. It
+prints `sk-` when it is, nothing when it is not, and never the key:
+
+```bash
+# Linux, macOS, Git Bash
+node -e "const f=require('fs'),p=require('path');process.stdout.write(f.readFileSync(p.join(process.env.PI_CODING_AGENT_DIR||p.join(require('os').homedir(),'.pi','agent'),'deepseek.key'),'utf8').trim().slice(0,3)+'\n')"
+```
+
+```powershell
+# Windows, PowerShell: the same one-liner, cmd.exe quoting
+node -e "const f=require('fs'),p=require('path');process.stdout.write(f.readFileSync(p.join(process.env.PI_CODING_AGENT_DIR||p.join(require('os').homedir(),'.pi','agent'),'deepseek.key'),'utf8').trim().slice(0,3)+'\n')"
+```
+
+`install.mjs` and `setup.mjs` print the same verdict as one line
+(`deepseek key: present, models.json reads it`), and `setup.mjs` runs that command
+the way pi runs it before saying so. When the line says `MISSING` or
+`cannot read it`, `./setup.sh` is the fix; when the file exists and the line is
+still wrong, `./install.sh` copies this repo's `models.json` over the installed
+one.
 
 Neither file can be committed: the repo's `.gitignore` names them, and the global
 gitignore the installer sets (`*.key`, `.env*`, `secrets.*`) catches them in every
