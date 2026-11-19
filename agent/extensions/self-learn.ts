@@ -124,6 +124,11 @@ export const MAX_PER_SESSION = 2;
  * every learner could only answer "those branches are gone". A week is longer
  * than any branch here runs red without a newer run: a real failure re-fires on
  * the next push, and an idle branch has nothing left to judge.
+ *
+ * The window alone did not make that true: the query asked gh for failures only,
+ * so the green run that *fixed* a branch was never in front of the gate and the
+ * red it replaced stayed evidence for the rest of the week. `supersededOut` reads
+ * the green runs too, and drops a failure a newer run has already answered.
  */
 export const CI_FAILURE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 /**
@@ -843,7 +848,7 @@ export interface ReportText {
 	at?: number;
 }
 
-/** One row of `gh run list --status failure --json name,headBranch,conclusion,databaseId,createdAt`. */
+/** One row of `gh run list --json name,headBranch,conclusion,databaseId,createdAt`, failures and greens alike. */
 export interface CiRun {
 	name?: string;
 	headBranch?: string;
@@ -1345,13 +1350,85 @@ export async function ghCiRuns(cwd = REPO, bin = "gh"): Promise<{ runs: CiRun[];
 		return { runs: [], warning: "failing CI checks not read: gh printed something that is not JSON" };
 	}
 	if (!Array.isArray(parsed)) return { runs: [], warning: "failing CI checks not read: gh printed something that is not a list" };
-	const judged = await judgedByCode(parsed, cwd, bin);
+	const notes: string[] = [];
+	const settled = await ghCiSettled(cwd, bin);
+	if (settled.warning) notes.push(settled.warning);
+	const live = supersededOut(parsed, settled.runs);
+	if (live.superseded > 0) notes.push(supersededWarning(live.superseded, parsed.length));
+	const judged = await judgedByCode(live.runs, cwd, bin);
 	if (judged.runs.length === 0 && judged.refused > 0) return { runs: [], warning: blockedWarning(judged.refused, parsed.length) };
 	const aged = agedOut(judged.runs, Date.now());
-	const notes: string[] = [];
 	if (judged.refused > 0) notes.push(partialWarning(judged.refused, parsed.length));
 	if (aged.aged > 0) notes.push(agedWarning(aged.aged, parsed.length));
 	return { runs: aged.runs, warning: notes.length > 0 ? notes.join(" ") : null };
+}
+
+/**
+ * The newest runs that succeeded, so a failure a later green answered can be
+ * recognised.
+ *
+ * A second query rather than one unfiltered list: `--status failure --limit 100`
+ * is the newest hundred *failures*, and dropping that filter would let a busy day
+ * of green runs push a branch that is still red out of the evidence. Two short
+ * lists keep the failures' reach and add the greens' verdict.
+ *
+ * A list that cannot be read is a note, not a failure of the whole read: the gate
+ * keeps the failures it has and says it could not check them.
+ */
+export async function ghCiSettled(cwd: string, bin: string): Promise<{ runs: CiRun[]; warning: string | null }> {
+	const argv = [bin, "run", "list", "--status", "success", "--limit", "100", "--json", "name,headBranch,conclusion,createdAt"];
+	const result = await runOnce(argv, cwd, 5_000);
+	if (result.status !== 0) {
+		const why = clipDetail(result.stderr) || `gh exited ${result.status === null ? "with no status" : result.status}`;
+		return { runs: [], warning: `superseded CI failures not dropped: ${why}` };
+	}
+	let parsed: CiRun[];
+	try {
+		parsed = JSON.parse(result.stdout) as CiRun[];
+	} catch {
+		return { runs: [], warning: "superseded CI failures not dropped: gh printed something that is not JSON" };
+	}
+	if (!Array.isArray(parsed)) return { runs: [], warning: "superseded CI failures not dropped: gh printed something that is not a list" };
+	return { runs: parsed, warning: null };
+}
+
+/**
+ * Drop a failing run that a newer run of the same check on the same branch
+ * already answered with a success.
+ *
+ * This is what "a real failure re-fires on the next push" needs in order to be
+ * true: the failure query holds a branch's red run for the whole week, so a fix
+ * that landed yesterday left the red it replaced in the table until it aged out.
+ * 2026-11-19 read `24× tests` across 24 branches, twenty of which no longer
+ * existed on the remote, while `cd agent && npm test` was green here.
+ *
+ * Only a *newer* success on the *same* branch and the *same* check supersedes: a
+ * green on another branch, an older green, a run of another check, and a newer
+ * run that settled nothing (cancelled, action_required) all leave the failure in
+ * place. A date that cannot be read is kept on the same rule `agedOut` uses — an
+ * unreadable date is not a newer one.
+ */
+export function supersededOut(failures: CiRun[], settled: CiRun[]): { runs: CiRun[]; superseded: number } {
+	// Only a run that settled the check green is evidence about it: a cancelled or
+	// action_required run decided nothing, so it answers nothing.
+	const greens = settled.filter((win) => win.conclusion === "success");
+	const keep: CiRun[] = [];
+	let superseded = 0;
+	for (const run of failures) {
+		const at = Date.parse(run.createdAt as string);
+		const answered = greens.some(
+			(win) =>
+				win.name === run.name &&
+				win.headBranch === run.headBranch &&
+				Date.parse(win.createdAt as string) > at,
+		);
+		if (answered) {
+			superseded += 1;
+			continue;
+		}
+		keep.push(run);
+	}
+	return { runs: keep, superseded };
 }
 
 /**
@@ -1443,6 +1520,17 @@ const BILLING_HINT = "check the repo's Billing & plans — payments failed or th
 /** Every failing run was a queue refusal: no code was judged, so nothing counts. */
 function blockedWarning(refused: number, total: number): string {
 	return `failing CI checks not counted: all ${refused} of ${total} failing runs ran no step, so GitHub never started the jobs and no code was judged (${BILLING_HINT})`;
+}
+
+/**
+ * Some of the failing runs were fixed by a later run: say how many, so the table
+ * shrinking is a measurement and not a silence.
+ *
+ * Not phrased as "not read": the list was read, and this counts what a newer run
+ * already answered.
+ */
+function supersededWarning(superseded: number, total: number): string {
+	return `CI failures not counted: ${superseded} of ${total} failing runs were followed by a newer run of the same check on the same branch that succeeded, so that failure is fixed`;
 }
 
 /** Some of the failing runs never started: count the rest, and say what was dropped. */

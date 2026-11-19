@@ -56,6 +56,8 @@ const {
 	chunks,
 	judgedByCode,
 	agedOut,
+	supersededOut,
+	ghCiSettled,
 	CI_FAILURE_WINDOW_MS,
 	SPAWN_FAILED_WINDOW_MS,
 	noStepRan,
@@ -1659,6 +1661,130 @@ describe("repeated failing CI checks", () => {
 			assert.match(result.warning ?? "", /older CI failures not counted/);
 			assert.doesNotMatch(result.warning ?? "", /not read/, "the list was read; only the window changed");
 			assert.equal(ciFailuresFrom(result.runs).length, 1, "tests on two fresh branches still fires");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	// 2026-11-19: the table read `24× tests` across 24 branches, twenty of which no
+	// longer existed on the remote, while `cd agent && npm test` was green here. The
+	// query asked for failures only, so the green run that fixed a branch was never
+	// in front of the gate and the red it replaced stayed for the rest of the week.
+	test("a failure a newer green run answered is dropped, and nothing else answers it", () => {
+		const clock = (hours: number) => new Date(Date.parse("2026-11-19T12:00:00Z") + hours * 60 * 60 * 1000).toISOString();
+		const failed = (headBranch: string, createdAt: string = clock(0)) => ({ name: "tests", headBranch, conclusion: "failure", createdAt });
+		const settled = (headBranch: string, conclusion: string, createdAt?: string, name = "tests") => ({ name, headBranch, conclusion, createdAt });
+		const failures = [
+			failed("fixed"),
+			failed("another-branch"),
+			failed("another-check"),
+			failed("older-green"),
+			failed("same-instant"),
+			failed("cancelled-after"),
+			failed("undated", ""),
+		];
+		const greens = [
+			settled("fixed", "success", clock(1)),
+			settled("a-branch-with-no-failure", "success", clock(1)),
+			settled("another-check", "success", clock(1), "pr-tier"),
+			settled("older-green", "success", clock(-1)),
+			settled("same-instant", "success", clock(0)),
+			settled("cancelled-after", "cancelled", clock(1)),
+			settled("undated", "success"),
+		];
+		const live = supersededOut(failures, greens);
+		assert.deepEqual(
+			live.runs.map((run) => run.headBranch),
+			["another-branch", "another-check", "older-green", "same-instant", "cancelled-after", "undated"],
+			"only the same check, on the same branch, strictly newer, and actually green supersedes",
+		);
+		assert.equal(live.superseded, 1);
+		assert.deepEqual(supersededOut([], greens), { runs: [], superseded: 0 }, "no failures is nothing to drop");
+	});
+
+	test("a branch that was fixed stops counting, and the newest red on the branch still does", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-superseded-gh-"));
+		try {
+			const hour = 60 * 60 * 1000;
+			const clock = (hours: number) => new Date(Date.now() - hours * hour).toISOString();
+			const failures = JSON.stringify([
+				{ name: "tests", headBranch: "fixed-yesterday", conclusion: "failure", databaseId: 1, createdAt: clock(24) },
+				{ name: "tests", headBranch: "still-red", conclusion: "failure", databaseId: 2, createdAt: clock(1) },
+			]);
+			const greens = JSON.stringify([
+				{ name: "tests", headBranch: "fixed-yesterday", conclusion: "success", createdAt: clock(2) },
+				{ name: "tests", headBranch: "still-red", conclusion: "success", createdAt: clock(48) },
+			]);
+			const bin = join(dir, "gh");
+			await writeFile(
+				bin,
+				`#!/usr/bin/env bash\ncase "$2$4" in\n  listsuccess) printf '%s' '${greens}' ;;\n  listfailure) printf '%s' '${failures}' ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;;\nesac\n`,
+				"utf8",
+			);
+			await chmod(bin, 0o755);
+			const result = await ghCiRuns(dir, bin);
+			assert.deepEqual(
+				result.runs.map((run) => run.headBranch),
+				["still-red"],
+				"the branch fixed yesterday is history; the branch whose newest run is red is not",
+			);
+			assert.match(result.warning ?? "", /1 of 2 failing runs were followed by a newer run/);
+			assert.match(result.warning ?? "", /CI failures not counted/);
+			assert.doesNotMatch(result.warning ?? "", /not read/, "the list was read; only the green was added");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a green list that cannot be read is a note, and every failure is kept", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-nogreen-gh-"));
+		try {
+			const shapes: [string, RegExp][] = [
+				["exit 1", /superseded CI failures not dropped: gh exited 1/],
+				["printf '%s' 'not json'", /superseded CI failures not dropped: gh printed something that is not JSON/],
+				["printf '%s' '{\"not\":\"a list\"}'", /superseded CI failures not dropped: gh printed something that is not a list/],
+			];
+			for (const [green, expected] of shapes) {
+				const bin = join(dir, "gh");
+				await writeFile(
+					bin,
+					`#!/usr/bin/env bash\ncase "$2$4" in\n  listsuccess) ${green} ;;\n  listfailure) printf '%s' '${FAILED_RUNS}' ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;;\nesac\n`,
+					"utf8",
+				);
+				await chmod(bin, 0o755);
+				const result = await ghCiRuns(dir, bin);
+				assert.equal(result.runs.length, 3, `doubt counts normally: ${green}`);
+				assert.match(result.warning ?? "", expected, green);
+				assert.deepEqual((await ghCiSettled(dir, bin)).runs, [], `nothing was settled: ${green}`);
+			}
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("the green list is asked for exactly one shape of run, and an absent gh is not a crash", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-greenargs-gh-"));
+		try {
+			const bin = join(dir, "gh");
+			const log = join(dir, "args.txt");
+			await writeFile(bin, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "${log}"\nprintf '%s' '[]'\n`, "utf8");
+			await chmod(bin, 0o755);
+			assert.deepEqual(await ghCiSettled(dir, bin), { runs: [], warning: null }, "an empty list settles nothing and is not a warning");
+			const asked = (await readFile(log, "utf8")).trim();
+			assert.equal(
+				asked,
+				"run list --status success --limit 100 --json name,headBranch,conclusion,createdAt",
+				"the query is the green half of the failure query, so both lists name the same checks",
+			);
+			const killed = join(dir, "gh-killed");
+			await writeFile(killed, `#!/usr/bin/env bash\nkill -KILL $$\n`, "utf8");
+			await chmod(killed, 0o755);
+			const missing = await ghCiSettled(dir, killed);
+			assert.deepEqual(missing.runs, [], "a gh killed before it answered settles nothing");
+			assert.match(missing.warning ?? "", /superseded CI failures not dropped: gh exited with no status/);
+			const absent = await ghCiSettled(dir, join(dir, "no-such-gh-binary"));
+			assert.deepEqual(absent.runs, [], "a binary that does not exist settles nothing either");
+			assert.match(absent.warning ?? "", /superseded CI failures not dropped: Error: spawn/);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
