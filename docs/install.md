@@ -169,8 +169,11 @@ all dropped loses its heading too. Keeping every rule reproduces
 `agent/AGENTS.md` byte for byte.
 
 Answers are recorded in `~/.pi/state/setup.json`, keyed by a slug built from each
-rule's first six words. A second run asks only about what that file does not
-cover, so a dropped rule stays dropped. `--reask` ignores the record and asks
+rule's first six words. That folder is local machine state, not harness code: the
+repo's `.gitignore` carries `state/`, so `git status` in `~/.pi` stays clean after
+a fresh install and nobody wonders whether the answers are theirs to commit.
+A second run asks only about what that file does
+not cover, so a dropped rule stays dropped. `--reask` ignores the record and asks
 about everything again.
 
 Between the questions and the install, the keys (step 6) are the only interactive
