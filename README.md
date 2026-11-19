@@ -66,7 +66,7 @@ place: Herdr mods, `herdr-app/programs.json`, anything outside the
 |---|---|---|---|
 | sandbox (`bubblewrap`) | installed and wraps `pi` | not available — one line, no failure | not available — one line, no failure |
 | bin entries in `~/.local/bin` | symlinks | symlinks | copies (a symlink needs elevation or Developer Mode) |
-| guard service | systemd user unit, enabled | launchd plist, opt-in with `PI_ENABLE_SERVICES=1` | Task Scheduler entry at logon, same opt-in |
+| guard service | systemd user unit, enabled | launchd plist, opt-in with `PI_ENABLE_SERVICES=1` | Task Scheduler entry at logon, same opt-in, running the guard through the Git for Windows `bash.exe` it resolves |
 | weekly timers (`pi-evals`, `pi-retro`) | systemd timers | skipped, one line | skipped, one line |
 | `herdr-app` | `curl … install.sh \| sh` | same | `irm … install.ps1 \| iex` |
 

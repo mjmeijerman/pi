@@ -317,6 +317,114 @@ function dirname(p) {
 	return path.dirname(p);
 }
 
+// --- the Windows guard task --------------------------------------------------
+export const GUARD_TASK_NAME = 'big-boss-pi-guard';
+
+/**
+ * gitBashCandidates — where Git for Windows may have put `bash.exe`, best guess
+ * first.
+ *
+ * Why this exists: `bin/guard` starts with `#!/usr/bin/env bash`, and Task
+ * Scheduler has no shebang interpretation — a task pointing at the file itself
+ * starts nothing, which is exactly what the Windows run reported. So the
+ * scheduled command has to name the interpreter, and naming it means resolving
+ * it: a task gets no useful PATH, `C:\Program Files\Git` is only the default (a
+ * per-user install lands in `%LOCALAPPDATA%\Programs\Git`), and being wrong here
+ * fails silently at the next logon.
+ *
+ * `execPath` is `git --exec-path` — `<root>\mingw64\libexec\git-core`, or
+ * `<root>\libexec\git-core` for a 64-bit-only install. Rather than encode those
+ * layouts, every ancestor of it is tried with `bin\bash.exe` appended: the root
+ * is one of them whatever the layout, and a candidate that does not exist costs
+ * one `existsSync`.
+ *
+ * `PI_GIT_BASH` replaces the whole list instead of joining it: an explicit
+ * override is a promise, and a wrong one should say "that is not there" rather
+ * than quietly register whichever bash happened to be found instead. The value
+ * is returned verbatim — a path outside the default layout is the reason to set
+ * it, so normalising it is how it stops matching.
+ */
+export function gitBashCandidates({ platform = process.platform, env = process.env, execPath = '' } = {}) {
+	if (platform !== 'win32') return [];
+	if (env.PI_GIT_BASH) return [env.PI_GIT_BASH];
+	const win = path.win32;
+	const out = [];
+	const add = (p) => {
+		if (!p || out.includes(p)) return;
+		out.push(p);
+	};
+	if (execPath) {
+		let dir = win.dirname(win.normalize(execPath));
+		for (let up = 0; up < 5 && dir; up++) {
+			add(win.join(dir, 'bin', 'bash.exe'));
+			const parent = win.dirname(dir);
+			if (!parent || parent === dir) break;
+			dir = parent;
+		}
+	}
+	add(win.join(env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe'));
+	add(win.join(env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git', 'bin', 'bash.exe'));
+	if (env.LOCALAPPDATA) add(win.join(env.LOCALAPPDATA, 'Programs', 'Git', 'bin', 'bash.exe'));
+	return out;
+}
+
+/**
+ * pasteArg — one argument spelled so it can be pasted into cmd.exe, backslash
+ * escapes and all. Not the shared `cmdQuote` below: that one doubles a quote,
+ * which is right for cmd.exe reading a command line, and wrong here — the value
+ * being carried is itself a quoted program line that schtasks parses with
+ * MSVCRT rules, where `\"` is the escape.
+ */
+function pasteArg(value) {
+	return `"${String(value).replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * schtasksExe — the absolute `schtasks.exe`.
+ *
+ * Spawned by that path and never as bare `schtasks`: scripts/install-lib.mjs
+ * `spawnPlan` sends a bare name on Windows through `cmd.exe` (it cannot know the
+ * name is not a `.cmd` shim), and cmd.exe quotes the command line on its way in
+ * — which doubles every `"` inside the `/TR` value. The task then registers a
+ * command line that is not the one printed. A full `.exe` path is spawned
+ * directly, argv untouched.
+ */
+export function schtasksExe({ systemRoot = process.env.SystemRoot || 'C:\\Windows' } = {}) {
+	return path.win32.join(systemRoot, 'System32', 'schtasks.exe');
+}
+
+/**
+ * guardTaskCommand — the `schtasks` argv for the guard, and the two lines a
+ * person needs from it.
+ *
+ * The `/TR` value is the whole program line Task Scheduler will run, one string
+ * containing both paths, each quoted: `C:\Program Files\Git\bin\bash.exe` has a
+ * space in it and an unquoted program path is a task that starts nothing. The
+ * argv is passed as argv (node quotes it for the child), while `registered` is
+ * the same command quoted for cmd.exe, so what the installer prints is what a
+ * person can paste into a prompt — the two differ, and that is why both exist.
+ *
+ * The interpreter is named, never bare `bash`: a scheduled task does not get the
+ * PATH the shell it was registered from had.
+ */
+export function guardTaskCommand({ bashPath, guardPath, taskName = GUARD_TASK_NAME }) {
+	if (!bashPath) throw new Error('guardTaskCommand needs the absolute path of bash.exe');
+	if (!guardPath) throw new Error('guardTaskCommand needs the absolute path of bin/guard');
+	const tr = `"${bashPath}" "${guardPath}"`;
+	const args = ['/Create', '/F', '/SC', 'ONLOGON', '/TN', taskName, '/TR', tr];
+	return {
+		// `program` is what a person types; `exe` is what the engine spawns, for the
+		// quoting reason in schtasksExe.
+		program: 'schtasks',
+		exe: schtasksExe(),
+		args,
+		registered: `schtasks ${args
+			.map((a) => (a === tr ? pasteArg(a) : a))
+			.join(' ')}`,
+		remove: `schtasks /Delete /TN ${taskName} /F`,
+	};
+}
+
 // --- the delegation workspace clone ------------------------------------------
 export const BOSS_REPO_DEFAULT = 'mjmeijerman/big-boss-pi';
 
