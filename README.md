@@ -15,7 +15,7 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 | `gitignore_global` | global gitignore for secret files |
 | `sandbox/` | bubblewrap launcher + policy selftest (`pi-sandbox.sh`) |
 | `herdr-mods/` | Herdr window mods: `prs` shows open pull requests with merge |
-| `bin/` | `space` makes a durable space for one project; `delegate` runs one worker at a time in it |
+| `bin/` | `space` makes a durable space for one project; `delegate` runs one worker at a time in it; `guard` is the supervisor that puts those spaces and their Boss tabs back |
 | `scripts/` | session report / prune helpers + Herdr pane launcher |
 | `docs/` | Radar conformance audit and the agent working playbook |
 | `install.mjs` | the installer engine, one file for Linux, macOS and Windows (config, hooks, bin entries, services) |
@@ -135,6 +135,18 @@ A worker is a tab in the space that asked for it, not a space of its own: `spawn
 opens `herdr-app do tab.new --space <id> --focus false`, so the person stays on the
 tab they were reading, and `close` closes that tab rather than the space — a
 finished worker cannot take the boss's desk with it.
+
+A durable space is supervised. `bin/guard` runs a pass every 20 seconds over the
+records in `~/.pi/state/spaces/`: a space that is gone is rebuilt from its record
+(same name, same project folder, same Boss tab name, plus the tabs the record
+lists), and a space whose Boss tab is gone gets that one tab back — from its
+resume entry, so the boss comes back with its conversation. Its worker tabs do
+not come back: a finished worker's tab stays closed, and only
+`delegate wait --forever` restarts a worker. Nothing is ever closed, renamed or
+moved, a space whose project folder is gone is reported with
+`bin/space forget <slug>` and skipped, and a forgotten space is left alone.
+`bin/guard --once` is one pass, `--space <slug>` one space, `--dry-run` the plan
+with no call to the app.
 
 ### Herdr window
 
