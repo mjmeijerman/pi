@@ -43,6 +43,8 @@ const {
 	clipDetail,
 	turnSession,
 	ciFailuresFrom,
+	failedJobsOf,
+	jobSample,
 	namesCheckAsFailed,
 	workerFailuresFrom,
 	decisionRows,
@@ -1434,6 +1436,69 @@ describe("repeated failing CI checks", () => {
 		assert.equal(ciFailuresFrom([run("pr-gate", "one"), run("pr-gate", "one"), run("pr-gate", "one")]).length, 0);
 	});
 
+	test("a workflow says which of its jobs failed, so the row names a cause and not a name", () => {
+		// `tests` spans the node matrix and the mutation gate: 22 branches red on the
+		// workflow alone cannot be acted on, while "mutation score" and "extension
+		// tests" are two different fixes.
+		const withJobs = (headBranch: string, failedJobs: string[]) => ({ ...run("tests", headBranch), failedJobs });
+		const fired = ciFailuresFrom([
+			withJobs("one", ["mutation score (stryker)"]),
+			withJobs("two", ["mutation score (stryker)"]),
+			withJobs("three", ["extension tests (node 22)"]),
+		]);
+		assert.equal(fired.length, 1, "three branches of one workflow is still one row");
+		assert.equal(fired[0].sample, "jobs: mutation score (stryker) ×2, extension tests (node 22) ×1");
+		assert.match(decideLearner(evidence({ ciFailures: fired })).reason, /3× CI check "tests" failed/);
+	});
+
+	test("a report that names the cause outranks the job names", () => {
+		const fired = ciFailuresFrom(
+			[
+				{ ...run("tests", "one"), failedJobs: ["mutation score (stryker)"] },
+				{ ...run("tests", "two"), failedJobs: ["mutation score (stryker)"] },
+			],
+			[report("w1.md", "FAIL tests: the stryker run timed out on one mutant")],
+		);
+		assert.match(fired[0].sample, /timed out on one mutant/, "a worker's own words beat a job name");
+	});
+
+	test("no job names, no jobs line: the branches stay the sample", () => {
+		const fired = ciFailuresFrom([run("tests", "one"), run("tests", "two")]);
+		assert.equal(fired[0].sample, "branches: one, two");
+	});
+
+	test("the job names are the failed ones, deduped, and an unnamed job is not a name", () => {
+		const jobs = [
+			{ name: "extension tests (node 22)", conclusion: "failure" },
+			{ name: "extension tests (node 22)", conclusion: "failure" },
+			{ name: "mutation score (stryker)", conclusion: "failure" },
+			{ name: "extension tests (node 24)", conclusion: "success" },
+			{ name: "  ", conclusion: "failure" },
+			{ conclusion: "failure" },
+		];
+		assert.deepEqual(failedJobsOf(jobs), ["extension tests (node 22)", "mutation score (stryker)"]);
+		assert.deepEqual(failedJobsOf([]), []);
+		// gh can print a row with no object in it; a reader that trusts the type
+		// dies on that row instead of naming the ones around it.
+		const nullRow = null as unknown as { name?: string; conclusion?: string };
+		assert.deepEqual(
+			failedJobsOf([nullRow, { name: "mutation score (stryker)", conclusion: "failure" }]),
+			["mutation score (stryker)"],
+			"a null row is skipped, not a crash",
+		);
+	});
+
+	test("the jobs line counts down, and a tie is decided by the name, not by gh's order", () => {
+		const tied = new Map([
+			["zebras", 2],
+			["alpacas", 2],
+		]);
+		assert.equal(jobSample(tied), "jobs: alpacas ×2, zebras ×2");
+		assert.equal(jobSample(new Map([["only", 1]])), "jobs: only ×1");
+		assert.equal(jobSample(new Map()), "", "no tally is not an empty line");
+		assert.equal(jobSample(undefined), "", "a check no probe asked about says nothing about jobs");
+	});
+
 	test("a verdict has to be attached to the name, in either of the two shapes", () => {
 		const counts: [string, string, boolean][] = [
 			["FAIL tests", "tests", true],
@@ -1682,6 +1747,79 @@ describe("repeated failing CI checks", () => {
 			assert.equal(judged.unreadable, 0, "no probe went unanswered");
 			const asked = await readFile(seen, "utf8").catch(() => "");
 			assert.equal(asked, "x", "one probe call, for the run that has an id");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("the probe keeps the job names, so the evidence can say what inside a workflow broke", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-jobs-"));
+		try {
+			const bin = await fakeGh(
+				dir,
+				`printf '%s' '{"jobs":[{"name":"mutation score (stryker)","conclusion":"failure","steps":[{"name":"stryker run"}]},{"name":"extension tests (node 22)","conclusion":"success","steps":[{"name":"test"}]}]}'`,
+			);
+			const runs = [
+				{ name: "tests", headBranch: "a", conclusion: "failure", databaseId: 1 },
+				{ name: "tests", headBranch: "b", conclusion: "failure", databaseId: 2 },
+			];
+			const judged = await judgedByCode(runs, dir, bin);
+			assert.deepEqual(
+				judged.runs.map((run) => run.failedJobs),
+				[["mutation score (stryker)"], ["mutation score (stryker)"]],
+				"a job that succeeded is not a failed job",
+			);
+			const fired = ciFailuresFrom(judged.runs);
+			assert.equal(fired[0].sample, "jobs: mutation score (stryker) ×2", "the row names the job, not the workflow");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a run with no failed job carries no list, rather than an empty one", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-nojobs-"));
+		try {
+			const bin = await fakeGh(dir, `printf '%s' '{"jobs":[{"name":"test","conclusion":"success","steps":[{"name":"test"}]}]}'`);
+			const judged = await judgedByCode([{ name: "tests", headBranch: "a", conclusion: "failure", databaseId: 1 }], dir, bin);
+			assert.equal(judged.runs.length, 1);
+			assert.equal(judged.runs[0].failedJobs, undefined, "no failed job: nothing to name");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a probe that failed is doubt, whatever its stdout held", async () => {
+		// gh exits non-zero and still prints a plausible body: the exit code is the
+		// verdict, so the body is not one. Reading it would hand the caller job
+		// names that no run reported.
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-exit-gh-"));
+		try {
+			const body =
+				'{"jobs":[{"name":"mutation score (stryker)","conclusion":"failure","steps":[{"name":"stryker run"}]}]}';
+			const bin = await fakeGh(dir, `printf '%s' '${body}'; exit 1`);
+			const judged = await judgedByCode([{ name: "tests", headBranch: "a", conclusion: "failure", databaseId: 1 }], dir, bin);
+			assert.equal(judged.unreadable, 1, "a failed probe is doubt, not an answer");
+			assert.equal(judged.runs.length, 1, "doubt counts normally");
+			assert.equal(judged.runs[0].failedJobs, undefined, "the body beside a failed exit named no job");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a body gh cannot read as a job list is doubt, not a green run", async () => {
+		// Two shapes that are not a roster: valid JSON with the wrong type, and
+		// something that is not JSON at all. Both mean "gh could not say", so the
+		// run is kept and counted as doubt — never as a run that judged nothing.
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-unreadable-gh-"));
+		try {
+			for (const body of ['{"jobs":42}', "not json at all"]) {
+				const bin = await fakeGh(dir, `printf '%s' '${body}'`);
+				const judged = await judgedByCode([{ name: "tests", headBranch: "a", conclusion: "failure", databaseId: 1 }], dir, bin);
+				assert.equal(judged.unreadable, 1, `body ${body} is doubt`);
+				assert.equal(judged.refused, 0, `body ${body} is not a queue refusal`);
+				assert.equal(judged.runs.length, 1, `body ${body} keeps the run`);
+				assert.equal(judged.runs[0].failedJobs, undefined, `body ${body} named no job`);
+			}
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}

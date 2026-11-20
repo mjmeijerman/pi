@@ -857,10 +857,17 @@ export interface CiRun {
 	databaseId?: number;
 	/** When the run was created, as gh prints it. Absent on a fixture, and such a run is kept. */
 	createdAt?: string;
+	/**
+	 * The jobs gh said failed, by the name the workflow gave them. Absent when no
+	 * probe asked, when gh could not answer, or when nothing inside the run failed.
+	 */
+	failedJobs?: string[];
 }
 
 /** One job of `gh run view <id> --json jobs`. */
 export interface CiJob {
+	/** The job's name in the workflow — the only thing that says what inside a run broke. */
+	name?: string;
 	conclusion?: string;
 	/** Every step GitHub executed for this job. */
 	steps?: unknown[];
@@ -971,12 +978,23 @@ const NAME_CHAR = /[a-z0-9_./-]/i;
  */
 export function ciFailuresFrom(runs: CiRun[], reports: ReportText[] = []): CiFailure[] {
 	const groups = new Map<string, CiFailure>();
+	// What failed inside each check, counted across its runs. Kept beside the
+	// groups because a `CiFailure` is what the evidence file prints, and a tally
+	// is an intermediate: only its one-line summary belongs in `sample`.
+	const jobs = new Map<string, Map<string, number>>();
 	const group = (name: string): CiFailure => {
 		const key = name.trim();
 		const seen = groups.get(key);
 		if (seen) return seen;
 		const fresh: CiFailure = { check: key, branches: [], reports: [], sample: "" };
 		groups.set(key, fresh);
+		return fresh;
+	};
+	const tally = (check: string): Map<string, number> => {
+		const seen = jobs.get(check);
+		if (seen) return seen;
+		const fresh = new Map<string, number>();
+		jobs.set(check, fresh);
 		return fresh;
 	};
 	for (const run of runs) {
@@ -987,6 +1005,8 @@ export function ciFailuresFrom(runs: CiRun[], reports: ReportText[] = []): CiFai
 		const ci = group(run.name);
 		const branch = (run.headBranch ?? "").trim();
 		if (branch && !ci.branches.includes(branch)) ci.branches.push(branch);
+		const counted = tally(ci.check);
+		for (const job of run.failedJobs ?? []) counted.set(job, (counted.get(job) ?? 0) + 1);
 	}
 	for (const report of reports) {
 		const lines = failureLines(report.text);
@@ -999,8 +1019,24 @@ export function ciFailuresFrom(runs: CiRun[], reports: ReportText[] = []): CiFai
 	}
 	return [...groups.values()]
 		.filter((ci) => ci.branches.length + ci.reports.length >= MIN_REPEATS)
-		.map((ci) => ({ ...ci, sample: ci.sample || `branches: ${ci.branches.join(", ")}` }))
+		.map((ci) => ({ ...ci, sample: ci.sample || jobSample(jobs.get(ci.check)) || `branches: ${ci.branches.join(", ")}` }))
 		.sort((a, b) => b.branches.length + b.reports.length - (a.branches.length + a.reports.length));
+}
+
+/**
+ * The jobs that failed inside a check, strongest first: `jobs: mutation score
+ * (stryker) ×14, extension tests (node 22) ×8`.
+ *
+ * Ties sort by name, because two jobs on four branches each have no strongest
+ * one and a map's insertion order would make the line depend on gh's answer
+ * order — the same evidence printing two ways (blip 11).
+ */
+export function jobSample(counted: Map<string, number> | undefined): string {
+	if (!counted || counted.size === 0) return "";
+	const parts = [...counted.entries()]
+		.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+		.map(([job, count]) => `${job} ×${count}`);
+	return `jobs: ${parts.join(", ")}`;
 }
 
 /**
@@ -1448,20 +1484,49 @@ export function noStepRan(jobs: CiJob[]): boolean {
 	return judged.length > 0 && judged.every((job) => (job.steps?.length ?? 0) === 0);
 }
 
+/**
+ * The jobs GitHub said failed, by the name the workflow gave them.
+ *
+ * `probeRun` already fetches every job of a run to tell a billing refusal from a
+ * verdict on the code, and threw the names away. So the evidence file could only
+ * say `22× CI check "tests" failed`, which is a workflow, not a cause: `tests`
+ * spans the node test matrix and the mutation gate, and the fix for one is not
+ * the fix for the other. On 2026-11-20 three learners in 56 minutes read that
+ * row, and none of them could say what inside it was red (blip 11: evidence that
+ * cannot name the thing that repeated cannot be learned from).
+ */
+export function failedJobsOf(jobs: CiJob[]): string[] {
+	const out: string[] = [];
+	for (const job of jobs) {
+		if (job?.conclusion !== "failure") continue;
+		const name = (job.name ?? "").trim();
+		if (name && !out.includes(name)) out.push(name);
+	}
+	return out;
+}
+
 /** How many `gh run view` probes are in flight at once, so a 90-run list stays cheap. */
 export const CI_PROBE_CONCURRENCY = 8;
 
-/** Did the jobs of this run execute anything? `null` when gh could not say. */
-async function ranAStep(id: number, cwd: string, bin: string): Promise<boolean | null> {
+/**
+ * What one `gh run view` said about a run: did any job execute anything, and
+ * which jobs failed by name. `ran` is `null` when gh could not say.
+ */
+async function probeRun(id: number, cwd: string, bin: string): Promise<{ ran: boolean | null; failed: string[] }> {
 	const result = await runOnce([bin, "run", "view", String(id), "--json", "jobs"], cwd, 5_000);
-	if (result.status !== 0) return null;
+	if (result.status !== 0) return { ran: null, failed: [] };
+	// The try covers the parse and nothing else: a body that is JSON but not a
+	// job list has its own verdict, and reading it inside the catch would make
+	// that verdict unreachable — the same `{ ran: null, failed: [] }` either way,
+	// so no test could tell the two apart (the mutation gate found exactly that).
+	let parsed: { jobs?: CiJob[] };
 	try {
-		const parsed = JSON.parse(result.stdout) as { jobs?: CiJob[] };
-		if (!Array.isArray(parsed.jobs)) return null;
-		return !noStepRan(parsed.jobs);
+		parsed = JSON.parse(result.stdout) as { jobs?: CiJob[] };
 	} catch {
-		return null;
+		return { ran: null, failed: [] };
 	}
+	if (!Array.isArray(parsed.jobs)) return { ran: null, failed: [] };
+	return { ran: !noStepRan(parsed.jobs), failed: failedJobsOf(parsed.jobs) };
 }
 
 /**
@@ -1503,12 +1568,15 @@ export async function judgedByCode(
 	// A run without an id cannot be asked about, so it counts normally.
 	kept.push(...runs.filter((run) => typeof run.databaseId !== "number"));
 	for (const batch of chunks(probeable, CI_PROBE_CONCURRENCY)) {
-		const answers = await Promise.all(batch.map((run) => ranAStep(run.databaseId as number, cwd, bin)));
+		const answers = await Promise.all(batch.map((run) => probeRun(run.databaseId as number, cwd, bin)));
 		batch.forEach((run, index) => {
-			if (answers[index] === false) refused += 1;
+			const answer = answers[index];
+			if (answer.ran === false) refused += 1;
 			else {
-				if (answers[index] === null) unreadable += 1;
-				kept.push(run);
+				if (answer.ran === null) unreadable += 1;
+				// The job names tag along: the caller groups by workflow, and this is
+				// the only reader that ever saw what inside it failed.
+				kept.push(answer.failed.length > 0 ? { ...run, failedJobs: answer.failed } : run);
 			}
 		});
 	}
