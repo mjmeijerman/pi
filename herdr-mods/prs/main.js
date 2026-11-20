@@ -1,6 +1,7 @@
 /**
  * prs — pull requests on the left, the diff on the right, and the actions you
- * take on one: review it, or hand the work to the big-boss-pi agent.
+ * take on one: review it, or hand the work to the agent of the space that owns
+ * the repository.
  *
  * Left: open pull requests grouped by repository, review requests first, every
  * repository folded until you open it — and the ones you open stay open, in
@@ -16,14 +17,19 @@
  * and four buttons that each start a brand-new agent — review the PR, fix the
  * pipeline, fix the merge conflicts, fix the review comments. That agent does
  * not do the work either: it hands it to a worker whose cwd is the PR's clone.
- * The worker commits on its own branch and stops; the boss agent publishes it
- * (push, pull request, review replies). Only the human merges.
+ * The boss delegates, the worker commits and stops, the boss publishes it (push,
+ * pull request, review replies). Only the human merges.
  *
- * Every button starts its own agent as a new tab in the one big-boss-pi space,
- * with the job as that agent's first message. It never types into an agent that
- * is already running: the pane the person is working in is theirs. When the
- * space is gone the mod creates it once and starts the new agent there; it never
- * makes a second big-boss-pi space.
+ * Every button acts in the space that owns the PR's repository — the record in
+ * ~/.pi/state/spaces/<slug>/space.json whose project is that clone or its nearest
+ * ancestor — and starts its agent as a new tab there, in the space's own
+ * project, with the job as that agent's first message. It never types into an
+ * agent that is already running: the pane the person is working in is theirs.
+ *
+ * When no space owns the repository nothing is started: the view says so and
+ * offers one button that opens the durable mod's New form. The mod makes no
+ * space itself, so a button can never quietly start a second boss in the wrong
+ * project.
  *
  * Keys: ↑/↓ move · a/x/c review · m merge (twice) · o browser · r refresh ·
  * esc cancel · 1..4 start a new agent on one of the four jobs.
@@ -31,13 +37,14 @@
  * Props: `{ "open": "owner/repo#12" }` starts on that pull request.
  *
  * Radar basis: #17 risk-tiered human oversight and #42 human-in-the-loop
- * theater — the human reads the change and presses the key, and the one agent
- * that acts on it is the boss they already watch, never a second one the button
- * quietly started.
+ * theater — the human reads the change and presses the key, and the agent that
+ * acts on it is the boss of that project's space, the one they already watch,
+ * never a second one the button quietly started.
  */
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle, Scrollbar, Textarea, TextareaState } from "gpui-base";
-import { appHome, exec, home, nextCommand, props, readTextFile, run, settings, spaces, theme, writeTextFile } from "herdr";
+import { appHome, exec, home, nextCommand, props, readTextFile, run, settings, theme, writeTextFile } from "herdr";
+import { noSpaceMessage, routeLabel, spaceForFolder, spaceName } from "./route.mjs";
 
 /**
  * The search answers one question only: which open pull requests exist. Its index
@@ -91,14 +98,10 @@ const ADD_TINT = "52";
 const DEL_TINT = "52";
 
 /**
- * The one big-boss-pi workspace: where every button's new agent starts, never the
- * PR's own clone. That workspace's AGENTS.md makes its agent pass the work to a
- * worker with the clone as the worker's cwd. The mod adds a tab to that space and
- * creates the space only when it is missing, so there is never a second boss.
+ * The durable spaces, one folder per space. `bin/space new` and the guard write these; this mod
+ * only reads them, so which space owns a repository is a fact it cannot invent.
  */
-const AGENT_FOLDER = `${home()}/big-boss-pi`;
-/** The name the one boss space is made with, and what marks it as that space. */
-const BOSS_SPACE = "big-boss-pi";
+const SPACES_DIR = `${home()}/.pi/state/spaces`;
 
 /** Finds a local clone by name, in the home directory, a dotted one, or one folder down. */
 const FIND_CLONE = `
@@ -112,14 +115,6 @@ async function gh(args, timeout) {
 	const first = await exec("gh", args, { timeout });
 	if (first.code !== 127 && !/ENOENT|no such file/i.test(first.stderr)) return first;
 	return exec(`${home()}/.local/bin/gh`, args, { timeout });
-}
-
-/**
- * The one big-boss-pi space, or null when it is gone. Read live from the app, so a
- * space the person closed is made again exactly once.
- */
-function bossSpace() {
-	return spaces().find((s) => s.name === BOSS_SPACE) ?? null;
 }
 
 function ago(iso) {
@@ -187,18 +182,20 @@ function parseDiff(text) {
 /**
  * The request a button sends to the boss agent: the job a worker must do, and the
  * clone that worker starts in. It reads as a request to that agent, so it never
- * says where the reader "starts" — the boss hands the job on.
+ * says where the reader "starts" — the boss hands the job on. `space` is the
+ * record the button routed to, and its project is where that agent's rules live.
  */
-function task(kind, pr, quote, folder) {
+function task(kind, pr, quote, folder, space) {
 	const label = kind === "line" ? "a comment on one changed line" : (ACTIONS.find((a) => a.key === kind)?.label ?? kind);
 	const head = `The user pressed "${label}" in the Herdr prs mod, on pull request ${pr.repo}#${pr.number} — ${pr.title}.`;
 	const repo = pr.repo;
 	const n = pr.number;
 	const clone = folder ?? `${home()}/code/${repo.split("/")[1]}`;
 	const missing = folder ? "" : ` That clone does not exist yet: \`gh repo clone ${repo} ${clone}\` first.`;
-	// The AGENTS.md in AGENT_FOLDER makes handing work to a worker that agent's job,
-	// and makes publishing that agent's job too: the worker commits and stops.
-	const common = `\n\nDelegate it to a worker: the AGENTS.md in ${AGENT_FOLDER} is binding, so do NOT do this work yourself — do not check the branch out, do not edit files, do not commit. Ask Jev which route it is (\`jev route "<the job in one line>"\`) when that is not obvious, then hand the whole job to a worker: \`delegate spawn --cwd ${clone}\`, so a worker agent runs it in another Herdr space with the clone as its cwd.${missing} The worker cuts its own worktree from the PR branch, commits there and stops — it never pushes and never opens a pull request; publishing is yours. So when it reports: upload its branch, open or update the PR with the review tier in the body, and post the review or the comment replies it drafted under its name — nothing to publish when it only reviewed. Then relay what changed, what is still open and what the worker could not do. Never merge — report and let the human merge — and never push to the trunk branch. Do not stop before the worker has reported.`;
+	// The space's own AGENTS.md makes handing work to a worker that agent's job, and
+	// makes publishing that agent's job too: the worker commits and stops.
+	const rules = space ? space.project : `the space for ${repo}`;
+	const common = `\n\nDelegate it to a worker: the AGENTS.md in ${rules} is binding, so do NOT do this work yourself — do not check the branch out, do not edit files, do not commit. Ask Jev which route it is (\`jev route "<the job in one line>"\`) when that is not obvious, then hand the whole job to a worker: \`delegate spawn --cwd ${clone}\`, so a worker agent runs it in another Herdr space with the clone as its cwd.${missing} The worker cuts its own worktree from the PR branch, commits there and stops — it never pushes and never opens a pull request; publishing is yours. So when it reports: upload its branch, open or update the PR with the review tier in the body, and post the review or the comment replies it drafted under its name — nothing to publish when it only reviewed. Then relay what changed, what is still open and what the worker could not do. Never merge — report and let the human merge — and never push to the trunk branch. Do not stop before the worker has reported.`;
 	if (kind === "review")
 		return `${head}\n\nHave it reviewed. The worker reads \`gh pr view ${n} -R ${repo}\` and \`gh pr diff ${n} -R ${repo}\`, reads the code around the change, and returns one verdict — approve, request changes or comment — with the body text and the files and lines it is unsure about. Do not touch the code; you post that verdict as \`gh pr review ${n} -R ${repo} --comment --body-file -\` (use --request-changes if something must change before it lands).${common}`;
 	if (kind === "checks")
@@ -239,6 +236,12 @@ export default class PullRequests extends View {
 		this.expanded = new Set();
 		this.tmp = `${appHome()}/review-note.json`;
 		this.tmpLast = null;
+		// The space records, read once per refresh: the buttons route from these alone.
+		this.recordsCache = null;
+		// What the selected pull request routes to: { folder, space } once it is known.
+		this.route = null;
+		// Set when nothing owns the repository, so the view can offer to make a space.
+		this.needSpace = null;
 		this.folded = `${appHome()}/prs-collapsed.json`;
 		this.foldedLast = null;
 		this.liveBusy = false;
@@ -414,6 +417,8 @@ export default class PullRequests extends View {
 
 	/** A full refresh: the search, then a live pass so the new rows have statuses too. */
 	full(cx) {
+		// One refresh, one reading of the records: the guard writes them, not this mod.
+		this.recordsCache = null;
 		this.refresh(cx, () => this.livePass(cx));
 	}
 
@@ -474,6 +479,7 @@ export default class PullRequests extends View {
 	loadDiff(pr, cx) {
 		if (!pr) return;
 		this.diff = { rows: [], width: 600, key: pr.key, loading: true };
+		this.route = null;
 		cx.notify();
 		cx.spawn(async (cx) => {
 			const result = await gh(["pr", "diff", String(pr.number), "-R", pr.repo], 120000);
@@ -483,8 +489,47 @@ export default class PullRequests extends View {
 			const rows = parseDiff(shown.join("\n"));
 			const width = Math.max(400, ...rows.map((r) => (r.text.length + 1) * 6.6 + 70));
 			this.diff = { rows, width, key: pr.key, loading: false };
+			// Where the four buttons would land, said before they are pressed.
+			const message = await this.routeFor(pr);
+			// A click that moved on while this was resolving keeps its own route.
+			if (this.diff.key !== pr.key) return;
+			this.route = message;
 			cx.notify();
 		});
+	}
+
+	/**
+	 * The records in ~/.pi/state/spaces, read once per refresh: `ls` for the slugs, then the
+	 * record itself. Nothing is written here — `bin/space` and the guard own these files.
+	 */
+	async records() {
+		if (this.recordsCache) return this.recordsCache;
+		const listed = await exec("ls", ["-1", SPACES_DIR], { timeout: 8000 }).catch(() => null);
+		const slugs = (listed?.code === 0 ? listed.stdout : "").split("\n").map((s) => s.trim()).filter(Boolean);
+		const records = [];
+		for (const slug of slugs) {
+			let raw = null;
+			try {
+				raw = await readTextFile(`${SPACES_DIR}/${slug}/space.json`);
+			} catch {
+				raw = null;
+			}
+			if (!raw) continue;
+			try {
+				records.push(JSON.parse(raw));
+			} catch {
+				// A record the person half-edited is not a route, and not this mod's to repair.
+			}
+		}
+		this.recordsCache = records;
+		return records;
+	}
+
+	/** Which space owns this pull request's repository, and the clone that decided it. */
+	async routeFor(pr) {
+		const folder = await this.folderFor(pr.repo);
+		const space = spaceForFolder(await this.records(), folder);
+		return { folder, space };
 	}
 
 	/** The rows of the left column: a header per repository, then its pull requests. */
@@ -771,33 +816,63 @@ export default class PullRequests extends View {
 	}
 
 	/**
-	 * Starts one button's job as a brand-new agent: a new tab in the big-boss-pi
-	 * space, with the job as its first message. An agent that is already running is
-	 * never touched — that pane belongs to the person using it.
+	 * Starts one button's job as a brand-new agent, in the space that owns the PR's
+	 * repository: a tab there, in the space's own project, with the job as its first
+	 * message. An agent that is already running is never touched — that pane belongs
+	 * to the person using it. No space, no agent: the view says which repository has
+	 * none and offers to make one, and this mod never creates a space itself.
 	 */
 	spawnAgent(kind, pr, quote, cx) {
 		this.error = "";
+		this.needSpace = null;
 		const name = `${pr.repo.split("/")[1]}#${pr.number} ${kind === "line" ? "note" : kind}`;
 		cx.spawn(async (cx) => {
-			// The clone is located only to be named: the new agent hands the job to a
-			// worker whose cwd is that clone.
-			const folder = await this.folderFor(pr.repo);
-			const text = task(kind, pr, quote, folder);
-			const argv = [await this.piPath()];
-			// No await between looking the space up and making it, so two clicks in a
-			// row can never make two boss spaces.
-			const boss = bossSpace();
-			try {
-				if (boss) run("tab.new", { space: boss.id, name, folder: AGENT_FOLDER, argv, task: text });
-				else run("space.new", { name: BOSS_SPACE, folder: AGENT_FOLDER, argv, task: text });
-			} catch (e) {
-				this.error = `could not start ${name} in ${AGENT_FOLDER}: ${e?.message ?? e}`;
+			// The clone decides the route: the space's project is that clone or its ancestor.
+			const { folder, space } = await this.routeFor(pr);
+			if (!space) {
+				this.needSpace = { name: spaceName(pr.repo), folder };
+				// The line under the buttons says the same thing the message does.
+				this.route = { folder, space: null };
+				this.error = noSpaceMessage(pr.repo, folder);
+				this.notice = "";
 				cx.notify();
 				return;
 			}
-			this.notice = `${this.notice ? this.notice + " · " : ""}started ${name} as a new agent in ${AGENT_FOLDER}${folder ? `, to delegate into ${folder}` : `, to clone ${pr.repo} first`}`;
+			const text = task(kind, pr, quote, folder, space);
+			const argv = [await this.piPath()];
+			try {
+				run("tab.new", { space: space.id || space.name, name, folder: space.project, argv, task: text });
+			} catch (e) {
+				this.error = `could not start ${name} in space ${space.name}: ${e?.message ?? e}`;
+				cx.notify();
+				return;
+			}
+			this.error = "";
+			this.needSpace = null;
+			this.notice = `started ${name} in space ${space.name}`;
 			cx.notify();
 		});
+	}
+
+	/**
+	 * The one way out of "no space owns it": open the durable mod's New form with the name
+	 * and folder already in hand. If that mod is not installed the line says so, with the
+	 * command that works without it.
+	 */
+	createSpace(cx) {
+		const need = this.needSpace;
+		if (!need) return;
+		try {
+			run("durable.new", { name: need.name, project: need.folder });
+			// The next press reads the records again, so the space just made is found.
+			this.recordsCache = null;
+			this.error = "";
+			this.needSpace = null;
+			this.notice = `durable.new is open for ${need.name} — create the space, then press the button again`;
+		} catch (e) {
+			this.error = `durable.new did not open (${e?.message ?? e}) — install herdr-mods/durable, or run: ~/.pi/bin/space new --name ${need.name} --project ${need.folder}`;
+		}
+		cx.notify();
 	}
 
 	/** The changed line under the cursor, if any — only real lines take a note. */
@@ -852,6 +927,14 @@ export default class PullRequests extends View {
 			if (action) this.startAgent(action.key, cx);
 		} else return;
 		cx.stop_propagation();
+	}
+
+	/** The line under the four buttons: where they land, or which repository has no space. */
+	routeLine(pr) {
+		if (!pr) return "";
+		if (!this.route) return `→ looking for the space that owns ${pr.repo}…`;
+		if (this.route.space) return routeLabel(this.route.space);
+		return `no space owns ${this.route.folder ?? pr.repo} — press a button for the way out`;
 	}
 
 	textButton(id, label, on, primary, t) {
@@ -1180,7 +1263,8 @@ export default class PullRequests extends View {
 									this.textButton(`prs-agent-${action.key}`, `${i + 1} ${action.label}`, (_e, cx) => this.startAgent(action.key, cx), false, t),
 								),
 							),
-					),
+					)
+					.child(div().text_size(10).text_color(t.dim).child(this.routeLine(this.current))),
 			);
 	}
 
@@ -1202,7 +1286,14 @@ export default class PullRequests extends View {
 						.py(3)
 						.text_size(11)
 						.text_color(this.error ? t.blocked : t.done)
-						.child(this.error || this.notice),
+						.children((this.error || this.notice).split("\n").map((line) => div().child(line)))
+						.when(Boolean(this.needSpace), (e) =>
+							e.child(
+								div()
+									.py(3)
+									.child(this.textButton("prs-create-space", "create a space for it", (_e, cx) => this.createSpace(cx), true, t)),
+							),
+						),
 				),
 			)
 			.child(h_flex().flex_1().min_h(0).items_stretch().child(this.list(t, cx)).child(this.detail(t, cx)));
