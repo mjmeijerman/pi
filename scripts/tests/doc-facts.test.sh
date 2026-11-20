@@ -179,6 +179,39 @@ table 'jev' 'typesafe' 'localhost|11434|ollama' 'agent/AGENTS.md' 'jev-model.mjs
 check
 expect_fail_with 'FAIL doc-facts' 'agent/AGENTS.md' 'the table is stale'
 
+# --------------------------- a pull request opened with a body the gate rejects --
+# The playbook is the instruction a person and a boss agent follow before opening a
+# PR by hand, and the gate red it produced (pr-tier on 5 branches, 2026-11-20) is
+# the measure: a filled body has no `Mission:` or `Review tier:` line, so the
+# command in the doc decides whether the gate can pass. planted, not real: the
+# real tree is the last case.
+case_start "a doc that opens a pull request with a filled body fails"
+table 'gh pr create' '--body-file' '--fill' 'docs/agent-playbook.md' ''
+doc docs/agent-playbook.md <<'DOC'
+# Opening the pull request
+
+The body is a file, so `--body-file` is what to pass.
+
+```bash
+git push -u origin fix/date-parser-tz
+gh pr create --base trunk --fill
+gh pr checks <n>
+```
+DOC
+check
+expect_fail_with 'FAIL doc-facts' 'docs/agent-playbook.md:' 'sits with'
+
+case_start "the same doc passes once the body is a file the gate can read"
+table 'gh pr create' '--body-file' '--fill' 'docs/agent-playbook.md' ''
+doc docs/agent-playbook.md <<'DOC'
+```bash
+make pr-check BODY=/tmp/pr-body.md
+gh pr create --base trunk --body-file /tmp/pr-body.md
+```
+DOC
+check
+expect_pass_with 'PASS doc-facts'
+
 # --------------------------------------------------- the real tree stays green --
 case_start "this checkout passes the check, so the table and the docs agree"
 run bash "$ROOT_DIR/scripts/harness-check.sh" --root "$ROOT_DIR" --verify-doc-facts

@@ -49,3 +49,16 @@ local-run|local_llm	11434|ollama|qwen3\.8:27b	typesafe	agent/AGENTS.md agent/ski
 # agree. No module field: the transport is an argument in install-lib.mjs, not a
 # url in a bin/ script.
 git clone	https://github\.com	git@github\.com	INSTALL.md README.md docs/install.md
+
+# A pull request body is a file, because the body gates read three lines a filled
+# body cannot have: `Mission:`, `Review tier:`, and `Test change:` when a test
+# moved beside its source (scripts/pr-gate.sh, .github/workflows/pr-tier.yml).
+# The learner path was fixed on 2026-11-17 — scripts/learn-publish.sh writes
+# --body-file and runs the gate before it spawns anything. The playbook is what a
+# person and a boss agent read before opening a PR by hand, and it still printed
+# the filled form, so pr-tier was red on 5 branches in the queue written
+# 2026-11-20T14-27 (test change justified x4, review tier x2, mission stated x1)
+# with 0 worker reports: a body that never had the lines is not a failure a worker
+# can report. No module field: the gate is a shell script, and a filename here
+# would promise a comparison the table does not make.
+gh pr create	--body-file	--fill	docs/agent-playbook.md

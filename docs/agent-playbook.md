@@ -155,7 +155,9 @@ Non-negotiable, enforced by `merge-guard.ts`:
 
 1. Never commit on trunk. Branch first: `git switch -c <type>/<kebab-name>`.
 2. Conventional commit, subject ≤ 72 chars, body explains *why*.
-3. Push the branch, open a PR against `trunk` with What / Why / How / Testing.
+3. Push the branch, open a PR against `trunk` with What / Why / How / Testing, and the
+   three lines the body gates read: `Mission:`, `Review tier:`, and `Test change:` when a
+   test moved beside its source (`specs/areas/pr-gates.md`).
 4. Merging is the user's decision. Say yes out loud, then `/mergeguard allow` and run the
    single merge command. A green CI run is not permission.
 5. One branch = one logical change. If the PR needs a "stacked" explanation, split the work
@@ -165,7 +167,10 @@ Non-negotiable, enforced by `merge-guard.ts`:
 git switch -c fix/date-parser-tz
 git commit -m "fix(parser): handle timezone offsets"
 git push -u origin fix/date-parser-tz
-gh pr create --base trunk --fill
+# The body is a file, not a `--fill` summary of the commits: the gates read
+# `Mission:`, `Review tier:` and `Test change:`, and a filled body never has them.
+make pr-check BODY=/tmp/pr-body.md      # the same script pr-tier runs, in seconds
+gh pr create --base trunk --body-file /tmp/pr-body.md
 gh pr checks <n>          # then, and only then, ask for the merge
 ```
 
@@ -240,7 +245,7 @@ pisandbox -- pi                        # same, sandboxed
 
 # git / GitHub
 git switch -c feat/short-name
-gh pr create --base trunk --fill
+gh pr create --base trunk --body-file /tmp/pr-body.md
 gh pr checks <n>
 
 # harness maintenance
