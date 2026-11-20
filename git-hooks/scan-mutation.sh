@@ -80,10 +80,43 @@ done
 	skip "agent/stryker.conf.json is missing in $ROOT — no mutation run, and none claimed"
 command -v node >/dev/null 2>&1 ||
 	skip "node is not on PATH, so stryker cannot run"
-if [ ! -x "$ROOT/agent/node_modules/.bin/stryker" ]; then
+
+# stryker_from_main — the main checkout's stryker binary, for a git worktree.
+#
+# A worktree is a checkout without its own node_modules: `git worktree add`
+# copies tracked files and nothing else. So the availability check below failed
+# in every worker's worktree and the gate skipped by name — honestly, and
+# uselessly, because the survivor then arrived in CI, which is the late red
+# round this hook exists to prevent. Measured on 2026-11-20: 32 of the 44
+# worktrees of this repo had no agent/node_modules.
+#
+# The binary is the same install either way. `--git-common-dir` is the main
+# checkout's .git, so its parent is the tree that has node_modules. A normal
+# checkout returns its own .git, and the `"$main" != "$1"` guard keeps this
+# from claiming a fallback that is the tree itself.
+stryker_from_main() {
+	local common main
+	common="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+	[ -n "$common" ] || return 1
+	main="$(dirname -- "$common")"
+	[ "$main" != "$1" ] || return 1
+	[ -x "$main/agent/node_modules/.bin/stryker" ] || return 1
+	printf '%s\n' "$main/agent/node_modules/.bin/stryker"
+}
+
+STRYKER_BIN=""
+if [ -x "$ROOT/agent/node_modules/.bin/stryker" ]; then
+	STRYKER_BIN="$ROOT/agent/node_modules/.bin/stryker"
+elif STRYKER_BIN="$(stryker_from_main "$ROOT")"; then
+	printf 'mutation-gate: %s is a worktree with no node_modules; running the main checkout stryker\n' "$ROOT"
+else
+	STRYKER_BIN=""
 	( cd "$ROOT/agent" && npx --no-install stryker --version >/dev/null 2>&1 ) ||
-		skip "no stryker in $ROOT/agent/node_modules and npx --no-install failed — run npm ci in agent/"
+		skip "no stryker in $ROOT/agent/node_modules, no main checkout to borrow one from, and npx --no-install failed — run npm ci in agent/"
 fi
+# mutate-changed.sh prefers this over its own ./node_modules: it is the same
+# install, and in a worktree it is the only one there is.
+export STRYKER_BIN
 
 # The pushed range and the range mutate-changed.sh derives are not the same
 # question: it diffs against origin/trunk. A branch whose extension commits are
@@ -132,7 +165,7 @@ fi
 if [ "$RC" -ne 0 ]; then
 	{
 		printf 'mutation-gate: refusing the push — scripts/mutate-changed.sh exited %s after %ss\n' "$RC" "$ELAPSED"
-		SURVIVORS="$(grep -a -e '\[Survived\]' -e 'Final mutation score' -- "$LOG" | head -10)"
+		SURVIVORS="$(grep -a -e '\[Survived\]' -e '\[NoCoverage\]' -e 'Final mutation score' -- "$LOG" | head -10)"
 		if [ -n "$SURVIVORS" ]; then
 			printf 'mutation-gate: the run printed:\n'
 			printf '%s\n' "$SURVIVORS" | sed 's/^/   /'
@@ -152,14 +185,23 @@ fi
 # here to prevent, so a printed survivor refuses the push too. Measured:
 # flipping one comparison in agent/extensions/lib/usage-format.ts scores 80.00,
 # prints `[Survived] EqualityOperator`, and exits 0 — CI red, local green.
-SURVIVORS="$(grep -a -c '\[Survived\]' -- "$LOG")"
-if [ "${SURVIVORS:-0}" -gt 0 ]; then
+#
+# A mutant no test covers counts too. break 100 is a threshold on stryker's
+# `mutationScore`, and that score's denominator is `totalValid = killed +
+# timeout + survived + noCoverage` (mutation-testing-metrics
+# calculateMetrics.js, toMetrics) — a line the branch added and no test runs is
+# an undetected mutant and lands the score under 100, while it prints
+# `[NoCoverage]`, not `[Survived]`. The grep that had only the survivor status
+# therefore said "push allowed" about a run CI would fail.
+UNDETECTED="$(grep -a -c -E '\[(Survived|NoCoverage)\]' -- "$LOG")"
+if [ "${UNDETECTED:-0}" -gt 0 ]; then
 	{
-		printf 'mutation-gate: refusing the push — %s surviving mutant(s) after %ss\n' "$SURVIVORS" "$ELAPSED"
+		printf 'mutation-gate: refusing the push — %s undetected mutant(s) after %ss\n' "$UNDETECTED" "$ELAPSED"
 		printf 'mutation-gate: agent/stryker.conf.json has break null, so the local run exited 0;\n'
-		printf 'mutation-gate: the PR job derives break 100 from the same config and fails on these.\n'
+		printf 'mutation-gate: the PR job derives break 100 from the same config and fails on these,\n'
+		printf 'mutation-gate: and "undetected" is survived + noCoverage, which is the score it reads.\n'
 		printf 'mutation-gate: the run printed:\n'
-		grep -a -A2 '\[Survived\]' -- "$LOG" | head -20 | sed 's/^/   /'
+		grep -a -A2 -E '\[(Survived|NoCoverage)\]' -- "$LOG" | head -20 | sed 's/^/   /'
 		printf 'mutation-gate: override on purpose: git push --no-verify (skips every local hook, the secret scan too)\n'
 	} >&2
 	exit 1

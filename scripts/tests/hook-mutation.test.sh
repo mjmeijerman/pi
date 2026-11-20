@@ -167,6 +167,34 @@ case "$ERR$OUT" in
 *) pass "no pass line" ;;
 esac
 
+# --- an uncovered mutant also refuses: break 100 counts it ------------------
+# stryker's mutationScore is (killed + timeout) / (killed + timeout + survived +
+# noCoverage), so a line the branch added and no test runs is undetected and
+# lands under 100 — and it prints [NoCoverage], never [Survived]. A grep that
+# reads only the survivor status calls that run a pass while CI calls it red.
+case_start "uncovered mutant printed, run exits 0"
+(
+	cd "$REPO" && mkdir -p agent/extensions &&
+		printf 'export const u = 9\n' >agent/extensions/unc.ts &&
+		git add -A && git commit -q -m 'feat: extension'
+)
+stub 'printf "[NoCoverage] ConditionalExpression\nextensions/unc.ts:1:1\n"; printf "Final mutation score 95.00\n"; exit 0'
+run_hook "$(git -C "$REPO" rev-parse HEAD)"
+[ "$RC" -ne 0 ] && pass "refuses the push (exit $RC)" ||
+	fail "an uncovered mutant was read as a pass" "stdout: $OUT" "stderr: $ERR"
+case "$ERR$OUT" in
+*'[NoCoverage] ConditionalExpression'*) pass "quotes the uncovered mutant" ;;
+*) fail "the uncovered mutant was not quoted" "stderr: $ERR" ;;
+esac
+case "$ERR$OUT" in
+*'noCoverage'*) pass "says the score counts it" ;;
+*) fail "does not say why noCoverage is a refusal" "stderr: $ERR" ;;
+esac
+case "$OUT$ERR" in
+*'push allowed'*) fail "an uncovered mutant was reported as allowed" "stdout: $OUT" ;;
+*) pass "no pass line" ;;
+esac
+
 # --- test files are not in scope -------------------------------------------
 case_start "extension test-only push"
 (
@@ -236,6 +264,66 @@ case "$OUT$ERR" in
 *'skip'*'stryker'*) pass "names the missing stryker" ;;
 *) fail "no named skip for the missing dependency" "stdout: $OUT" "stderr: $ERR" ;;
 esac
+
+# --- a worktree borrows the main checkout's stryker ----------------------
+# `git worktree add` copies tracked files and nothing else, so a worktree has no
+# agent/node_modules unless someone ran npm ci inside it (measured 2026-11-20:
+# 32 of this repo's 44 worktrees had none). The gate used to skip by name there
+# — honestly and uselessly — and the survivor arrived in CI instead of at the
+# push. The install is the same one either way, so the hook resolves it through
+# --git-common-dir and hands it to mutate-changed.sh as STRYKER_BIN.
+case_start "worktree without node_modules"
+# The stub is written here, not through stub(): its body has to read
+# STRYKER_BIN, which a generating heredoc would expand away. REPO is exported so
+# the hook's child sees the same path.
+export REPO
+cat >"$REPO/scripts/mutate-changed.sh" <<'MUTATE_STUB'
+#!/usr/bin/env bash
+printf 'ran\n' >>"$REPO/ran.txt"
+printf 'bin=%s\n' "${STRYKER_BIN:-unset}" >"$REPO/bin.txt"
+printf 'Final mutation score 100.00\n'
+exit 0
+MUTATE_STUB
+chmod +x "$REPO/scripts/mutate-changed.sh"
+(
+	cd "$REPO" && git add -A && git commit -q -m 'chore: mutation stub'
+)
+WT="$WORK/case$CASE_N-wt"
+if git -C "$REPO" worktree add -q "$WT" -b wt 2>/dev/null; then
+	(
+		cd "$WT" && mkdir -p agent/extensions &&
+			printf 'export const k = 11\n' >agent/extensions/wt.ts &&
+			git add -A && git commit -q -m 'feat: extension in a worktree'
+	)
+	# The worktree is a fresh checkout: the fixture's node_modules is tracked, so
+	# take it away here to get the state a real worktree is in.
+	rm -rf "$WT/agent/node_modules"
+	if [ -e "$WT/agent/node_modules" ]; then
+		fail "the worktree fixture has node_modules, so it cannot show the fallback"
+	else
+		pass "the worktree has no node_modules of its own"
+	fi
+	rm -f "$REPO/ran.txt" "$REPO/bin.txt"
+	OUT="$(cd "$WT" && bash "$HOOK" <<<"refs/heads/wt $(git rev-parse HEAD) refs/heads/wt $BASE_SHA" 2>"$WORK/err")"
+	RC=$?
+	ERR="$(cat "$WORK/err")"
+	[ "$RC" -eq 0 ] && pass "exits 0" || fail "expected exit 0, got $RC" "stderr: $ERR"
+	case "$OUT$ERR" in
+	*'skip'*'stryker'*) fail "the gate skipped a worktree push" "stdout: $OUT" "stderr: $ERR" ;;
+	*) pass "no skip line" ;;
+	esac
+	[ -f "$REPO/ran.txt" ] && pass "the gate ran" ||
+		fail "the mutation run never started in the worktree" "stdout: $OUT" "stderr: $ERR"
+	case "$OUT$ERR" in
+	*'is a worktree with no node_modules'*) pass "names the borrowed install" ;;
+	*) fail "does not say which stryker it used" "stdout: $OUT" "stderr: $ERR" ;;
+	esac
+	[ "$(cat "$REPO/bin.txt" 2>/dev/null)" = "bin=$REPO/agent/node_modules/.bin/stryker" ] &&
+		pass "hands the main checkout's binary to mutate-changed.sh" ||
+		fail "mutate-changed.sh did not receive the main checkout's stryker" "bin.txt: $(cat "$REPO/bin.txt" 2>/dev/null)" "expected: $REPO/agent/node_modules/.bin/stryker"
+else
+	fail "git worktree add failed; the case could not run"
+fi
 
 # --- a capped run refuses, and never prints a pass ------------------------
 case_start "cap hit"

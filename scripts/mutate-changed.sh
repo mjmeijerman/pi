@@ -64,6 +64,11 @@
 #                      print how many were deferred to the weekly run (0 = no cap)
 #   --mutants-file FILE  read the mutant enumeration from FILE instead of
 #                      instrumenting; the test seam for --cap
+#
+# STRYKER_BIN names the stryker to run. git-hooks/scan-mutation.sh sets it to the
+# main checkout's binary when the gate fires inside a worktree, which has no
+# node_modules of its own; unset (CI, `make mutate-changed`) it resolves to
+# ./node_modules/.bin/stryker and then npx, as before.
 # ============================================================================
 set -uo pipefail
 
@@ -237,6 +242,11 @@ cd "$ROOT/agent" || {
 # the value on commas and keeps only the last --mutate it is given, so a
 # repeated flag silently mutates one hunk and calls the rest covered.
 specs="$(printf '%s\n' "$ranges" | paste -sd, -)"
+# An explicit binary wins: the caller may be a worktree borrowing the main
+# checkout's install through STRYKER_BIN (git-hooks/scan-mutation.sh).
+if [ -n "${STRYKER_BIN:-}" ] && [ -x "${STRYKER_BIN}" ]; then
+	exec "$STRYKER_BIN" run --mutate "$specs" --force
+fi
 if [ -x ./node_modules/.bin/stryker ]; then
 	exec ./node_modules/.bin/stryker run --mutate "$specs" --force
 fi
