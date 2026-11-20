@@ -123,6 +123,29 @@ test("a learn branch already merged into trunk is litter, not an unfinished run"
 	assert.deepEqual(items.filter((item) => item.status === "FAIL"), [], "a landed lesson needs no pull request");
 });
 
+test("a lesson that landed on trunk under another sha is litter, not an unfinished run", () => {
+	const { dir, git } = fixture({ ageMin: 300 });
+	// A publish rebases the learner's branch before it pushes, so the commit that
+	// reaches trunk carries another sha and the learner's ref is no longer an
+	// ancestor of trunk. A cherry-pick reproduces exactly that: new sha, same patch.
+	git("cherry-pick", "learn/learn-13-22");
+	const items = check(dir);
+	assert.deepEqual(items.filter((item) => item.status === "FAIL"), [], "a landed lesson needs no pull request");
+	assert.equal(items.at(-1).status, "PASS");
+});
+
+test("a learn branch trunk does not carry is still an unfinished run, even when trunk moved on", () => {
+	const { dir, commitAt } = fixture({ ageMin: 300 });
+	// The negative control for the case above: trunk gaining a commit of its own
+	// must not turn an unlanded lesson into a pass.
+	writeFileSync(join(dir, "trunk-only.txt"), "unrelated work\n");
+	commitAt(200, "trunk: unrelated work");
+	const items = check(dir);
+	assert.equal(items.length, 1);
+	assert.equal(items[0].status, "FAIL");
+	assert.equal(items[0].path, "learn/learn-13-22");
+});
+
 test("the commit body's proposal path is put in the repair command", () => {
 	const { dir } = fixture({
 		body: "learn: judge a death once\n\nProposal: agent/proposals/2026-11-15-11-51-43-805Z.md\n",
