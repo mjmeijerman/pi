@@ -23,16 +23,16 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { guardTaskCommand, gitBashCandidates, schtasksExe, spawnPlan } from '../install-lib.mjs';
+import { gitBashCandidates, guardTaskCommand, hiddenLauncher, schtasksExe, spawnPlan } from '../install-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
 // --- the guard command -------------------------------------------------------
 
-test('guardTaskCommand names the interpreter and quotes both paths', () => {
-	const bashPath = 'C:\\Program Files\\Git\\bin\\bash.exe';
-	const guardPath = 'C:\\Users\\mj\\big-boss-pi\\bin\\guard';
-	const task = guardTaskCommand({ bashPath, guardPath });
+test('guardTaskCommand runs the hidden launcher through wscript.exe, and quotes both paths', () => {
+	const launcherPath = 'C:\\Users\\mj\\.pi\\state\\guard-hidden.vbs';
+	const wscriptPath = 'C:\\Windows\\System32\\wscript.exe';
+	const task = guardTaskCommand({ launcherPath, wscriptPath });
 
 	// One argv element, both paths quoted inside it: an unquoted program path with
 	// a space in it is a scheduled task that starts nothing.
@@ -44,20 +44,25 @@ test('guardTaskCommand names the interpreter and quotes both paths', () => {
 		'/TN',
 		'big-boss-pi-guard',
 		'/TR',
-		`"${bashPath}" "${guardPath}"`,
+		`"${wscriptPath}" "${launcherPath}"`,
 	]);
 	assert.equal(task.program, 'schtasks');
 	// The pasteable form: the whole /TR value quoted once more for cmd.exe, with
 	// the inner quotes escaped the way MSVCRT expects — not doubled.
 	assert.equal(
 		task.registered,
-		'schtasks /Create /F /SC ONLOGON /TN big-boss-pi-guard /TR "\\"C:\\Program Files\\Git\\bin\\bash.exe\\" \\"C:\\Users\\mj\\big-boss-pi\\bin\\guard\\""',
+		'schtasks /Create /F /SC ONLOGON /TN big-boss-pi-guard /TR "\\"C:\\Windows\\System32\\wscript.exe\\" \\"C:\\Users\\mj\\.pi\\state\\guard-hidden.vbs\\""',
 	);
 	assert.equal(task.remove, 'schtasks /Delete /TN big-boss-pi-guard /F');
+	// Never bash.exe directly: bash is a console program, so a task naming it opened
+	// a console window at logon and again on the installer's `/Run`, and the guard
+	// loops — the window never closed. This is the whole change.
+	assert.doesNotMatch(task.tr, /bash\.exe/i);
+	assert.match(task.tr, /wscript\.exe/i);
 });
 
 test('the task is registered through schtasks.exe, so cmd.exe never re-quotes /TR', () => {
-	const task = guardTaskCommand({ bashPath: 'C:\\Program Files\\Git\\bin\\bash.exe', guardPath: 'C:\\b\\bin\\guard' });
+	const task = guardTaskCommand({ launcherPath: 'C:\\Program Files\\Users\\.pi\\state\\guard-hidden.vbs' });
 	const exe = schtasksExe({ systemRoot: 'C:\\Windows' });
 	assert.equal(exe, 'C:\\Windows\\System32\\schtasks.exe');
 	// The trap: a bare name is wrapped in cmd.exe by spawnPlan (it cannot know the
@@ -68,11 +73,13 @@ test('the task is registered through schtasks.exe, so cmd.exe never re-quotes /T
 	assert.deepEqual(spawnPlan(exe, task.args, { platform: 'win32' }), { file: exe, args: task.args, windowsVerbatimArguments: false });
 });
 
-test('guardTaskCommand refuses a command that would start nothing', () => {
-	// No interpreter and no guard path are both "register a task that does
-	// nothing at logon", which is the bug being fixed; say so instead.
-	assert.throws(() => guardTaskCommand({ guardPath: 'C:\\x\\bin\\guard' }), /bash\.exe/);
-	assert.throws(() => guardTaskCommand({ bashPath: 'C:\\Program Files\\Git\\bin\\bash.exe' }), /bin\/guard/);
+test('nothing is registered or written that would start nothing', () => {
+	// No launcher is "register a task that does nothing at logon"; no interpreter or
+	// no guard path is a launcher that starts nothing. Say so instead.
+	assert.throws(() => guardTaskCommand({}), /hidden launcher/);
+	assert.throws(() => hiddenLauncher({ guardPath: 'C:\\x\\bin\\guard', pidPath: 'C:\\x\\pid' }), /bash\.exe/);
+	assert.throws(() => hiddenLauncher({ bashPath: 'C:\\Program Files\\Git\\bin\\bash.exe', pidPath: 'C:\\x\\pid' }), /bin\/guard/);
+	assert.throws(() => hiddenLauncher({ bashPath: 'C:\\Program Files\\Git\\bin\\bash.exe', guardPath: 'C:\\x\\bin\\guard' }), /pid/);
 });
 
 test('gitBashCandidates finds bash from git --exec-path, and only on win32', () => {
@@ -206,7 +213,10 @@ test('the guard task is registered with Git Bash, and the default is the entry i
 	assert.match(out.stdout, /^== guard: registering a Task Scheduler entry at logon \(this is what creates the big-boss-pi space\)$/m);
 	const registered = out.stdout.match(/^   command: (schtasks .*)$/m);
 	assert.ok(registered, 'no registered command line');
-	assert.ok(registered[1].includes(`"\\"/usr/bin/bash\\" \\"${guard}\\""`), registered[1]);
+	// The `/TR` names wscript.exe and the hidden launcher, never bash.exe directly.
+	const launcher = path.join(home, '.pi', 'state', 'guard-hidden.vbs');
+	assert.ok(registered[1].includes(`"\\"C:\\Windows\\System32\\wscript.exe\\" \\"${launcher}\\""`), registered[1]);
+	assert.doesNotMatch(registered[1], /bash/i, registered[1]);
 
 	// No interpreter: registering the file itself would start nothing, so say so
 	// instead of writing a task that silently does nothing at logon.
@@ -221,6 +231,14 @@ test('the guard task is registered with Git Bash, and the default is the entry i
 	assert.equal(byDefault.status, 0, byDefault.stderr);
 	assert.match(byDefault.stdout, /^== guard: registering a Task Scheduler entry at logon/m);
 	assert.match(byDefault.stdout, /^Disable: schtasks \/Delete \/TN big-boss-pi-guard \/F$/m);
+	// Deleting the task is not stopping the guard: the process the launcher started
+	// is still running, with no window to close, so the disable block names the pid
+	// the launcher wrote.
+	assert.match(
+		byDefault.stdout,
+		/^Disable: for \/f "usebackq" %p in \(""?.*guard\.pid"\) do taskkill \/F \/PID %p$/m,
+		byDefault.stdout,
+	);
 
 	// The one way out names the variable that did it, and the line that starts the
 	// guard once by hand.

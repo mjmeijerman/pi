@@ -28,7 +28,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { GUARD_LABEL, GUARD_SPACE_NAME, POSIX_WRAPPERS, homePaths, planFor, samePath, spaceIdIn } from './install-lib.mjs';
+import { GUARD_LABEL, GUARD_LAUNCHER_NAME, GUARD_PID_NAME, GUARD_SPACE_NAME, POSIX_WRAPPERS, homePaths, launcherTargets, planFor, samePath, spaceIdIn } from './install-lib.mjs';
 
 const HOME = process.env.HOME || process.env.USERPROFILE;
 let agentDirArg = null;
@@ -207,24 +207,55 @@ if (PLAN.service === 'systemd') {
 		// first space in `C:\Program Files`.
 		const toRun = (/Task To Run:\s*\r?\n?\s*(.+)/i.exec(query.stdout)?.[1] || '').trim();
 		const named = [...toRun.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-		// Registered is not started. `/SC ONLOGON` alone leaves the task Ready until
-		// the next logon, which is the install that finished with no space: so the
-		// row asks Task Scheduler for the status, and Ready is a failure that says
-		// which command starts it.
-		const status = (/Status:\s*\r?\n?\s*(.+)/i.exec(query.stdout)?.[1] || '').trim();
-		if (/^running$/i.test(status)) pass('scheduled task status', 'Running');
-		else
-			fail(
-				'scheduled task status',
-				`${status || 'no Status line'} — registered but not started, so the big-boss-pi space waits for the next logon; start it: schtasks /Run /TN big-boss-pi-guard`,
-			);
-		if (named.length < 2) fail('scheduled task program', `the registered command line names no quoted interpreter and guard: ${toRun || 'nothing'}`);
+		// Registered is not started, and the task's own `Status:` can no longer answer
+		// it: the task runs a launcher that exits the moment the guard is up, so Task
+		// Scheduler reads Ready while the guard runs. The pid the launcher wrote is the
+		// process, so that is what is asked — and a pid that is not alive is a failure
+		// that names the command which starts it.
+		const pidFile = path.join(home, 'big-boss-pi', 'state', GUARD_PID_NAME);
+		let pid = '';
+		try {
+			pid = (fs.readFileSync(pidFile, 'utf8') || '').trim();
+		} catch {
+			pid = '';
+		}
+		if (!pid) {
+			fail('guard pid', `${pidFile} is missing or empty — the hidden launcher wrote no pid, so the guard never started; start it: schtasks /Run /TN big-boss-pi-guard`);
+		} else if (PLAN.platform === 'win32') {
+			const alive = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH'], { encoding: 'utf8' });
+			if (alive.status === 0 && new RegExp(`\\b${pid}\\b`).test(alive.stdout || ''))
+				pass('guard pid', `${pid} is running (tasklist /FI "PID eq ${pid}" shows it)`);
+			else fail('guard pid', `pid ${pid} from ${pidFile} is not a running process — the guard stopped; start it: schtasks /Run /TN big-boss-pi-guard`);
+		} else pass('guard pid', `${pid} recorded in ${pidFile} (answered on the platform that has the launcher)`);
+		if (named.length < 2) fail('scheduled task program', `the registered command line names no quoted launcher: ${toRun || 'nothing'}`);
 		else {
-			const [bash, guard] = named;
-			if (fs.existsSync(bash)) pass('scheduled task interpreter', bash);
-			else fail('scheduled task interpreter', `${bash} does not exist`);
-			if (fs.existsSync(guard)) pass('scheduled task guard', guard);
-			else fail('scheduled task guard', `${guard} does not exist`);
+			// \`wscript.exe\` is a GUI program: no console. It used to name bash.exe, a
+			// console program, so logon and the installer's own /Run each opened a
+			// window — and the guard loops, so the window never closed.
+			const [program, argument] = named;
+			if (/wscript\.exe$/i.test(program)) pass('scheduled task launcher', `${program} — a GUI program, so no console window`);
+			else
+				fail(
+					'scheduled task launcher',
+					`the task runs ${program} directly — a console program owns a window the guard never closes; it must run wscript.exe "<launcher>"`,
+				);
+			const launcher = path.join(P.piHome, 'state', GUARD_LAUNCHER_NAME);
+			if (samePath(argument, launcher, PLAN.platform)) pass('scheduled task launcher file', argument);
+			else fail('scheduled task launcher file', `${argument || 'nothing'} is not ${launcher}`);
+			mustExist('guard launcher', launcher);
+			// Read the installed file, not the string it would have been generated from:
+			// a launcher naming a bash.exe or a bin/guard this machine does not have
+			// starts nothing, and the task still looks healthy.
+			if (fs.existsSync(launcher)) {
+				const targets = launcherTargets(fs.readFileSync(launcher, 'utf8'));
+				if (!targets) fail('guard launcher command', `${launcher} names no quoted bash.exe and bin/guard`);
+				else {
+					if (fs.existsSync(targets.bashPath)) pass('guard launcher interpreter', targets.bashPath);
+					else fail('guard launcher interpreter', `${targets.bashPath} does not exist — the task starts wscript, and the launcher starts nothing`);
+					if (fs.existsSync(targets.guardPath)) pass('guard launcher guard', targets.guardPath);
+					else fail('guard launcher guard', `${targets.guardPath} does not exist — the guard is what creates the big-boss-pi space`);
+				}
+			}
 		}
 	}
 	assertGuardSpace();

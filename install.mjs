@@ -27,9 +27,11 @@
 //      Windows — installed by default on all three, because `bin/guard` is what
 //      creates and repairs the `big-boss-pi` space: an install that registers no
 //      login entry opens Herdr with no space in it. Plus the weekly timers, which
-//      need systemd and say so. The Task Scheduler entry names the Git for
-//      Windows bash.exe it resolved: Task Scheduler runs a command line, never a
-//      shebang.
+//      need systemd and say so. The task runs a hidden `.vbs` launcher through
+//      `wscript.exe` (no console) that starts `bin/guard` with the Git for
+//      Windows `bash.exe` it resolved: Task Scheduler runs a command line, never
+//      a shebang, and a console program it started owned a window the guard's
+//      loop never closed.
 //
 // Idempotent: a second run changes nothing. Never touches auth.json, sessions,
 // models-store.json. Never prints a key. Never overwrites a file a person may
@@ -71,10 +73,13 @@ import {
 	cmdShim,
 	deepseekApiKey,
 	deepseekKeyState,
+	guardLauncherPath,
+	guardPidPath,
 	guardTaskCommand,
 	herdrAttempt,
 	herdrInstallCommand,
 	helpText,
+	hiddenLauncher,
 	homePaths,
 	isRuntimeState,
 	parseFlags,
@@ -882,9 +887,18 @@ function stepServices() {
 		say('   fix: install Git for Windows, or set PI_GIT_BASH to bash.exe, then re-run');
 		return;
 	}
-	const task = guardTaskCommand({ bashPath: bash, guardPath: guard });
+	// The task runs a hidden launcher, not bash: bash is a console program, so
+	// registering it opened a console window at logon and again on the `/Run`
+	// below, and the guard loops — the window never closed. The launcher starts
+	// the same bash command line with window style 0 and records the pid, so the
+	// Disable line can stop the process the task delete does not reach.
+	const launcher = guardLauncherPath({ piHome: P.piHome });
+	const pidFile = guardPidPath({ bossDir: BOSS_DIR });
+	if (writeText(launcher, hiddenLauncher({ bashPath: bash, guardPath: guard, pidPath: pidFile })))
+		note(`guard launcher (hidden, no console window) -> ${launcher}`);
+	const task = guardTaskCommand({ launcherPath: launcher, pidPath: pidFile });
 	note('guard: registering a Task Scheduler entry at logon (this is what creates the big-boss-pi space)');
-	note(`interpreter: ${bash}`);
+	note(`interpreter: ${bash}   # run hidden by ${launcher}`);
 	say(`   command: ${task.registered}`);
 	// Printed above as the pasteable line, so run()'s own `[dry-run] cmd args`
 	// echo would be a second, differently-quoted spelling of the same thing.
@@ -892,8 +906,9 @@ function stepServices() {
 	// task.exe, not task.program: a bare name goes through cmd.exe, whose quotes
 	// would double the ones inside /TR and register a different command line.
 	else run(task.exe, task.args, { allowFail: true });
-	guardService = { label: `Task Scheduler entry big-boss-pi-guard (${bash})`, remove: task.remove };
+	guardService = { label: `Task Scheduler entry big-boss-pi-guard (hidden: ${launcher})`, remove: task.remove, stop: task.stop };
 	say(`   disable: ${task.remove}`);
+	say(`   disable: ${task.stop}`);
 	return startGuardNow();
 }
 
@@ -1095,6 +1110,10 @@ function summary() {
 		else {
 			say(`${DRY ? 'Would install' : 'Installed'}: ${guardService.label}`);
 			say(`Disable: ${guardService.remove}`);
+			// The delete stops the next logon; the guard this install started is still
+			// running with no window to close, so the launcher's pid file is named
+			// next to it rather than leaving "deleted, still running" to be found out.
+			if (guardService.stop) say(`Disable: ${guardService.stop}`);
 		}
 	}
 	say('');

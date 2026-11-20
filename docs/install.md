@@ -237,7 +237,7 @@ variable one of the two engines or `scripts/install-lib.mjs` reads.
 | `PI_SKIP_SYSTEMD=1` | install | The one way out of the service step: copy the systemd units without enabling them, and register no launchd plist and no scheduled task. The guard is what creates the `big-boss-pi` space, so off Linux this is what leaves Herdr with no space |
 | `PI_SKIP_SERVICES=1` | install | The same switch under a name that is honest on all three systems. Same effect, and the skip line names whichever variable you set |
 | `PI_ENABLE_SERVICES=1` | install | Accepted, and no longer needed: the macOS launchd plist and the Windows scheduled task install by default. Kept so a script written against the old opt-in flag keeps working — it changes nothing |
-| `PI_GIT_BASH` | install | The `bash.exe` the Windows scheduled task runs `bin/guard` with, and the one every `.cmd` shim in `%USERPROFILE%\.local\bin` starts, when the search does not find Git for Windows. Replaces the whole candidate list, so a wrong value is reported instead of silently ignored |
+| `PI_GIT_BASH` | install | The `bash.exe` the hidden Windows launcher runs `bin/guard` with, and the one every `.cmd` shim in `%USERPROFILE%\.local\bin` starts, when the search does not find Git for Windows. Replaces the whole candidate list, so a wrong value is reported instead of silently ignored |
 | `PI_ALLOW_MISSING_PI=1` | both | Skip pi entirely — no question, no install — and carry on with one `== pi binary: PI_ALLOW_MISSING_PI=1 — config only` line. **CI only**: it exists so a runner with no `pi` can prove the config wires up. On a machine you are setting up, let the installer install pi instead |
 | `PI_DRY_RUN=1` | install | The same as `--dry-run`. `setup.mjs` reads the flag and sets this for the engine it calls |
 | `PI_PLATFORM` | both | Override the OS the per-OS plan comes from (`linux`, `darwin`, `win32`) — it exists so one host can exercise all three branches; a real install reads the platform it runs on |
@@ -275,7 +275,7 @@ file you may have edited in place.
 | sandbox | bubblewrap: `pi` runs under `~/.pi/sandbox/pi-sandbox.sh` | not available — one line, no failure | not available natively — WSL2 and Docker provide it: [Sandboxing on Windows](#sandboxing-on-windows) |
 | bin entries | symlinks | symlinks | copies; a symlink needs elevation or Developer Mode. Every bash wrapper (the two in `scripts/`, plus `jev`, `delegate`, `local-run` from the clone) also gets a `<name>.cmd` that runs the resolved `bash.exe` on it, forwards `%*` and returns the exit status — PowerShell, `cmd.exe` and the Herdr menu row can only start a `.cmd`, and the list is read from the engine so a new wrapper is not forgotten |
 | `herdr-app` | `curl … install.sh \| sh` | same | `pwsh -NoProfile -Command "irm … install.ps1 \| iex"`, falling back to `powershell` when PowerShell 7 is not on `PATH` |
-| guard service | systemd user unit, `enable --now` then `restart` when a user manager answers | launchd plist, installed and `kickstart -k`-ed by default (`PI_SKIP_SYSTEMD=1` turns it off) | `schtasks /Create /SC ONLOGON` then `/Run`, installed and started by default (same switch); the task runs `bin/guard` through the Git for Windows `bash.exe` it resolves (see below) |
+| guard service | systemd user unit, `enable --now` then `restart` when a user manager answers | launchd plist, installed and `kickstart -k`-ed by default (`PI_SKIP_SYSTEMD=1` turns it off) | `schtasks /Create /SC ONLOGON` then `/Run`, installed and started by default (same switch); the task runs a generated `~/.pi/state/guard-hidden.vbs` through `wscript.exe` — no console window — and the launcher runs `bin/guard` through the Git for Windows `bash.exe` it resolves (see below) |
 | weekly timers (`pi-evals`, `pi-retro`) | systemd timers, enabled | skipped, one line | skipped, one line |
 | shell rc files updated | `~/.bashrc`, `~/.zshrc` | `~/.zshrc`, `~/.bashrc` | none: the wrapper is POSIX shell, so nothing is written and the summary points at `pi-bare` |
 | `core.hooksPath` spelling | `~/.pi/git-hooks` | same | the node-computed path (not the `/c/Users/…` form Git Bash writes), so a second run is not a change |
@@ -420,24 +420,48 @@ launchctl unload -w ~/Library/LaunchAgents/dev.herdr.big-boss-pi-guard.plist
 launchctl unload -w ~/Library/LaunchAgents/*.plist   # every pi login item
 ```
 
-```powershell
-# Windows
+```cmd
+rem Windows: the delete stops the next logon, the second line stops the guard that
+rem is running now — its pid is in the file the hidden launcher wrote
 schtasks /Delete /TN big-boss-pi-guard /F
+for /f "usebackq" %p in ("%USERPROFILE%\big-boss-pi\state\guard.pid") do taskkill /F /PID %p
 ```
 
-The Windows entry names its interpreter, because Task Scheduler has no shebang:
-`bin/guard` starts `#!/usr/bin/env bash`, and a task pointing at the file itself
-started nothing at all — which is why the `big-boss-pi` space never appeared on
-the first real Windows install. The installer resolves `bash.exe` instead of
-assuming it, and the `.cmd` shims use the same one answer: `PI_GIT_BASH` when
-set, otherwise `bash.exe` as `PATH` has it (skipping `%SystemRoot%\System32`,
-which is the WSL `bash.exe` and not Git Bash), then `git --exec-path` walked up
-to the install root that holds `bin\bash.exe`, then `%ProgramFiles%\Git`,
-the 32-bit counterpart and `%LOCALAPPDATA%\Programs\Git`, each looked for under
-both `bin` and `usr\bin`. It prints the exact command it registered — one `/TR` value, the interpreter and the guard each quoted, so
-`C:\Program Files` survives — and the delete line above. No `bash.exe` means no
-task: the step says so and names `PI_GIT_BASH` instead of registering a task that
-starts nothing.
+The Windows entry shows no window, at logon or at install time. It used to
+register `bash.exe` — a console program — to run `bin/guard`, and the guard is a
+loop that never returns, so the install opened a console window that stayed open
+until the machine went down; the same window came back at every logon. The task
+now runs `wscript.exe "%USERPROFILE%\.pi\state\guard-hidden.vbs"`. wscript is a
+GUI program with no console, and that launcher starts the same Git Bash command
+line with window style 0 (hidden, not waited on) and exits. The guard itself is
+unchanged: same script, same interval, same space. The installer runs the very
+same entry on the spot with `schtasks /Run`, so neither start opens a window.
+
+To see whether it is running, read the pid the launcher leaves beside the guard's
+log, and ask Windows whether it is alive. Task Scheduler reads `Ready` even while
+the guard runs — the launcher is not the loop — so the task's `Status:` is not the
+answer, the pid file is:
+
+```cmd
+schtasks /Query /TN big-boss-pi-guard /FO LIST          rem the entry exists (On Logon)
+type "%USERPROFILE%\big-boss-pi\state\guard.pid"        rem the guard's process id
+tasklist /FI "PID eq <that id>"                         rem and that process is alive
+tail -n 20 ~/big-boss-pi/state/guard.log                rem what it did (Git Bash)
+```
+
+The interpreter is still resolved, not assumed, because Task Scheduler has no
+shebang: `bin/guard` starts `#!/usr/bin/env bash`, and a task pointing at the file
+itself started nothing at all — which is why the `big-boss-pi` space never
+appeared on the first real Windows install. The launcher and the `.cmd` shims use
+that one answer: `PI_GIT_BASH` when set, otherwise `bash.exe` as `PATH` has it
+(skipping `%SystemRoot%\System32`, which is the WSL `bash.exe` and not Git Bash),
+then `git --exec-path` walked up to the install root that holds `bin\bash.exe`,
+then `%ProgramFiles%\Git`, the 32-bit counterpart and
+`%LOCALAPPDATA%\Programs\Git`, each looked for under both `bin` and `usr\bin`.
+It prints the exact command it registered — one `/TR` value, wscript and the
+launcher each quoted, so `C:\Program Files` survives — and the two disable lines
+above. No `bash.exe` means no launcher and no task: the step says so and names
+`PI_GIT_BASH` instead of registering a task that starts nothing.
 
 That login entry installs **and starts** by default on macOS and Windows, like
 the systemd unit does on Linux, and `PI_SKIP_SYSTEMD=1` is the one way out.
@@ -596,7 +620,8 @@ there when Herdr starts. When it is not, the install says
 these three commands — they are the whole diagnosis:
 
 ```bash
-schtasks /Query /TN big-boss-pi-guard /V /FO LIST     # Windows: is the task Running?
+schtasks /Query /TN big-boss-pi-guard /V /FO LIST     # Windows: is the entry registered (and its Task To Run)
+type "%USERPROFILE%\big-boss-pi\state\guard.pid"       # Windows: the pid the launcher started
 launchctl print gui/$(id -u)/dev.herdr.big-boss-pi-guard   # macOS: is the login item loaded?
 tail -n 20 ~/big-boss-pi/state/guard.log              # what the guard itself did
 herdr-app ls                                          # does the app show the space?

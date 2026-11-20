@@ -97,7 +97,7 @@ test('macOS: a default run writes the launchd plist, pointed at bin/guard', (t) 
 
 test('Windows: a default run registers the Task Scheduler entry', (t) => {
 	const home = tempHome(t);
-	const { guard } = cloneWithGuard(home);
+	cloneWithGuard(home);
 
 	// PI_GIT_BASH is the resolution's override and the only way this runs on a host
 	// without Git for Windows; --dry-run keeps a Linux host from asking schtasks.
@@ -106,9 +106,14 @@ test('Windows: a default run registers the Task Scheduler entry', (t) => {
 	assert.match(out.stdout, /^== guard: registering a Task Scheduler entry at logon \(this is what creates the big-boss-pi space\)$/m);
 	const registered = out.stdout.match(/^   command: (schtasks .*)$/m);
 	assert.ok(registered, 'no registered command line');
-	assert.ok(registered[1].includes(`"\\"/usr/bin/bash\\" \\"${guard}\\""`), registered[1]);
+	// wscript.exe and the generated launcher, never bash.exe: bash is a console
+	// program, and the guard is a loop — the window it opened never closed.
+	const launcher = path.join(home, '.pi', 'state', 'guard-hidden.vbs');
+	assert.ok(registered[1].includes(`"\\"C:\\Windows\\System32\\wscript.exe\\" \\"${launcher}\\""`), registered[1]);
+	assert.doesNotMatch(registered[1], /bash/i, registered[1]);
 	assert.match(out.stdout, /^Would install: Task Scheduler entry big-boss-pi-guard \(.*\)$/m);
 	assert.match(out.stdout, /^Disable: schtasks \/Delete \/TN big-boss-pi-guard \/F$/m);
+	assert.match(out.stdout, /^Disable: for \/f "usebackq" %p in \(".*guard\.pid"\) do taskkill \/F \/PID %p$/m);
 });
 
 // Registering is not starting: `/SC ONLOGON` is a promise about the next logon,
