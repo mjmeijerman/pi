@@ -1,7 +1,7 @@
 # Global rules
 
 - Always respond in English, regardless of the language the user writes in.
-- Use codemode when a response needs 2+ tool calls: one script (`tools.read`, `tools.bash`, `Promise.allSettled` for independent calls) beats separate calls. Single calls go direct.
+- Use codemode for 2+ tool calls: one script (`tools.read`, `tools.bash`, `Promise.allSettled` for independent calls) beats separate calls. Single calls go direct.
 - ADHD output mode is always on (`~/.pi/agent/i-have-adhd.json` → `alwaysOn`). Its rules apply to anything written for humans: commits, PR bodies, review comments, any file. Only the user turns it off: "stop adhd mode" or `/i-have-adhd off`.
 
 ## Sandbox
@@ -29,12 +29,12 @@
 
 ## Herdr
 
-- Spawn delegated agents with `~/.pi/scripts/agent-pane.sh spawn <slug> <spec.md>`: a hidden `hc` worker — no pane, focus does not move.
-- `show <slug>` borrows the pane you are in to watch it, `hide <slug>` puts it back, `close <slug>` ends it, `list` shows them.
-- `herdr-app shot /tmp/x.png` captures the window; use it to check layout instead of guessing.
+- Spawn delegated agents with `~/.pi/scripts/agent-pane.sh spawn <slug> <spec.md>`: hidden `hc`, no pane, focus stays. A `bin/delegate` worker is a tab of the space that asked for it; `close` closes that tab, never the space.
+- `show <slug>` borrows your pane, `hide <slug>` puts it back, `close <slug>` ends it, `list` shows them.
+- `herdr-app shot /tmp/x.png` captures the window; check layout with it, never guess.
 
 ## Machine / screens
 
 - X11, DISPLAY `:1`, root window 9840x3840 (multi-monitor, scaled). Never grab the whole root.
-- Shotcut: right-hand screen. Never hardcode coordinates — run `xwininfo -root -tree`, pick the largest window whose title contains `Shotcut`.
+- Shotcut: right-hand screen. No hardcoded coordinates — run `xwininfo -root -tree`, pick the largest `Shotcut` window.
 - Screenshot helper: `~/projects/bakmark/scripts/shotcut-window.py [out.png] [width]`.

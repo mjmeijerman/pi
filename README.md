@@ -131,6 +131,11 @@ no space claims is refused with the `bin/space new` command that fixes it. Specs
 reports and the worker record live in the space, not in one global list. A space
 with no `.git` skips the whole git half: no branch, no worktree, no PR.
 
+A worker is a tab in the space that asked for it, not a space of its own: `spawn`
+opens `herdr-app do tab.new --space <id> --focus false`, so the person stays on the
+tab they were reading, and `close` closes that tab rather than the space — a
+finished worker cannot take the boss's desk with it.
+
 ### Herdr window
 
 `herdr-mods/prs` is a mod for the Herdr app: open pull requests on the left,

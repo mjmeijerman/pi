@@ -29,11 +29,13 @@ cat >"$WORK/stub/herdr-app" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$HERDR_LOG"
 case "$1 $2" in
-"do space.new")
+"do space.new") printf '{"space":"sp1","tab":"tb-boss","pane":"p-boss","terminal":"t-boss"}\n' ;;
+"do tab.new")
 	n=$(($(cat "$HERDR_COUNT" 2>/dev/null || echo 0) + 1))
 	printf '%s' "$n" >"$HERDR_COUNT"
-	printf '{"space":"sp%s","tab":"tb%s","pane":"p%s","terminal":"tr%s"}\n' "$n" "$n" "$n" "$n"
+	printf '{"space":"sp1","tab":"tb%s","pane":"p%s","terminal":"tr%s"}\n' "$n" "$n" "$n"
 	;;
+"do tab.close") printf '{}\n' ;;
 "ls "*) printf '{"spaces":[]}\n' ;;
 *) printf '{}\n' ;;
 esac
@@ -109,9 +111,9 @@ case $OUT in
 *) fail 'it does not say what it saw' "$OUT" ;;
 esac
 RESTARTS=$(grep -c -- '--name w1-r' "$HERDR_LOG")
-if [ "$RESTARTS" = 3 ]; then pass 'three spaces were started'; else fail "space.new ran $RESTARTS times, not 3"; fi
+if [ "$RESTARTS" = 3 ]; then pass 'three tabs were started'; else fail "tab.new ran $RESTARTS times, not 3"; fi
 for n in 1 2 3; do
-	if grep -q -- "--name w1-r$n" "$HERDR_LOG"; then pass "restart $n is space w1-r$n"; else fail "restart $n is not named w1-r$n"; fi
+	if grep -q -- "--name w1-r$n" "$HERDR_LOG"; then pass "restart $n is tab w1-r$n"; else fail "restart $n is not named w1-r$n"; fi
 done
 if [ "$(grep -c '^Restart ' "$SPEC")" = 3 ]; then pass 'the spec records each restart'; else fail 'the spec does not record three restarts'; fi
 if grep -q 'Mission: test fixture' "$SPEC"; then pass 'the spec is appended to, not rewritten'; else fail 'the spec lost its original text'; fi
