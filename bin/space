@@ -66,7 +66,8 @@ cmd_new() {
 
 	need node
 	need herdr-app
-	need hc
+	# No `need hc`: `space new` opens the space through herdr-app and never talks to
+	# herdr-core itself. Demanding hc refused every offline test and every runner.
 
 	local remote=""
 	if [ -n "$clone" ]; then
