@@ -31,7 +31,9 @@ cat >"$WORK/stub/herdr-app" <<'STUB'
 printf '%s\n' "$*" >>"$HERDR_LOG"
 case "$1 $2" in
 "do space.new") printf '{"space":"sp1","tab":"tb1","pane":"p1","terminal":"t1"}\n' ;;
+"do tab.new") printf '{"space":"sp1","tab":"tb2","pane":"p2","terminal":"t2"}\n' ;;
 "do space.close") printf '{}\n' ;;
+"do tab.close") printf '{}\n' ;;
 "ls "*) if [ -f "${HERDR_SPACES:-/nonexistent}" ]; then cat "$HERDR_SPACES"; else printf '{"spaces":[]}\n'; fi ;;
 *) printf '{}\n' ;;
 esac

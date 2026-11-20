@@ -85,6 +85,8 @@ if [ "$RC" -eq 0 ]; then pass 'a folder makes a space'; else fail 'space new fai
 if [ -f "$(record demo)" ]; then pass 'the record is at state/spaces/demo/space.json'; else fail 'no record written'; fi
 if grep -q '"git": false' "$(record demo)"; then pass 'git is false without a .git'; else fail 'git was not recorded false'; fi
 if grep -q '"project": "'"$P"'"' "$(record demo)"; then pass 'the project path is recorded'; else fail 'project path missing'; fi
+# The herdr space id is recorded because `tab.new` needs it: a worker is a tab inside this space.
+if grep -q '"id": "sp1"' "$(record demo)"; then pass "herdr's space id is recorded"; else fail 'the record has no herdr id' "$(cat "$(record demo)")"; fi
 if [ -f "$P/AGENTS.md" ]; then pass 'AGENTS.md is created in the project'; else fail 'AGENTS.md was not created'; fi
 if [ "$(grep -c 'pi-space:begin' "$P/AGENTS.md")" = 1 ]; then pass 'exactly one rules block'; else fail 'the rules block is not exactly one'; fi
 if grep -q 'This space is demo' "$P/AGENTS.md"; then pass 'the block names the space'; else fail 'the block does not name the space'; fi

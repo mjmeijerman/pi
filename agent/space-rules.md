@@ -10,6 +10,9 @@
   it with `delegate wait <slug> --forever` until the report file exists. If the worker dies before
   it reports, restart it with the same spec — three times, then write the report naming what you
   saw. A second worker in this space is what `delegate spawn` refuses, on purpose.
+- A worker arrives as a tab in this space, and its work is about {{PROJECT}}: the tab is opened
+  `--focus false`, so nobody is moved off what they were reading. A finished worker's tab is
+  closed and never reopened, and this space's Boss tab is never closed by anything but the person.
 - A new worker only after the previous pull request is merged. `delegate spawn` enforces it and
   names the PR; when it does, the next action is asking the person to merge, not spawning again.
 - The boss never edits files in {{PROJECT}}. Reading is fine; a change is a worker's job, and its

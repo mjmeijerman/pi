@@ -7,7 +7,10 @@
 #   bin/space forget <slug>
 #
 # A space is one project. It is durable: the record at state/spaces/<slug>/space.json outlives
-# the terminals in it, so later workers can reopen the tabs and read where the work goes.
+# the terminals in it, so later workers can reopen the tabs and read where the work goes. The
+# record carries herdr's id for the space (`id`), because a worker is opened as a tab inside it
+# and `tab.new` takes that id; a record from before the field is filled in by `delegate` from
+# `herdr-app ls`, by name, once.
 # `bin/delegate` reads the space from the directory it is run in, and refuses in a folder no
 # space claims — creating one here is the fix that refusal names.
 #
@@ -102,10 +105,11 @@ cmd_new() {
 	terminal=$(json_field terminal <<<"$out")
 	[ -n "$space" ] || die "could not read the new space id from: $out"
 
-	NAME=$name PROJECT=$project GIT=$git REMOTE=$remote TAB=$tab TERMINAL=$terminal node -e '
+	NAME=$name PROJECT=$project GIT=$git REMOTE=$remote TAB=$tab TERMINAL=$terminal ID=$space node -e '
 		const fs = require("fs");
 		const rec = {
 			name: process.env.NAME,
+			id: process.env.ID || "",
 			project: process.env.PROJECT,
 			git: process.env.GIT === "true",
 			remote: process.env.REMOTE || "",
@@ -163,7 +167,7 @@ cmd_show() {
 	node -e '
 		const fs=require("fs");
 		const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-		const order=["name","project","git","remote","created","uberboss_tab","terminals"];
+		const order=["name","id","project","git","remote","created","uberboss_tab","terminals"];
 		for (const k of order) if (k in j) {
 			const v=j[k];
 			console.log(k+": "+(Array.isArray(v)?(v.length?v.join(", "):"(none)"):(v===true?"true":v===false?"false":(v||"-"))));

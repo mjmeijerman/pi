@@ -15,7 +15,7 @@ fi
 
 #   delegate spawn <slug> --cwd DIR [--space SLUG] [--mode bare|sandboxed|no-net] [--thinking LEVEL]
 #                  [--acceptance] [--allow-matrix --reason TEXT]
-#                  [--override-jev --reason TEXT] [--no-restore] "<task>"
+#                  [--override-jev --reason TEXT] "<task>"
 #   delegate wait <slug> [--space SLUG] [--timeout SECONDS] [--forever]
 #   delegate list [--space SLUG]
 #   delegate close <slug> [--space SLUG] [--merged PR-URL-OR-NUMBER]
@@ -37,25 +37,33 @@ fi
 #
 # A space holds one worker at a time, on a git project only while nothing of its is unmerged.
 # Both are hard refusals, not notes: two workers in one space was the thing spaces exist to stop.
+# `--space X` with a `--cwd` that another space claims is refused naming both, because the work in
+# a space is about that space's project.
+#
 # A project with no `.git` skips git entirely — no branch, no worktree, no trailer, no publish —
 # and its worker leaves the change in the folder for the boss to record.
 #
+# A worker is a tab in the space that asked for it, not a space of its own: the boss shares what
+# it knows with its worker, not its desktop with strangers. It gets that tab, a spec in
+# specs/<slug>.md, and one place to report back: reports/<slug>.md. Its delegation record says
+# `kind: "tab"`; a record written before that field is read as `kind: "space"`, the shape it was
+# (one space per worker), so the two shapes are told apart by the record and not by guessing.
+#
 # `delegate wait <slug> --forever` is the boss's loop: one line per poll, and a worker whose
 # terminal died before it reported is restarted with the same spec (three restarts, then it gives
-# up naming what it saw). Without --forever, wait keeps today's single timeout.
+# up naming what it saw), as a fresh tab in the same space. Without --forever, wait keeps today's
+# single timeout.
 #
-# A worker gets its own Herdr space (never the big-boss-pi space), a spec in specs/<slug>.md,
-# and one place to report back: reports/<slug>.md.
+# Spawning does not move the person's view. `tab.new --focus false` adds the tab last in its
+# space and keeps the shown space and the tab selected in it, so the person stays where they were
+# and the worker is there when they want it. Nothing is selected back afterwards, because nothing
+# was taken away; the tab is named after the worker and the name is the person's to change.
 #
-# Spawning does not move the person's view. space.new always shows the new space, so spawn
-# records the selected space and tab first and selects them again afterwards; on screen you
-# stay where you were, and the worker's space is there when you want it. If the view cannot be
-# read or put back, spawn prints one warning and carries on: a started worker is never thrown
-# away over a view. --no-restore keeps the old behaviour, for watching the worker appear.
-#
-# A worker space never outlives its report: once reports/<slug>.md exists, the space is closed
-# as soon as the report has been relayed. The one exception is a report whose first line reads
-# "DECISION NEEDED: <question>": that marker keeps the space open until the user answers.
+# A worker's tab never outlives its report: once reports/<slug>.md exists, the tab is closed as
+# soon as the report has been relayed, and never reopened. `close` closes that tab and never the
+# space — a worker's tab cannot take the boss's space with it — and the Boss tab itself is never
+# closed by anything but the person. The one exception is a report whose first line reads
+# "DECISION NEEDED: <question>": that marker keeps the tab open until the user answers.
 # `delegate sweep` applies exactly that rule to every tracked worker in one go.
 #
 # A second opinion is a worker that has not seen the code. `delegate spawn SLUG --acceptance
@@ -452,6 +460,16 @@ delegation_field() {
 		const r = j[process.argv[2]];
 		if (r && r[process.argv[3]]) process.stdout.write(String(r[process.argv[3]]));' \
 		"$DELEGATIONS" "${1:-}" "${2:-}"
+}
+
+# delegation_kind <slug> — the shape the record says this worker was started in: `tab` (a tab in
+# the boss's space) or `space` (its own space, before workers became tabs). A record with no
+# `kind` is read as `space`, which is what it was, so an older worker keeps the close and the
+# restart it was started under instead of being guessed at from its other fields.
+delegation_kind() {
+	local kind
+	kind=$(delegation_field "${1:-}" kind)
+	[ "$kind" = tab ] && printf 'tab' || printf 'space'
 }
 
 # herdr_terminals — herdr's own list of terminals (`hc ls --all --json`), read once per run.
@@ -1494,26 +1512,6 @@ worker_thinking_level() {
 	printf '%s' "$out"
 }
 
-# screen_state — the "space tab" the person is looking at, or empty when the window cannot be
-# read (no window, herdr-app error). Never dies: a view that cannot be read must not stop a spawn.
-screen_state() {
-	local out space tab
-	out=$(herdr-app status 2>/dev/null) || return 0
-	space=$(printf '%s' "$out" | json_field space)
-	tab=$(printf '%s' "$out" | json_field tab)
-	[ -n "$space" ] && [ -n "$tab" ] || return 0
-	printf '%s %s' "$space" "$tab"
-}
-
-# restore_focus <space> <tab> — select that space, then that tab, explicitly by id. Returns
-# non-zero instead of dying: the caller warns and the spawn stands.
-restore_focus() {
-	local space=$1 tab=$2
-	herdr-app do space.select --id "$space" >/dev/null 2>&1 || return 1
-	herdr-app do tab.select --id "$tab" >/dev/null 2>&1 || return 1
-	return 0
-}
-
 # fresh_trunk_branch <cwd> — the branch origin's HEAD points at, else the first of
 # trunk/main/master the remote actually has; empty when the remote has none of them.
 #
@@ -1683,8 +1681,8 @@ EOF
 }
 
 cmd_spawn() {
-	local slug="" cwd="" space_opt="" mode="" thinking="" task="" override_jev=0 allow_matrix=0 reason="" runner="" no_restore=0 acceptance=0
-	[ "$#" -ge 1 ] || die 'usage: delegate spawn <slug> --cwd DIR [--space SLUG] [--mode M] [--thinking LEVEL] [--acceptance] [--allow-matrix --reason TEXT] [--override-jev --reason TEXT] [--no-restore] "<task>"'
+	local slug="" cwd="" space_opt="" mode="" thinking="" task="" override_jev=0 allow_matrix=0 reason="" runner="" acceptance=0
+	[ "$#" -ge 1 ] || die 'usage: delegate spawn <slug> --cwd DIR [--space SLUG] [--mode M] [--thinking LEVEL] [--acceptance] [--allow-matrix --reason TEXT] [--override-jev --reason TEXT] "<task>"'
 	slug=$1; shift
 	local words=()
 	while [ "$#" -gt 0 ]; do
@@ -1697,7 +1695,6 @@ cmd_spawn() {
 		--allow-matrix) allow_matrix=1; shift ;;
 		--override-jev) override_jev=1; shift ;;
 		--reason) reason=${2:-}; shift 2 ;;
-		--no-restore) no_restore=1; shift ;;
 		--*) die "unknown option $1" ;;
 		*) words+=("$1"); shift ;;
 		esac
@@ -1709,6 +1706,20 @@ cmd_spawn() {
 	[ -n "$task" ] || die "spawn needs a task description"
 	# The space decides where the spec, the report and the record live. It is read from --cwd
 	# unless --space names it, and a folder no space claims is refused before jev costs a call.
+	# --space against a --cwd another space claims is refused naming both: a space is one project,
+	# so a worker started in it is about that project's folder and no other. Both names are given,
+	# because the fix is one of two commands and the reader must see which way they were wrong.
+	if [ -n "$space_opt" ] && space_valid_slug "$space_opt" && space_exists "$space_opt"; then
+		local cwd_space
+		cwd_space=$(space_resolve "$cwd")
+		if [ -n "$cwd_space" ] && [ "$cwd_space" != "$space_opt" ]; then
+			die "--space $space_opt and --cwd $cwd disagree: $cwd belongs to space $cwd_space, and the work in a space is about that space's project.
+Start the worker in the space that owns the folder:
+  $self_bin/delegate spawn <slug> --cwd $cwd \"<task>\"
+Or read what space $space_opt is about:
+  $self_bin/space show $space_opt"
+		fi
+	fi
 	local sp
 	sp=$(need_space "$space_opt" "$cwd") || exit 1
 	use_space "$sp"
@@ -2004,7 +2015,7 @@ ACCEPTANCE
 	# One spawn, one worker, one space. A second worker in the same space is the refusal two lines
 	# up; a task that needs more is a second spawn, after this one merged, in its own space.
 	local spawn_slug=$slug spec=$SPECS/$slug.md report=$REPORTS/$slug.md
-	local argv before out space tab pane terminal
+	local argv out space tab pane terminal
 	local rule2 rule5 rule7
 	if [ "$is_git" = true ]; then
 		rule2="2. Never switch \`$cwd\` (the boss reads it). Cut a worktree inside the repo:
@@ -2093,7 +2104,7 @@ Output (last 20 lines):
 \`delegate close\` refuses a report with no Evidence block or with a placeholder left in.
 EOF
 
-		# The skeleton is written before the space exists: the worker starts inside `space.new`'s
+		# The skeleton is written before the tab exists: the worker starts inside `tab.new`'s
 		# argv, so this is the last point at which the five lines every report carries are
 		# guaranteed to be there before it writes prose. One function, because a restarted worker
 		# gets the same skeleton and two copies of it would drift.
@@ -2101,44 +2112,39 @@ EOF
 
 	argv=$(node -e 'process.stdout.write(JSON.stringify(["sh","-lc",process.argv[1]]))' \
 		"cd $(printf '%q' "$cwd") && export AGENT_SLUG=$(printf '%q' "$spawn_slug") && exec $(printf '%q' "$runner") --thinking $(printf '%q' "$jev_level") -a")
-	# space.new has no hidden or background mode: the new space is shown, which takes the person
-	# off the space and tab they were reading. Note both ids now, explicitly, to put them back.
-	before=""
-	if [ "$no_restore" = 0 ]; then before=$(screen_state); fi
+	# The worker arrives as a tab in the space that asked for it: `tab.new` takes the space's id,
+	# which the record may predate (space_id_ensure reads it back from herdr by name, once).
+	# `--focus false` adds the tab last and keeps the shown space and its selected tab, so the
+	# person stays exactly where they were — nothing is selected back afterwards.
+	local space_id
+	space_id=$(space_id_ensure "$SPACE")
+	[ -n "$space_id" ] || die "space $SPACE has no herdr id and herdr does not list it by name, so there is no space to put a tab in.
+Open it again, or make a new space and start there:
+  $self_bin/space list
+  herdr-app ls
+  $self_bin/space new --name <slug> --project $cwd"
 
-	out=$(herdr-app do space.new --name "$spawn_slug" --folder "$cwd" --tab "$spawn_slug" \
-		--argv "$argv" --task "Read $spec and do it. Report to $report." 2>&1) \
-		|| die "space.new failed for $spawn_slug: $out"
+	out=$(herdr-app do tab.new --name "$spawn_slug" --space "$space_id" --folder "$cwd" \
+		--argv "$argv" --task "Read $spec and do it. Report to $report." --focus false 2>&1) \
+		|| die "tab.new failed for $spawn_slug in space $SPACE ($space_id): $out"
 
 	space=$(printf '%s' "$out" | json_field space)
-	[ -n "$space" ] || space=$(printf '%s' "$out" | json_field id)
+	[ -n "$space" ] || space=$space_id
 	tab=$(printf '%s' "$out" | json_field tab)
 	pane=$(printf '%s' "$out" | json_field pane)
 	terminal=$(printf '%s' "$out" | json_field terminal)
 
-	# Put the view back before anything slow happens: state, the task send, the banner wait.
-	# Each failure is one warning line, never a refusal, and --no-restore skips it entirely.
-	if [ "$no_restore" = 0 ]; then
-		if [ -z "$before" ]; then
-			printf '%s: warning: could not read the space on screen before the spawn, so focus stayed on space %s\n' "$prog" "${space:-?}" >&2
-		elif ! restore_focus "${before%% *}" "${before##* }"; then
-			printf '%s: warning: could not restore focus to space %s, so focus stayed on space %s\n' "$prog" "${before%% *}" "${space:-?}" >&2
-		fi
-	fi
-
-	[ -n "$space" ] || die "could not read the new space id from: $out"
-
 	node -e '
 		const fs=require("fs");const [state,slug,space,tab,pane,terminal,cwd,mode,thinking,spec,report,jevEffort,overridden,reason,branch,acceptance,sourceSpec,spaceName]=process.argv.slice(1);
 		let j={};try{j=JSON.parse(fs.readFileSync(state,"utf8"))}catch{}
-		j[slug]={slug,space,spaceName,tab,pane,terminal,cwd,mode,thinking,thinkingEffort:jevEffort,spec,report,
+		j[slug]={slug,kind:"tab",space,spaceName,tab,pane,terminal,cwd,mode,thinking,thinkingEffort:jevEffort,spec,report,
 			overridden:overridden==="true",overrideReason:reason||null,branch:branch||null,acceptance:acceptance==="true",
 			acceptanceSpec:sourceSpec||null,started:new Date().toISOString()};
 		fs.writeFileSync(state,JSON.stringify(j,null,2)+"\n");' \
 		"$DELEGATIONS_WRITE" "$spawn_slug" "$space" "$tab" "$pane" "$terminal" "$cwd" "$mode" "$thinking" "$spec" "$report" \
 		"$jev_effort" "$overridden" "$reason" "$base_branch" "$acceptance_bool" "$source_spec" "$SPACE"
 
-	# space.new's --task can arrive before pi is listening, so send it again once the banner is up.
+	# tab.new's --task can arrive before pi is listening, so send it again once the banner is up.
 	local i
 	for i in $(seq 1 40); do
 		hc read "$terminal" 2>/dev/null | grep -q "escape interrupt" && break
@@ -2169,18 +2175,21 @@ restart_worker() {
 	case $mode in bare|sandboxed) runner=$(bin_prog "pi-$mode") ;; *) runner=$(bin_prog pi-nonet) ;; esac
 	[ -x "$runner" ] || die "cannot restart $slug: no runner for mode '${mode:-?}' ($runner)"
 
-	printf '\n---\n\nRestart %s: the previous terminal died before the report was written. Same spec,\nsame slug, a fresh space.\n' "$attempt" >>"$spec"
+	printf '\n---\n\nRestart %s: the previous terminal died before the report was written. Same spec,\nsame slug, a fresh tab in the same space.\n' "$attempt" >>"$spec"
 	write_report_skeleton "$report" "$slug" "$(space_field "$SPACE" git)"
 	argv=$(node -e 'process.stdout.write(JSON.stringify(["sh","-lc",process.argv[1]]))' \
 		"cd $(printf '%q' "$cwd") && export AGENT_SLUG=$(printf '%q' "$slug") && exec $(printf '%q' "$runner") --thinking $(printf '%q' "$level") -a")
-	out=$(herdr-app do space.new --name "$slug-r$attempt" --folder "$cwd" --tab "$slug-r$attempt" \
-		--argv "$argv" --task "Read $spec and do it. Report to $report." 2>&1) ||
+	# A restart is a fresh tab in the space that asked for the worker, not a space of its own: the
+	# worker is the same work in the same project, and `tabs` is where that project's work lives.
+	local space_id
+	space_id=$(space_id_ensure "$SPACE")
+	[ -n "$space_id" ] || die "cannot restart $slug: space $SPACE has no herdr id and herdr does not list it by name — $self_bin/space list"
+	out=$(herdr-app do tab.new --name "$slug-r$attempt" --space "$space_id" --folder "$cwd" \
+		--argv "$argv" --task "Read $spec and do it. Report to $report." --focus false 2>&1) ||
 		die "restart $attempt of $slug failed: herdr-app said: $out"
-	space=$(printf '%s' "$out" | json_field space)
-	[ -n "$space" ] || space=$(printf '%s' "$out" | json_field id)
+	space=$space_id
 	tab=$(printf '%s' "$out" | json_field tab)
 	terminal=$(printf '%s' "$out" | json_field terminal)
-	[ -n "$space" ] || die "restart $attempt of $slug failed: could not read the new space id from: $out"
 
 	node -e '
 		const fs=require("fs");
@@ -2188,7 +2197,7 @@ restart_worker() {
 		let j={};try{j=JSON.parse(fs.readFileSync(file,"utf8"))}catch{}
 		if (j[slug]) {
 			const e=j[slug];
-			e.space=space; e.tab=tab||""; e.terminal=terminal||"";
+			e.kind="tab"; e.space=space; e.tab=tab||""; e.terminal=terminal||"";
 			e.restarts=Number(e.restarts||0)+1;
 			e.restartList=Array.isArray(e.restartList)?e.restartList:[];
 			e.restartList.push({attempt:Number(attempt),space,terminal:terminal||"",at:new Date().toISOString()});
@@ -2352,7 +2361,10 @@ cmd_list() {
 			const jev=`mode=${r.mode||"?"} route=${route?route.decision:"?"} thinking=${level}${overridden?" (overridden)":""}`;
 			// Every column is defaulted: a delegations entry written by hand, or by an older version
 			// of spawn, has no mode or space, and `list` must print that row rather than crash on it.
-			console.log([String(who).padEnd(22),String(r.spaceName||"-").padEnd(16),String(r.mode||"").padEnd(10),String(level).padEnd(8),state.padEnd(9),jev.padEnd(44),String(r.space||"-"),"cwd="+String(r.cwd||"-")].join(" "));
+			// A tab-kind worker is shown as the space it sits in and the tab it is, so a reader can
+			// tell "the space the boss had, tab 3" from "a space of its own" without opening the record.
+			const where = r.kind === "tab" ? String(r.space||"-")+"/"+String(r.tab||"-") : String(r.space||"-");
+			console.log([String(who).padEnd(22),String(r.spaceName||"-").padEnd(16),String(r.mode||"").padEnd(10),String(level).padEnd(8),state.padEnd(9),jev.padEnd(44),where,"cwd="+String(r.cwd||"-")].join(" "));
 		}' "$DELEGATIONS" "$DECISIONS"
 	if ! herdr_terminals >/dev/null; then
 		printf '%s: herdr did not answer, so reported/working is what state/delegations.json records, not what herdr still runs\n' "$prog" >&2
@@ -2516,6 +2528,32 @@ space_close() {
 	return 1
 }
 
+# tab_close <id> <name> — close one herdr tab and prove it is gone.
+#
+# The same "answering 0 is not the thing being gone" as space_close, one level down: a tab that
+# herdr still lists after tab.close is a tab somebody has to close by hand, and the worker's
+# record stays so a retry reads it. The id is matched as a JSON token in `herdr-app ls`, never
+# parsed out of a shape this side does not own. Returns 1, naming the id and the name, only when
+# herdr still lists the tab.
+tab_close() {
+	local id=$1 name=$2 attempt tabs
+	[ -n "$id" ] || return 0
+	command -v herdr-app >/dev/null 2>&1 || return 0
+	for attempt in 1 2; do
+		herdr-app do tab.close --id "$id" >/dev/null 2>&1 || true
+		tabs=$(herdr-app ls 2>/dev/null) || return 0
+		[ -n "$tabs" ] || return 0
+		if ! printf '%s' "$tabs" | grep -qF "\"$id\""; then
+			return 0
+		fi
+		[ "$attempt" = 1 ] && sleep 1
+	done
+	printf '%s: warning: tab %s%s is still open after tab.close answered — herdr still lists it, so the worker is not closed. Close it by hand:\n' \
+		"$prog" "$id" "${name:+ ($name)}" >&2
+	printf '  herdr-app do tab.close --id %s\n' "$id" >&2
+	return 1
+}
+
 cmd_close() {
 	local slug=${1:-} merged="" nothing="" nothing_given="" rewritten="" rewritten_reason="" rewritten_given=""
 	[ "$#" -ge 1 ] || die 'usage: delegate close <slug> [--merged <pr-url-or-number>] [--nothing "<why nothing landed>"] [--rewritten <sha> "<why the tip is another worker commit, rewritten>"]'
@@ -2570,13 +2608,20 @@ cmd_close() {
 		space_git=$(space_field "$worker_space" git)
 		[ -n "$space_git" ] || space_git=true
 	fi
-	local space cwd branch meta report
+	local space tab kind cwd branch meta report
 	meta=$(node -e '
 		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
 		const e=j[process.argv[2]]||{};
-		process.stdout.write(JSON.stringify({space:e.space||"",cwd:e.cwd||"",branch:e.branch||""}))' "$DELEGATIONS" "$slug")
+		// A record with no kind is a worker from before workers were tabs: it owned a space, and
+		// closing it closes that space. Reading the kind here, once, is what keeps both shapes
+		// working without either command guessing from the fields of the other.
+		const kind = e.kind === "tab" ? "tab" : "space";
+		process.stdout.write(JSON.stringify({kind,space:e.space||"",tab:e.tab||"",cwd:e.cwd||"",branch:e.branch||""}))' "$DELEGATIONS" "$slug")
 	space=$(printf '%s' "$meta" | json_field space)
-	[ -n "$space" ] || die "no such worker: $slug"
+	tab=$(printf '%s' "$meta" | json_field tab)
+	kind=$(printf '%s' "$meta" | json_field kind)
+	[ -n "$space" ] || [ -n "$tab" ] || die "no such worker: $slug"
+	[ -n "$kind" ] || kind=space
 	cwd=$(printf '%s' "$meta" | json_field cwd)
 	branch=$(printf '%s' "$meta" | json_field branch)
 
@@ -2810,9 +2855,23 @@ fi
 			"$(printf '{"sha":"%s","branch":"%s","replaces":"%s","trunk":"origin/%s"}' "$rewritten_full" "$rewritten_branch" "$rewritten_pred" "$rewritten_trunk")"
 	fi
 
-	# A close that cannot confirm the space is gone is not a close: the delegation entry is what
-	# a retry reads, so it stays, and `finish` stops at step 3 saying the space is still open.
-	if ! space_close "$space" "$slug"; then
+	# A close that cannot confirm the thing it closed is gone is not a close: the delegation entry
+	# is what a retry reads, so it stays, and `finish` stops at step 3 saying the worker is still
+	# open. A tab-kind worker closes its own tab and never the space: the space is the boss's, and
+	# a finished worker must not be able to take the person's desk with it.
+	if [ "$kind" = tab ]; then
+		if [ -z "$tab" ]; then
+			printf '%s: refusing to close %s: its record is a tab with no tab id, so there is nothing to close. Close it by hand and drop the record:\n' "$prog" "$slug" >&2
+			printf '  herdr-app ls\n  %s/delegate list\n' "$BIN" >&2
+			return 1
+		fi
+		if ! tab_close "$tab" "$slug"; then
+			printf '%s: refusing to close %s: its tab %s would not close, and herdr still lists it. The delegation entry is kept, so this is the fix once the tab is gone:\n' \
+				"$prog" "$slug" "$tab" >&2
+			printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+			return 1
+		fi
+	elif ! space_close "$space" "$slug"; then
 		printf '%s: refusing to close %s: its space %s would not close, and herdr still lists it. The delegation entry is kept, so this is the fix once the space is gone:\n' \
 			"$prog" "$slug" "$space" >&2
 		printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
@@ -2940,7 +2999,7 @@ cmd_finish() {
 			pf_args+=( --only syntax --only suites --only semgrep --only scrub )
 		fi
 		if ! "$pf" "${pf_args[@]}"; then
-			printf '%s: finish stopped at step 1 of 4 (preflight) for %s: nothing was pushed, the PR body was not touched, nothing was wiped, nothing was closed, and the space is still open.\n' "$prog" "$slug" >&2
+			printf '%s: finish stopped at step 1 of 4 (preflight) for %s: nothing was pushed, the PR body was not touched, nothing was wiped, nothing was closed, and the worker is still open.\n' "$prog" "$slug" >&2
 			printf 'Fix: the FAIL line above names the check and the exact command that reproduces it — run that, fix it, commit, then run this again:\n' >&2
 			printf '  %s finish %s\n' "$BIN/delegate" "$slug" >&2
 			printf 'If the check itself is broken on this machine, record why and publish anyway:\n' >&2
@@ -2962,7 +3021,7 @@ cmd_finish() {
 		record_decision wipe "$slug" skipped "non-git space $SPACE: no branch to consolidate" false "$slug"
 		say "finish: $slug — 4/4 close"
 		if ! ( cmd_close "$slug" --nothing "non-git space: the change is in $(space_field "$SPACE" project), not in a commit" ); then
-			printf '%s: finish stopped at step 4 of 4 (close) for %s: nothing was published, and the space is still open.\n' "$prog" "$slug" >&2
+			printf '%s: finish stopped at step 4 of 4 (close) for %s: nothing was published, and the worker is still open.\n' "$prog" "$slug" >&2
 			return 1
 		fi
 		say "finish: $slug — preflighted, recorded, no PR, closed"
@@ -2975,7 +3034,7 @@ cmd_finish() {
 	# replayed unchanged, so nothing publish said is lost — only read.
 	local pub_out="" publish_word=published
 	if ! pub_out=$("$pub" "$slug" ${lookup_cwd:+--cwd "$lookup_cwd"}); then
-		printf '%s: finish stopped at step 2 of 4 (publish) for %s: nothing was wiped, nothing was closed, and the space is still open.\n' "$prog" "$slug" >&2
+		printf '%s: finish stopped at step 2 of 4 (publish) for %s: nothing was wiped, nothing was closed, and the worker is still open.\n' "$prog" "$slug" >&2
 		printf 'Fix: the refusal above names what the report is missing. Once it is fixed, run this again:\n' >&2
 		printf '  %s finish %s\n' "$BIN/delegate" "$slug" >&2
 		return 1
@@ -2992,7 +3051,7 @@ cmd_finish() {
 		local wipe_args=( "$slug" )
 		[ -z "$skip_given" ] || wipe_args+=( --skip "$skip" )
 		if ! ( cmd_wipe "${wipe_args[@]}" ); then
-			printf '%s: finish stopped at step 3 of 4 (wipe) for %s: the report is published, so its PR exists, but nothing was wiped, nothing was closed, and the space is still open.\n' "$prog" "$slug" >&2
+			printf '%s: finish stopped at step 3 of 4 (wipe) for %s: the report is published, so its PR exists, but nothing was wiped, nothing was closed, and the worker is still open.\n' "$prog" "$slug" >&2
 			printf 'Fix: write the five answers under "## Thrown away" in %s — or say why the step does not apply — then run this again:\n' "$REPORTS/$slug.md" >&2
 			printf '  %s finish %s\n' "$BIN/delegate" "$slug" >&2
 			return 1

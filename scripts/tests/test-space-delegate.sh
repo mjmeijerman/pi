@@ -31,12 +31,14 @@ export PATH
 export HERDR_LOG="$WORK/herdr.log"
 export DELEGATE_POLL_SECONDS=0
 
-# herdr-app: space.new hands out ids, everything else is quiet.
+# herdr-app: space.new and tab.new hand out ids, everything else is quiet.
 cat >"$WORK/stub/herdr-app" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$HERDR_LOG"
 case "$1 $2" in
 "do space.new") printf '{"space":"sp1","tab":"tb1","pane":"p1","terminal":"t1"}\n' ;;
+"do tab.new") printf '{"space":"sp1","tab":"tb2","pane":"p2","terminal":"t2"}\n' ;;
+"do tab.close") printf '{}\n' ;;
 "ls "*) printf '{"spaces":[]}\n' ;;
 *) printf '{}\n' ;;
 esac
@@ -149,8 +151,8 @@ else
 fi
 
 # --------------------------------------------------------- --space on its own --
-new_case '--space names the space from anywhere'
-run "$DELEGATE" spawn w3 --space other --cwd "$OUTER" "write three lines in a.txt"
+new_case '--space names the space for a folder no space claims'
+run "$DELEGATE" spawn w3 --space other --cwd "$STRAY" "write three lines in a.txt"
 if [ "$RC" -eq 0 ]; then pass 'the spawn succeeds'; else fail 'the spawn failed' "$OUT"; fi
 case $OUT in
 *"state/spaces/other/reports/w3.md"*) pass 'the record went to the space --space named' ;;

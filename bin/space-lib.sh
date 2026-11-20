@@ -52,6 +52,47 @@ space_field() {
 	' "$(space_record "${1:-}")" "${2:-}"
 }
 
+# space_set_field <slug> <field> <value> — write one field into a record and leave every other
+# field as it was. The record is the whole document (`bin/space show` prints it), so a migration
+# that rewrote it would lose what this version does not know about.
+space_set_field() {
+	node -e '
+		const fs = require("fs");
+		let j = {};
+		try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
+		j[process.argv[2]] = process.argv[3];
+		fs.writeFileSync(process.argv[1], JSON.stringify(j, null, 2) + "\n");
+	' "$(space_record "${1:-}")" "${2:-}" "${3:-}"
+}
+
+# space_id_ensure <slug> — herdr's id for a space, from its record.
+#
+# A record written before this field existed holds the name only, and the name is the person's
+# to rename, so the id is read back from `herdr-app ls` once and written into the record (a lazy
+# migration: one field, the rest of the record untouched). Prints the id, or nothing when neither
+# the record nor herdr can name the space — the caller refuses in words that say what to do.
+space_id_ensure() {
+	local slug=${1:-} id
+	id=$(space_field "$slug" id)
+	if [ -n "$id" ]; then
+		printf '%s' "$id"
+		return 0
+	fi
+	command -v herdr-app >/dev/null 2>&1 || return 0
+	id=$(herdr-app ls 2>/dev/null | HERDR_SPACE_NAME=$slug node -e '
+		let d = "";
+		process.stdin.on("data", (c) => (d += c)).on("end", () => {
+			let j = {};
+			try { j = JSON.parse(d); } catch { return; }
+			for (const s of (Array.isArray(j.spaces) ? j.spaces : []))
+				if (s && s.name === process.env.HERDR_SPACE_NAME && s.id) { process.stdout.write(String(s.id)); return; }
+		});
+	') || id=""
+	[ -n "$id" ] || return 0
+	space_set_field "$slug" id "$id" || return 0
+	printf '%s' "$id"
+}
+
 # space_resolve <dir> — the slug of the space whose project contains <dir>, longest path first.
 # A folder no space claims prints nothing: that is the refusal delegate turns into the command
 # that creates one. Two spaces on the same folder cannot both be right, so the longer project
