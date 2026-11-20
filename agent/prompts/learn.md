@@ -131,6 +131,19 @@ refuses the branch before any space is spawned: you get the refusal, not a red P
 and you come back to a test — or to the `**No test:**` proof — before the
 branch can go out.
 
+A shipped test **is** the proof; a local mutation run is not required. When the
+proposal carries a `**Test:**` line, the PR gate's mutation of exactly the added
+lines is where that gets decided — the same mutants on the same code, so a local
+pre-run buys no verdict, only wall clock. Only the `**No test:**` line needs a
+proof, and that proof is the differential run above.
+
+If you run mutation locally anyway, bound it. Print the scope first:
+`bash scripts/mutate-changed.sh --list-only` — it prints the scope ranges minus
+the test files, and it never widens on an empty list. Then name the cap you chose
+in the proposal and run under it — `timeout 300 bash scripts/mutate-changed.sh`.
+When the cap stops the run, the proposal says how many mutants were decided and
+calls the remainder **unproven** — never a pass, never a silent truncation.
+
 ```markdown
 # <one line: what changes>
 
