@@ -1515,13 +1515,18 @@ export const CI_PROBE_CONCURRENCY = 8;
 async function probeRun(id: number, cwd: string, bin: string): Promise<{ ran: boolean | null; failed: string[] }> {
 	const result = await runOnce([bin, "run", "view", String(id), "--json", "jobs"], cwd, 5_000);
 	if (result.status !== 0) return { ran: null, failed: [] };
+	// The try covers the parse and nothing else: a body that is JSON but not a
+	// job list has its own verdict, and reading it inside the catch would make
+	// that verdict unreachable — the same `{ ran: null, failed: [] }` either way,
+	// so no test could tell the two apart (the mutation gate found exactly that).
+	let parsed: { jobs?: CiJob[] };
 	try {
-		const parsed = JSON.parse(result.stdout) as { jobs?: CiJob[] };
-		if (!Array.isArray(parsed.jobs)) return { ran: null, failed: [] };
-		return { ran: !noStepRan(parsed.jobs), failed: failedJobsOf(parsed.jobs) };
+		parsed = JSON.parse(result.stdout) as { jobs?: CiJob[] };
 	} catch {
 		return { ran: null, failed: [] };
 	}
+	if (!Array.isArray(parsed.jobs)) return { ran: null, failed: [] };
+	return { ran: !noStepRan(parsed.jobs), failed: failedJobsOf(parsed.jobs) };
 }
 
 /**

@@ -1478,6 +1478,14 @@ describe("repeated failing CI checks", () => {
 		];
 		assert.deepEqual(failedJobsOf(jobs), ["extension tests (node 22)", "mutation score (stryker)"]);
 		assert.deepEqual(failedJobsOf([]), []);
+		// gh can print a row with no object in it; a reader that trusts the type
+		// dies on that row instead of naming the ones around it.
+		const nullRow = null as unknown as { name?: string; conclusion?: string };
+		assert.deepEqual(
+			failedJobsOf([nullRow, { name: "mutation score (stryker)", conclusion: "failure" }]),
+			["mutation score (stryker)"],
+			"a null row is skipped, not a crash",
+		);
 	});
 
 	test("the jobs line counts down, and a tie is decided by the name, not by gh's order", () => {
@@ -1775,6 +1783,43 @@ describe("repeated failing CI checks", () => {
 			const judged = await judgedByCode([{ name: "tests", headBranch: "a", conclusion: "failure", databaseId: 1 }], dir, bin);
 			assert.equal(judged.runs.length, 1);
 			assert.equal(judged.runs[0].failedJobs, undefined, "no failed job: nothing to name");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a probe that failed is doubt, whatever its stdout held", async () => {
+		// gh exits non-zero and still prints a plausible body: the exit code is the
+		// verdict, so the body is not one. Reading it would hand the caller job
+		// names that no run reported.
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-exit-gh-"));
+		try {
+			const body =
+				'{"jobs":[{"name":"mutation score (stryker)","conclusion":"failure","steps":[{"name":"stryker run"}]}]}';
+			const bin = await fakeGh(dir, `printf '%s' '${body}'; exit 1`);
+			const judged = await judgedByCode([{ name: "tests", headBranch: "a", conclusion: "failure", databaseId: 1 }], dir, bin);
+			assert.equal(judged.unreadable, 1, "a failed probe is doubt, not an answer");
+			assert.equal(judged.runs.length, 1, "doubt counts normally");
+			assert.equal(judged.runs[0].failedJobs, undefined, "the body beside a failed exit named no job");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a body gh cannot read as a job list is doubt, not a green run", async () => {
+		// Two shapes that are not a roster: valid JSON with the wrong type, and
+		// something that is not JSON at all. Both mean "gh could not say", so the
+		// run is kept and counted as doubt — never as a run that judged nothing.
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-unreadable-gh-"));
+		try {
+			for (const body of ['{"jobs":42}', "not json at all"]) {
+				const bin = await fakeGh(dir, `printf '%s' '${body}'`);
+				const judged = await judgedByCode([{ name: "tests", headBranch: "a", conclusion: "failure", databaseId: 1 }], dir, bin);
+				assert.equal(judged.unreadable, 1, `body ${body} is doubt`);
+				assert.equal(judged.refused, 0, `body ${body} is not a queue refusal`);
+				assert.equal(judged.runs.length, 1, `body ${body} keeps the run`);
+				assert.equal(judged.runs[0].failedJobs, undefined, `body ${body} named no job`);
+			}
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
