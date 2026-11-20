@@ -4,8 +4,8 @@
 #
 # Radar basis: #2 mutation testing (Adopt), #3 shorten feedback loops (Adopt).
 #
-# Why this exists. The mutation gate has gone red in CI six times on one day
-# (#159, #192, #193, #194 among them), and every red round is a whole fix
+# Why this exists. The mutation gate went red in CI six times on one day (PRs
+# 159, 192, 193 and 194 among them), and every red round is a whole fix
 # cycle: three mutants, one survivor, fifty seconds of the runner's time
 # (specs/archive/fix-194-mutants.md). The same run locally costs seconds to a
 # minute. Nothing between a branch and origin ran it, so the verdict always
