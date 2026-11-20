@@ -16,6 +16,11 @@
  * them read-write. Blocking them made a worker unable to file its own report. Everything
  * else under the guarded roots, `state/` included, stays blocked for the boss session.
  *
+ * `.worktrees/` is carved out in the live workspace only: a worker's checkout has its own
+ * branch and is not the live trunk the guard protects, so the boss may fix a mechanical
+ * rebase conflict in it — the rollback copy's `.worktrees/` stays blocked, it is not the
+ * boss's to touch.
+ *
  * During the rename both trees are guarded: `/home/mark/big-boss-pi` (the live workspace)
  * and `/home/mark/pi-master` (the rollback copy, which must not be edited either).
  *
@@ -71,6 +76,25 @@ export function delegationPath(path: string): boolean {
 	const target = real(path);
 	const base = real(DELEGATION_ROOT);
 	return DELEGATION_DIRS.some((dir) => target === `${base}/${dir}` || target.startsWith(`${base}/${dir}/`));
+}
+
+/**
+ * True when `path` is inside a worker checkout under the live workspace's `.worktrees/`.
+ *
+ * A rebase conflict is resolved by editing files in `<root>/.worktrees/<slug>/`: that
+ * subtree has its own branch, nothing in it is the trunk the guard exists to protect.
+ * Only the live workspace is carved out — `/home/mark/pi-master` is the rollback copy and
+ * a `.worktrees/` under it is not the boss's to touch.
+ */
+export function worktreePath(path: string): boolean {
+	const target = real(path);
+	const base = real(DELEGATION_ROOT);
+	return target.startsWith(`${base}/.worktrees/`);
+}
+
+/** The paths the guard lets through: the delegation flow's files and worker checkouts. */
+function carvedOut(path: string): boolean {
+	return delegationPath(path) || worktreePath(path);
 }
 
 /** Drop quoted text so a path inside `echo "…"` is still seen, but a mention in prose is not. */
@@ -174,14 +198,63 @@ function redirectTargets(segment: string, cwd: string): string[] {
 }
 
 /**
- * Every token in the segment that could name a path, absolute or relative to `cwd`.
- * With `bare`, plain words count too (a write verb makes `rm specs` a write);
- * without it only redirect targets count, so `echo hi > /tmp/x` is not a hit.
+ * A flag whose next word is a script — code, not a path: `sed -e 's/a/b/'`, `perl -E …`,
+ * and clusters such as `-pe`. `-i` is not one: `perl -i x` carries no script, so `x` stays
+ * a write target.
  */
-function pathTokens(segment: string, cwd: string, bare: boolean, verb: string | undefined): string[] {
+const SCRIPT_FLAG = /^-[a-zA-Z]*[eEf]/;
+
+/**
+ * The words in a `sed -i`/`perl -i` segment that are code rather than paths.
+ *
+ * Only the script is skipped, never the file it edits: `perl -i /path/x` has one argument
+ * and it is a write target, so skipping the first non-flag word dropped the only path.
+ * Without a script flag, `sed -i 's/a/b/' x` still passes its script positionally.
+ */
+function scriptWords(words: string[], verb: string): string[] {
+	// Stryker disable next-line ArrayDeclaration: equivalent — a seed word can never equal a
+	// whitespace-free token, so a non-empty seed only adds a skip nothing matches.
+	const scripts: string[] = [];
+	let positionalScriptSeen = false;
+	for (let i = 1; i < words.length; i += 1) {
+		const word = words[i];
+		if (word.startsWith("-")) {
+			if (!SCRIPT_FLAG.test(word)) continue;
+			// `words[i + 1]` is `undefined` when the flag ends the segment; `undefined` in the skip
+			// set matches no token, so a trailing flag needs no check of its own.
+			scripts.push(words[i + 1]);
+			// the script came from a flag, so no positional script is left to skip
+			positionalScriptSeen = true;
+			i += 1;
+			continue;
+		}
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
+		if (verb === "sed -i" && !positionalScriptSeen) {
+			scripts.push(word);
+			positionalScriptSeen = true;
+		}
+	}
+	return scripts;
+}
+
+/**
+ * Every token in the segment that could name a path, absolute or relative to `cwd`.
+ * With a write verb, plain words count too (the verb makes `rm specs` a write);
+ * without one only redirect targets count, so `echo hi > /tmp/x` is not a hit.
+ * `verb` is the flag as well as the verb: the only caller passes the two together, and a
+ * segment with no verb has no bare word worth reading.
+ */
+function pathTokens(segment: string, cwd: string, verb: string | undefined): string[] {
 	const targets = redirectTargets(segment, cwd);
-	if (!bare) return targets;
-	const skip = new Set([segment.split(/\s+/)[0] ?? "", verb?.split(/\s+/)[0] ?? ""]);
+	if (!verb) return targets;
+	// `segments()` trims, so this split leaves no empty word to filter out.
+	const words = segment.split(/\s+/);
+	// `commandVerb` answers either a bare command or `${command} -i`, so dropping that suffix
+	// is the command word itself — `sed -i` → `sed`.
+	const skip = new Set([words[0], verb.replace(" -i", "")]);
+	// `sed -i`/`perl -i` take their script as code, not as a path: without this the
+	// `s/a/b/` in `sed -i 's/a/b/' x.ts` resolved to `<cwd>/s/a/b` and blocked it.
+	if (verb === "sed -i" || verb === "perl -i") for (const word of scriptWords(words, verb)) skip.add(word);
 	for (const token of segment.split(/\s+/)) {
 		if (!token || token.startsWith("-") || /^[<>&|]+$/.test(token) || skip.has(token)) continue;
 		const path = toPath(token, cwd);
@@ -200,9 +273,9 @@ export function shellWriteReason(command: string, cwd: string): string | null {
 		const verb = commandVerb(segment);
 		const redirected = redirectsInto(segment).length > 0;
 		if (!verb && !redirected) continue;
-		for (const path of pathTokens(segment, cwd, Boolean(verb), verb)) {
+		for (const path of pathTokens(segment, cwd, verb)) {
 			if (!insideGuarded(path)) continue;
-			if (delegationPath(path)) continue;
+			if (carvedOut(path)) continue;
 			return `${verb ? `\`${verb}\`` : "a shell redirect"} into ${path}`;
 		}
 	}
@@ -233,9 +306,9 @@ export default function bigBossPiGuard(pi: ExtensionAPI) {
 		if (!cwdIsGuarded(ctx.cwd)) return;
 
 		if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
-			// The spec and the report are the delegation flow's own files.
+			// The delegation flow's own files, and a worker's own checkout.
 			const target = toPath(String((event.input as { path?: string }).path ?? ""), ctx.cwd);
-			if (delegationPath(target)) return;
+			if (carvedOut(target)) return;
 			ctx.ui.notify("big-boss-pi-guard: this workspace is for delegation, not direct edits", "warning");
 			return {
 				block: true,

@@ -12,7 +12,7 @@ import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
 
 const mod = await import("../big-boss-pi-guard.ts");
 const bigBossPiGuard = mod.default;
-const { insideGuarded, shellWriteReason, GUARDED_ROOTS, workerSession, delegationPath, DELEGATION_DIRS } =
+const { insideGuarded, shellWriteReason, GUARDED_ROOTS, workerSession, delegationPath, DELEGATION_DIRS, worktreePath } =
 	mod;
 
 function setup(cwd: string) {
@@ -320,6 +320,138 @@ describe("big-boss-pi-guard: false positives (bug A: verb in argument position, 
 				assert.equal(result, undefined, `${command} should not be blocked`);
 			}
 			assert.deepEqual(notices, []);
+		});
+	});
+});
+
+/**
+ * The boss now rebases a worker's branch and resolves a mechanical conflict itself. That
+ * edit lands in `<root>/.worktrees/<slug>/` — a checkout with its own branch, not the live
+ * trunk — so that subtree is the third carve-out. Everything else, one directory above it
+ * included, stays blocked, and `..` cannot be used to walk out of the exception.
+ */
+describe("big-boss-pi-guard: worker worktrees", () => {
+	const cwd = "/home/mark/big-boss-pi";
+	const slug = "/home/mark/big-boss-pi/.worktrees/guard-allow-worktree";
+
+	test("only the live workspace's .worktrees/ is carved out", () => {
+		assert.equal(worktreePath(`${slug}/x.ts`), true);
+		assert.equal(worktreePath(`${slug}/agent/extensions/x.ts`), true);
+		assert.equal(worktreePath(`${cwd}/.worktrees`), false);
+		assert.equal(worktreePath(`${cwd}/bin/x.sh`), false);
+		assert.equal(worktreePath(`${cwd}/.worktreesevil/x.ts`), false);
+		// the rollback copy is not the boss's to touch, its worktrees included
+		assert.equal(worktreePath("/home/mark/pi-master/.worktrees/x/x.ts"), false);
+		assert.equal(worktreePath(""), false);
+	});
+
+	test("a tool write and edit into a worktree is not blocked, and silent", async () => {
+		await asBoss(async () => {
+			const { emit, ctx, notices } = setup(cwd);
+			const calls = [
+				{ toolName: "write", input: { path: `${slug}/agent/extensions/x.ts`, content: "x" } },
+				{ toolName: "edit", input: { path: ".worktrees/guard-allow-worktree/bin/x.sh", oldText: "a", newText: "b" } },
+			];
+			for (const call of calls) {
+				const [result] = await emit("tool_call", call, ctx);
+				assert.equal(result, undefined, `${call.toolName} into a worktree must pass`);
+			}
+			assert.deepEqual(notices, []);
+		});
+	});
+
+	test("a shell write into a worktree is not blocked: sed -i and a redirect", () => {
+		assert.equal(shellWriteReason("sed -i 's/a/b/' .worktrees/guard-allow-worktree/x.ts", cwd), null);
+		assert.equal(shellWriteReason("echo resolved > .worktrees/guard-allow-worktree/x.ts", cwd), null);
+		assert.equal(shellWriteReason(`echo hi >> ${slug}/x.ts`, cwd), null);
+		// the sed script is code, not a path: it used to resolve to <cwd>/s/a/b
+		assert.equal(shellWriteReason("sed -i 's/a/b/' /tmp/x", cwd), null);
+	});
+
+	test("a shell write into a worktree passes through the handler, silently", async () => {
+		await asBoss(async () => {
+			const { emit, ctx, notices } = setup(cwd);
+			for (const command of [
+				"sed -i 's/a/b/' .worktrees/guard-allow-worktree/x.ts",
+				"echo resolved > .worktrees/guard-allow-worktree/x.ts",
+			]) {
+				const [result] = await emit("tool_call", { toolName: "bash", input: { command } }, ctx);
+				assert.equal(result, undefined, command);
+			}
+			assert.deepEqual(notices, []);
+		});
+	});
+
+	test("one directory above the worktree is still blocked", async () => {
+		await asBoss(async () => {
+			const { emit, ctx } = setup(cwd);
+			const calls = [
+				{ toolName: "write", input: { path: `${cwd}/bin/x.sh`, content: "x" } },
+				{ toolName: "bash", input: { command: "sed -i 's/a/b/' bin/x.sh" } },
+			];
+			for (const call of calls) {
+				const [result] = await emit("tool_call", call, ctx);
+				assert.equal(result?.block, true, `${call.toolName} on bin/x.sh must stay blocked`);
+			}
+			assert.match(shellWriteReason("echo hi > .worktrees/../bin/x.sh", cwd) ?? "", /bin\/x\.sh/);
+		});
+	});
+
+	test("`../.worktrees/…` traversal cannot escape the exception", async () => {
+		// stepping out of the worktree lands back in the guarded trunk: blocked
+		assert.match(shellWriteReason("echo hi > .worktrees/slug/../../state/x", cwd) ?? "", /state\/x/);
+		assert.equal(shellWriteReason("echo hi > .worktrees/slug/../../../elsewhere/x", cwd), null);
+		// a relative path that only passes `.worktrees` on the way in is resolved first
+		assert.equal(shellWriteReason("echo hi > ../big-boss-pi/.worktrees/slug/x.ts", cwd), null);
+		await asBoss(async () => {
+			const { emit, ctx } = setup(cwd);
+			const [result] = await emit(
+				"tool_call",
+				{ toolName: "write", input: { path: ".worktrees/slug/../../bin/x.sh", content: "x" } },
+				ctx,
+			);
+			assert.equal(result?.block, true, "traversal out of a worktree must stay blocked");
+		});
+	});
+});
+
+/**
+ * The rollback copy is read-only in full, `.worktrees/` included: the carve-out belongs to
+ * the live workspace only. Every in-place editor form has to be caught there, and the
+ * refusal is the same message any other rollback-copy write gets.
+ */
+describe("big-boss-pi-guard: the rollback copy stays read-only", () => {
+	const cwd = "/home/mark/big-boss-pi";
+	const rollback = "/home/mark/pi-master";
+
+	test("sed -i.bak, perl -i and perl -pi -e are all shell writes into the rollback copy", () => {
+		const cases: [string, RegExp][] = [
+			[`sed -i.bak 's/a/b/' ${rollback}/x`, /`sed -i` into \/home\/mark\/pi-master\/x/],
+			[`perl -i ${rollback}/x`, /`perl -i` into \/home\/mark\/pi-master\/x/],
+			[`perl -pi -e 's/a/b/' ${rollback}/x`, /`perl -i` into \/home\/mark\/pi-master\/x/],
+		];
+		for (const [command, expected] of cases) {
+			assert.match(shellWriteReason(command, cwd) ?? "", expected, command);
+		}
+	});
+
+	test("a .worktrees/ path under the rollback copy is refused like any other write there", async () => {
+		assert.equal(worktreePath(`${rollback}/.worktrees/slug/x.ts`), false);
+		assert.match(
+			shellWriteReason(`sed -i 's/a/b/' ${rollback}/.worktrees/slug/x.ts`, cwd) ?? "",
+			/pi-master\/\.worktrees\/slug\/x\.ts/,
+		);
+		await asBoss(async () => {
+			const { emit, ctx, notices } = setup(cwd);
+			const [plain] = await emit("tool_call", { toolName: "write", input: { path: `${rollback}/x`, content: "x" } }, ctx);
+			const [worktree] = await emit(
+				"tool_call",
+				{ toolName: "write", input: { path: `${rollback}/.worktrees/slug/x.ts`, content: "x" } },
+				ctx,
+			);
+			assert.equal(worktree?.block, true, "a rollback-copy worktree is not the boss's to touch");
+			assert.equal(worktree?.reason, plain?.reason, "the same message as any other rollback-copy write");
+			assert.equal(notices.length, 2);
 		});
 	});
 });

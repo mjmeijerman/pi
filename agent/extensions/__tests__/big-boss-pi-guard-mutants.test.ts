@@ -53,11 +53,39 @@ const SHELL: [string, string, string | null][] = [
 	["bash -c echo a  > sed -i /home/mark/pi-master/x", "/home/mark/big-boss-pi", "a shell redirect into /home/mark/big-boss-pi/sed"],
 	["perl -i /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/pi-master/x"],
 	["sed -n /home/mark/big-boss-pi/x", "/home/mark/big-boss-pi", null],
-	["perl -pi -e 's/a/b/' /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/big-boss-pi/s/a/b"],
+	["perl -pi -e 's/a/b/' /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/pi-master/x"],
 	["jev echo a  >rm /home/mark/pi-master/x", "/home/mark/big-boss-pi", "a shell redirect into /home/mark/big-boss-pi/rm"],
 	["rm ~/pi-master/x", "/home/mark/big-boss-pi", "`rm` into /home/mark/pi-master/x"],
-	["sed -i.bak 's/a/b/' /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`sed -i` into /home/mark/big-boss-pi/s/a/b"],
+	["sed -i.bak 's/a/b/' /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`sed -i` into /home/mark/pi-master/x"],
 	["sudo rm /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`rm` into /home/mark/pi-master/x"],
+	// `sed -i`/`perl -i`: the script is code, the file it edits is not. A script flag
+	// with a next word (`-e xs`) hides that word, so a positional script behind it is
+	// still skipped and the file stays a write — and a flag that is not a script flag
+	// (`-1e`) must not hide the only argument. The cwd is outside the guarded roots
+	// where a relative word (`FOO=1`, `AB=1`, `a.b=c`) would otherwise land inside one
+	// and the two decisions would both block, for different reasons.
+	["sed -i -e 's/a/b/' x.ts", "/home/mark/big-boss-pi", "`sed -i` into /home/mark/big-boss-pi/x.ts"],
+	["perl -i -1e /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/pi-master/x"],
+	["sed -i 1A=2 /home/mark/pi-master/x", "/home/mark/projects/bakmark", "`sed -i` into /home/mark/pi-master/x"],
+	["sed -i a.b=c /home/mark/pi-master/x", "/home/mark/projects/bakmark", "`sed -i` into /home/mark/pi-master/x"],
+	["sed -i AB=1 /home/mark/pi-master/x", "/home/mark/projects/bakmark", null],
+	["sed -i FOO=1 /home/mark/pi-master/x", "/home/mark/projects/bakmark", null],
+	// Two spaces: the script is the word after `-i`, not the empty string a single
+	// whitespace split leaves behind, which would hide `s/a/b/` and keep the write.
+	["sed -i  's/a/b/' x.ts", "/home/mark/big-boss-pi", "`sed -i` into /home/mark/big-boss-pi/x.ts"],
+	// `SCRIPT_FLAG` is anchored and its body is `[a-zA-Z]*`: a word that only *ends* in `e`
+	// (`-a-e`, a second dash) is not a script flag, and `-e` with nothing between the dash
+	// and the `e` is. Both directions change which word is taken for code instead of a path,
+	// so one row each:
+	["sed 's/a/b/' -i -a-e /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`sed -i` into /home/mark/pi-master/x"],
+	["perl -i -e 's/a/b/'", "/home/mark/big-boss-pi", null],
+	// A flag the pattern does not see (`-1e` is a digit, not `[a-zA-Z]`) leaves its script to be
+	// read as a path, and a flag that is exactly `-i` must not be read as a script flag either:
+	["perl -i -1e 's/a/b/'", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/big-boss-pi/s/a/b"],
+	["perl -i 's/a/b/'", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/big-boss-pi/s/a/b"],
+	// The skip set keeps the command itself (`sed`, `perl`) out of the path scan even when a
+	// wrapper holds first position, and `perl -i` has no positional script to pull it in:
+	["sudo perl -i 's/a/b/' x.ts", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/big-boss-pi/s/a/b"],
 ];
 
 const TOOL: ToolCase[] = [
