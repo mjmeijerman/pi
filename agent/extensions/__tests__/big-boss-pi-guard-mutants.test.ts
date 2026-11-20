@@ -53,10 +53,10 @@ const SHELL: [string, string, string | null][] = [
 	["bash -c echo a  > sed -i /home/mark/pi-master/x", "/home/mark/big-boss-pi", "a shell redirect into /home/mark/big-boss-pi/sed"],
 	["perl -i /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/pi-master/x"],
 	["sed -n /home/mark/big-boss-pi/x", "/home/mark/big-boss-pi", null],
-	["perl -pi -e 's/a/b/' /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/big-boss-pi/s/a/b"],
+	["perl -pi -e 's/a/b/' /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/pi-master/x"],
 	["jev echo a  >rm /home/mark/pi-master/x", "/home/mark/big-boss-pi", "a shell redirect into /home/mark/big-boss-pi/rm"],
 	["rm ~/pi-master/x", "/home/mark/big-boss-pi", "`rm` into /home/mark/pi-master/x"],
-	["sed -i.bak 's/a/b/' /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`sed -i` into /home/mark/big-boss-pi/s/a/b"],
+	["sed -i.bak 's/a/b/' /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`sed -i` into /home/mark/pi-master/x"],
 	["sudo rm /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`rm` into /home/mark/pi-master/x"],
 ];
 

@@ -414,3 +414,44 @@ describe("big-boss-pi-guard: worker worktrees", () => {
 		});
 	});
 });
+
+/**
+ * The rollback copy is read-only in full, `.worktrees/` included: the carve-out belongs to
+ * the live workspace only. Every in-place editor form has to be caught there, and the
+ * refusal is the same message any other rollback-copy write gets.
+ */
+describe("big-boss-pi-guard: the rollback copy stays read-only", () => {
+	const cwd = "/home/mark/big-boss-pi";
+	const rollback = "/home/mark/pi-master";
+
+	test("sed -i.bak, perl -i and perl -pi -e are all shell writes into the rollback copy", () => {
+		const cases: [string, RegExp][] = [
+			[`sed -i.bak 's/a/b/' ${rollback}/x`, /`sed -i` into \/home\/mark\/pi-master\/x/],
+			[`perl -i ${rollback}/x`, /`perl -i` into \/home\/mark\/pi-master\/x/],
+			[`perl -pi -e 's/a/b/' ${rollback}/x`, /`perl -i` into \/home\/mark\/pi-master\/x/],
+		];
+		for (const [command, expected] of cases) {
+			assert.match(shellWriteReason(command, cwd) ?? "", expected, command);
+		}
+	});
+
+	test("a .worktrees/ path under the rollback copy is refused like any other write there", async () => {
+		assert.equal(worktreePath(`${rollback}/.worktrees/slug/x.ts`), false);
+		assert.match(
+			shellWriteReason(`sed -i 's/a/b/' ${rollback}/.worktrees/slug/x.ts`, cwd) ?? "",
+			/pi-master\/\.worktrees\/slug\/x\.ts/,
+		);
+		await asBoss(async () => {
+			const { emit, ctx, notices } = setup(cwd);
+			const [plain] = await emit("tool_call", { toolName: "write", input: { path: `${rollback}/x`, content: "x" } }, ctx);
+			const [worktree] = await emit(
+				"tool_call",
+				{ toolName: "write", input: { path: `${rollback}/.worktrees/slug/x.ts`, content: "x" } },
+				ctx,
+			);
+			assert.equal(worktree?.block, true, "a rollback-copy worktree is not the boss's to touch");
+			assert.equal(worktree?.reason, plain?.reason, "the same message as any other rollback-copy write");
+			assert.equal(notices.length, 2);
+		});
+	});
+});

@@ -199,6 +199,42 @@ function redirectTargets(segment: string, cwd: string): string[] {
 }
 
 /**
+ * A flag whose next word is a script — code, not a path: `sed -e 's/a/b/'`, `perl -E …`,
+ * and clusters such as `-pe`. `-i` is not one: `perl -i x` carries no script, so `x` stays
+ * a write target.
+ */
+const SCRIPT_FLAG = /^-[a-zA-Z]*[eEf]/;
+
+/**
+ * The words in a `sed -i`/`perl -i` segment that are code rather than paths.
+ *
+ * Only the script is skipped, never the file it edits: `perl -i /path/x` has one argument
+ * and it is a write target, so skipping the first non-flag word dropped the only path.
+ * Without a script flag, `sed -i 's/a/b/' x` still passes its script positionally.
+ */
+function scriptWords(words: string[], verb: string): string[] {
+	const scripts: string[] = [];
+	let positionalScriptSeen = false;
+	for (let i = 1; i < words.length; i += 1) {
+		const word = words[i];
+		if (word.startsWith("-")) {
+			if (!SCRIPT_FLAG.test(word)) continue;
+			if (words[i + 1] !== undefined) scripts.push(words[i + 1]);
+			// the script came from a flag, so no positional script is left to skip
+			positionalScriptSeen = true;
+			i += 1;
+			continue;
+		}
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
+		if (verb === "sed -i" && !positionalScriptSeen) {
+			scripts.push(word);
+			positionalScriptSeen = true;
+		}
+	}
+	return scripts;
+}
+
+/**
  * Every token in the segment that could name a path, absolute or relative to `cwd`.
  * With `bare`, plain words count too (a write verb makes `rm specs` a write);
  * without it only redirect targets count, so `echo hi > /tmp/x` is not a hit.
@@ -206,17 +242,11 @@ function redirectTargets(segment: string, cwd: string): string[] {
 function pathTokens(segment: string, cwd: string, bare: boolean, verb: string | undefined): string[] {
 	const targets = redirectTargets(segment, cwd);
 	if (!bare) return targets;
-	const skip = new Set([segment.split(/\s+/)[0] ?? "", verb?.split(/\s+/)[0] ?? ""]);
+	const words = segment.split(/\s+/).filter(Boolean);
+	const skip = new Set([words[0] ?? "", verb?.split(/\s+/)[0] ?? ""]);
 	// `sed -i`/`perl -i` take their script as code, not as a path: without this the
 	// `s/a/b/` in `sed -i 's/a/b/' x.ts` resolved to `<cwd>/s/a/b` and blocked it.
-	if (verb === "sed -i" || verb === "perl -i") {
-		const script = segment
-			.split(/\s+/)
-			.filter(Boolean)
-			.slice(1)
-			.find((word) => !word.startsWith("-") && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
-		if (script) skip.add(script);
-	}
+	if (verb === "sed -i" || verb === "perl -i") for (const word of scriptWords(words, verb)) skip.add(word);
 	for (const token of segment.split(/\s+/)) {
 		if (!token || token.startsWith("-") || /^[<>&|]+$/.test(token) || skip.has(token)) continue;
 		const path = toPath(token, cwd);
