@@ -17,3 +17,6 @@
   names the PR; when it does, the next action is asking the person to merge, not spawning again.
 - The boss never edits files in {{PROJECT}}. Reading is fine; a change is a worker's job, and its
   report is where the change is described.
+- Learning here writes **{{PROJECT}}'s `AGENTS.md`** — on a `learn/<slug>` branch, from a sandboxed
+  learner that cannot touch anything else in the project — and the person merges it. A rule that
+  arrived without them reading it is a rule they will not follow.

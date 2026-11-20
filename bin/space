@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # space — the durable project spaces, and the only command the UI calls.
 #
-#   bin/space new --name <slug> [--project PATH | --clone URL] [--no-git] [--tab-name Boss]
+#   bin/space new --name <slug> [--project PATH | --clone URL] [--kind harness|project] [--no-git] [--tab-name Boss]
 #   bin/space list
 #   bin/space show <slug>
 #   bin/space forget <slug>
@@ -11,6 +11,12 @@
 # record carries herdr's id for the space (`id`), because a worker is opened as a tab inside it
 # and `tab.new` takes that id; a record from before the field is filled in by `delegate` from
 # `herdr-app ls`, by name, once.
+#
+# `kind` says what learning in the space may change, and the space decides it, never the session
+# that compacted: a `harness` space is this pi checkout and its learner may edit the harness and
+# publish its own branch; a `project` space (the default, and what a record without the field
+# reads as) teaches that project's `AGENTS.md` and nothing else. One harness space per machine:
+# a second one would be a second copy of the harness to disagree with the first.
 # `bin/delegate` reads the space from the directory it is run in, and refuses in a folder no
 # space claims — creating one here is the fix that refusal names.
 #
@@ -32,7 +38,7 @@ need() { command -v "$1" >/dev/null 2>&1 || die "$1 is not on PATH"; }
 
 usage() {
 	cat >&2 <<'EOF'
-usage: bin/space new --name <slug> [--project PATH | --clone URL] [--no-git] [--tab-name Boss]
+usage: bin/space new --name <slug> [--project PATH | --clone URL] [--kind harness|project] [--no-git] [--tab-name Boss]
        bin/space list
        bin/space show <slug>
        bin/space forget <slug>
@@ -45,19 +51,24 @@ json_field() {
 }
 
 cmd_new() {
-	local name="" project="" clone="" no_git=0 tabname="Boss"
+	local name="" project="" clone="" no_git=0 tabname="Boss" kind="project"
 	[ "$#" -ge 1 ] || usage
 	while [ "$#" -gt 0 ]; do
 		case $1 in
 		--name) name=${2:-}; shift 2 ;;
 		--project) project=${2:-}; shift 2 ;;
 		--clone) clone=${2:-}; shift 2 ;;
+		--kind) kind=${2:-}; shift 2 ;;
 		--no-git) no_git=1; shift ;;
 		--tab-name) tabname=${2:-Boss}; shift 2 ;;
 		-h | --help) usage ;;
 		*) die "unknown option $1" ;;
 		esac
 	done
+	case $kind in
+	harness | project) ;;
+	*) die "--kind takes harness or project, not '$kind'" ;;
+	esac
 	space_valid_slug "$name" || die "a space name is a slug: [a-z0-9][a-z0-9-]{0,30} — '$name' is not"
 	# A name is the whole handle a person types later, so a second space under it would make
 	# `delegate --space <slug>` ambiguous. Refused by name, naming the project already using it.
@@ -105,11 +116,14 @@ cmd_new() {
 	terminal=$(json_field terminal <<<"$out")
 	[ -n "$space" ] || die "could not read the new space id from: $out"
 
-	NAME=$name PROJECT=$project GIT=$git REMOTE=$remote TAB=$tab TERMINAL=$terminal ID=$space node -e '
+	NAME=$name PROJECT=$project GIT=$git REMOTE=$remote TAB=$tab TERMINAL=$terminal ID=$space KIND=$kind node -e '
 		const fs = require("fs");
 		const rec = {
 			name: process.env.NAME,
 			id: process.env.ID || "",
+			// The kind is written on every new record: a learner reads it to know whether it may
+			// touch the harness or only the rules file of the project.
+			kind: process.env.KIND === "harness" ? "harness" : "project",
 			project: process.env.PROJECT,
 			git: process.env.GIT === "true",
 			remote: process.env.REMOTE || "",
@@ -125,14 +139,14 @@ cmd_new() {
 			"$prog" "$name" "$project/AGENTS.md" "$SPACE_RULES_TEMPLATE" >&2
 	fi
 
-	say "space $name: $project ($( [ "$git" = true ] && echo git || echo no-git )), ${tabname} tab opened"
+	say "space $name: $project ($( [ "$git" = true ] && echo git || echo no-git ), kind $kind), ${tabname} tab opened"
 	say "next: cd $project && bin/delegate spawn <worker> --cwd $project \"<task>\""
 }
 
-# space_list — one line per durable space: slug, project, git, tabs, state.
+# space_list — one line per durable space: slug, kind, project, git, tabs, state.
 cmd_list() {
 	command -v node >/dev/null 2>&1 || die "node is not on PATH"
-	local slugs s project git tabs state open_names=""
+	local slugs s project git tabs state kind open_names=""
 	if command -v herdr-app >/dev/null 2>&1; then
 		open_names=$(herdr-app ls 2>/dev/null | node -e '
 			let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
@@ -145,6 +159,7 @@ cmd_list() {
 	while IFS= read -r s; do
 		[ -n "$s" ] || continue
 		project=$(space_field "$s" project)
+		kind=$(space_kind "$s")
 		git=$(space_field "$s" git)
 		[ "$git" = true ] && git=git || git=no-git
 		tabs=$(node -e '
@@ -156,8 +171,8 @@ cmd_list() {
 		elif printf '%s\n' "$open_names" | grep -qxF "$s"; then state=open
 		else state=closed
 		fi
-		printf '%s\t%s\t%s\t%s\t%s\n' "$s" "$project" "$git" "$tabs tabs" "$state"
-	done <<<"$slugs" | awk -F'\t' '{ printf "%-20s %-40s %-7s %-8s %s\n", $1, $2, $3, $4, $5 }'
+		printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$s" "$kind" "$project" "$git" "$tabs tabs" "$state"
+	done <<<"$slugs" | awk -F'\t' '{ printf "%-20s %-8s %-40s %-7s %-8s %s\n", $1, $2, $3, $4, $5, $6 }'
 }
 
 cmd_show() {
@@ -173,6 +188,9 @@ cmd_show() {
 			console.log(k+": "+(Array.isArray(v)?(v.length?v.join(", "):"(none)"):(v===true?"true":v===false?"false":(v||"-"))));
 		}
 	' "$(space_record "$slug")"
+	# Read through `space_kind` rather than printed from the record: a record written before the
+	# field existed is a project space, and this is the same answer the learner gets.
+	printf 'kind: %s\n' "$(space_kind "$slug")"
 	printf 'specs: %s\n' "$(space_specs "$slug")"
 	printf 'reports: %s\n' "$(space_reports "$slug")"
 }

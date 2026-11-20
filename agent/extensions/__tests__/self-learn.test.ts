@@ -15,6 +15,17 @@ import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { createFakeCtx, createFakePi, waitFor } from "./helpers/fake-pi.ts";
 
+/**
+ * A fake ctx whose cwd is the space's project.
+ *
+ * The extension resolves the space from the session's cwd, so a ctx with no cwd teaches
+ * nothing and a gate test would be measuring the refusal instead of the launch. `options`
+ * still wins, so a test can say `learnerCtx({ cwd: "/somewhere/else" })` and check that
+ * nothing is taught there.
+ */
+const learnerCtx = (options: Record<string, any> = {}): ReturnType<typeof createFakeCtx> =>
+	createFakeCtx({ mode: "tui", hasUI: true, cwd: SPACE.project, ...options });
+
 // The extension resolves its proposal directory at import time; point it at a
 // scratch directory so a test run never writes into ~/.pi/agent/proposals.
 const scratch = await mkdtemp(join(tmpdir(), "self-learn-test-"));
@@ -22,6 +33,18 @@ process.env.PI_CODING_AGENT_DIR = scratch;
 delete process.env.PI_SELF_LEARN;
 // A developer running `npm test` inside `pisandbox` must see the same wiring as CI.
 delete process.env.PI_SANDBOX_MODE;
+// A learner is a tab in the space that owns the compacted session's project, so a test
+// session must sit in one: one project space on a scratch root, written the way `bin/space
+// new` writes it, and `learnerCtx` reports its project as the session's cwd. Nothing here
+// touches the real `state/spaces`, which holds the spaces this machine is working in.
+const SPACE = { slug: "proj", kind: "project", project: join(scratch, "proj") };
+process.env.PI_SPACE_ROOT = scratch;
+await mkdir(join(scratch, "state", "spaces", SPACE.slug), { recursive: true });
+await writeFile(
+	join(scratch, "state", "spaces", SPACE.slug, "space.json"),
+	JSON.stringify({ name: SPACE.slug, project: SPACE.project, kind: SPACE.kind, git: true }),
+	"utf8",
+);
 
 const mod = await import("../self-learn.ts");
 const selfLearn = mod.default;
@@ -30,6 +53,11 @@ const {
 	signatureOf,
 	redact,
 	pickLauncher,
+	learnerSpace,
+	learnerPathRefusal,
+	learnerPaths,
+	HARNESS_PATHS,
+	readSpaceRecords,
 	sandboxBlocksSpawn,
 	parseSpawnRequest,
 	spawnQueue,
@@ -206,19 +234,117 @@ describe("sandboxBlocksSpawn", () => {
 	});
 });
 
+describe("which space teaches a compaction", () => {
+	const PI = { slug: "pi", project: "/home/person/.pi" };
+	const WEB = { slug: "web", project: "/home/person/projects/web" };
+	const WEB_APP = { slug: "web-app", project: "/home/person/projects/web/app" };
+
+	test("exact: the session's cwd is the project", () => {
+		assert.deepEqual(learnerSpace([PI, WEB], "/home/person/projects/web"), {
+			slug: "web",
+			kind: "project",
+			project: "/home/person/projects/web",
+		});
+	});
+
+	test("ancestor: a session in a subfolder teaches the project above it", () => {
+		const found = learnerSpace([PI, WEB], "/home/person/projects/web/src/deep");
+		assert.equal(found?.slug, "web", "the folder the space is about, not the folder the session was in");
+		assert.equal(found?.project, "/home/person/projects/web", "and the learner's cwd is the project root");
+	});
+
+	test("no match: a cwd no space claims teaches nothing", () => {
+		assert.equal(learnerSpace([PI, WEB], "/home/person/elsewhere"), null);
+		assert.equal(learnerSpace([], "/home/person/projects/web"), null, "no records is not a guess either");
+		assert.equal(learnerSpace([PI, WEB], ""), null);
+	});
+
+	test("longest wins: the nearest project, not the first one listed", () => {
+		const found = learnerSpace([WEB, WEB_APP], "/home/person/projects/web/app/lib");
+		assert.equal(found?.slug, "web-app", "two spaces on one tree: the narrower project is the right one");
+	});
+
+	test("a trailing slash on either side is the same folder", () => {
+		assert.equal(learnerSpace([{ slug: "web", project: "/home/person/projects/web/" }], "/home/person/projects/web")?.slug, "web");
+		assert.equal(learnerSpace([WEB], "/home/person/projects/web/")?.slug, "web");
+	});
+
+	test("kind defaults to project, and only the word harness is harness", () => {
+		assert.equal(learnerSpace([{ slug: "a", project: "/a" }], "/a")?.kind, "project", "a record from before the field");
+		assert.equal(learnerSpace([{ slug: "a", project: "/a", kind: "harness" }], "/a")?.kind, "harness");
+		assert.equal(learnerSpace([{ slug: "a", project: "/a", kind: "HARNESS" }], "/a")?.kind, "project", "not a guess");
+		assert.equal(learnerSpace([{ slug: "a", project: "/a", kind: "nonsense" }], "/a")?.kind, "project");
+	});
+
+	test("the records on disk are the ones `bin/space` writes", async () => {
+		const root = await mkdtemp(join(scratch, "spaces-"));
+		try {
+			await mkdir(join(root, "pi"), { recursive: true });
+			await writeFile(join(root, "pi", "space.json"), JSON.stringify({ name: "pi", project: "/pi", kind: "harness" }));
+			await mkdir(join(root, "broken"), { recursive: true });
+			await writeFile(join(root, "broken", "space.json"), "{not json");
+			await mkdir(join(root, "empty"), { recursive: true });
+			await writeFile(join(root, "empty", "space.json"), JSON.stringify({ name: "empty" }));
+			assert.deepEqual(await readSpaceRecords(root), [{ slug: "pi", project: "/pi", kind: "harness" }], "a broken or projectless record is skipped, not fatal");
+			assert.deepEqual(await readSpaceRecords(join(root, "nope")), [], "no directory yet is no spaces");
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("what a learner of each kind may touch", () => {
+	test("harness: the harness paths, and a change outside them is refused", () => {
+		for (const path of [...HARNESS_PATHS, "README.md", "install.mjs"]) {
+			assert.equal(learnerPathRefusal("harness", path), null, `${path} is the harness`);
+		}
+		for (const path of ["AGENTS.md", "src/index.ts", "package.json"]) {
+			assert.match(learnerPathRefusal("harness", path) ?? "", /belongs to a project space/, `${path} is not the harness`);
+		}
+	});
+
+	test("project: AGENTS.md and nothing else, and the refusal says whose file it is", () => {
+		assert.equal(learnerPathRefusal("project", "AGENTS.md"), null);
+		assert.equal(learnerPathRefusal("project", "./AGENTS.md"), null, "./ is the same file");
+		for (const path of ["src/index.ts", "README.md", "agent/AGENTS.md"]) {
+			const refusal = learnerPathRefusal("project", path) ?? "";
+			assert.match(refusal, /AGENTS\.md and nothing else/, `${path} is not this project's rules file`);
+		}
+		assert.match(learnerPathRefusal("project", "") ?? "", /no path/);
+	});
+
+	test("the queue file names the paths, so the learner does not have to remember", () => {
+		assert.deepEqual(learnerPaths("harness"), [...HARNESS_PATHS]);
+		assert.deepEqual(learnerPaths("project"), ["AGENTS.md"]);
+	});
+});
+
 describe("pickLauncher", () => {
 	const slug = "learn-1200";
 	const queue = "/tmp/queue.md";
+	// The harness space is this checkout, the way `bin/space new --kind harness --project ~/.pi`
+	// records it; the project space is any other folder, and the two differ in one argv word.
+	const HARNESS = { slug: "pi", kind: "harness", project: join(homedir(), ".pi") } as const;
+	const PROJECT = { slug: "web", kind: "project", project: "/home/person/projects/web" } as const;
 
-	test("one visible space, and the pi inside it runs sandboxed", () => {
+	test("a project learner is a tab in its space, and the pi inside it runs sandboxed", () => {
 		// Injected probes: CI has no ~/.pi, and the choice must not depend on it.
-		const launcher = pickLauncher(() => true, slug, queue, () => true);
+		const launcher = pickLauncher(() => true, slug, queue, () => true, PROJECT);
 		assert.equal(launcher.kind, "pane");
 		assert.match(launcher.argv[0], /agent-pane\.sh$/);
 		assert.match(launcher.argv[1], /^spawn$/);
-		assert.ok(launcher.argv.includes("--visible"), "it must appear in the agents pane");
-		assert.ok(launcher.argv.includes("--sandbox"), "the pi inside it must run through the sandbox");
+		assert.equal(launcher.argv[launcher.argv.indexOf("--space") + 1], "web", "the space whose project it teaches");
+		assert.ok(!launcher.argv.includes("--visible"), "a tab in that space, never a space of its own");
+		assert.ok(launcher.argv.includes("--sandbox"), "a project learner runs behind the wall like every worker");
+		assert.equal(launcher.cwd, PROJECT.project, "and works in the project, not in the session's folder");
 		assert.equal(launcher.missing, undefined);
+	});
+
+	test("a harness learner is a tab too, and runs bare so it may publish its own branch", () => {
+		const launcher = pickLauncher(() => true, slug, queue, () => true, HARNESS);
+		assert.equal(launcher.argv[launcher.argv.indexOf("--space") + 1], "pi");
+		assert.ok(!launcher.argv.includes("--sandbox"), "the one worker that publishes itself has no wall to stop it");
+		assert.deepEqual(launcher.space, HARNESS, "the kind travels with the launcher, for the run log");
 	});
 
 	test("there is no headless or detached runner left to fall back to", () => {
@@ -226,7 +352,7 @@ describe("pickLauncher", () => {
 		// looked like a sub-agent of the host session for seven launches in a row.
 		for (const has of [() => true, () => false]) {
 			for (const exists of [() => true, () => false]) {
-				const launcher = pickLauncher(has, slug, queue, exists);
+				const launcher = pickLauncher(has, slug, queue, exists, HARNESS);
 				assert.equal(launcher.kind, "pane");
 				const argv = launcher.argv.join(" ");
 				assert.ok(!argv.includes(" -p "), "a print-mode pi is not a visible learner");
@@ -235,21 +361,26 @@ describe("pickLauncher", () => {
 		}
 	});
 
-	test("the learner is started in the repo, never in the queue", () => {
+	test("the learner is started in the space's project, never in the queue", () => {
 		for (const launcher of [
-			pickLauncher(() => true, slug, queue, () => true),
-			pickLauncher(() => false, slug, queue, () => true),
-			pickLauncher(() => false, slug, queue, () => false),
+			pickLauncher(() => true, slug, queue, () => true, HARNESS),
+			pickLauncher(() => false, slug, queue, () => true, HARNESS),
+			pickLauncher(() => false, slug, queue, () => false, HARNESS),
 		]) {
-			assert.equal(launcher.cwd, join(homedir(), ".pi"));
+			assert.equal(launcher.cwd, HARNESS.project, "the project the compaction was about");
 		}
 		// agent-pane.sh spawns in the spec's directory unless it is told otherwise.
-		const pane = pickLauncher(() => true, slug, queue, () => true);
-		assert.deepEqual(pane.argv.slice(4, 6), ["--cwd", join(homedir(), ".pi")]);
+		const pane = pickLauncher(() => true, slug, queue, () => true, HARNESS);
+		assert.deepEqual(pane.argv.slice(4, 6), ["--cwd", HARNESS.project]);
+	});
+
+	test("a session in a subfolder still teaches the project it sits in", () => {
+		const launcher = pickLauncher(() => true, slug, queue, () => true, PROJECT);
+		assert.equal(launcher.cwd, PROJECT.project, "the space's project, not the subfolder the session was in");
 	});
 
 	test("the markers that stop a learner starting a learner are handed over", () => {
-		const launcher = pickLauncher(() => true, slug, queue, () => true, join(homedir(), ".pi"), {
+		const launcher = pickLauncher(() => true, slug, queue, () => true, HARNESS, {
 			PI_SELF_LEARN: "1",
 			PI_SELF_LEARN_SLUG: slug,
 		});
@@ -261,19 +392,19 @@ describe("pickLauncher", () => {
 	test("no herdr: a named failure, not a hidden learner", () => {
 		// The bug this replaces: without herdr the learner ran detached, as a
 		// sub-agent of the host session, visible to nobody.
-		const launcher = pickLauncher((cmd) => cmd !== "hc", slug, queue, () => true);
+		const launcher = pickLauncher((cmd) => cmd !== "hc", slug, queue, () => true, HARNESS);
 		assert.deepEqual(launcher.argv, [], "nothing may be started");
 		assert.match(launcher.missing ?? "", /hc.*not on PATH/);
 	});
 
 	test("no herdr-app: a space could be made but not seen, so it is a failure too", () => {
-		const launcher = pickLauncher((cmd) => cmd !== "herdr-app", slug, queue, () => true);
+		const launcher = pickLauncher((cmd) => cmd !== "herdr-app", slug, queue, () => true, HARNESS);
 		assert.deepEqual(launcher.argv, []);
 		assert.match(launcher.missing ?? "", /herdr-app.*not on PATH/);
 	});
 
 	test("no launcher script: same named failure, not plain pi", () => {
-		const launcher = pickLauncher(() => true, slug, queue, () => false);
+		const launcher = pickLauncher(() => true, slug, queue, () => false, HARNESS);
 		assert.deepEqual(launcher.argv, []);
 		assert.match(launcher.missing ?? "", /agent-pane\.sh is missing/);
 	});
@@ -515,7 +646,7 @@ describe("wiring", () => {
 			publishWindowMs: 0,
 			...deps,
 		});
-		const { ctx, notices } = createFakeCtx({ mode: "tui", hasUI: true });
+		const { ctx, notices } = learnerCtx();
 		return { ...fake, ctx, notices, started, api, learn, now: base };
 	}
 
@@ -549,13 +680,30 @@ describe("wiring", () => {
 		assert.equal(started.length, 1);
 	});
 
-	test("the cwd handed to the launch is the repo, not the queue directory", async () => {
+	test("the cwd handed to the launch is the space's project, not the queue directory", async () => {
 		const { emit, ctx, started } = setup();
 		await trip(emit, ctx);
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		await waitFor(() => started.length === 1);
-		assert.equal(started[0].launcher.cwd, join(homedir(), ".pi"));
+		assert.equal(started[0].launcher.cwd, SPACE.project);
 		assert.match(started[0].env.PI_SELF_LEARN_SLUG, /^learn-\d{2}-\d{2}$/);
+		assert.equal(started[0].launcher.space?.slug, SPACE.slug, "a tab in the space that owns the project");
+	});
+
+	test("a cwd no space claims starts nothing, and says which folder it was", async () => {
+		// Half of the point of the boundary: a session in a folder no space owns teaches
+		// nothing, and the line says so instead of leaving the person with no learner and
+		// no reason. The queue file is not written: nothing would ever read it.
+		const { emit, started, api } = setup();
+		const { ctx, notices } = learnerCtx({ cwd: join(scratch, "unclaimed") });
+		await trip(emit, ctx);
+		const decision = await api.learn("compact", ctx);
+		assert.equal(decision.spawn, false, "no space, no learner");
+		assert.equal(started.length, 0);
+		assert.match(decision.reason, /^no space owns .*unclaimed, so this compaction teaches nothing$/);
+		const told = notices.filter((notice) => /no space owns/.test(notice.message));
+		assert.equal(told.length, 1, "told once, in the session");
+		assert.equal(told[0].level, "info");
 	});
 
 	test("a launch that exits 0 without a space is a failure, and nothing else is tried", async () => {
@@ -725,7 +873,9 @@ describe("wiring", () => {
 		// The other half of the rule above: the wait is not a rejection. When the session
 		// file lands, the row is the ordinary `spawned` one — and it can be watched,
 		// which a screen-only confirmation never could.
-		const home = join(homedir(), ".pi");
+		// The session file is keyed by the cwd the learner was started in, and that is the
+		// space's project: a session in a subfolder still teaches the project.
+		const home = SPACE.project;
 		const { emit, ctx, now: base } = setup({
 			launch: () => ({ ok: true, status: 0, detail: "t7" }),
 			confirm: async () => ({ ok: true, source: "terminal" as const, detail: "t7" }),
@@ -3138,7 +3288,7 @@ describe("a request left by a learner that already finished", () => {
 
 		const { fake } = setupWithBroker();
 		const rows: any[] = [];
-		const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+		const { ctx } = learnerCtx();
 		// The extension's own runs.jsonl appender is what records the row here.
 		await fake.emit("session_start", {}, ctx);
 		await new Promise((resolve) => setTimeout(resolve, 120));
@@ -3159,7 +3309,7 @@ describe("a request left by a learner that already finished", () => {
 		process.env.PI_SELF_LEARN = "1";
 		try {
 			const { fake } = setupWithBroker();
-			const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+			const { ctx } = learnerCtx();
 			await fake.emit("session_start", {}, ctx);
 			await new Promise((resolve) => setTimeout(resolve, 120));
 			assert.equal(published.length, 0, "a sandboxed broker would claim and fail it");
@@ -3213,7 +3363,7 @@ describe("a request left by a learner that already finished", () => {
 
 		const { fake } = setupWithBroker();
 		const rows: any[] = [];
-		const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+		const { ctx } = learnerCtx();
 		// The extension's own runs.jsonl appender is what records the row here.
 		await fake.emit("session_start", {}, ctx);
 		await new Promise((resolve) => setTimeout(resolve, 120));
@@ -3234,7 +3384,7 @@ describe("a request left by a learner that already finished", () => {
 		process.env.PI_SELF_LEARN = "1";
 		try {
 			const { fake } = setupWithBroker();
-			const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+			const { ctx } = learnerCtx();
 			await fake.emit("session_start", {}, ctx);
 			await new Promise((resolve) => setTimeout(resolve, 120));
 			assert.equal(published.length, 0, "a sandboxed broker would claim and fail it");
@@ -3326,7 +3476,7 @@ describe("the host session's half of the broker", () => {
 			publishWindowMs: 0,
 			...over,
 		});
-		const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+		const { ctx } = learnerCtx();
 		return { fake, ctx };
 	}
 
@@ -3440,7 +3590,7 @@ describe("a launch that ends in a request is published", () => {
 			},
 			...over,
 		});
-		const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+		const { ctx } = learnerCtx();
 		return { fake, ctx, published };
 	}
 
@@ -3532,7 +3682,7 @@ describe("a launch handed to the host session", () => {
 			publishWindowMs: 0,
 			...deps,
 		});
-		const { ctx } = createFakeCtx({ mode: "tui", hasUI: true });
+		const { ctx } = learnerCtx();
 		return { fake, ctx };
 	}
 
@@ -3570,6 +3720,9 @@ describe("a launch handed to the host session", () => {
 			evidence: EVIDENCE,
 			ts: new Date().toISOString(),
 			judged: ["learn-10-59"],
+			// The project the compaction was about: the host resolves the space from it, so
+			// the kind of teaching is still the space's answer and not the request's.
+			cwd: SPACE.project,
 			...over,
 		});
 	}
@@ -3752,6 +3905,9 @@ describe("a launch handed to the host session", () => {
 		assert.equal(parse({ proposal: "/tmp/x.md" }).ok, false, "only the proposals directory");
 		assert.equal(parse({ ts: "yesterday" }).ok, false);
 		assert.equal(parse({ ts: undefined }).ok, false);
+		assert.equal(parse({ cwd: "relative/project" }).ok, false, "a cwd is absolute or it is a guess about the host's folder");
+		assert.equal(parse({ cwd: "" }).ok, false);
+		assert.equal(parse({ cwd: undefined }).ok, false);
 		assert.equal(parse({ judged: ["a", 3, null] }).ok === true, true, "a non-string in judged is dropped, not fatal");
 		const filtered = parse({ judged: ["a", 3] });
 		if (filtered.ok) assert.deepEqual(filtered.request.judged, ["a"]);
@@ -3806,7 +3962,7 @@ describe("a launch handed to the host session", () => {
 				publishWindowMs: 0,
 				...over,
 			});
-			const { ctx, notices } = createFakeCtx({ mode: "tui", hasUI: true });
+			const { ctx, notices } = learnerCtx();
 			const emit = (name: string, event: any = {}, c: any = ctx) => fake.emit(name, event, c);
 			return { emit, ctx, notices, api };
 		}
