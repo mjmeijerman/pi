@@ -28,6 +28,22 @@ commit-msg)
 	"$HOOKS_HOME/scan-commitmsg.sh" "$1" || exit $?
 	exec "$HOOKS_HOME/add-provenance.sh" "$1"
 	;;
-pre-push) exec "$HOOKS_HOME/scan-prepush.sh" ;;
+pre-push)
+	# pre-push feeds ref lines on stdin and two gates want them: the secret scan
+	# (which decides the push) and the mutation gate (which decides whether this
+	# branch is worth a CI round). stdin is read once into a temp file so both
+	# see the same refs; the hook exits as soon as either refuses.
+	PUSH_REFS="$(mktemp)" || exit 1
+	trap 'rm -f -- "$PUSH_REFS"' EXIT
+	cat > "$PUSH_REFS"
+	rc=0
+	if [ -x "$HOOKS_HOME/scan-prepush.sh" ]; then
+		"$HOOKS_HOME/scan-prepush.sh" < "$PUSH_REFS" || rc=$?
+	fi
+	if [ "$rc" -eq 0 ] && [ -x "$HOOKS_HOME/scan-mutation.sh" ]; then
+		"$HOOKS_HOME/scan-mutation.sh" < "$PUSH_REFS" || rc=$?
+	fi
+	exit "$rc"
+	;;
 esac
 exit 0

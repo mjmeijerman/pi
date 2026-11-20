@@ -133,9 +133,11 @@ branch can go out.
 
 A shipped test **is** the proof; a local mutation run is not required. When the
 proposal carries a `**Test:**` line, the PR gate's mutation of exactly the added
-lines is where that gets decided — the same mutants on the same code, so a local
-pre-run buys no verdict, only wall clock. Only the `**No test:**` line needs a
-proof, and that proof is the differential run above.
+lines is where that gets decided — the same mutants on the same code, and the
+`pre-push` gate (`git-hooks/scan-mutation.sh`) now runs that same script before
+the branch leaves the machine, so a local pre-run of *it* buys a verdict and not
+just wall clock. Only the `**No test:**` line needs a proof, and that proof is
+the differential run above.
 
 If you run mutation locally anyway, bound it. Print the scope first:
 `bash scripts/mutate-changed.sh --list-only` — it prints the scope ranges minus
