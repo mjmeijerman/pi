@@ -1710,6 +1710,26 @@ check_self_learn() {
 }
 
 # -------------------------------------------------- learn branch published --
+# landed_by_patch <branch> — true when every commit the branch adds is already in
+# trunk under another sha, which is what a rebased or cherry-picked publish
+# produces. The ancestor test below cannot see that: a publish rebases the
+# learner's branch before it pushes, so the same lesson reaches trunk as a new
+# sha and the old ref stops being an ancestor of it. Measured on 2026-11-20:
+# learn/learn-cap (ae827ae, the docs(learn) lesson that landed as f9d3618) read
+# as an unfinished run for three hours and failed harness-check in every checkout
+# that shares this repo's refs — a red on trunk that no branch can fix and no
+# worker owns. `git cherry` compares patch-ids, which is the question here ("is
+# this change in trunk?"), while the age, the proposal path and the publish log
+# stay the answer for a commit trunk does not carry. Exit 1 when `git cherry`
+# cannot answer (no trunk ref, an old git): an unanswerable question is judged
+# the old way, never as a pass.
+landed_by_patch() {
+	local branch=$1 out
+	out=$(git -C "$ROOT" cherry trunk "refs/heads/$branch" 2>/dev/null) || return 1
+	[ -n "$out" ] || return 1
+	! printf '%s\n' "$out" | grep -q '^+'
+}
+
 check_learn_branch_published() {
 	local check=learn-branch-published
 	local log="$ROOT/agent/proposals/publish-log.jsonl"
@@ -1733,6 +1753,9 @@ check_learn_branch_published() {
 		seen=$((seen + 1))
 		# Already trunk's history: the lesson landed, the leftover branch is litter.
 		git -C "$ROOT" merge-base --is-ancestor "refs/heads/$branch" trunk 2>/dev/null && continue
+		# Landed under another sha (a rebase before the push): the same lesson, so the
+		# same verdict — landed, and the leftover ref is litter.
+		landed_by_patch "$branch" && continue
 		ts=$(git -C "$ROOT" log -1 --format=%ct "refs/heads/$branch" 2>/dev/null) || continue
 		[ -n "$ts" ] || continue
 		age=$(((now - ts) / 60))
@@ -1764,7 +1787,7 @@ check_learn_branch_published() {
 	if [ "$seen" -eq 0 ]; then
 		verdict "$check" . 1 "no learn/* branches — every lesson learned here has landed or been dropped"
 	else
-		verdict "$check" . 1 "$seen learn/* branch(es): merged, younger than ${LEARN_BRANCH_GRACE_MIN} min, or carrying a PR in publish-log.jsonl"
+		verdict "$check" . 1 "$seen learn/* branch(es): merged or landed under another sha, younger than ${LEARN_BRANCH_GRACE_MIN} min, or carrying a PR in publish-log.jsonl"
 	fi
 }
 
