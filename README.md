@@ -15,6 +15,7 @@ This repository is the pi coding-agent configuration for this machine: skills, a
 | `gitignore_global` | global gitignore for secret files |
 | `sandbox/` | bubblewrap launcher + policy selftest (`pi-sandbox.sh`) |
 | `herdr-mods/` | Herdr window mods: `prs` shows open pull requests with merge |
+| `bin/` | `space` makes a durable space for one project; `delegate` runs one worker at a time in it |
 | `scripts/` | session report / prune helpers + Herdr pane launcher |
 | `docs/` | Radar conformance audit and the agent working playbook |
 | `install.mjs` | the installer engine, one file for Linux, macOS and Windows (config, hooks, bin entries, services) |
@@ -105,6 +106,30 @@ stop, not grind:
    be skipped to stay green;
 4. more than one worker-day across two attempts without a green matrix run;
 5. start-at-login on macOS or Windows proving flaky.
+
+### Spaces
+
+A **space is a project**. One Herdr space holds one project, one worker at a
+time, and the record that says so:
+
+```bash
+bin/space new --name myproject --project ~/projects/myproject   # or --clone <url>, --no-git
+bin/space list                                                  # slug, project, git, tabs, open|closed
+bin/space show myproject
+```
+
+`space new` opens the Herdr space, writes `~/.pi/state/spaces/<slug>/space.json`,
+and puts a rules block between `<!-- pi-space:begin -->` and `<!-- pi-space:end -->`
+in the project's `AGENTS.md`: one project per space, one worker at a time, a new
+worker only after the previous pull request is merged, and the boss never edits
+files itself.
+
+`bin/delegate` reads the space from where it is run: it takes the longest project
+path that contains the cwd, so `cd ~/projects/myproject && bin/delegate spawn …`
+is already inside that space. `--space <slug>` names one explicitly, and a folder
+no space claims is refused with the `bin/space new` command that fixes it. Specs,
+reports and the worker record live in the space, not in one global list. A space
+with no `.git` skips the whole git half: no branch, no worktree, no PR.
 
 ### Herdr window
 
