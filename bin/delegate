@@ -1,0 +1,3070 @@
+#!/usr/bin/env bash
+# delegate — the only way an agent in big-boss-pi starts work.
+# bash is resolved at runtime, before anything else runs: see bin/shell-resolve.sh. It re-execs this
+# script under a bash it finds when the shell that started it is not bash (cmd.exe, PowerShell, or a
+# minimal Git Bash with only sh.exe), and says so when there is none. A copy a Windows shim starts is
+# already bash and needs no resolver beside it; a shell that is not bash and has none is stopped here.
+# shellcheck source=bin/shell-resolve.sh
+shell_dir=$(dirname -- "$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")")
+if [ -f "$shell_dir/shell-resolve.sh" ]; then
+	. "$shell_dir/shell-resolve.sh"
+elif [ -z "${BASH_VERSION:-}" ]; then
+	printf '%s: no shell-resolve.sh next to %s — it is what finds bash: set PI_GIT_BASH or run this under bash\n' "${0##*/}" "$0" >&2
+	exit 127
+fi
+
+#   delegate spawn <slug> --cwd DIR [--space SLUG] [--mode bare|sandboxed|no-net] [--thinking LEVEL]
+#                  [--acceptance] [--allow-matrix --reason TEXT]
+#                  [--override-jev --reason TEXT] [--no-restore] "<task>"
+#   delegate wait <slug> [--space SLUG] [--timeout SECONDS] [--forever]
+#   delegate list [--space SLUG]
+#   delegate close <slug> [--space SLUG] [--merged PR-URL-OR-NUMBER]
+#   delegate close <slug> --space SLUG --nothing "<why nothing landed>"   (a worker whose change never landed)
+#   delegate close <slug> --rewritten <sha> "<why the tip is another worker's, rewritten>"
+#                  (a worker whose only commit is another worker's branch, rebased)
+#   delegate finish <slug> [--cwd DIR] [--skip "<reason>"]   (publish, wipe, close — the whole tail)
+#   delegate ask "<question>" [--json]
+#   delegate stats [--since DURATION] [--json]
+#   delegate sweep
+#   delegate wipe <slug> [--skip "<reason>"]
+#
+# A worker runs in a *space*: one project, durable, made by `bin/space new`. The space is where
+# the worker's spec, its report and the record of who was started live, all under
+# state/spaces/<slug>/. `--space` names it; without it the space is read from `--cwd` (or the
+# current directory) by the longest project path that contains it, and a folder no space claims
+# is refused with the `bin/space new` command that fixes it. Two spaces can never share a
+# project path, because the one that owns it is the one that was made first.
+#
+# A space holds one worker at a time, on a git project only while nothing of its is unmerged.
+# Both are hard refusals, not notes: two workers in one space was the thing spaces exist to stop.
+# A project with no `.git` skips git entirely — no branch, no worktree, no trailer, no publish —
+# and its worker leaves the change in the folder for the boss to record.
+#
+# `delegate wait <slug> --forever` is the boss's loop: one line per poll, and a worker whose
+# terminal died before it reported is restarted with the same spec (three restarts, then it gives
+# up naming what it saw). Without --forever, wait keeps today's single timeout.
+#
+# A worker gets its own Herdr space (never the big-boss-pi space), a spec in specs/<slug>.md,
+# and one place to report back: reports/<slug>.md.
+#
+# Spawning does not move the person's view. space.new always shows the new space, so spawn
+# records the selected space and tab first and selects them again afterwards; on screen you
+# stay where you were, and the worker's space is there when you want it. If the view cannot be
+# read or put back, spawn prints one warning and carries on: a started worker is never thrown
+# away over a view. --no-restore keeps the old behaviour, for watching the worker appear.
+#
+# A worker space never outlives its report: once reports/<slug>.md exists, the space is closed
+# as soon as the report has been relayed. The one exception is a report whose first line reads
+# "DECISION NEEDED: <question>": that marker keeps the space open until the user answers.
+# `delegate sweep` applies exactly that rule to every tracked worker in one go.
+#
+# A second opinion is a worker that has not seen the code. `delegate spawn SLUG --acceptance
+# --cwd DIR specs/some-spec.md` turns a spec into failing acceptance tests instead of an
+# implementation: the generated spec orders the worker to read that spec file and the interfaces
+# it names, never the implementation files of the change, to write one failing test per behaviour
+# the spec states, to raise DECISION NEEDED instead of guessing where the spec is silent, to
+# commit only test files and to leave production code untouched. The report has to show the tests
+# failing against the current tree, because a test that already passes proves nothing about work
+# not yet done. The mode is auditable: the spawn's state line and its printed result both carry
+# `acceptance`, so a later reader can tell a second opinion from an implementer without reading
+# the spec.
+#
+# A spec measures one thing, and spawn checks that before anything is started. The task text's
+# `Measure:` lines are counted: two of them, or none plus prose asking for before/after numbers, is
+# refused with each offending line quoted. Proof proportional to the diff is the reason (AGENTS.md
+# rule 10): a worker spent twenty minutes after its commit landed on a matrix its own spec asked
+# for, and no decision changed because of it. `--allow-matrix --reason '<why>'` goes through and
+# lands in state/decisions.jsonl, so a matrix is a decision somebody made and can be argued with.
+#
+# The report skeleton is spawn's to write: reports/<slug>.md is created with the five lines every
+# report carries — `Mission:`, `Review tier:`, `Test change:`, `## Evidence` (which asks for
+# `bin/preflight` by name) and `Commit:` — each left as a `<fill …>` placeholder. The worker fills
+# them in or overwrites the file. `delegate close` already refuses a report that still carries a
+# placeholder, so a skeleton can never publish; and a report that is only a skeleton is not a
+# report: `delegate wait` keeps waiting, the in-flight block does not count it as unread, and
+# `worker_state` keeps saying `working`. A worker is finished when its report is written.
+#
+# Work in flight is capped by review, not by generation. A report is "read" once something marks
+# it so: `delegate wait` and `delegate close` write state/read/<slug> as they print or check the
+# report, and nothing else does. While a reported worker in a --cwd still has no marker, the boss
+# has not looked at what already landed there. The block is by area, not by directory: each unread
+# worker's paths come from its own branch (`git diff --name-only` against the merge base with the
+# origin trunk) and the new task's paths come from the paths the task text names, so only an
+# overlapping unread report refuses — with the queue and both path lists — while a task that
+# touches different files, or names no path at all, goes through with a note saying why.
+# --override-jev --reason '<why the queue can wait>' goes through and lands as a command
+# "in-flight" line in state/decisions.jsonl, which is written either way. Generation outrunning
+# review is invisible until it is counted, which is why `delegate stats` prints the unread queue
+# and the age of its oldest report with no network and no gh.
+#
+# Between features there is one more step, and `delegate close` enforces it: `delegate wipe
+# <slug>` prints the five consolidation questions — what did this feature make unnecessary, what
+# is duplicated, could the next feature land in this area in 30 minutes, what did we learn, what
+# would we re-implement from scratch — and records the step in state/decisions.jsonl. A step that
+# does not apply is recorded too, as `--skip "<reason>"`, with the reason, instead of being
+# dropped silently. A close with no wipe line for that slug is refused, because a rule nothing
+# checks is gone (blip 20).
+#
+# The close is the last step of the three, not the second: publish the report while the delegation
+# entry still exists, or after the entry is gone if it has to be (`bin/publish` finds the branch by
+# its Agent-Slug trailer then), then wipe, then close. `delegate finish` runs all three in that
+# order, because four turns for one intent is where the boss drops a step; a failure stops the run,
+# names the step and says which state the worker is in, and `closed but not published` stays
+# unreachable by construction. Fewer turns, not fewer gates: each step keeps its own checks.
+#
+# The wipe is asked for the answers as well as the questions. A report with no `## Thrown away`
+# block (or the `## Wipe` block an older report writes) has not answered anything, so recording
+# the step over it would put a line in the log standing for nothing. A worker with no report at
+# all is left alone: there is nothing to answer, and close already refuses that worker for the
+# evidence block it does not have.
+#
+# A report is a claim until it carries output. So `delegate close` refuses a report with no
+# `## Evidence` block, or one that still has fill-in placeholders left in it: it prints what is
+# missing and how to fix it, and exits nonzero without closing the space. The generated spec
+# carries the scaffold, command line and fence included, so the block is copied into the report
+# and deleting it is a decision; the worker stays idle and its space stays open, so the evidence
+# is one edit away instead of lost. The spec and report templates say the same thing to the
+# worker, earlier: "should work", "looks correct" and "tests pass" are banned without the output
+# that shows it. Plausible is not working — the genie is plausible by default, so the harness asks
+# for the transcript.
+#
+# Provenance is demanded in the shape the commit can still be given it in. A report's commit
+# must carry the `Agent-Slug` trailer, which is one `git commit --amend` away while the branch
+# is unmerged. The sha that is checked is the report's own commit, not the first sha it mentions:
+# a report quotes another branch's commit as evidence, which is what evidence is, and reading the
+# earliest mention refused a worker whose own commit sat two lines below it (learner-proof, PR
+# #164, quoted the learner's 6dbff2f38d8c from #159). So the reader prefers a `Commit:` line whose
+# sha carries this worker's trailer, then any sha the report names that carries it, then the
+# earliest one; and when none of them carries it, the refusal lists every sha it looked at with
+# what each one is, so the next reader sees at once that the report is quoting someone else. A
+# commit that is already in trunk cannot be amended — that is a rewrite of
+# trunk — so `delegate close <slug> --merged <pr-url-or-number>` is the documented escape, and
+# it closes on one of two verdicts, each with a warning and a row in state/decisions.jsonl
+# carrying slug, sha, pr and the reason. Provenance recorded after the fact is visible
+# provenance; a silent pass is not. Four outcomes, and no others: without the flag nothing
+# changes; a commit that is an ancestor of origin/<trunk> closes exactly as before; a commit
+# that is not an ancestor but whose patch git marks as already upstream closes as the *same
+# change under another sha*, because this repo squash-merges and the landed squash is never the
+# worker's own commit — `git cherry origin/<trunk> <sha>` prints `-`, which is what `git
+# patch-id --stable` says; and anything git marks `+`, or cannot compute at all, refuses, with
+# the refusal saying which of the two it was. Nothing else is evidence: no commit count, no
+# similarity, no "close enough".
+#
+# Two caveats the verdict inherits from git, both refused rather than guessed through. `git
+# cherry` compares a commit's diff against its parent, so a squash that also touched
+# neighbouring lines reads `+` although the content is in; that case is refused with its own
+# message and its own two fixes, since amendment and a manual record are different moves. And a
+# landing that was later reverted still reads `-`, because the landing commit is still reachable
+# from trunk — so a `-` is not taken on its own: the change must also still be in origin/<trunk>'s
+# tree, or the close is refused as a reverted landing with the landing commit named. That check
+# reads content by un-making the commit's patch in a throwaway index, which is also what tells
+# the two `+` cases apart. It can read a squash whose neighbouring lines moved as "not there",
+# and then the refusal says so and offers the one honest way through: name the landed commit in
+# the report. The row keeps both shas — the report's and the landed one — for a human to check
+# instead of a bare yes. A commit whose parent has not been fetched is refused as "fetch first",
+# never read as `+`.
+#
+# The third exit, `--rewritten <sha> "<why>"`, is for a worker whose work *is* a rebase: it
+# rewrote another worker's branch onto trunk, so the tip carries that worker's Agent-Slug trailer
+# and nothing else — a rebase rewrites a commit without changing whose trailer it is. Both other
+# paths refuse it, and the space stays open for something that is not the worker's fault. It is
+# accepted only when the sha resolves in the worker's tree, is not in origin/<trunk>, carries an
+# Agent-Slug that is not this slug, is the tip of the branch that trailer names, and replaces a
+# commit on that branch's reflog with the same subject and author — a rewrite of somebody's
+# commit, never an invented one. One row in state/decisions.jsonl carries the sha, the branch and
+# the commit it replaces, and the reason is printed like --nothing's.
+#
+# Every spawn asks Jev, unconditionally, for the mode, the route (local or remote) and the
+# thinking effort — in one call (`jev plan`), for the decisions that used to be guessed. A field
+# Jev answered only weakly takes the conservative default (sandboxed, remote, medium), the spawn
+# says which field defaulted, and the decision lines carry the field names in `defaults`. The
+# answers are recorded as decision lines (mode, route, thinking), each carrying jev's own answer.
+# Routing is a refusal, not a warning: a task Jev calls "local" stops the spawn and prints the
+# cheaper bin/local-run command to run instead. A caller's --mode or --thinking is accepted only
+# when it matches Jev's answer for that exact task text; otherwise the spawn aborts and prints
+# Jev's answer. Overriding Jev — a mode, a thinking level or a local route — needs --override-jev
+# with a non-empty --reason, and the override is recorded on that decision's own line. A dead
+# model is still a refusal, unless --override-jev carried a reason, which is the promise those
+# refusal messages make and which makes every field take the same default, recorded as defaulted.
+# An "unsure" route is recorded and the spawn continues.
+#
+# How many workers a task needs is not one of Jev's decisions: it was a count, and a count told
+# nobody anything. One spawn starts one worker in one space; a task that needs three is three
+# spaces, started when the one before it has merged. The live ceiling of 8 spaces stays as a
+# plain refusal, because eight workers on one machine is a fact about the machine.
+#
+# Thinking is the one decision with two halves. Jev answers an abstract effort, low | medium |
+# high: it cannot know which thinking levels the worker's model supports. So the effort is
+# mapped here, against the model the worker will actually start with
+# (worker_thinking_level): the user's pi settings name that model, the model catalogue says
+# which levels it supports (thinkingLevelMap, where null marks an unsupported level), and the
+# effort goes to the nearest supported level, ties to the lower one. When the catalogue cannot
+# be read the effort name is passed through and pi clamps it to the model.
+#
+# Every decision lands in state/decisions.jsonl as one JSON line: timestamp, command, task
+# text, jev decision, jev reason, whether it was overridden, and the resulting slug. The route
+# is the third line for a task (command "route"), the thinking level the fourth (command
+# "thinking"). `delegate ask` writes the same line for a question put to jev before it ever
+# reaches the user.
+#
+# `overridden` is per line and means one thing: this decision was overturned by
+# --override-jev. Each line also carries `jev`, the answer jev actually gave, so a reader can
+# check the flag instead of trusting it. Rows written before that fix are spawn-wide (the flag
+# sat on all four lines of an overridden spawn, so a route jev answered "remote" could read as
+# overridden); `delegate stats` counts them as legacy instead of re-interpreting them.
+#
+# `delegate stats` reads this file and state/usage.jsonl and prints one screen: jev calls per
+# command, the route/mode/thinking splits, how often jev was overruled, and whether the local
+# work path (bin/local-run) ever ran. It exists because "is the local model used" used to be
+# answerable only by inference.
+#
+# The base a worker cuts from is fetched and brought up to date here, before the space exists:
+# a sandboxed worker cannot fetch, so a stale trunk would put a PR on an old base. Trunk is
+# fast-forwarded only when it is a clean, strictly-behind ancestor; dirty, ahead or diverged
+# trunk refuses the spawn with the state named, and nothing is ever reset, rebased or forced.
+#
+# Radar Vol. 35: blip 1 (agent sandboxing, Adopt), blip 21 (subagents, Trial — capped at 4),
+# blip 17 (risk-tiered human oversight — the mode decides how much rope a worker gets).
+#
+# The base a worker cuts from is fetched and brought up to date here, before the space exists:
+# a sandboxed worker cannot fetch, so a stale trunk would put a PR on an old base. Trunk is
+# fast-forwarded only when it is a clean, strictly-behind ancestor; dirty, ahead or diverged
+# trunk refuses the spawn with the state named, and nothing is ever reset, rebased or forced.
+set -euo pipefail
+
+# ROOT: PI_BOSS_ROOT wins, PI_MASTER_ROOT is the deprecated fallback, then this script's tree.
+self_root=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
+# The tree this script lives in, as opposed to ROOT (which a caller may point elsewhere).
+# Programs are found here; state and the jev stub are found under ROOT.
+self_bin=$self_root/bin
+ROOT=${PI_BOSS_ROOT:-${PI_MASTER_ROOT:-$self_root}}
+BIN=$ROOT/bin
+STATE=$ROOT/state
+DECISIONS=$STATE/decisions.jsonl
+READ_MARKS=$STATE/read
+# The space record lives at state/spaces/<slug>/, and the rules that read it are one file shared
+# with bin/space so the two cannot disagree about where a space is.
+SPACE_STATE=$STATE
+# shellcheck source=bin/space-lib.sh
+. "$self_bin/space-lib.sh"
+# Before a space is selected: the pre-space layout, still readable for one release.
+SPECS=$ROOT/specs
+REPORTS=$ROOT/reports
+DELEGATIONS=$STATE/delegations.json
+DELEGATIONS_WRITE=$STATE/delegations.json
+SPACE=""
+DELEGATIONS_ALL=""
+trap '[ -z "$DELEGATIONS_ALL" ] || rm -f "$DELEGATIONS_ALL"' EXIT
+
+prog=delegate
+die() { printf '%s: error: %s\n' "$prog" "$*" >&2; exit 1; }
+say() { printf '%s\n' "$*"; }
+
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 is not on PATH"; }
+
+json_field() { node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{let j={};try{j=JSON.parse(d)}catch{}const v=process.argv[1].split(".").reduce((a,k)=>a?.[k],j);if(v!==undefined&&v!==null)process.stdout.write(String(v))})' "$1"; }
+
+valid_slug() { case $1 in [a-z0-9]*) ;; *) return 1 ;; esac; printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]{0,30}$'; }
+
+# bin_prog <name> — a program from this tree, or from the pre-move tree when this one has not got
+# it yet. bin/ is the tool's single home now; ~/big-boss-pi/bin is where the rest still lives
+# until its own move, so a delegate here runs against the same jev, runners and preflight it did
+# before. Once the move is finished this fallback is one line to delete.
+bin_prog() {
+	if [ -x "$BIN/$1" ]; then printf '%s' "$BIN/$1"; else printf '%s' "$SPACE_LEGACY_ROOT/bin/$1"; fi
+}
+
+# self_bin_stats — the stats program, from this tree or the pre-move one.
+self_bin_stats() {
+	if [ -f "$self_bin/stats.mjs" ]; then printf '%s' "$self_bin/stats.mjs"; else printf '%s' "$SPACE_LEGACY_ROOT/bin/stats.mjs"; fi
+}
+
+# non_git_changes <project> <since-file> — what changed in a folder that has no git to ask. The
+# spec's mtime is the moment the worker was started, so "newer than the spec" is the honest
+# boundary, and the junk folders are dropped because they are not the worker's change.
+non_git_changes() {
+	local project=$1 since=$2
+	[ -f "$since" ] && [ -d "$project" ] || return 0
+	find "$project" -newer "$since" -type f \
+		-not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/.worktrees/*' \
+		-not -path '*/__pycache__/*' -not -path '*/.venv/*' 2>/dev/null |
+		sed -e "s|^$project/||" | sort | head -100
+}
+
+# delegations_all — every space's workers in one document, for the commands that span spaces
+# (list, sweep, wait, the one-live-worker check). Written once per run and removed at exit.
+delegations_all() {
+	if [ -z "$DELEGATIONS_ALL" ]; then
+		DELEGATIONS_ALL=$(mktemp)
+		space_merge_delegations "$DELEGATIONS_ALL"
+	fi
+	printf '%s' "$DELEGATIONS_ALL"
+}
+
+# report_path <slug> — the report the record names; the pre-space reports/ folder as a fallback.
+report_path() {
+	local p
+	p=$(delegation_field "${1:-}" report)
+	if [ -n "$p" ]; then printf '%s' "$p"; else printf '%s/reports/%s.md' "$ROOT" "${1:-}"; fi
+}
+
+# use_space <slug> — point specs, reports and the delegation record at one space. A space whose
+# own record is missing falls back to the pre-space state/delegations.json for reading; writes go
+# to the space's own file, so the old layout is read once and never written back.
+use_space() {
+	SPACE=$1
+	SPECS=$(space_specs "$SPACE")
+	REPORTS=$(space_reports "$SPACE")
+	DELEGATIONS_WRITE=$(space_delegations "$SPACE")
+	DELEGATIONS=$DELEGATIONS_WRITE
+	if [ ! -f "$DELEGATIONS" ] && [ -f "$SPACE_LEGACY_ROOT/state/delegations.json" ]; then
+		DELEGATIONS=$SPACE_LEGACY_ROOT/state/delegations.json
+	fi
+}
+
+# need_space <explicit|empty> <dir> — the space this command runs in: the one --space named,
+# else the space whose project path is the longest one containing <dir>. A folder no space claims
+# is refused with the command that makes one, because "which project is this?" is a question and
+# not a task. Both refusals are made here, in this shell, so the caller's `|| exit 1` catches
+# them: a `die` inside a command substitution only ends that subshell.
+need_space() {
+	local explicit=${1:-} dir=${2:-.} slug
+	if [ -n "$explicit" ]; then
+		space_valid_slug "$explicit" || die "--space takes a space name: '$explicit'"
+		space_exists "$explicit" || die "no such space: $explicit — bin/space list"
+		printf '%s' "$explicit"
+		return 0
+	fi
+	slug=$(space_resolve "$dir")
+	[ -n "$slug" ] && { printf '%s' "$slug"; return 0; }
+	die "no space claims $dir — a worker runs in a space, and a space is one project.
+Make one, then run this again:
+  $self_bin/space new --name <slug> --project $dir"
+}
+
+# space_tracks_worker <space> <slug> — true when this space's record holds that worker.
+space_tracks_worker() {
+	local file
+	file=$(space_delegations "$1")
+	[ -f "$file" ] || return 1
+	node -e '
+		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+		process.exit(j[process.argv[2]]?0:1);' "$file" "${2:-}"
+}
+
+# space_open_pr <space> <project> <remote> — the open pull request that must merge before this
+# space starts another worker: "<number> <branch> <url>", or empty.
+#
+# The trailer is what makes a PR this space's: every commit a worker lands carries `Agent-Slug:`,
+# and a slug this space records (or the space's own name) is a trailer of this space. When the
+# trailer cannot be read — the branch is not fetched here — the fallback is the blunter answer:
+# any open PR on the space's remote touched in the last 30 days blocks, because a maybe is not a
+# no when the cost of being wrong is a second worker beside the first. No gh, no remote or no
+# answer at all is silence: an unreadable service is not a merged PR.
+space_open_pr() {
+	local space=$1 project=$2 remote=${3:-} prs num branch url recent trailer
+	command -v gh >/dev/null 2>&1 || return 0
+	[ -n "$remote" ] || return 0
+	prs=$(gh pr list --repo "$remote" --state open --limit 50 \
+		--json number,headRefName,updatedAt,url 2>/dev/null) || return 0
+	[ -n "$prs" ] || return 0
+	prs=$(printf '%s' "$prs" | node -e '
+		let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+			let j=[];try{j=JSON.parse(d)}catch{return}
+			const now=Date.now(), month=30*24*3600*1000;
+			for (const p of (Array.isArray(j)?j:[])) {
+				if (!p||p.number==null) continue;
+				const t=Date.parse(p.updatedAt||"");
+				const recent=(!Number.isNaN(t)&&now-t<=month)?"1":"0";
+				// "|" and not a tab: read(1) collapses adjacent whitespace delimiters, and an
+				// empty url would then shift the recent flag into its place.
+				process.stdout.write([p.number,String(p.headRefName||""),String(p.url||""),recent].join("|")+"\n");
+			}
+		})')
+	while IFS='|' read -r num branch url recent; do
+		[ -n "${num:-}" ] || continue
+		trailer=""
+		if [ -n "$branch" ] && git -C "$project" rev-parse --verify --quiet "origin/$branch" >/dev/null 2>&1; then
+			trailer=$(git -C "$project" log -1 --format=%B "origin/$branch" 2>/dev/null | sed -n 's/^Agent-Slug:[[:space:]]*//p' | head -1 || true)
+			if [ -n "$trailer" ]; then
+				# A worker that has been closed is gone from the record but its spec is not: the
+				# spec is the durable half, so a PR whose trailer names one is still this space's.
+				if [ "$trailer" = "$space" ] || space_tracks_worker "$space" "$trailer" ||
+					[ -f "$(space_specs "$space")/$trailer.md" ]; then
+					printf '%s %s %s' "$num" "$branch" "$url"
+					return 0
+				fi
+				continue
+			fi
+		fi
+		# Unreadable trailer (not fetched, or no branch at all): the 30-day fallback.
+		if [ "${recent:-0}" = 1 ]; then
+			printf '%s %s %s' "$num" "${branch:-?}" "$url"
+			return 0
+		fi
+	done <<<"$prs"
+	return 0
+}
+
+# space_gate <space> — the two refusals a space keeps. Both are hard, and both name the next move.
+space_gate() {
+	local space=$1 project git remote live="" s st pr
+	project=$(space_field "$space" project)
+	git=$(space_field "$space" git)
+	remote=$(space_field "$space" remote)
+	if [ -f "$(space_delegations "$space")" ]; then
+		while IFS= read -r s; do
+			[ -n "$s" ] || continue
+			st=$(worker_state "$s")
+			[ "$st" = working ] || continue
+			live=$s
+			break
+		done <<<"$(node -e '
+			const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+			for (const k of Object.keys(j)) console.log(k);' "$(space_delegations "$space")")"
+	fi
+	if [ -n "$live" ]; then
+		die "space '$space' already has a live worker: $live
+Two workers in one space is the thing spaces exist to prevent. Wait for it, then spawn again:
+  $BIN/delegate wait $live --forever"
+	fi
+	[ "$git" = true ] || return 0
+	pr=$(space_open_pr "$space" "$project" "$remote")
+	if [ -n "$pr" ]; then
+		local prnum prbranch prurl
+		prnum=${pr%% *}
+		pr=${pr#* }
+		prbranch=${pr%% *}
+		prurl=${pr#* }
+		die "space '$space' has an open pull request: PR #$prnum ($prbranch) ${prurl:-no url recorded}
+Merged before the next is the rule, so the next action is asking the person to merge it, not a new worker.
+When it is merged:  $BIN/delegate spawn <slug> --cwd $project \"<task>\""
+	fi
+	return 0
+}
+
+# delegation_field <slug> <field> — a recorded value, empty when the entry or the field is missing.
+delegation_field() {
+	node -e '
+		const fs = require("fs");
+		let j = {};
+		try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
+		const r = j[process.argv[2]];
+		if (r && r[process.argv[3]]) process.stdout.write(String(r[process.argv[3]]));' \
+		"$DELEGATIONS" "${1:-}" "${2:-}"
+}
+
+# herdr_terminals — herdr's own list of terminals (`hc ls --all --json`), read once per run.
+# state/delegations.json is the record of what was started; this is what herdr still runs.
+# Nonzero when hc is missing or refuses, and every caller then trusts the record instead: a herdr
+# that is down is not a worker that died, and guessing `gone` would close a live space.
+# Declared here because the script runs under `set -u`: the first caller may be any of list, wait
+# or sweep, and none of them may have written these yet.
+herdr_terminals_read=""
+herdr_terminals_out=""
+herdr_terminals_ok=""
+herdr_terminals() {
+	if [ -z "$herdr_terminals_read" ]; then
+		herdr_terminals_read=1
+		herdr_terminals_out=""
+		herdr_terminals_ok=""
+		if command -v hc >/dev/null 2>&1 && herdr_terminals_out=$(hc ls --all --json 2>/dev/null) && [ -n "$herdr_terminals_out" ]; then
+			herdr_terminals_ok=1
+		else
+			herdr_terminals_out=""
+		fi
+	fi
+	[ -n "$herdr_terminals_ok" ] || return 1
+	printf '%s' "$herdr_terminals_out"
+}
+
+# herdr_terminals_none — true when herdr answered and listed no terminal at all.
+herdr_terminals_none() {
+	local terms
+	terms=$(herdr_terminals) || return 1
+	printf '%s' "$terms" | grep -qE '"terminals"[[:space:]]*:[[:space:]]*\[[[:space:]]*\]'
+}
+
+# reap_finished_learners — close the `learn-*` spaces a compaction leaves behind.
+#
+# self-learn starts one visible sandboxed learner space per `/om` compaction, and its own close
+# path deliberately leaves a successful learner open so a person can watch it. Ten workers running
+# for hours is one leftover space per compaction (13 at once, measured, every one at turn 1 and
+# done), and nobody closes them. The clean-up happens where herdr is already being talked to: an
+# extra best-effort step of spawn and finish, not a new command to remember.
+#
+# It closes nothing it is not sure about: only a `learn-*` space whose every listed terminal is
+# `done` or `idle`, never a slug in state/delegations.json, never the two permanent spaces. It
+# never changes an exit status and never blocks. No `hc`, an `hc` that refuses, or an empty
+# terminal list (what a sandbox answers) means silence, not a fake "reaped 0": a count about a
+# herdr this side cannot see is a lie with a number in it. DELEGATE_NO_REAP=1 turns it off.
+reap_finished_learners() {
+	[ "${DELEGATE_NO_REAP:-}" = 1 ] && return 0
+	local terms candidates spaces closable name id count states
+	command -v hc >/dev/null 2>&1 || return 0
+	# Read once. `hc ls --json` lists what herdr still runs, live terminals only: a learner whose
+	# terminal is already gone from that list is not a close candidate here, it is invisible.
+	if ! terms=$(hc ls --json 2>/dev/null); then
+		printf '%s: reap: skipped, hc ls failed\n' "$prog" >&2
+		return 0
+	fi
+	[ -n "$terms" ] || return 0
+
+	# A space name is the part of `where` before " / ". A space survives unless every terminal in
+	# it is done or idle: a live one, a status this side does not know, a missing status — all are
+	# still working, and the cost of guessing is somebody's running learner.
+	candidates=$(printf '%s' "$terms" | node -e '
+		let raw = "";
+		process.stdin.on("data", (c) => (raw += c)).on("end", () => {
+			const fs = require("fs");
+			let j = {};
+			try { j = JSON.parse(raw); } catch { return; }
+			const terms = Array.isArray(j.terminals) ? j.terminals : [];
+			if (!terms.length) return;
+			let deleg = {};
+			try { deleg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
+			// The live delegations and the two permanent spaces are never reaped.
+			const keep = new Set(Object.keys(deleg || {}));
+			keep.add("big-boss-pi");
+			keep.add("pi-master");
+			const spaces = new Map();
+			for (const t of terms) {
+				const where = String((t && t.where) || "");
+				const cut = where.indexOf(" / ");
+				if (cut < 0) continue;
+				const name = where.slice(0, cut).trim();
+				const status = String((t && t.status) || "");
+				const s = spaces.get(name) || { all: 0, done: 0, seen: new Set() };
+				s.all += 1;
+				if (status) s.seen.add(status);
+				if (status === "done" || status === "idle") s.done += 1;
+				spaces.set(name, s);
+			}
+			for (const [name, s] of spaces) {
+				if (!name.startsWith("learn-") || keep.has(name)) continue;
+				if (s.done !== s.all) continue;
+				const phrase = s.seen.size === 1 ? "all " + [...s.seen][0] : "all done or idle";
+				process.stdout.write([name, String(s.all), phrase].join("\t") + "\n");
+			}
+		});' "$DELEGATIONS") || candidates=""
+	[ -n "$candidates" ] || return 0
+
+	# space.close takes the space id, and the terminal list only carries the space's name: the
+	# window's own list is the one place the two sit together. Read once, only when there is
+	# something to close, so the ordinary run pays nothing for this.
+	if ! spaces=$(herdr-app ls 2>/dev/null); then
+		printf '%s: reap: skipped, herdr-app ls failed\n' "$prog" >&2
+		return 0
+	fi
+	closable=$(printf '%s' "$spaces" | node -e '
+		let raw = "";
+		process.stdin.on("data", (c) => (raw += c)).on("end", () => {
+			let j = {};
+			try { j = JSON.parse(raw); } catch { return; }
+			const byName = new Map();
+			for (const s of (Array.isArray(j.spaces) ? j.spaces : [])) {
+				if (s && s.name && s.id) byName.set(String(s.name), String(s.id));
+			}
+			for (const line of String(process.argv[1]).split("\n")) {
+				if (!line) continue;
+				const parts = line.split("\t");
+				const id = byName.get(parts[0]);
+				if (!id) continue;
+				process.stdout.write([parts[0], id, parts[1], parts[2]].join("\t") + "\n");
+			}
+		});' "$candidates") || closable=""
+	[ -n "$closable" ] || return 0
+
+	while IFS=$'\t' read -r name id count states; do
+		[ -n "$name" ] && [ -n "$id" ] || continue
+		if herdr-app do space.close --id "$id" --confirmed true >/dev/null 2>&1; then
+			printf '%s: reap: closed %s (%s terminals, %s)\n' "$prog" "$name" "$count" "$states" >&2
+		else
+			printf '%s: reap: warning: space.close failed for %s (%s)\n' "$prog" "$name" "$id" >&2
+		fi
+	done <<<"$closable"
+	return 0
+}
+
+# worker_state <slug> — `reported`, `gone` or `working`.
+#
+# `delegate list` used to read state/delegations.json alone, so a worker whose space was closed
+# (space.close answered ok, its terminal was gone, `hc ls --json` had nothing for it) went on
+# printing `working` for minutes; `delegate wait` then sat out its whole timeout, and `delegate
+# sweep` kept the entry forever. The record is what spawn wrote, not what herdr runs. A slug whose
+# recorded terminal herdr no longer lists and which never wrote a report is `gone`: not working,
+# and nothing to report. A report is still `reported` whatever herdr says — the report is the
+# thing the boss acts on, and a closed space after a report is the normal end of a worker.
+worker_state() {
+	local slug=${1:-} report terminal terms
+	report=$(report_path "$slug")
+	if report_written "$report"; then
+		printf 'reported'
+		return 0
+	fi
+	terminal=$(delegation_field "$slug" terminal)
+	# The state is only decided when herdr names at least one terminal. An answer of `[]` while the
+	# record names terminals is not "every worker died": it is a herdr this side cannot see — another
+	# core, a socket from inside a sandbox — and reading it as `gone` would call live workers dead.
+	# Same fallback as no answer at all: the record stands.
+	if [ -n "$terminal" ] && terms=$(herdr_terminals) &&
+		printf '%s' "$terms" | grep -qE '"terminals"[[:space:]]*:[[:space:]]*\[[[:space:]]*[{"]'; then
+		# The id is matched as a JSON token, not parsed out of a shape this side does not own:
+		# `"t16r"` in herdr's answer means herdr knows the terminal, whatever else is in there.
+		if ! printf '%s' "$terms" | grep -qF "\"$terminal\""; then
+			printf 'gone'
+			return 0
+		fi
+	fi
+	printf 'working'
+}
+
+# report_needs_decision <report> -- true when the report opens with a DECISION NEEDED line.
+# That marker is the only thing that keeps a worker space open once the report exists. A report
+# that is absent or empty means the worker is still working: a keep for the sweep, never a close.
+report_needs_decision() {
+	local report=${1:-}
+	[ -f "$report" ] || return 1
+	head -n 20 -- "$report" | grep -qiE '^[[:space:]]*[*_>#-]*[[:space:]]*decision needed[[:space:]]*:'
+}
+
+# mark_read <slug> -- records that reports/<slug>.md has been read: one empty file per worker in
+# state/read/. It is the only thing that clears the in-flight block in cmd_spawn, so the two
+# writing commands are the ones that actually show the boss the report: `delegate wait` (it prints
+# it) and `delegate close` (it checks it). A marker is a fact on disk, not a memory: the boss
+# cannot be asked to remember which report it already relayed.
+mark_read() {
+	mkdir -p "$READ_MARKS"
+	: >"$READ_MARKS/$1"
+}
+
+# unread_reports_in <cwd> -- one line per tracked worker in <cwd> whose report exists, has
+# content, and has no read marker: "<slug> <age-seconds> <report> <branch>". Age is the report's
+# mtime, the moment the worker wrote it. Empty output means nothing in that area is waiting to be
+# read. A worker with no report is still working, not unread, so it never blocks. The branch is
+# what cmd_spawn reads the worker's touched paths from: a report names what the worker says it
+# did, the branch diff names what it actually changed.
+unread_reports_in() {
+	[ -f "$DELEGATIONS" ] || return 0
+	local line report
+	# A report that is still a skeleton is a worker mid-work, not a report waiting to be read: the
+	# spawn writes it, and counting it would make every running worker block the next spawn.
+	while read -r line; do
+		[ -n "$line" ] || continue
+		report=$(printf '%s\n' "$line" | awk '{print $3}')
+		report_written "$report" || continue
+		printf '%s\n' "$line"
+	done < <(node -e '
+		const fs = require("fs"), path = require("path");
+		let j = {}; try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
+		const marks = process.argv[2], cwd = path.resolve(process.argv[3]), now = Date.now();
+		for (const slug of Object.keys(j)) {
+			const r = j[slug] || {};
+			if (!r.report || path.resolve(String(r.cwd || "")) !== cwd) continue;
+			let st; try { st = fs.statSync(r.report); } catch { continue; }
+			if (!st.size) continue;
+			if (fs.existsSync(path.join(marks, slug))) continue;
+			process.stdout.write([slug, Math.max(0, Math.round((now - st.mtimeMs) / 1000)), r.report, r.branch || ""].join(" ") + "\n");
+		}' "$DELEGATIONS" "$READ_MARKS" "$1")
+}
+
+# worker_paths <cwd> <branch> -- the paths a worker's branch actually changes, one per line, and
+# nothing when that cannot be read (no branch recorded, no origin trunk, no merge base). A report
+# says what the worker believes it did; this says what the tree says, which is the side the next
+# worker would collide with. The diff is against the merge base with the origin trunk, so a
+# branch that has fallen behind does not read as touching every file trunk touched since.
+worker_paths() {
+	local cwd=$1 branch=$2 trunk base
+	[ -n "$branch" ] || return 0
+	trunk=$(fresh_trunk_branch "$cwd")
+	[ -n "$trunk" ] || return 0
+	base=$(git -C "$cwd" merge-base "refs/remotes/origin/$trunk" "$branch" 2>/dev/null) || return 0
+	[ -n "$base" ] || return 0
+	git -C "$cwd" diff --name-only "$base" "$branch" 2>/dev/null || true
+}
+
+# task_paths <task text> -- the paths a task text names, one per line, deduplicated and sorted.
+# A path is a word with a slash in it (bin/delegate, src/auth.ts, agent/extensions/): that is what
+# a person writes when they mean a file, and an idea does not carry one. A URL is dropped, because
+# "https://..." is a slash and not a file this repo holds. Text that names no path prints nothing:
+# that is an honest "no overlap established", said out loud in cmd_spawn's note, not a silent
+# "safe to overlap".
+task_paths() {
+	printf '%s\n' "${1:-}" | tr -s '[:space:]' '\n' \
+		| sed -e 's/^[^[:alnum:]._@+~/-]*//' -e 's/[^[:alnum:]._@+~/-]*$//' \
+		| grep -E '^[[:alnum:]._@+~-]+(/[[:alnum:]._@+~-]+)+/?$' \
+		| sed -e 's#/*$##' | sort -u || true
+}
+
+# paths_overlap <worker-paths> <task-paths> -- the task paths that meet a worker path, one per line
+# as "<task path> -> <worker path>". Two paths meet when they are equal or when one is the other's
+# directory: bin/delegate and bin are the same area of work, and a worker that touched bin/delegate
+# is not someone a change to bin/delegate/... can be started beside.
+paths_overlap() {
+	WORKER_PATHS=${1:-} TASK_PATHS=${2:-} node -e '
+		const w = String(process.env.WORKER_PATHS || "").split("\n").filter(Boolean);
+		const t = String(process.env.TASK_PATHS || "").split("\n").filter(Boolean);
+		const meets = (a, b) => a === b || a.startsWith(b + "/") || b.startsWith(a + "/");
+		const out = [];
+		for (const tp of t) for (const wp of w) if (meets(tp, wp)) { out.push(tp + " -> " + wp); break; }
+		process.stdout.write(out.join("\n"));
+	'
+}
+
+
+# report_has_evidence <report> -- true when the report carries an Evidence heading with at
+# least one written line under it. A heading with nothing beneath it is the same claim as no
+# heading at all, so an empty block does not count. Both `## Evidence` and `**Evidence**` are
+# read the same way: the heading line, stripped of #, * and spaces, is the word "evidence".
+report_has_evidence() {
+	local report=${1:-}
+	[ -f "$report" ] || return 1
+	awk '
+		{
+			line = $0
+			gsub(/[#*]/, "", line)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+			if (!inblock) {
+				if (tolower(line) ~ /^evidence([[:space:]]+block)?$/) { inblock = 1; next }
+				next
+			}
+			if (tolower(line) ~ /^(thrown away|what i would do differently)/) exit 1
+			if (line != "") found = 1
+		}
+		END { exit(found ? 0 : 1) }
+	' "$report"
+}
+
+# report_has_preflight_evidence <report> [slug] -- true when the report's Evidence block names a
+# `bin/preflight` run, so the green it claims is a green somebody saw.
+#
+# Red CI rounds are this workspace's biggest cost (#177 three rebases, #180 three rounds, #183 two,
+# #66 one, #184 one) and every one of those failures was a check this machine answers in seconds.
+# The gate that runs them is `bin/preflight`; the Evidence block is where a report proves it ran,
+# and a report that proves everything except that one thing is a report claiming a verdict it never
+# saw. The block is read the same way report_has_evidence reads it — the heading, then the lines
+# under it, stopping at the next section — and one recorded `--skip-preflight` reason for this slug
+# stands in for the run: a check that is genuinely broken here is the one case where it cannot run.
+report_has_preflight_evidence() {
+	local report=${1:-} slug=${2:-}
+	[ -f "$report" ] || return 1
+	if awk '
+		{
+			line = $0
+			t = line
+			gsub(/[#*]/, "", t)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+			if (!inblock) {
+				if (tolower(t) ~ /^evidence([[:space:]]+block)?$/) { inblock = 1 }
+				next
+			}
+			if (line ~ /^##[[:space:]]/) exit
+			if (tolower(t) ~ /^(thrown away|what i would do differently)/) exit
+			print
+		}' "$report" | grep -qiE 'preflight'; then
+		return 0
+	fi
+	[ -n "$slug" ] || return 1
+	[ -f "$DECISIONS" ] || return 1
+	node -e '
+		const fs = require("fs");
+		let lines = [];
+		try { lines = fs.readFileSync(process.argv[1], "utf8").split("\n"); } catch { process.exit(1); }
+		for (const l of lines) {
+			if (!l.trim()) continue;
+			let j = {};
+			try { j = JSON.parse(l); } catch { continue; }
+			if (j.command === "preflight" && j.decision === "skipped" && (j.slug || "") === process.argv[2]) process.exit(0);
+		}
+		process.exit(1);' "$DECISIONS" "$slug"
+}
+
+# report_placeholders <report> -- the fill-in placeholders still left in the report, as
+# "LINE:TEXT" lines, empty when the report is written out in full. Narrow on purpose: a report
+# may quote a literal <slug> in a code fence, so only the words that mean "I did not fill this
+# in" are matched, and TODO/TBD/FIXME only as whole words.
+#
+# Fenced code blocks are pasted output, not prose: a test runner that prints "# todo 0" is
+# evidence the run happened, so the scan skips every line inside a fence (three or more
+# backticks or tildes; a fence closes with the same character and at least the same length).
+# A fence opened and never closed is read as fenced to end of file — a report is never refused
+# over pasted output — and one warning line goes to stderr, so the typo is still seen.
+#
+# An inline code span is the same claim one step smaller: a report that says "the scaffold's own
+# `Command: <fill in: ...>` line, slim-plain.md:88" is quoting the template it deleted, with the
+# citation beside it, and refusing it called an honest report unfinished. So the code spans are
+# removed before the scan, and the rest of the line is read as prose — the placeholder still
+# refuses when it is not inside backticks, or when it sits beside a span on the same line.
+report_placeholders() {
+	local report=${1:-}
+	[ -f "$report" ] || return 0
+	awk -v prog="$prog" -v file="$report" '
+		{
+			t = $0
+			sub(/^[ \t]+/, "", t)
+			if (infence) {
+				if (match(t, /^(`{3,}|~{3,})/)) {
+					m = substr(t, RSTART, RLENGTH)
+					if (substr(t, RLENGTH + 1) ~ /^[ \t]*$/ && substr(m, 1, 1) == ch && length(m) >= len) infence = 0
+				}
+				next
+			}
+			if (match(t, /^(`{3,}|~{3,})/)) {
+				m = substr(t, RSTART, RLENGTH)
+				ch = substr(m, 1, 1); len = length(m); infence = 1; openline = NR; openrun = m
+				next
+			}
+			# A quoted placeholder is a quotation, not an unfinished sentence: strip inline code spans
+			# (double backticks first, so ``x`` is one span and not two empty ones) and scan the rest.
+			code = $0
+			while (match(code, /``[^`]*``/)) code = substr(code, 1, RSTART - 1) " " substr(code, RSTART + RLENGTH)
+			while (match(code, /`[^`]*`/)) code = substr(code, 1, RSTART - 1) " " substr(code, RSTART + RLENGTH)
+			if (tolower(code) ~ /<[[:space:]]*(fill|insert|your|add|paste|todo|tbd)|(^|[^[:alpha:]])(todo|tbd|fixme)([^[:alpha:]]|$)/) {
+				printf "%d:%s\n", NR, $0
+			}
+		}
+		END {
+			if (infence) {
+				printf "%s: warning: %s: unclosed %s fence opened at line %d — the rest of the file is read as fenced output\n", prog, file, openrun, openline > "/dev/stderr"
+			}
+		}
+	' < "$report"
+}
+
+# report_written <report> -- true when the report is written, not merely present: a non-empty
+# file with no fill-in placeholder left in it. Since `spawn` writes the skeleton, "the file exists"
+# stopped meaning "the worker reported", and an unfilled skeleton is the worker still writing,
+# exactly like no file at all. Every question of the shape "has this worker finished?" asks here.
+report_written() {
+	local report=${1:-}
+	[ -s "$report" ] || return 1
+	[ -z "$(report_placeholders "$report" 2>/dev/null)" ]
+}
+
+# report_commit_candidates <report> -- every sha the report could be naming, in the order it names
+# them, one per line, deduplicated. Three shapes, because that is what a report writes: on a line
+# carrying the word "commit" (whatever label it uses), inside a backtick span anywhere (reports
+# write `460ec13` beside the prose), and therefore on a `Commit:` line as well. A short and a full
+# sha both look like 7 to 40 hex characters.
+#
+# All of them, not the first: a report quotes another branch's commit as evidence — that is what
+# evidence is — and a reader that takes the earliest mention picks the quoted one and refuses a
+# worker whose own commit is two lines further down. Which one is this worker's is a question for
+# report_commit_sha, which has the slug and the tree to answer it.
+report_commit_candidates() {
+	[ -f "${1:-}" ] || return 0
+	awk '
+		function hexes(s,   w) {
+			while (match(s, /[0-9a-f]+/)) {
+				w = substr(s, RSTART, RLENGTH)
+				if (length(w) >= 7 && length(w) <= 40) print w
+				s = substr(s, RSTART + RLENGTH)
+			}
+		}
+		{
+			line = tolower($0)
+			if (line ~ /commit/) hexes(line)
+			# A backtick span holding nothing but a sha is a name, not prose: `460ec13`.
+			rest = $0
+			while (match(rest, /`[^`]*`/)) {
+				span = tolower(substr(rest, RSTART + 1, RLENGTH - 2))
+				sub(/^[ \t]+/, "", span); sub(/[ \t]+$/, "", span)
+				if (span ~ /^[0-9a-f]{7,40}$/) print span
+				rest = substr(rest, RSTART + RLENGTH)
+			}
+		}
+	' "$1" | awk '!seen[$0]++'
+}
+
+# report_commit_labeled <report> -- the shas on a `Commit:` line, with or without a bullet and
+# with or without bold marks: the one label the spawn template tells a worker to write, and the
+# line that says "this is the commit that carries the work" rather than "this sha came up".
+report_commit_labeled() {
+	[ -f "${1:-}" ] || return 0
+	awk '
+		tolower($0) ~ /^[ \t]*(-[ \t]+)?[*_]*[ \t]*commit[*_]*[ \t]*:/ {
+			line = tolower($0)
+			while (match(line, /[0-9a-f]+/)) {
+				w = substr(line, RSTART, RLENGTH)
+				if (length(w) >= 7 && length(w) <= 40) print w
+				line = substr(line, RSTART + RLENGTH)
+			}
+		}
+	' "$1" | awk '!seen[$0]++'
+}
+
+# report_commit_sha <report> [slug] [cwd] -- the commit sha the report records, empty when it
+# records none. With a slug and a tree, the sha that belongs to THIS worker is preferred over the
+# one the report happens to name first:
+#
+#   a. a `Commit:` line whose sha resolves in cwd and carries `Agent-Slug: <slug>` — the label the
+#      template asks for, on the commit the worker says carries its work;
+#   b. any sha the report names that resolves in cwd and carries that trailer — the "What changed"
+#      list writes `- Commit: \`460ec13\``, and a report may name its commit only there;
+#   c. the sha this reader returned before the candidates existed (the first commit line's longest
+#      hex), then the earliest candidate of any shape. Same answer as yesterday for every report
+#      that has no sha of its own, so nothing that closes today starts failing.
+#
+# Without a slug and a tree the answer is (c): only the sha question is being asked.
+report_commit_sha() {
+	local report=${1:-} slug=${2:-} cwd=${3:-} c legacy
+	[ -f "$report" ] || return 0
+	if [ -n "$slug" ] && [ -n "$cwd" ] && [ -d "$cwd" ] && git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
+		for c in $(report_commit_labeled "$report"); do
+			if commit_carries_slug "$cwd" "$c" "$slug"; then printf '%s\n' "$c"; return 0; fi
+		done
+		for c in $(report_commit_candidates "$report"); do
+			if commit_carries_slug "$cwd" "$c" "$slug"; then printf '%s\n' "$c"; return 0; fi
+		done
+	fi
+	legacy=$(awk '
+		tolower($0) ~ /commit/ {
+			line = tolower($0); best = ""
+			while (match(line, /[0-9a-f]+/)) {
+				w = substr(line, RSTART, RLENGTH)
+				if (length(w) >= 7 && length(w) <= 40 && length(w) > length(best)) best = w
+				line = substr(line, RSTART + RLENGTH)
+			}
+			if (best != "") { print best; exit }
+		}
+	' "$report")
+	if [ -n "$legacy" ]; then printf '%s\n' "$legacy"; return 0; fi
+	report_commit_candidates "$report" | head -n 1
+}
+
+# commit_message <cwd> <sha> -- the full message of that commit, empty when the sha does not
+# resolve in that tree. The provenance check compares a report's sha against the repo the worker
+# was given, so a made-up sha fails instead of passing as a mystery.
+commit_message() {
+	git -C "${1:-}" log -1 --format=%B "${2:-}" 2>/dev/null
+}
+
+# commit_carries_slug <cwd> <sha> <slug> -- true when that commit resolves in that tree and its
+# message carries `Agent-Slug: <slug>`, this worker's own slug and not merely some trailer. A
+# trailer naming another worker ties the change to that worker; it says nothing about this one.
+commit_carries_slug() {
+	local msg
+	msg=$(commit_message "${1:-}" "${2:-}") || return 1
+	[ -n "$msg" ] || return 1
+	printf '%s\n' "$msg" | awk -v slug="${3:-}" '
+		# match(), not a bare pattern rule: mawk sets RSTART/RLENGTH only for match(), and
+		# commit_carries_slug is the whole question the close asks — it cannot depend on awk.
+		match($0, /^Agent-Slug:[ \t]*/) {
+			v = substr($0, RLENGTH + 1)
+			sub(/[ \t\r]+$/, "", v)
+			if (v == slug) { found = 1; exit }
+		}
+		END { exit(found ? 0 : 1) }'
+}
+
+# rewritten_predecessor <cwd> <branch> <full-sha> -- the commit on that branch's reflog that the
+# current tip replaces: same subject, same author, a different commit. Empty when the reflog holds
+# no such commit, which is what "and nothing shows it was rewritten" reads as.
+#
+# Why the reflog: a rebase rewrites a commit and keeps its message, so subject and author are the
+# only identity the old commit shares with the new one, and the branch's reflog is the one place the
+# old sha is still recorded. Fetching every object is not needed and would be a network call on a
+# close. A reflog that expired reads exactly like an invented commit, and the refusal says so —
+# a rewrite nobody can show is a rewrite the record must not claim.
+rewritten_predecessor() {
+	local cwd=${1:-} branch=${2:-} full=${3:-} c sig want have
+	[ -n "$cwd" ] && [ -d "$cwd" ] && [ -n "$branch" ] && [ -n "$full" ] || return 0
+	want=$(git -C "$cwd" log -1 --format='%s%x00%an%x00%ae' "$full" 2>/dev/null) || return 0
+	[ -n "$want" ] || return 0
+	for c in $(git -C "$cwd" reflog show --format=%H "$branch" 2>/dev/null); do
+		[ "$c" = "$full" ] && continue
+		have=$(git -C "$cwd" log -1 --format='%s%x00%an%x00%ae' "$c" 2>/dev/null) || continue
+		if [ "$have" = "$want" ]; then printf '%s\n' "$c"; return 0; fi
+	done
+	return 0
+}
+
+# report_provenance_note <report> <slug> <cwd> <chosen> -- every sha the reader looked at and why
+# each one did not tie the change to this worker. Printed only when a close is refused, so the
+# refusal answers the question the next person actually has: is the report quoting another
+# branch's commit as evidence, and which line is this worker's own? A refusal that names one sha
+# out of four, and suggests amending it, sends them to amend a commit they do not own.
+report_provenance_note() {
+	local report=$1 slug=$2 cwd=$3 chosen=$4 c list n=0 shown=0 msg trailer state plural
+	list=$(report_commit_candidates "$report")
+	[ -n "$list" ] || return 0
+	for c in $list; do n=$((n + 1)); done
+	if [ "$n" = 1 ]; then plural=""; else plural="s"; fi
+	printf '%s: %s names %d commit sha%s; the reader took %s:\n' \
+		"$prog" "$report" "$n" "$plural" "$chosen" >&2
+	for c in $list; do
+		# Eight lines is a report's own shas; the rest are pasted output, and a refusal nobody
+		# reads to the end is the refusal this fixes. The count still says how many there were.
+		[ "$shown" -ge 8 ] && break
+		shown=$((shown + 1))
+		msg=$(commit_message "$cwd" "$c" 2>/dev/null || true)
+		if [ -z "$msg" ]; then
+			state="does not resolve in $cwd"
+		else
+			trailer=$(printf '%s\n' "$msg" | awk -F':[ \t]*' '/^Agent-Slug:/ { v = $2; sub(/[ \t\r]+$/, "", v); print v; exit }')
+			if [ -z "$trailer" ]; then
+				state="no Agent-Slug trailer"
+			elif [ "$trailer" = "$slug" ]; then
+				state="Agent-Slug: $trailer"
+			else
+				state="Agent-Slug: $trailer (not this worker)"
+			fi
+		fi
+		printf '    %s  %s\n' "$c" "$state" >&2
+	done
+	if [ "$n" -gt "$shown" ]; then
+		printf '    and %d more\n' "$((n - shown))" >&2
+	fi
+	printf '  A sha quoted as evidence is not provenance: put the sha of the commit that carries this worker\047s own work on a "Commit: <sha>" line and close again:\n' >&2
+	printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+}
+
+# wipe_recorded <slug> — true when state/decisions.jsonl carries a wipe line for that slug,
+# either the step itself (decision "done") or the recorded reason it did not apply ("skipped").
+# cmd_close asks this: the wipe is mandatory, and a mandatory step nobody can check is a wish.
+wipe_recorded() {
+	[ -f "$DECISIONS" ] || return 1
+	node -e '
+		const fs=require("fs");
+		let lines=[];
+		try{lines=fs.readFileSync(process.argv[1],"utf8").split("\n")}catch{process.exit(1)}
+		for(const line of lines){
+			if(!line)continue;
+			let d;try{d=JSON.parse(line)}catch{continue}
+			if(d.command==="wipe"&&d.slug===process.argv[2])process.exit(0);
+		}
+		process.exit(1);' "$DECISIONS" "$1"
+}
+
+# wipe_answers_present <report> — true when the report carries the answers the wipe asks for: a
+# `## Thrown away` block (this repo's own heading) or the `## Wipe` block an older report writes,
+# with at least one written line under it. A heading with nothing beneath it is the same claim as
+# no heading at all, the way an empty Evidence block is.
+#
+# A report that does not exist passes: there is nothing to answer, and `delegate close` already
+# refuses that worker for the Evidence block it does not have. A report that exists and says
+# nothing about what was thrown away is refused, because the wipe's whole value is the answers —
+# a recorded step with no answers behind it is a rule that got clicked through.
+wipe_answers_present() {
+	local report=${1:-}
+	[ -f "$report" ] || return 0
+	awk '
+		{
+			line = $0
+			gsub(/[#*]/, "", line)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+			if (!inblock) {
+				if (tolower(line) ~ /^(thrown away|wipe)([[:space:]].*)?$/) { inblock = 1; next }
+				next
+			}
+			if (line != "") found = 1
+		}
+		END { exit(found ? 0 : 1) }
+	' "$report"
+}
+
+# merged_pr_ref <text> — the PR number in a `--merged` argument, empty when the argument is not
+# a PR reference at all. Three shapes, because that is what people paste: 63, #63, and the URL a
+# PR page sits at. Nothing else is guessed: a branch name or a sha is not evidence of a merge.
+merged_pr_ref() {
+	printf '%s' "${1:-}" | sed -nE \
+		-e 's/^#?([0-9]{1,9})$/#\1/p' \
+		-e 's#^https?://[^/[:space:]]+/[^/[:space:]]+/[^/[:space:]]+/pull/([0-9]{1,9})/?$#\1#p' \
+		| head -n 1
+}
+
+# commit_in_trunk <cwd> <trunk> <sha> [name-landed] — is that commit's change in origin/<trunk>?
+#
+# The ONE implementation of "these commits are already in trunk", asked by the two commands that
+# used to answer it separately and disagreed about the same commit: publish's new_commits (how much
+# of a branch is not in trunk) and this file's merged_escape (a report's commit with no Agent-Slug
+# trailer). Both call it, so the answer cannot be one thing on the publish side and another on the
+# close side. It is git only — no `gh`, no network, no login — because a close has to answer
+# offline, and the publish side keeps the better message (a merged PR has a number to name).
+#
+# Prints one line, and returns 0 when the change is in trunk:
+#   in                       the commit itself is an ancestor of origin/<trunk>
+#   in <landed-sha>          not an ancestor, but its patch is upstream under that sha (a squash)
+#   notin                    git compared the patch and it is not in trunk
+#   reverted [<landed-sha>]  the patch is in trunk's history but the change is not in its tree
+#   fetch                    the commit's parent is not readable here, so there is no patch to compare
+#   unknown <why>            git could not compare it at all
+#
+# [name-landed] asks for the landed sha, which is what a close records: a row that says "trust me,
+# it is in" is what that record exists to avoid. It costs a walk over the commits trunk has that the
+# commit's branch point does not, so it runs only for the caller that writes the row.
+#
+# A `-` from git cherry is not the end of the answer: a landing that was later reverted is still
+# reachable from trunk's history, so the content is checked too (patch_already_in_trunk), and a
+# reverted change has not landed.
+commit_in_trunk() {
+	local cwd=$1 trunk=$2 sha=$3 want_landed=${4:-} full out rc flag wantid base landed c patch
+	full=$(git -C "$cwd" rev-parse --verify --quiet "$sha^{commit}" 2>/dev/null) || full=$sha
+	if git -C "$cwd" merge-base --is-ancestor "$full" "refs/remotes/origin/$trunk" 2>/dev/null; then
+		printf 'in'
+		return 0
+	fi
+	if ! git -C "$cwd" rev-parse --verify --quiet "$full^" >/dev/null 2>&1; then
+		printf 'fetch'
+		return 1
+	fi
+	out=$(git -C "$cwd" cherry "refs/remotes/origin/$trunk" "$full" 2>&1) && rc=0 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		printf 'unknown %s' "$(printf '%s\n' "$out" | tail -n 1)"
+		return 1
+	fi
+	flag=$(printf '%s\n' "$out" | awk -v s="$full" '$2 == s { print $1; exit }')
+	case $flag in
+	-)
+		landed=""
+		if [ -n "$want_landed" ]; then
+			wantid=$(git -C "$cwd" show --format= "$full" 2>/dev/null | git -C "$cwd" patch-id --stable 2>/dev/null | awk 'NR == 1 { print $1 }')
+			base=$(git -C "$cwd" merge-base "$full" "refs/remotes/origin/$trunk" 2>/dev/null) || base=""
+			if [ -n "$wantid" ] && [ -n "$base" ]; then
+				for c in $(git -C "$cwd" rev-list "refs/remotes/origin/$trunk" "^$base" 2>/dev/null); do
+					patch=$(git -C "$cwd" show --format= "$c" 2>/dev/null | git -C "$cwd" patch-id --stable 2>/dev/null | awk 'NR == 1 { print $1 }')
+					if [ -n "$patch" ] && [ "$patch" = "$wantid" ]; then
+						landed=$c
+						break
+					fi
+				done
+			fi
+			if [ -z "$landed" ]; then
+				printf 'unknown git reports the patch as already applied upstream, but no commit in origin/%s since %s carries it, so the landed sha cannot be named' \
+					"$trunk" "${base:-the branch point}"
+				return 1
+			fi
+		fi
+		if ! patch_already_in_trunk "$cwd" "$trunk" "$full"; then
+			printf 'reverted%s' "${landed:+ $(git -C "$cwd" rev-parse --short "$landed" 2>/dev/null || printf '%s' "$landed")}"
+			return 1
+		fi
+		if [ -n "$landed" ]; then printf 'in %s' "$landed"; else printf 'in'; fi
+		return 0
+		;;
+	+) 
+		printf 'notin'
+		return 1
+		;;
+	*)
+		printf 'unknown git cherry named no patch for %s against origin/%s' "$full" "$trunk"
+		return 1
+		;;
+	esac
+}
+
+# merged_escape <slug> <sha> <cwd> <pr-arg> — the close path for a commit that is already in trunk,
+# where the Agent-Slug trailer can no longer be added without rewriting trunk.
+#
+# Four outcomes, in this order, and the third is the only new permission in the whole command:
+#   - no --merged given: today's refusal, verbatim (the caller prints it, this returns 1);
+#   - --merged given and the commit is in origin/<trunk>: close, with a warning naming the short
+#     sha and the PR, and one state/decisions.jsonl row (command "provenance", decision "merged")
+#     carrying slug, sha, pr and the reason. Unchanged from before patch-equivalence: the cheap,
+#     exact test runs first and nothing else is computed when it answers;
+#   - --merged given, the commit is not an ancestor, and `git cherry` marks its patch `-`: the
+#     same change landed under another sha (a squash merge), so close, with a warning naming BOTH
+#     shas and the PR, and a row carrying slug, sha, pr, the landed sha and the reason — the
+#     record says "these are the same change" instead of hiding one of them;
+#   - anything else: refuse. `+` says the patch is not upstream, and it is refused as such, with
+#     two messages because the fixes differ: plain not-in-trunk (amend the branch commit with its
+#     trailers), and a squash that touched neighbouring lines so the patch-id moved although the
+#     content is in (amend, or name the landed commit in the report). A commit whose parent is not
+#     fetched, or a `git cherry` that cannot run, is refused as "fetch first" — never read as `+`,
+#     because "git could not look" and "the change is not upstream" are different findings.
+#
+# The trunk side is read from origin/, never from the local branch: a local trunk can be behind or
+# ahead of what was actually merged, and "is this in trunk" has one meaning — the remote's.
+merged_escape() {
+	local slug=$1 sha=$2 cwd=$3 prarg=$4 full trunk short pr reason verdict landed landed_short
+	full=$(git -C "$cwd" rev-parse --verify --quiet "$sha^{commit}" 2>/dev/null) || full=$sha
+	short=$(git -C "$cwd" rev-parse --short "$full" 2>/dev/null) || short=$full
+	if [ -z "$prarg" ]; then
+		printf '%s: refusing to close %s: %s records commit %s, and that commit has no Agent-Slug trailer, so nothing ties the change to this worker.\n' "$prog" "$slug" "$REPORTS/$slug.md" "$sha" >&2
+		printf 'Fix: end that commit'"'"'s message with the two trailers, then close again:\n' >&2
+		printf "  git -C %%q commit --amend --no-edit --trailer 'Agent-Slug: %s' --trailer 'Spec: specs/%s.md'\n" "$slug" "$slug" >&2
+		printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+		return 1
+	fi
+	pr=$(merged_pr_ref "$prarg")
+	if [ -z "$pr" ]; then
+		die "--merged needs a PR number or a pull-request URL (63, #63, https://<host>/<owner>/<repo>/pull/63): '$prarg'"
+	fi
+	trunk=$(fresh_trunk_branch "$cwd")
+	if [ -z "$trunk" ]; then
+		printf '%s: refusing to close %s: %s records commit %s with no Agent-Slug trailer, and --merged does not apply: %s has no origin/trunk, origin/main or origin/master, so there is no trunk to check that commit against.\n' \
+			"$prog" "$slug" "$REPORTS/$slug.md" "$sha" "$cwd" >&2
+		printf 'Fix: fetch the remote first (%s), or amend the commit with its trailers and close again.\n' "git -C $cwd fetch origin" >&2
+		return 1
+	fi
+	# One answer to "is this change already in trunk", shared with publish's new_commits: this
+	# command used to run its own ancestry-then-`git cherry` check, and the two disagreed about the
+	# same commit. The last argument asks commit_in_trunk to name the landed sha, because the record
+	# written below has to say which two commits are the same change.
+	verdict=$(commit_in_trunk "$cwd" "$trunk" "$full" 1) || true
+	case $verdict in
+	in)
+		reason="commit $short carries no Agent-Slug trailer and is already in origin/$trunk, so the trailer cannot be added without rewriting trunk; provenance recorded after the fact from PR $pr"
+		printf '%s: warning: %s records commit %s, which has no Agent-Slug trailer. That commit is already in origin/%s (PR %s), so it cannot be amended without rewriting trunk; closing anyway and recording the exception in state/decisions.jsonl.\n' \
+			"$prog" "$slug" "$short" "$trunk" "$pr" >&2
+		record_decision provenance "$slug" merged "$reason" false "$slug" "" \
+			"$(printf '{"sha":"%s","pr":"%s","trunk":"origin/%s"}' "$full" "$pr" "$trunk")"
+		return 0
+		;;
+	in\ *)
+		# git says an equivalent patch is already upstream. The landed sha is named because a row
+		# that says "trust me, it is in" is exactly what this check exists to avoid: the record has
+		# to say which two commits are the same change.
+		landed=${verdict#in }
+		landed_short=$(git -C "$cwd" rev-parse --short "$landed" 2>/dev/null) || landed_short=$landed
+		reason="commit $short carries no Agent-Slug trailer and is not itself in origin/$trunk; the same change landed there as $landed_short from PR $pr, which git cherry marks as an applied patch (git patch-id --stable), so provenance is recorded after the fact against both shas"
+		printf '%s: warning: %s records commit %s, which has no Agent-Slug trailer. That commit is not in origin/%s itself, but the same change is, as %s (PR %s): git cherry reports its patch as already applied upstream. Closing anyway; state/decisions.jsonl records both shas, so the exception can be checked rather than trusted.\n' \
+			"$prog" "$slug" "$short" "$trunk" "$landed_short" "$pr" >&2
+		record_decision provenance "$slug" merged "$reason" false "$slug" "" \
+			"$(printf '{"sha":"%s","landed":"%s","pr":"%s","trunk":"origin/%s","how":"patch-id"}' "$full" "$landed" "$pr" "$trunk")"
+		return 0
+		;;
+	reverted\ *)
+		# The patch is reachable from trunk's history but the change is not in trunk's tree any
+		# more: a landing that was later reverted, or a squash whose neighbouring lines moved so far
+		# that the patch no longer un-makes cleanly. Either way git cannot certify it as landed, and
+		# a reverted change has not landed.
+		landed_short=${verdict#reverted }
+		printf '%s: refusing to close %s: %s records commit %s with no Agent-Slug trailer, and --merged does not apply: git reports its patch as applied upstream%s, but the change is not in origin/%s'"'"'s tree any more — the shape of a landing that was later reverted, or of a squash whose neighbouring lines moved so far that the patch no longer un-makes cleanly. Either way git cannot certify it as landed, and a reverted change has not landed.\n' \
+			"$prog" "$slug" "$REPORTS/$slug.md" "$sha" "${landed_short:+ as $landed_short}" "$trunk" >&2
+		printf 'Fix: check the revert in origin/%s first. If the landing does stand, name the landed commit on the report'"'"'s Commit: line and close again:\n' "$trunk" >&2
+		printf '  git -C %q log --oneline origin/%s -- %s\n' "$cwd" "$trunk" "$(git -C "$cwd" diff-tree --no-commit-id --name-only -r "$full" 2>/dev/null | head -n 1)" >&2
+		printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+		return 1
+		;;
+	notin)
+		# git says the patch is not upstream. Two findings hide behind that, and the fixes differ,
+		# so say which one this is: a squash that also touched neighbouring lines moved the
+		# patch-id while the content went in, where a plain unlanded commit is one amendment away.
+		if patch_already_in_trunk "$cwd" "$trunk" "$full"; then
+			printf '%s: refusing to close %s: %s records commit %s with no Agent-Slug trailer, and --merged does not apply: git will not certify it as landed. Its change is already in origin/%s, but under a different patch-id — a squash that also touched neighbouring lines reads as not upstream in git cherry, so the content is in and git cannot prove it.\n' \
+				"$prog" "$slug" "$REPORTS/$slug.md" "$sha" "$trunk" >&2
+			printf 'Fix, either way: amend the branch commit with its trailers and close again (no rewrite of trunk involved):\n' >&2
+			printf "  git -C %%q commit --amend --no-edit --trailer 'Agent-Slug: %s' --trailer 'Spec: specs/%s.md'\n" "$slug" "$slug" >&2
+			printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+			printf '  — or, if the change really is in, put the sha of the commit that carries it in origin/%s on the report'"'"'s Commit: line and close again.\n' "$trunk" >&2
+			return 1
+		fi
+		printf '%s: refusing to close %s: %s records commit %s with no Agent-Slug trailer, and --merged does not apply: %s is not an ancestor of origin/%s, so it has not landed and can still be amended.\n' \
+			"$prog" "$slug" "$REPORTS/$slug.md" "$sha" "$full" "$trunk" >&2
+		printf 'Fix: amend that commit with its trailers and close again (no rewrite of trunk involved):\n' >&2
+		printf "  git -C %%q commit --amend --no-edit --trailer 'Agent-Slug: %s' --trailer 'Spec: specs/%s.md'\n" "$slug" "$slug" >&2
+		printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+		return 1
+		;;
+	fetch)
+		# git cannot compare a patch with upstream unless it can read the commit's diff, and that
+		# starts at its parent: a commit that exists only locally, or in a shallow clone, has no
+		# parent here and no answer to compare. Say fetch instead of reading the silence as "not
+		# upstream".
+		printf '%s: refusing to close %s: %s records commit %s with no Agent-Slug trailer, and --merged does not apply yet: %s cannot read that commit'"'"'s parent, so its patch cannot be compared with origin/%s — a commit whose history was never fetched looks exactly like this.\n' \
+			"$prog" "$slug" "$REPORTS/$slug.md" "$sha" "$cwd" "$trunk" >&2
+		printf 'Fix: fetch the remote first, then close again:\n' >&2
+		printf '  git -C %q fetch origin\n' "$cwd" >&2
+		printf '  %s close %s --merged %s\n' "$BIN/delegate" "$slug" "$prarg" >&2
+		return 1
+		;;
+	*)
+		# Neither answer: git could not read the patch at all, which is not a finding about trunk.
+		# Refuse and say what git said rather than let an unread answer pass as an answer.
+		printf '%s: refusing to close %s: %s records commit %s with no Agent-Slug trailer, and --merged does not apply yet: git could not compare its patch with origin/%s (%s), so "not upstream" has not been established.\n' \
+			"$prog" "$slug" "$REPORTS/$slug.md" "$sha" "$trunk" "${verdict#unknown }" >&2
+		printf 'Fix: fetch the remote first, then close again:\n' >&2
+		printf '  git -C %q fetch origin\n' "$cwd" >&2
+		printf '  %s close %s --merged %s\n' "$BIN/delegate" "$slug" "$prarg" >&2
+		return 1
+		;;
+	esac
+}
+
+# patch_already_in_trunk <cwd> <trunk> <sha> — true when that commit's change cannot be un-made in
+# origin/<trunk>'s tree because it is already there. Read as: the content is in trunk now.
+#
+# Two jobs, both of them refusals when it says no. On a `-` it is the guard against a landing that
+# was later reverted: git cherry still sees the landing commit in trunk's history, the content is
+# gone, and an accredited revert is not a landed change. On a `+` it separates a squash that also
+# touched neighbouring lines (content in, patch-id moved) from a commit that never landed, which
+# are refused with different fixes.
+#
+# Asked of a throwaway index seeded from the trunk tree, so the worker's working tree and its own
+# index are never read or written. It can be wrong in the strict direction only: neighbouring
+# lines that moved make it read "not there" for a change that is, and the caller then refuses and
+# offers the manual path. It can never turn a `+` into a close.
+patch_already_in_trunk() {
+	local cwd=$1 trunk=$2 sha=$3 idx
+	idx=$(mktemp "${TMPDIR:-/tmp}/delegate-trunk-index.XXXXXX") || return 1
+	rm -f "$idx"
+	if ! GIT_INDEX_FILE=$idx git -C "$cwd" read-tree "refs/remotes/origin/$trunk" 2>/dev/null; then
+		rm -f "$idx"
+		return 1
+	fi
+	if git -C "$cwd" show --format= "$sha" 2>/dev/null \
+		| GIT_INDEX_FILE=$idx git -C "$cwd" apply --reverse --check --cached - >/dev/null 2>&1; then
+		rm -f "$idx"
+		return 0
+	fi
+	rm -f "$idx"
+	return 1
+}
+
+# plan_jev <task text> [context] [override-jev 1|0] [reason-given 1|0] -- sets JEV_MODE,
+# JEV_MODE, JEV_ROUTE, JEV_THINKING, JEV_REASON, JEV_DEFAULTS, JEV_DEFAULTS_NOTE and the
+# JEV_ANSWER_* values from ONE `jev plan` call.
+#
+# One call instead of four: the four questions are one judgement about one task, and asking the
+# local model four times costs four latencies (~20-60s of spawn) for answers that agree with each
+# other anyway. Two of the gates changed, and the rest did not. A field Jev answered weakly is no
+# longer a refusal: bin/jev hands back the conservative value for it (mode sandboxed,
+# route remote, thinking medium) and names it in `defaults`, so the spawn continues with one
+# worker and says which field defaulted — a weak count costs a worker, not the harness. A field
+# Jev answered with an option it was not offered, or a malformed response, a refused key and a
+# dead model, have no answer to work with at all: those still refuse, unless --override-jev came
+# with a non-empty --reason, which is exactly what the refusal message promises. With that flag
+# and reason every field takes the same default and the spawn continues.
+#
+# JEV_DEFAULTS is the space-separated names of the defaulted fields (empty when none) and
+# JEV_ANSWER_* is what Jev itself answered for such a field, empty when it answered nothing, so
+# the caller can write jev's answer and the defaulting down separately instead of recording the
+# default as jev's own. The decision lines written by the caller are still four. The context lands
+# on Jev's one usage line in state/usage.jsonl, so the call can be tied to the worker or question
+# that caused it.
+plan_jev() {
+	local text=$1 ctx=${2:-} override=${3:-0} reason_given=${4:-0} out rc errf err why
+	errf=$(mktemp)
+	# stderr apart from stdout: the defaulted fields and their probabilities are named there, and
+	# stdout is the JSON the caller parses.
+	out=$(PI_BOSS_CONTEXT="$ctx" "$(bin_prog jev)" plan "$text" --json 2>"$errf") && rc=0 || rc=$?
+	err=$(cat "$errf" 2>/dev/null)
+	rm -f "$errf"
+	JEV_MODE="" JEV_ROUTE="" JEV_THINKING="" JEV_REASON="" JEV_DEFAULTS="" JEV_DEFAULTS_NOTE=""
+	JEV_ANSWER_MODE="" JEV_ANSWER_ROUTE="" JEV_ANSWER_THINKING=""
+	if [ "$rc" -ne 0 ]; then
+		case $err in
+		*unreachable* | *"returned nothing"* | *"HTTP "* | *"outside JSON"* | *"no API key"*) why=unreachable ;;
+		*) why=unsure ;;
+		esac
+		if [ "$override" = 1 ] && [ "$reason_given" != 1 ]; then
+			die "--override-jev needs a non-empty --reason: an override without a reason is a guess. jev said: $err"
+		fi
+		if [ "$override" = 1 ]; then
+			# The bypass the refusal message promises. Same four values bin/jev's DEFAULTS holds.
+			JEV_MODE=sandboxed JEV_ROUTE=remote JEV_THINKING=medium
+			JEV_REASON="jev was $why"
+			JEV_DEFAULTS="mode route thinking"
+			JEV_DEFAULTS_NOTE="jev was $why, so all four fields took their conservative default"
+			return 0
+		fi
+		case $why in
+		unreachable)
+			die "jev is unreachable or broken — refusing to guess. jev said: $err
+Re-run with --override-jev --reason '<why these defaults are good enough>' to spawn on the defaults anyway (mode sandboxed, route remote, thinking medium)." ;;
+		*)
+			die "jev plan is unsure, so the spawn stops here. jev said: $err
+Re-run with --override-jev --reason '<why these defaults are good enough>' to spawn on the defaults anyway (mode sandboxed, route remote, thinking medium)." ;;
+		esac
+	fi
+	JEV_MODE=$(printf '%s' "$out" | json_field mode)
+	JEV_ROUTE=$(printf '%s' "$out" | json_field route)
+	JEV_THINKING=$(printf '%s' "$out" | json_field thinking)
+	JEV_REASON=$(printf '%s' "$out" | json_field reason)
+	JEV_ANSWER_MODE=$(printf '%s' "$out" | json_field answered.mode)
+	JEV_ANSWER_ROUTE=$(printf '%s' "$out" | json_field answered.route)
+	JEV_ANSWER_THINKING=$(printf '%s' "$out" | json_field answered.thinking)
+	# The field names are ours, not the model's: anything else in the payload is dropped, so the
+	# names cannot reach a decision row or the note as arbitrary text.
+	JEV_DEFAULTS=$(printf '%s' "$out" | json_field defaults | tr ',' '\n' | grep -xE 'mode|route|thinking' | paste -sd' ' - || true)
+	[ -n "$JEV_MODE" ] && [ -n "$JEV_ROUTE" ] && [ -n "$JEV_THINKING" ] \
+		|| die "jev plan gave no usable answer: $out"
+	if [ -n "$JEV_DEFAULTS" ]; then
+		# One note, naming each defaulted field with the probability that made it weak.
+		local named="" name prob
+		for name in $JEV_DEFAULTS; do
+			prob=$(printf '%s' "$JEV_REASON" | tr ',' '\n' | sed -n "s/^ *$name //p")
+			named="${named:+$named, }$name ${prob:-?}"
+		done
+		JEV_DEFAULTS_NOTE="jev defaulted $named"
+	fi
+}
+
+# defaults_json <space-separated field names> -- the `defaults` extra for the decision rows, or
+# nothing when no field defaulted. The names are already restricted to the four by plan_jev.
+defaults_json() {
+	local names=$1 out="" sep="" name
+	[ -n "$names" ] || return 0
+	for name in $names; do
+		out="$out$sep\"$name\""
+		sep=,
+	done
+	printf '{"defaults":[%s]}' "$out"
+}
+
+# record_decision <command> <task> <decision> <reason> <overridden true|false> <slug|-> [jev] [extra-json]
+# `jev` is jev's own answer for that command; `overridden` is true only when <decision>
+# differs from it. See the header: the flag is per line, never per spawn.
+#
+# `extra-json` is an object merged into the row after the standard fields, for a row that carries
+# evidence of its own: the --merged escape records the sha and the PR that justify it. It is
+# positional after `jev`, so callers that want extras and have no jev answer pass "" there. The
+# shape of every other row is untouched — one format, read by `delegate stats` and `delegate
+# list` the same way.
+record_decision() {
+	local cmd=$1 task=$2 decision=$3 reason=$4 overridden=$5 slug=$6 jev=${7:-} extra=${8:-}
+	mkdir -p "$STATE"
+	node -e '
+		const fs=require("fs");
+		const [file,command,task,decision,reason,overridden,slug,jev,extra]=process.argv.slice(1);
+		const line={timestamp:new Date().toISOString(),command,task,decision,reason:reason||null,
+			overridden:overridden==="true",slug:slug==="-"?"":slug};
+		if(jev!==undefined&&jev!=="")line.jev=jev;
+		if(extra)try{Object.assign(line,JSON.parse(extra))}catch{}
+		fs.appendFileSync(file,JSON.stringify(line)+"\n");' \
+		"$DECISIONS" "$cmd" "$task" "$decision" "$reason" "$overridden" "$slug" "$jev" "$extra"
+}
+
+# worker_thinking_level <effort> — map Jev's abstract effort (low|medium|high) to a thinking
+# level the worker's model actually supports; prints {"level":…,"map":…,"model":…,"source":…}.
+#
+# The model is the one a fresh `pi` starts with: settings.json defaultProvider/defaultModel.
+# Its `reasoning` flag and `thinkingLevelMap` come from the user's models.json first and the
+# generated models-store.json second. Per pi's docs a level the map does not mention uses the
+# provider default up through "high", xhigh and max are unsupported unless mapped, and null
+# marks a level unsupported. A non-reasoning model runs "off". Nothing readable: the effort is
+# passed through unchanged and pi clamps it, which its docs say it does.
+worker_thinking_level() {
+	local effort=$1 out
+	out=$(node -e '
+		const fs = require("fs"), path = require("path");
+		const effort = process.argv[1];
+		const ORDER = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+		const read = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return null; } };
+		const home = process.env.HOME || "";
+		const settings = read(path.join(home, ".pi/agent/settings.json")) || {};
+		const provider = settings.defaultProvider || "";
+		const model = settings.defaultModel || "";
+		const emit = (o) => { process.stdout.write(JSON.stringify(o)); process.exit(0); };
+		if (!model) emit({ level: effort, map: "pass-through", model: "unknown", source: "fallback-clamp" });
+
+		let entry = null, from = "";
+		for (const f of [".pi/agent/models.json", ".pi/agent/models-store.json"]) {
+			const j = read(path.join(home, f)) || {};
+			// models.json wraps its providers in "providers"; the generated models-store.json is
+			// the provider map itself. Both are read the same way once the wrapper is gone.
+			const providers = j.providers || j;
+			let hit = null;
+			for (const [pid, pv] of Object.entries(providers)) {
+				if (provider && pid !== provider) continue;
+				if (!pv || !Array.isArray(pv.models)) continue;
+				hit = pv.models.find((m) => m.id === model) || null;
+				if (hit) break;
+			}
+			if (hit) { entry = hit; from = f; break; }
+		}
+		if (!entry) emit({ level: effort, map: "pass-through", model: provider + "/" + model, source: "fallback-clamp" });
+
+		const label = provider + "/" + model;
+		if (entry.reasoning !== true)
+			emit({ level: "off", map: effort + "→off", model: label, source: from, note: "non-reasoning model" });
+
+		const map = entry.thinkingLevelMap || {};
+		const supported = ORDER.filter((l) =>
+			l === "off" ? true : l === "xhigh" || l === "max" ? Boolean(map[l]) : map[l] !== null);
+		const candidates = supported.filter((l) => l !== "off");
+		let level = effort;
+		if (!supported.includes(effort)) {
+			// Nearest supported level, ties to the lower one: jev asked for the lowest effort that
+			// does the task, so rounding up spends tokens it did not ask for. "off" is the last
+			// resort, never a tie-break: it drops reasoning the task was said to need.
+			if (!candidates.length) level = "off";
+			else {
+				const target = ORDER.indexOf(effort);
+				level = candidates[0];
+				for (const l of candidates)
+					if (Math.abs(ORDER.indexOf(l) - target) < Math.abs(ORDER.indexOf(level) - target)) level = l;
+			}
+		}
+		emit({ level, map: level === effort ? effort + " (supported)" : effort + "→" + level,
+			model: label, source: from, supported });
+	' "$effort") || out=""
+	[ -n "$out" ] || out=$(printf '{"level":"%s","map":"pass-through","model":"unknown","source":"fallback-clamp"}' "$effort")
+	printf '%s' "$out"
+}
+
+# screen_state — the "space tab" the person is looking at, or empty when the window cannot be
+# read (no window, herdr-app error). Never dies: a view that cannot be read must not stop a spawn.
+screen_state() {
+	local out space tab
+	out=$(herdr-app status 2>/dev/null) || return 0
+	space=$(printf '%s' "$out" | json_field space)
+	tab=$(printf '%s' "$out" | json_field tab)
+	[ -n "$space" ] && [ -n "$tab" ] || return 0
+	printf '%s %s' "$space" "$tab"
+}
+
+# restore_focus <space> <tab> — select that space, then that tab, explicitly by id. Returns
+# non-zero instead of dying: the caller warns and the spawn stands.
+restore_focus() {
+	local space=$1 tab=$2
+	herdr-app do space.select --id "$space" >/dev/null 2>&1 || return 1
+	herdr-app do tab.select --id "$tab" >/dev/null 2>&1 || return 1
+	return 0
+}
+
+# fresh_trunk_branch <cwd> — the branch origin's HEAD points at, else the first of
+# trunk/main/master the remote actually has; empty when the remote has none of them.
+#
+# origin/HEAD is only written by a clone or `git remote set-head --auto`, so plenty of local
+# checkouts have none: the fallback list is a normal path, not the exception.
+fresh_trunk_branch() {
+	local cwd=$1 ref b
+	ref=$(git -C "$cwd" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || ref=""
+	if [ -n "$ref" ]; then printf '%s' "${ref#origin/}"; return 0; fi
+	for b in trunk main master; do
+		if git -C "$cwd" show-ref --verify --quiet "refs/remotes/origin/$b"; then
+			printf '%s' "$b"
+			return 0
+		fi
+	done
+	return 0
+}
+
+# ensure_fresh_trunk <cwd> — a worker cuts its branch from a base the boss just fetched, never
+# from a stale local trunk. Called in the spawn path, before the space exists.
+#
+# Why here: a sandboxed worker cannot git fetch (the sandbox refuses the ownership of the ssh
+# config), so its origin/<trunk> is whatever was last fetched on the host, and a worker cut
+# from that stale base ships a PR against an old trunk. The boss can fetch, so the boss
+# guarantees the base before the worker starts.
+#
+# Fetching is always safe; moving trunk is not, so the update is limited to one case: the local
+# trunk is a clean, strictly-behind ancestor of origin/<trunk>. A dirty working tree, an ahead
+# trunk, or a diverged trunk all refuse the spawn, naming the exact state and the command that
+# fixes it. Nothing here resets, rebases, stashes, checks out or forces: that is the owner's
+# work to move.
+#
+# A --cwd that is not a git repo, or has no origin, is skipped with one line: delegation has no
+# business demanding git of every worker.
+ensure_fresh_trunk() {
+	local cwd=$1 branch current ahead behind counts url
+	if ! git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
+		say "trunk: $cwd is not a git repo, skipping the freshness check" >&2
+		return 0
+	fi
+	url=$(git -C "$cwd" remote get-url origin 2>/dev/null) || url=""
+	if [ -z "$url" ]; then
+		say "trunk: $cwd has no origin, skipping the freshness check" >&2
+		return 0
+	fi
+	branch=$(fresh_trunk_branch "$cwd")
+	if [ -z "$branch" ]; then
+		say "trunk: $cwd has no origin/trunk, origin/main or origin/master, skipping the freshness check" >&2
+		return 0
+	fi
+	git -C "$cwd" fetch --prune --quiet origin || die "refusing to spawn: git fetch origin failed in $cwd, so the base cannot be trusted.
+Fix remote access there first (ssh -T $url), then spawn again."
+
+	# Trunk is not checked out: move the ref, never the working tree. A fetch into a local branch
+	# refuses a non-fast-forward update by itself, so this cannot rewind anyone's trunk.
+	current=$(git -C "$cwd" symbolic-ref --quiet --short HEAD 2>/dev/null) || current=""
+	if [ "$current" != "$branch" ]; then
+		git -C "$cwd" fetch --quiet origin "$branch:$branch" || die "refusing to spawn: local $branch in $cwd is not a fast-forward of origin/$branch, and it is not checked out, so the base cannot be updated safely.
+Look before moving it:  git -C $cwd log --oneline --left-right $branch...origin/$branch"
+		say "trunk: $branch in $cwd updated to origin/$branch (not checked out; no working tree touched)" >&2
+		return 0
+	fi
+
+	# On trunk. Dirty first: a fast-forward is a checkout, so it would either fail halfway or
+	# carry somebody's uncommitted work onto the new base.
+	if [ -n "$(git -C "$cwd" status --porcelain 2>/dev/null)" ]; then
+		die "refusing to spawn: $cwd is on $branch with a dirty working tree, so trunk cannot be fast-forwarded to origin/$branch.
+Commit, stash or discard it first:  git -C $cwd stash -u"
+	fi
+	counts=$(git -C "$cwd" rev-list --left-right --count "HEAD...origin/$branch" 2>/dev/null | tr '\t' ' ') || counts="0 0"
+	ahead=${counts%% *}
+	behind=${counts##* }
+	if [ "$ahead" = 0 ] && [ "$behind" = 0 ]; then
+		say "trunk: $branch in $cwd is up to date with origin/$branch" >&2
+		return 0
+	fi
+	if [ "$ahead" != 0 ] && [ "$behind" != 0 ]; then
+		die "refusing to spawn: $branch in $cwd has diverged from origin/$branch ($ahead ahead, $behind behind).
+Move it yourself — rebase or merge origin/$branch, or move the work onto a branch — then spawn again:  git -C $cwd pull --rebase origin $branch"
+	fi
+	if [ "$ahead" != 0 ]; then
+		die "refusing to spawn: $branch in $cwd is $ahead commit(s) ahead of origin/$branch and nothing behind. Unpushed trunk is not a base to cut a worker's branch from.
+Push it, or move it onto a branch, then spawn again:  git -C $cwd log --oneline origin/$branch..$branch"
+	fi
+	git -C "$cwd" merge --ff-only --quiet "origin/$branch" || die "refusing to spawn: could not fast-forward $branch in $cwd to origin/$branch; the git merge --ff-only error above says why."
+	say "trunk: fast-forwarded $branch in $cwd by $behind commit(s) to origin/$branch" >&2
+}
+
+# acceptance_source_spec <task> <cwd> — the spec file an acceptance-test worker reads.
+#
+# The task is the path itself, or text that names one ("specs/login.md, the magic-link flow"),
+# so the first word ending in .md is taken as the candidate. It is resolved against the worker's
+# cwd first and the boss's specs/ second, and it must end up inside a specs/ directory: the whole
+# point of the mode is that the tests come from spec text, and text that is not a spec is just
+# another instruction. Prints the absolute path, exits nonzero when there is no such file.
+acceptance_source_spec() {
+	local task=${1:-} cwd=${2:-} word cand
+	for word in $task; do
+		case $word in *.md|*.md[,.\;:]*) word=${word%%[,;:]*}; cand=$word; break ;; esac
+	done
+	[ -n "${cand:-}" ] || return 1
+	local try
+	for try in "$cwd/$cand" "$SPECS/${cand##*/}" "$ROOT/$cand"; do
+		[ -f "$try" ] || continue
+		local real dir
+		real=$(readlink -f -- "$try")
+		dir=$(dirname -- "$real")
+		[ "$(basename -- "$dir")" = specs ] || continue
+		printf '%s' "$real"
+		return 0
+	done
+	return 1
+}
+
+# measure_lines <text> -- the `Measure:` lines a task declares its one measurement on, exactly as
+# written, one per line; empty when it declares none. A line counts after any list bullet and bold
+# marker, because that is how specs are written, and the refusal quotes the line back as written.
+measure_lines() {
+	printf '%s\n' "${1:-}" | grep -E '^[[:space:]]*([-*][[:space:]]+)?(\*\*)?Measure:' || true
+}
+
+# measure_prose <text> -- the lines asking for more than one number in prose instead: a before/after
+# pair, or the word "matrix". Only consulted when no `Measure:` line was declared, because a task
+# that declared its measurement answered the question rather than dodging it.
+measure_prose() {
+	printf '%s\n' "${1:-}" | grep -Ei 'before[[:space:]]*[-/][[:space:]]*(and[[:space:]]+)?after|before[[:space:]]+and[[:space:]]+after|matrix' || true
+}
+
+# write_report_skeleton <report> <slug> — the five lines every report carries, unfilled.
+# An unfilled skeleton is refused as a placeholder at close and read as "still working" everywhere
+# else, so it cannot publish, cannot be mistaken for a finished worker, and a restart can start
+# from the same blank page without inventing a sixth shape.
+write_report_skeleton() {
+	local report=$1 slug=$2 project_git=${3:-true} last_line
+	if [ "$project_git" = true ]; then
+		last_line='Commit: <fill in: the sha on this branch>'
+	else
+		# A folder with no repository has no sha: the report names the changed files instead, which
+		# is the same evidence and the only kind this project can produce.
+		last_line='Commit: none — this project has no git; the changed files are named above'
+	fi
+	mkdir -p "$(dirname -- "$report")"
+	cat >"$report" <<EOF
+# Report — $slug
+
+Mission: <fill in: who is better off and what shows it, in one line>
+
+Review tier: <fill in: High|Medium|Low>
+
+Test change: <fill in: what the test file pins, or "none: no test file changed">
+
+## Evidence
+
+\`bin/preflight\` ran once on this branch — paste it under the command below, by name, with its
+summary line:
+
+Command: <fill in: the exact command you ran, flags and all>
+
+Output (last 20 lines):
+
+\`\`\`
+<paste the last 20 lines of that command's output here>
+\`\`\`
+
+$last_line
+EOF
+}
+
+cmd_spawn() {
+	local slug="" cwd="" space_opt="" mode="" thinking="" task="" override_jev=0 allow_matrix=0 reason="" runner="" no_restore=0 acceptance=0
+	[ "$#" -ge 1 ] || die 'usage: delegate spawn <slug> --cwd DIR [--space SLUG] [--mode M] [--thinking LEVEL] [--acceptance] [--allow-matrix --reason TEXT] [--override-jev --reason TEXT] [--no-restore] "<task>"'
+	slug=$1; shift
+	local words=()
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--cwd) cwd=${2:-}; shift 2 ;;
+		--mode) mode=${2:-}; shift 2 ;;
+		--thinking) thinking=${2:-}; shift 2 ;;
+		--space) space_opt=${2:-}; shift 2 ;;
+		--acceptance) acceptance=1; shift ;;
+		--allow-matrix) allow_matrix=1; shift ;;
+		--override-jev) override_jev=1; shift ;;
+		--reason) reason=${2:-}; shift 2 ;;
+		--no-restore) no_restore=1; shift ;;
+		--*) die "unknown option $1" ;;
+		*) words+=("$1"); shift ;;
+		esac
+	done
+	task="${words[*]:-}"
+	valid_slug "$slug" || die "slug must match [a-z0-9][a-z0-9-]{0,30}: '$slug'"
+	[ -n "$cwd" ] || die "spawn needs --cwd: the directory the worker works in"
+	[ -d "$cwd" ] || die "no such directory: $cwd"
+	[ -n "$task" ] || die "spawn needs a task description"
+	# The space decides where the spec, the report and the record live. It is read from --cwd
+	# unless --space names it, and a folder no space claims is refused before jev costs a call.
+	local sp
+	sp=$(need_space "$space_opt" "$cwd") || exit 1
+	use_space "$sp"
+	DELEGATIONS=$(delegations_all)
+	# A slug names one worker, everywhere: `delegate wait <slug>` has no space argument to tell two
+	# w1s apart, and the merged view is keyed by slug, so a second one would silently shadow the
+	# first worker's report. Unique across spaces, refused by naming the space that holds it.
+	if [ -f "$DELEGATIONS" ] && node -e '
+		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+		process.exit(j[process.argv[2]]?0:1);' "$DELEGATIONS" "$slug"; then
+		die "a worker named '$slug' already exists in space '$(delegation_field "$slug" spaceName)' — a slug names one worker across all spaces, because 'delegate wait <slug>' has no space argument. Pick another slug, or look at it first: $BIN/delegate list"
+	fi
+	# The two refusals a space carries travel together: one live worker, and merged before the
+	# next. Both are about this space, so both run before anything is created or asked.
+	space_gate "$SPACE"
+	case $thinking in
+	"" | off | minimal | low | medium | high | xhigh | max) ;;
+	*) die "thinking must be off, minimal, low, medium, high, xhigh or max: '$thinking'" ;;
+	esac
+	# One measurement, declared on a `Measure:` line (AGENTS.md rule 10: proof proportional to the
+	# diff). The matrix refused here is the one a worker already ran: twenty minutes after its
+	# commit landed, changing no decision. Both shapes are counted — two declared measurements, or
+	# none declared and prose asking for a before/after pair — and the offending lines are quoted,
+	# because a refusal over text the caller cannot see is a guessing game.
+	local mlines mprose mcount mwhat mquote
+	mlines=$(measure_lines "$task")
+	mprose=""
+	mcount=0
+	if [ -n "$mlines" ]; then
+		mcount=$(printf '%s\n' "$mlines" | grep -c .)
+	else
+		mprose=$(measure_prose "$task")
+	fi
+	if [ "$mcount" -gt 1 ] || [ -n "$mprose" ]; then
+		if [ "$mcount" -gt 1 ]; then
+			mwhat="this task declares $mcount measurements; a spec gets one"
+			mquote=$mlines
+		else
+			mwhat="this task declares no Measure: line and asks for more than one number in prose; a spec gets one measurement, on one Measure: line"
+			mquote=$mprose
+		fi
+		if [ "$allow_matrix" = 1 ] && [ -n "${reason// /}" ]; then
+			record_decision matrix "$task" override "$reason — $mwhat" true "$slug"
+			printf '%s: note: %s; spawning because --allow-matrix --reason was given (%s).\n' "$prog" "$mwhat" "$reason" >&2
+		elif [ "$allow_matrix" = 1 ]; then
+			record_decision matrix "$task" refused "--allow-matrix without --reason" false "-"
+			die "--allow-matrix needs a non-empty --reason: a matrix without a reason is a guess, and a matrix is what cost a worker twenty minutes after its commit landed.
+$mwhat:
+$(printf '%s\n' "$mquote" | sed 's/^/  /')"
+		else
+			record_decision matrix "$task" refused "$mwhat" false "-"
+			die "$mwhat.
+The lines:
+$(printf '%s\n' "$mquote" | sed 's/^/  /')
+One command pair, measured once before and once after, is the whole proof; a second pair changes no decision and costs the worker the minutes between them.
+Declare the one measurement, or re-run with --allow-matrix --reason '<why this one has to be a matrix>'."
+		fi
+	fi
+	cwd=$(readlink -f -- "$cwd")
+	# --acceptance: the task text is, or names, a file under specs/. A second opinion that has not
+	# seen the implementation is only worth having if what it was given actually exists, so this
+	# is checked before jev is asked anything.
+	local source_spec=""
+	if [ "$acceptance" = 1 ]; then
+		source_spec=$(acceptance_source_spec "$task" "$cwd") ||
+			die "--acceptance needs a spec file under specs/ as the task: '${task}' names no such file"
+		[ "$source_spec" != "$SPECS/$slug.md" ] ||
+			die "--acceptance reads a spec, it does not write its own: '$slug' would overwrite $source_spec. Pick another slug."
+	fi
+	need herdr-app; need node; need hc
+
+	# 1. Jev decides the mode, the route and the thinking effort. Always. No caller
+	#    short-circuit. One call answers all three (see plan_jev); each answer is still checked and
+	#    still recorded on its own line below, so a reader cannot tell the difference in the log.
+	local jev_mode jev_route jev_effort plan_reason overridden=false
+	local mode_reason route_reason thinking_reason
+	local mode_overridden=false thinking_overridden=false route_overridden=false
+	local task_ctx="spawn:$slug" reason_given=0
+	if [ -n "${reason// /}" ]; then reason_given=1; fi
+	plan_jev "$task" "$task_ctx" "$override_jev" "$reason_given"
+	jev_mode=$JEV_MODE
+	jev_route=$JEV_ROUTE
+	jev_effort=$JEV_THINKING
+	plan_reason=$JEV_REASON
+	# One reason for three decisions: jev gave one sentence for one judgement, and a line that
+	# invented two more would be recording prose nobody wrote.
+	mode_reason=$plan_reason
+	route_reason=$plan_reason
+	thinking_reason=$plan_reason
+	# The effort is Jev's; the level is the model's. See worker_thinking_level.
+	local thinking_map jev_level jev_effort_level
+	thinking_map=$(worker_thinking_level "$jev_effort")
+	jev_level=$(printf '%s' "$thinking_map" | json_field level)
+	[ -n "$jev_level" ] || die "could not map jev's thinking effort '$jev_effort' to a level: $thinking_map"
+	jev_effort_level=$jev_level
+
+	# The fields that defaulted, and jev's own answer for them: the row says what jev said and
+	# `defaults` says why the decision differs from it. A field with no answer at all (a dead
+	# model) leaves `jev` empty, which `delegate stats` already counts as unknown rather than as
+	# agreement. The note is the one line that says which field defaulted, and to what.
+	local defaults_extra="" field
+	local ev_mode_answer=$jev_mode ev_route_answer=$jev_route
+	local ev_thinking_answer=$jev_effort_level
+	if [ -n "$JEV_DEFAULTS" ]; then
+		defaults_extra=$(defaults_json "$JEV_DEFAULTS")
+		for field in $JEV_DEFAULTS; do
+			case $field in
+			mode) ev_mode_answer=$JEV_ANSWER_MODE ;;
+			route) ev_route_answer=$JEV_ANSWER_ROUTE ;;
+			thinking)
+				ev_thinking_answer=""
+				if [ -n "$JEV_ANSWER_THINKING" ]; then
+					ev_thinking_answer=$(worker_thinking_level "$JEV_ANSWER_THINKING" | json_field level)
+				fi
+				;;
+			esac
+		done
+		printf '%s: note: %s; using mode=%s route=%s thinking=%s.\n' \
+			"$prog" "$JEV_DEFAULTS_NOTE" "$jev_mode" "$jev_route" "$jev_effort" >&2
+	fi
+
+	# 2. A caller's mode and thinking level must agree with Jev for this exact task text,
+	#    and a task Jev calls local refuses: local work needs no space, no spec and no agent.
+	#    Jev's answer is recorded either way: a refusal is a decision too, and the audit line
+	#    says why nothing spawned. An override without a reason is a guess, so it refuses too.
+	local refusal="" refuse_mode=0 refuse_thinking=0 refuse_route=0
+	if [ -n "$mode" ] && [ "$mode" != "$jev_mode" ]; then refuse_mode=1; fi
+	if [ -n "$thinking" ] && [ "$thinking" != "$jev_level" ]; then refuse_thinking=1; fi
+	if [ "$jev_route" = local ]; then refuse_route=1; fi
+
+	if [ "$override_jev" = 1 ] && [ "$reason_given" = 0 ]; then
+		refusal="--override-jev needs a non-empty --reason: an override without a reason is a guess"
+	elif [ "$override_jev" = 1 ]; then
+		# An override is per decision: only the line whose answer the caller contradicted is
+		# marked. Nothing to overrule is not an override.
+		if [ "$refuse_mode" = 1 ]; then mode_overridden=true; fi
+		if [ "$refuse_thinking" = 1 ]; then thinking_overridden=true; fi
+		if [ "$refuse_route" = 1 ]; then route_overridden=true; fi
+		if [ "$mode_overridden" = true ] || [ "$thinking_overridden" = true ] ||
+			[ "$route_overridden" = true ]; then
+			overridden=true
+		fi
+	elif [ "$refuse_mode" = 1 ]; then
+		refusal="--mode $mode contradicts jev, which answered '$jev_mode' for this task ($mode_reason).
+Re-run without --mode to use jev's answer, or re-run with --override-jev --reason '<why>' to overturn jev."
+	elif [ "$refuse_thinking" = 1 ]; then
+		refusal="--thinking $thinking contradicts jev, which answered effort '$jev_effort' — level '$jev_level' for this task ($thinking_reason).
+Re-run without --thinking to use jev's level, or re-run with --override-jev --reason '<why>' to overturn jev."
+	elif [ "$refuse_route" = 1 ]; then
+		refusal="jev routes this task local, so a space and an agent are more than it needs ($route_reason).
+Run it here instead:  $BIN/local-run \"<task>\"
+Forcing a remote worker needs --override-jev --reason '<why this cannot run locally>'."
+	fi
+
+	if [ -n "$refusal" ]; then
+		record_decision mode "$task" "$jev_mode" "$mode_reason" false "-" "$ev_mode_answer" "$defaults_extra"
+		record_decision route "$task" "$jev_route" "$route_reason" false "-" "$ev_route_answer" "$defaults_extra"
+		record_decision thinking "$task" "$jev_level" "$thinking_reason (jev effort $jev_effort → $jev_level)" false "-" "$ev_thinking_answer" "$defaults_extra"
+		die "$refusal"
+	fi
+
+	if [ -z "$mode" ]; then mode=$jev_mode; fi
+	# A --thinking that survives to here either agrees with jev or was overridden on purpose.
+	if [ -z "$thinking" ] || [ "$refuse_thinking" != 1 ]; then thinking=$jev_level; fi
+	jev_level=$thinking
+	case $mode in bare|sandboxed) runner=$(bin_prog "pi-$mode") ;; no-net) runner=$(bin_prog pi-nonet) ;; *) die "mode must be bare, sandboxed or no-net: '$mode'" ;; esac
+	[ -f "$runner" ] || die "no runner for mode $mode ($runner)"
+
+	# 3. A local route survives only as an override, and the note says so out loud.
+	if [ "$jev_route" = local ]; then
+		printf '%s: note: jev routes this task local (%s); spawning because --override-jev --reason was given.\n' "$prog" "$route_reason" >&2
+	fi
+
+	# 4. Record the three decisions before doing any work. `overridden` sits on the line whose
+	#    decision was actually overturned, `jev` carries jev's own answer on every line, and
+	#    `defaults` names the fields jev was not sure enough about to decide.
+	record_decision mode "$task" "$mode" "$mode_reason" "$mode_overridden" "$slug" "$ev_mode_answer" "$defaults_extra"
+	record_decision route "$task" "$jev_route" "$route_reason" "$route_overridden" "$slug" "$ev_route_answer" "$defaults_extra"
+	record_decision thinking "$task" "$jev_level" "$thinking_reason (jev effort $jev_effort → $jev_level)" "$thinking_overridden" "$slug" "$ev_thinking_answer" "$defaults_extra"
+
+	# Eight live spaces is the hard stop, counted across every space: a machine runs eight workers
+	# or it does not, and the number is a fact about the machine rather than a judgement.
+	local live
+	live=$(node -e '
+		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+		process.stdout.write(String(Object.keys(j).length));' "$DELEGATIONS" 2>/dev/null || echo 0)
+	if [ "$live" -ge "$SPACE_CEILING" ]; then
+		die "$live workers are already tracked, which is the live ceiling of $SPACE_CEILING spaces — close finished ones first.  $BIN/delegate list"
+	fi
+
+	# 4b. Review sets the pace in the area the work is in, not across the whole directory. An
+	#     unread report blocks only when the worker's branch touches a path this task names; the
+	#     worker's side comes from its branch diff, this task's side from its own text. Both lists
+	#     go into the refusal, because "overlaps" without the paths is a claim, not a finding.
+	#     No paths named means no overlap established — recorded and said out loud, never silent.
+	local unread uslug uage ureport ubranch wpaths hits tpaths tpaths_one blocking="" quiet=""
+	tpaths=$(task_paths "$task")
+	tpaths_one=$(printf '%s\n' "$tpaths" | paste -sd' ' -)
+	unread=$(unread_reports_in "$cwd")
+	while read -r uslug uage ureport ubranch; do
+		[ -n "${uslug:-}" ] || continue
+		wpaths=$(worker_paths "$cwd" "$ubranch")
+		hits=$(paths_overlap "$wpaths" "$tpaths")
+		if [ -n "$hits" ]; then
+			blocking="${blocking:+$blocking; }$uslug (reported ${uage}s ago, $ureport) touches: $(printf '%s\n' "${wpaths:-unknown}" | paste -sd' ' -); this task names: $(printf '%s\n' "$hits" | paste -sd' ' -)"
+		else
+			quiet="${quiet:+$quiet; }$uslug (reported ${uage}s ago) touches: $(printf '%s\n' "${wpaths:-nothing}" | paste -sd' ' -)"
+		fi
+	done <<<"$unread"
+
+	if [ -n "$blocking" ]; then
+		if [ "$override_jev" != 1 ]; then
+			record_decision in-flight "$task" blocked "$blocking" false "-"
+			die "refusing to spawn in $cwd: a report there is still unread — $blocking
+This task names: ${tpaths_one:-no path at all}.
+Review sets the pace, not generation. Read it, then spawn again:  $BIN/delegate wait <slug>  marks the report read as it prints it.
+Forcing a second worker in the same area needs --override-jev --reason '<why the queue can wait>'."
+		fi
+		record_decision in-flight "$task" override "$reason — blocked by: $blocking" true "$slug"
+		printf '%s: note: an unread report in %s touches a path this task names (%s); spawning because --override-jev --reason was given.\n' "$prog" "$cwd" "$blocking" >&2
+	elif [ -n "$quiet" ]; then
+		record_decision in-flight "$task" allowed "no overlap with the unread report(s): $quiet; this task names: ${tpaths_one:-no path}" false "$slug"
+		printf '%s: note: unread report(s) in %s touch no path this task names (%s): %s — spawning.\n' "$prog" "$cwd" "${tpaths_one:-the task names no path, so this is no overlap established}" "$quiet" >&2
+	fi
+
+	local is_git
+	is_git=$(space_field "$SPACE" git)
+	# 5. Guarantee the base before anything is created, on a git project only. The fetch works here
+	#    and not inside a sandboxed worker, so the worker's trunk is fresh by construction, not by
+	#    hope. A folder with no .git has no trunk to be behind: no branch is recorded for it, and
+	#    its worker is told to leave the change where it is.
+	local base_branch=""
+	if [ "$is_git" = true ]; then
+		ensure_fresh_trunk "$cwd"
+		# The branch the boss's tree is on right now. A worker must cut its own worktree from it,
+		# and cmd_close compares against this: a worker that switches the live checkout gets caught
+		# and the tree put back, even when the rule in the spec was ignored.
+		if command -v git >/dev/null 2>&1; then
+			base_branch=$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+		fi
+	fi
+
+	mkdir -p "$SPECS" "$REPORTS" "$STATE"
+	# overridden is the word "false" when nothing was overridden: test it, do not test for a value.
+	local overridden_note=""
+	if [ "$overridden" = true ]; then overridden_note=", overridden: $reason"; fi
+	# A defaulted field is not jev's choice, and the spec header says so: the worker reads what it
+	# was given, and "(jev)" over a value jev never chose is a claim that is not true.
+	local mode_src="jev" route_src="jev" thinking_src="jev" dfield
+	for dfield in $JEV_DEFAULTS; do
+		case $dfield in
+		mode) mode_src="defaulted" ;;
+		route) route_src="defaulted" ;;
+		thinking) thinking_src="defaulted" ;;
+		esac
+	done
+	# Acceptance mode rewrites the task section and adds one rule block. Everything else — the
+	# mission line, the worktree rule, the report shape — is the same worker, so it is the same
+	# template rather than a second one that drifts.
+	local acceptance_block="" acceptance_task="" task_block=$task base_task=$task
+	local acceptance_bool=false
+	if [ "$acceptance" = 1 ]; then
+		acceptance_bool=true
+		acceptance_task="Acceptance tests for the spec at \`$source_spec\`. You are the second opinion: the
+spec is your whole input, and the implementation is not."
+		acceptance_block=$(cat <<ACCEPTANCE
+
+## Acceptance mode
+
+You write the tests from the spec text alone and never see what was built. A test written by
+someone who has read the code can be bent to fit it, and then it proves nothing; that distance is
+the only reason this worker exists.
+
+1. Read only \`$source_spec\` and the interface files it names by path — a header, a type
+   declaration, a documented entry point. Never open the implementation files of the change: not
+   to check a name, not to see how it is wired. A path the spec does not name is not yours to read.
+2. Write one failing test per behaviour the spec states: the commands, inputs, outputs and
+   refusals it names. Not one more, not one guess at an unstated case.
+3. Ambiguity is not yours to resolve. Where the spec does not say what should happen, make the
+   first line of your report \`DECISION NEEDED: <the question in one line>\` and stop.
+4. Commit only test files. Production code stays untouched — a failing test is the deliverable,
+   and an implementation written here would defeat the point.
+5. The report must show the tests failing against the current tree, with the output that shows
+   it. If they pass, say which it is: the work is already done, or the tests do not test the spec.
+ACCEPTANCE
+)
+	fi
+
+	# Every refusal is behind us: this spawn really starts work, so the leftover learner spaces
+	# from earlier compactions get their one chance to be closed. Never fatal, never blocking.
+	reap_finished_learners
+
+	# One spawn, one worker, one space. A second worker in the same space is the refusal two lines
+	# up; a task that needs more is a second spawn, after this one merged, in its own space.
+	local spawn_slug=$slug spec=$SPECS/$slug.md report=$REPORTS/$slug.md
+	local argv before out space tab pane terminal
+	local rule2 rule5 rule7
+	if [ "$is_git" = true ]; then
+		rule2="2. Never switch \`$cwd\` (the boss reads it). Cut a worktree inside the repo:
+   \`git worktree add .worktrees/SLUG -b BRANCH\` from its root: the sandbox binds the repo, not
+   its parent. No \`git checkout\`, \`switch\`, \`stash\` or \`reset\` in it."
+		rule5="5. Commit on your branch and stop: no push, no PR, no merge, never on trunk — the boss publishes.
+   You stay sandboxed: publishing is the boss's
+   job, so it never needs host access from you."
+		rule7="7. End every commit message with two trailers: \`Agent-Slug: $spawn_slug\` and \`Spec: $spec\`.
+   The commit-msg hook stamps both; check \`git log -1 --format=%B\` before you report."
+	else
+		rule2="2. This project is not a git repository. Work directly in \`$cwd\`, and never run
+   \`git init\`, \`git checkout\` or a worktree command here."
+		rule5="5. Leave the change in \`$cwd\` and stop: no branch, no push, no PR — the boss records the
+   diff and closes the worker."
+		rule7="7. There is no commit to trailer here. Name every changed file, by path, in the report."
+	fi
+	task_block=$base_task
+	if [ "$acceptance" = 1 ]; then task_block=$acceptance_task; fi
+	# One worker per spawn: the body below is a block, not a loop, because a task that needs more
+	# is a second spawn after this one merges, in its own space.
+	if :; then
+		cat >"$spec" <<EOF
+# Worker \`$spawn_slug\`
+
+You are the genie. Prove it runs.
+
+- Work in: \`$cwd\`. Report file: \`$report\`.
+- Mode: \`$mode\` ($mode_src$overridden_note), route: $jev_route ($route_src), thinking: \`$jev_level\` ($thinking_src: $jev_effort)
+- Mission: who is better off and what shows it, in one line. Effort counts are cost, not progress.
+- Iteration: expect at least two cycles; you may throw this away.
+- Spec history: read the newest \`specs/archive/\` spec for this area first; it is the previous
+  decision, or say there is none.
+
+## Task
+
+$task_block
+$acceptance_block
+
+## Rules
+
+1. Do the task in \`$cwd\`; write nothing in \`$ROOT\` but the report.
+$rule2
+3. Route first: \`jev route "<the task>"\`; \`local\`: run \`local-run\`, answer in the report.
+4. Do not spawn, rename, move or close a space; need more hands: say so.
+$rule5
+6. Never edit a test to make your own change pass. A change that breaks a test is said in the
+   report and asked about — first line \`DECISION NEEDED: <may this test change, and why>\` — never
+   answered by weakening the assertion until it fits.
+$rule7
+8. Write the report before you stop, in the form \`bin/publish\` reads:
+   - Mission: the one-liner above, updated with what actually happened.
+   - \`Review tier: High\` — plain label, tier first: low (docs, comments, formatting), medium (code,
+     tests, migrations), high (extensions, AGENTS.md, .github/, git-hooks/, sandbox/, auth, secrets,
+     money, deletion). Prose after the word is fine.
+   - \`Test change: <why>\` — required when one diff changes a test and the source it tests; say what
+     the test now pins. No test can tell it apart: say that instead.
+   - \`Now possible: <fill in: what a person can do now that they could not before>\` — one sentence.
+     No LOC, no PR count, no "refactor". \`bin/publish\` puts it in the PR body at Medium and High tier.
+   - What now works: a command, a path, a passing test.
+   - What changed: one \`Commit: <sha>\`, the files, the PR branch.
+   - Still open, and the one next action.
+   - \`## Evidence\`: the exact command and its last 20 lines, fenced. No block, no close.
+   - \`## Thrown away\`: what you deleted on purpose, and why. "nothing" is fine.
+   - \`## What I would do differently next time\`: one or two lines.
+   Keep it short.
+9. No claim without the output; "not run" names what would run it.
+10. Then stay idle: the boss relays the report and closes the space — do not close it yourself.
+11. Must the user decide first? Make the first line "DECISION NEEDED: <the question>" and stop —
+    only that keeps the space open.
+
+Evidence scaffold:
+
+\`\`\`\`markdown
+## Evidence
+
+Command: <fill in: the exact command you ran, flags and all>
+
+Output (last 20 lines):
+
+\`\`\`
+<paste the last 20 lines of that command's output here>
+\`\`\`
+\`\`\`\`
+
+\`delegate close\` refuses a report with no Evidence block or with a placeholder left in.
+EOF
+
+		# The skeleton is written before the space exists: the worker starts inside `space.new`'s
+		# argv, so this is the last point at which the five lines every report carries are
+		# guaranteed to be there before it writes prose. One function, because a restarted worker
+		# gets the same skeleton and two copies of it would drift.
+		write_report_skeleton "$report" "$spawn_slug" "$is_git"
+
+	argv=$(node -e 'process.stdout.write(JSON.stringify(["sh","-lc",process.argv[1]]))' \
+		"cd $(printf '%q' "$cwd") && export AGENT_SLUG=$(printf '%q' "$spawn_slug") && exec $(printf '%q' "$runner") --thinking $(printf '%q' "$jev_level") -a")
+	# space.new has no hidden or background mode: the new space is shown, which takes the person
+	# off the space and tab they were reading. Note both ids now, explicitly, to put them back.
+	before=""
+	if [ "$no_restore" = 0 ]; then before=$(screen_state); fi
+
+	out=$(herdr-app do space.new --name "$spawn_slug" --folder "$cwd" --tab "$spawn_slug" \
+		--argv "$argv" --task "Read $spec and do it. Report to $report." 2>&1) \
+		|| die "space.new failed for $spawn_slug: $out"
+
+	space=$(printf '%s' "$out" | json_field space)
+	[ -n "$space" ] || space=$(printf '%s' "$out" | json_field id)
+	tab=$(printf '%s' "$out" | json_field tab)
+	pane=$(printf '%s' "$out" | json_field pane)
+	terminal=$(printf '%s' "$out" | json_field terminal)
+
+	# Put the view back before anything slow happens: state, the task send, the banner wait.
+	# Each failure is one warning line, never a refusal, and --no-restore skips it entirely.
+	if [ "$no_restore" = 0 ]; then
+		if [ -z "$before" ]; then
+			printf '%s: warning: could not read the space on screen before the spawn, so focus stayed on space %s\n' "$prog" "${space:-?}" >&2
+		elif ! restore_focus "${before%% *}" "${before##* }"; then
+			printf '%s: warning: could not restore focus to space %s, so focus stayed on space %s\n' "$prog" "${before%% *}" "${space:-?}" >&2
+		fi
+	fi
+
+	[ -n "$space" ] || die "could not read the new space id from: $out"
+
+	node -e '
+		const fs=require("fs");const [state,slug,space,tab,pane,terminal,cwd,mode,thinking,spec,report,jevEffort,overridden,reason,branch,acceptance,sourceSpec,spaceName]=process.argv.slice(1);
+		let j={};try{j=JSON.parse(fs.readFileSync(state,"utf8"))}catch{}
+		j[slug]={slug,space,spaceName,tab,pane,terminal,cwd,mode,thinking,thinkingEffort:jevEffort,spec,report,
+			overridden:overridden==="true",overrideReason:reason||null,branch:branch||null,acceptance:acceptance==="true",
+			acceptanceSpec:sourceSpec||null,started:new Date().toISOString()};
+		fs.writeFileSync(state,JSON.stringify(j,null,2)+"\n");' \
+		"$DELEGATIONS_WRITE" "$spawn_slug" "$space" "$tab" "$pane" "$terminal" "$cwd" "$mode" "$thinking" "$spec" "$report" \
+		"$jev_effort" "$overridden" "$reason" "$base_branch" "$acceptance_bool" "$source_spec" "$SPACE"
+
+	# space.new's --task can arrive before pi is listening, so send it again once the banner is up.
+	local i
+	for i in $(seq 1 40); do
+		hc read "$terminal" 2>/dev/null | grep -q "escape interrupt" && break
+		sleep 1
+	done
+	hc send "$terminal" "Read $spec and do it. Report to $report." >/dev/null 2>&1 \
+		|| printf '%s: warning: could not send the task to %s\n' "$prog" "$terminal" >&2
+
+	printf '{"slug":"%s","space":"%s","herdr_space":"%s","mode":"%s","thinking":"%s","thinking_effort":"%s","route":"%s","overridden":%s,"acceptance":%s,"cwd":"%s","report":"%s","branch":"%s"}\n' \
+		"$spawn_slug" "$SPACE" "$space" "$mode" "$jev_level" "$jev_effort" "$jev_route" "$overridden" "$acceptance_bool" "$cwd" "$report" "$base_branch"
+	fi
+}
+
+# restart_worker <slug> <attempt> — the same spec, started again, after the terminal died before
+# the report was written. A fresh skeleton, a fresh space and terminal, the same slug with `-rN`
+# so the space list says which run this is, and a decision line recording the restart. The spec is
+# appended to, never rewritten: the task is the same work, and the next reader must be able to see
+# that this is run 2 and not a second task.
+restart_worker() {
+	local slug=$1 attempt=$2 spec report cwd mode level runner argv out space tab terminal
+	spec=$(delegation_field "$slug" spec)
+	report=$(report_path "$slug")
+	cwd=$(delegation_field "$slug" cwd)
+	mode=$(delegation_field "$slug" mode)
+	level=$(delegation_field "$slug" thinking)
+	[ -n "$spec" ] && [ -f "$spec" ] || die "cannot restart $slug: its spec ($spec) is not on disk"
+	[ -n "$cwd" ] && [ -d "$cwd" ] || die "cannot restart $slug: its record names no usable cwd ($cwd)"
+	case $mode in bare|sandboxed) runner=$(bin_prog "pi-$mode") ;; *) runner=$(bin_prog pi-nonet) ;; esac
+	[ -x "$runner" ] || die "cannot restart $slug: no runner for mode '${mode:-?}' ($runner)"
+
+	printf '\n---\n\nRestart %s: the previous terminal died before the report was written. Same spec,\nsame slug, a fresh space.\n' "$attempt" >>"$spec"
+	write_report_skeleton "$report" "$slug" "$(space_field "$SPACE" git)"
+	argv=$(node -e 'process.stdout.write(JSON.stringify(["sh","-lc",process.argv[1]]))' \
+		"cd $(printf '%q' "$cwd") && export AGENT_SLUG=$(printf '%q' "$slug") && exec $(printf '%q' "$runner") --thinking $(printf '%q' "$level") -a")
+	out=$(herdr-app do space.new --name "$slug-r$attempt" --folder "$cwd" --tab "$slug-r$attempt" \
+		--argv "$argv" --task "Read $spec and do it. Report to $report." 2>&1) ||
+		die "restart $attempt of $slug failed: herdr-app said: $out"
+	space=$(printf '%s' "$out" | json_field space)
+	[ -n "$space" ] || space=$(printf '%s' "$out" | json_field id)
+	tab=$(printf '%s' "$out" | json_field tab)
+	terminal=$(printf '%s' "$out" | json_field terminal)
+	[ -n "$space" ] || die "restart $attempt of $slug failed: could not read the new space id from: $out"
+
+	node -e '
+		const fs=require("fs");
+		const [file,slug,space,tab,terminal,attempt]=process.argv.slice(1);
+		let j={};try{j=JSON.parse(fs.readFileSync(file,"utf8"))}catch{}
+		if (j[slug]) {
+			const e=j[slug];
+			e.space=space; e.tab=tab||""; e.terminal=terminal||"";
+			e.restarts=Number(e.restarts||0)+1;
+			e.restartList=Array.isArray(e.restartList)?e.restartList:[];
+			e.restartList.push({attempt:Number(attempt),space,terminal:terminal||"",at:new Date().toISOString()});
+			fs.writeFileSync(file,JSON.stringify(j,null,2)+"\n");
+		}' "$DELEGATIONS_WRITE" "$slug" "$space" "$tab" "$terminal" "$attempt"
+
+	record_decision restart "$spec" "restarted" "the terminal was gone before a report; restart $attempt of 3 as $slug-r$attempt" false "$slug"
+	hc send "$terminal" "Read $spec and do it. Report to $report." >/dev/null 2>&1 ||
+		printf '%s: warning: could not send the task to restarted worker %s\n' "$prog" "$terminal" >&2
+	return 0
+}
+
+cmd_wait() {
+	local slug=${1:-} timeout=600 forever=0 space_opt="" report
+	[ -n "$slug" ] || die 'usage: delegate wait <slug> [--space SLUG] [--timeout SECONDS] [--forever]'
+	shift || true
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--space) space_opt=${2:-}; shift 2 ;;
+		--timeout) timeout=${2:-600}; shift 2 ;;
+		--forever) forever=1; shift ;;
+		*) die "unknown option $1" ;;
+		esac
+	done
+	[ -n "$slug" ] || die 'usage: delegate wait <slug> [--space SLUG] [--timeout SECONDS] [--forever]'
+	# The worker's own space, from the record: `wait` is run for a slug, not from a folder.
+	[ -n "$space_opt" ] || space_opt=$(space_of_slug "$slug")
+	if [ -n "$space_opt" ] && space_exists "$space_opt"; then use_space "$space_opt"; fi
+	DELEGATIONS=$(delegations_all)
+	report=$(report_path "$slug")
+
+	# Forever is the boss's loop: poll, say one line, and start the same spec again when the
+	# terminal died without a report. Three restarts is the ceiling; after that the answer is a
+	# report naming what was seen, not a fourth worker.
+	if [ "$forever" = 1 ]; then
+		local restarts=0 state seen="" stamp
+		command -v node >/dev/null 2>&1 || die "node is not on PATH"
+		while :; do
+			# herdr's terminal list is cached per run for the one-shot commands; a loop that lives
+			# for minutes must ask again each time, or a worker that starts working after a restart
+			# would still read "gone" from the first poll.
+			herdr_terminals_read=""
+			if report_written "$report"; then
+				say "== $slug reported =="
+				cat "$report"
+				mark_read "$slug"
+				say ""
+				if report_needs_decision "$report"; then
+					say "$slug asks the user for a decision. Relay the question, and close the space once it is answered:"
+					say "  $BIN/delegate close $slug"
+				else
+					say "$slug is done. One command publishes it, wipes it and closes it, in that order:"
+					say "  $BIN/delegate finish $slug"
+				fi
+				return 0
+			fi
+			state=$(worker_state "$slug")
+			stamp=$(date +%H:%M:%S 2>/dev/null || printf 'poll')
+			say "$stamp $slug $state (restart $restarts/3) $report"
+			if [ "$state" = gone ]; then
+				if [ "$restarts" -ge 3 ]; then
+					die "$slug: restarted 3 times and it is gone again, with no report. What I saw: $seen.
+Its last terminal was $(delegation_field "$slug" terminal), and $(delegation_field "$slug" spec) is still the spec it was given. Write the report by hand, or ask the person what to do next."
+				fi
+				restarts=$((restarts + 1))
+				seen="${seen:+$seen; }restart $restarts: terminal $(delegation_field "$slug" terminal) gone, report $([ -e "$report" ] && echo 'a skeleton' || echo missing)"
+				say "  $slug is gone — restarting the same spec, attempt $restarts of 3 (space $slug-r$restarts)"
+				restart_worker "$slug" "$restarts" || die "restart $restarts of $slug could not start. What I saw: $seen"
+			fi
+			# 20 seconds: long enough to be a poll and not a spin, short enough to see movement.
+			# DELEGATE_POLL_SECONDS exists for the tests, which cannot wait a minute to watch a
+			# restart happen.
+			sleep "${DELEGATE_POLL_SECONDS:-20}"
+		done
+	fi
+
+	# A worker whose terminal is gone will never write that report: waiting the timeout out is the
+	# bug this state exists to name, so it is said once and now, not after ten minutes. The file is
+	# what decides: `spawn` writes a skeleton before the space exists, so an unfilled skeleton is a
+	# worker that started and stopped (`report_written` false), not one that never wrote at all
+	# (`-e` false). Only the second sends the reader to "spawn the task again".
+	if [ ! -e "$report" ] && [ "$(worker_state "$slug")" = gone ]; then
+		die "$slug is gone: its recorded herdr terminal $(delegation_field "$slug" terminal) is no longer listed and it never wrote $report — waiting cannot make it report. Check the space, then spawn the task again or write the report by hand (--forever restarts it for you)"
+	fi
+	command -v timeout >/dev/null 2>&1 || die "timeout not found"
+	local waited=0
+	while [ "$waited" -lt "$timeout" ]; do
+		if report_written "$report"; then
+			say "== $slug reported =="
+			cat "$report"
+			# Printing the report is reading it: the marker clears this cwd's in-flight block.
+			mark_read "$slug"
+			say ""
+			if report_needs_decision "$report"; then
+				say "$slug asks the user for a decision. Relay the question, and close the space once it is answered:"
+				say "  $BIN/delegate close $slug"
+			else
+				say "$slug is done. One command publishes it, wipes it and closes it, in that order:"
+				say "  $BIN/delegate finish $slug"
+			fi
+			return 0
+		fi
+		sleep 2; waited=$((waited + 2))
+	done
+	die "$slug has not reported after ${timeout}s — ask the user whether to keep waiting (--forever waits and restarts it)"
+}
+
+cmd_list() {
+	local space_opt=""
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--space) space_opt=${2:-}; shift 2 ;;
+		*) die "unknown option $1 — usage: delegate list [--space SLUG]" ;;
+		esac
+	done
+	DELEGATIONS=$(delegations_all)
+	if [ -n "$space_opt" ] && ! space_exists "$space_opt"; then
+		die "no such space: $space_opt — bin/space list"
+	fi
+	[ -f "$DELEGATIONS" ] || { say "no workers"; return 0; }
+	# Reconcile against herdr before anything is printed: the state of each row is read from what
+	# herdr still runs, not only from the entry spawn wrote (see worker_state). A herdr that does
+	# not answer leaves the record standing and says so on stderr, once.
+	local slug states=""
+	while IFS= read -r slug; do
+		[ -n "$slug" ] || continue
+		states="$states$slug=$(worker_state "$slug")"$'\n'
+	done <<<"$(node -e '
+		const fs = require("fs");
+		let j = {};
+		try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
+		Object.keys(j).forEach((k) => console.log(k));' "$DELEGATIONS")"
+	DELEGATE_SPACE_FILTER=$space_opt DELEGATE_STATES=$states node -e '
+		const fs=require("fs");
+		let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+		let decisions=[];
+		try{decisions=fs.readFileSync(process.argv[2],"utf8").trim().split("\n").filter(Boolean).map(l=>{try{return JSON.parse(l)}catch{return null}}).filter(Boolean)}catch{}
+		// One map per worker, keyed by command: mode, route and thinking are separate lines, and
+		// the last command to land is not the only one worth showing.
+		const by=new Map();
+		for(const d of decisions)if(d.slug){
+			if(!by.has(d.slug))by.set(d.slug,new Map());
+			by.get(d.slug).set(d.command,d);
+		}
+		const pick=(slug,cmd)=>{const m=by.get(slug);return m?m.get(cmd):undefined};
+		// The entry key, because a hand-written or older entry has no slug field and the state
+		// map is keyed the way `delegate list` walks the file.
+		const filter=String(process.env.DELEGATE_SPACE_FILTER||"");
+		const rows=Object.entries(j).map(([k,v])=>({key:k,...v}))
+			.filter((r)=>!filter||String(r.spaceName||"")===filter);
+		if(!rows.length){console.log("no workers");process.exit(0)}
+		// worker_state told this process what herdr says: reported, gone or working.
+		const states=new Map(String(process.env.DELEGATE_STATES||"").split("\n").filter(Boolean).map(l=>{const i=l.indexOf("=");return [l.slice(0,i),l.slice(i+1)]}));
+		for(const r of rows){
+			let size=0;try{size=fs.statSync(r.report).size}catch{}
+			const state=states.get(r.slug||r.key)||(size?"reported":"working");
+			const who=r.slug||r.key;
+			const mode=pick(who,"mode"),route=pick(who,"route"),think=pick(who,"thinking");
+			const level=(think?think.decision:r.thinking)||"?";
+			const overridden=(mode&&mode.overridden)||(think&&think.overridden)||r.overridden;
+			const jev=`mode=${r.mode||"?"} route=${route?route.decision:"?"} thinking=${level}${overridden?" (overridden)":""}`;
+			// Every column is defaulted: a delegations entry written by hand, or by an older version
+			// of spawn, has no mode or space, and `list` must print that row rather than crash on it.
+			console.log([String(who).padEnd(22),String(r.spaceName||"-").padEnd(16),String(r.mode||"").padEnd(10),String(level).padEnd(8),state.padEnd(9),jev.padEnd(44),String(r.space||"-"),"cwd="+String(r.cwd||"-")].join(" "));
+		}' "$DELEGATIONS" "$DECISIONS"
+	if ! herdr_terminals >/dev/null; then
+		printf '%s: herdr did not answer, so reported/working is what state/delegations.json records, not what herdr still runs\n' "$prog" >&2
+	elif herdr_terminals_none && grep -q '"terminal"' "$DELEGATIONS"; then
+		# Not the same thing as one worker gone: a herdr that lists nothing at all while the record
+		# names terminals is a herdr this side cannot see, and saying so is cheaper than a boss
+		# believing `working`.
+		printf '%s: herdr lists no terminals at all, so reported/working is what state/delegations.json records, not what herdr still runs\n' "$prog" >&2
+	fi
+}
+
+# ask — put a question to Jev before it reaches the user. The question is not the person's to
+# answer until Jev says it is.
+#
+# "Ask jev before you ask the user" is a rule; this makes it checkable instead of remembered.
+# Every question that goes through here leaves the same audit line in state/decisions.jsonl
+# (command "ask"), and the exit code says what to do next: 0 yes, 1 no — act on it, do not
+# interrupt the user — and 3 unsure or model unreachable, the only case that reaches the user,
+# carrying Jev's answer and reason in one line. The user is the tie-breaker, not the first
+# responder.
+cmd_ask() {
+	local question="" json=0 out rc decision reason
+	[ "$#" -ge 1 ] || die 'usage: delegate ask "<question for jev>" [--json]'
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--json) json=1; shift ;;
+		--*) die "unknown option $1" ;;
+		*) question="${question:+$question }$1"; shift ;;
+		esac
+	done
+	[ -n "${question// /}" ] || die 'usage: delegate ask "<question for jev>" [--json]'
+	need node
+	out=$(PI_BOSS_CONTEXT="ask" "$(bin_prog jev)" ask "$question" --json 2>&1) && rc=0 || rc=$?
+	decision=$(printf '%s' "$out" | json_field decision)
+	reason=$(printf '%s' "$out" | json_field reason)
+	case $rc in
+	0) decision=yes ;;
+	1) decision=no ;;
+	*) decision=unsure ;;
+	esac
+	# An unreachable model leaves no reason behind, only jev's own complaint. Keep that line:
+	# the one sentence the user sees has to explain itself.
+	if [ -z "$reason" ]; then
+		reason=$(printf '%s' "$out" | head -n 1 | sed 's/^[^:]*: //')
+	fi
+	record_decision ask "$question" "$decision" "$reason" false "-" "$decision"
+	if [ "$json" = 1 ]; then
+		node -e 'const [q,d,r]=process.argv.slice(1);process.stdout.write(JSON.stringify({question:q,decision:d,reason:r||null,ask_user:d==="unsure"})+"\n")' \
+			"$question" "$decision" "$reason"
+		return "$rc"
+	fi
+	case $decision in
+	yes)
+		say "jev: yes${reason:+ — $reason}"
+		say "Act on that answer. Do not ask the user."
+		;;
+	no)
+		say "jev: no${reason:+ — $reason}"
+		say "Act on that answer. Do not ask the user. Overturning jev is the user's call, not yours."
+		;;
+	*)
+		say "jev: unsure${reason:+ — $reason}"
+		say "Now ask the user, and carry that line: \"jev is unsure — $reason\"."
+		;;
+	esac
+	return "$rc"
+}
+
+# cmd_wipe -- the consolidation step between features: five questions, then a line in the log.
+#
+# It is a gate, not a report: the answers belong in the worker's report (`## Thrown away`) and in
+# AGENTS.md only when they generalise, so this prints the questions and records that the step
+# happened. Effort spent here is the only thing that turns a finished feature into a cheaper
+# codebase; without it every feature is an addition and the tree only grows.
+cmd_wipe() {
+	local slug=${1:-} skip=0 reason="" branch=""
+	[ -n "$slug" ] || die 'usage: delegate wipe <slug> [--skip "<reason>"]'
+	shift || true
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--skip)
+			skip=1
+			reason=${2:-}
+			[ -n "${reason// /}" ] || die "--skip needs a reason: delegate wipe $slug --skip \"<why the step does not apply>\""
+			shift 2
+			;;
+		*) die "unknown option $1" ;;
+		esac
+	done
+	# A wipe on a slug nobody spawned wipes nothing and records nothing useful, and the answers
+	# would go into a report that does not exist. Refuse it the way close does: loud, nonzero,
+	# and naming the word that was wrong.
+	[ -f "$DELEGATIONS" ] || die "no such worker: $slug"
+	known=$(node -e 'const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}process.stdout.write(j[process.argv[2]]?"1":"0")' \
+		"$DELEGATIONS" "$slug") || known=0
+	[ "$known" = 1 ] || die "no such worker: $slug"
+	branch=$(node -e 'const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}process.stdout.write((j[process.argv[2]]||{}).branch||"")' \
+		"$DELEGATIONS" "$slug") || branch=""
+
+	if [ "$skip" = 1 ]; then
+		record_decision wipe "$slug" skipped "$reason" false "$slug"
+		say "wipe: $slug — skipped, reason recorded: $reason"
+		say "state/decisions.jsonl holds the line; close goes through:  $BIN/delegate close $slug"
+		return 0
+	fi
+
+	# The step is recorded only over answers. `--skip` above is the one honest way to record a
+	# wipe that does not apply, and the reason it needs is why it is not the gap this closes.
+	if ! wipe_answers_present "$REPORTS/$slug.md"; then
+		die "refusing to wipe $slug: $REPORTS/$slug.md has no \"## Thrown away\" block with the answers under it, so recording the step would stand for nothing. Write the five answers there, or record why the step does not apply: delegate wipe $slug --skip \"<reason>\""
+	fi
+
+	say "wipe: $slug — five answers before the next feature starts${branch:+ (branch $branch)}:"
+	say "  1. Deleted?      what did this make unnecessary, and is that code gone?"
+	say "  2. Duplicated?   what here is a second copy of something already in the tree?"
+	say "  3. Next feature? could one land in this area in 30 minutes, or does it need a rewrite?"
+	say "  4. Learned?      what belongs in AGENTS.md or a comment after this?"
+	say "  5. Rewrite?      what would you re-implement from scratch, and why?"
+	say ""
+	say "Write the answers into the report (## Thrown away), then this line records the step."
+	# Spec continuity (Radar blip 82): a finished spec moves out of specs/ into specs/archive/, where
+# the next worker in the same area reads it before it starts. A spec nobody archives is one the
+# next worker re-decides from nothing.
+local spec=$SPECS/$slug.md
+if [ -f "$spec" ]; then
+	mkdir -p "$SPECS/archive"
+	mv "$spec" "$SPECS/archive/$slug.md"
+	say "spec archived: specs/archive/$slug.md — the next worker in this area reads it first"
+fi
+	record_decision wipe "$slug" done "" false "$slug"
+	say "state/decisions.jsonl: wipe done for $slug — close goes through:  $BIN/delegate close $slug"
+}
+
+# space_close <id> <name> — close one herdr space and prove it is gone.
+#
+# `herdr-app do space.close` answering 0 is not the space being gone. A `delegate close ci-wiring`
+# printed `closed`, `delegate finish` printed `3/3 close`, the delegation entry was deleted — and
+# the space was still there with a live idle `pi` in it. Only a person asking why found it, and by
+# then nothing recorded the space any more. So the close is confirmed against `herdr-app ls`, the
+# window's own list and the same one `reap` reads, with one retry for a space whose close has not
+# landed yet. An answer this side cannot read (no herdr-app, an empty list, a component that
+# refuses) is silence, not a finding: the close then stands on the record, as it always has.
+# Returns 1, with a warning naming the id and the name, only when herdr still lists the space.
+space_close() {
+	local id=$1 name=$2 attempt spaces
+	[ -n "$id" ] || return 0
+	command -v herdr-app >/dev/null 2>&1 || return 0
+	for attempt in 1 2; do
+		herdr-app do space.close --id "$id" --confirmed true >/dev/null 2>&1 || true
+		spaces=$(herdr-app ls 2>/dev/null) || return 0
+		[ -n "$spaces" ] || return 0
+		# The id is matched as a JSON token, never parsed out of a shape this side does not own.
+		if ! printf '%s' "$spaces" | grep -qF "\"$id\""; then
+			return 0
+		fi
+		[ "$attempt" = 1 ] && sleep 1
+	done
+	printf '%s: warning: space %s%s is still open after space.close answered — herdr still lists it, so the worker is not closed. Close it by hand:\n' \
+		"$prog" "$id" "${name:+ ($name)}" >&2
+	printf '  herdr-app do space.close --id %s --confirmed true\n' "$id" >&2
+	return 1
+}
+
+cmd_close() {
+	local slug=${1:-} merged="" nothing="" nothing_given="" rewritten="" rewritten_reason="" rewritten_given=""
+	[ "$#" -ge 1 ] || die 'usage: delegate close <slug> [--merged <pr-url-or-number>] [--nothing "<why nothing landed>"] [--rewritten <sha> "<why the tip is another worker commit, rewritten>"]'
+	slug=$1; shift
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--merged) merged=${2:-}; shift 2 ;;
+		--nothing)
+			nothing=${2:-}; nothing_given=1
+			if [ "$#" -ge 2 ]; then shift 2; else shift 1; fi
+			;;
+		--rewritten)
+			rewritten=${2:-}; rewritten_reason=${3:-}; rewritten_given=1
+			if [ "$#" -ge 3 ]; then shift 3; else shift "$#"; fi
+			;;
+		--*) die "unknown option $1" ;;
+		*) die "close takes one slug: '$1' — usage: delegate close <slug> [--merged <pr-url-or-number>] [--nothing \"<why nothing landed>\"] [--rewritten <sha> \"<why>\"]" ;;
+		esac
+	done
+	[ -n "$slug" ] || die 'usage: delegate close <slug> [--merged <pr-url-or-number>] [--nothing "<why nothing landed>"] [--rewritten <sha> "<why>"]'
+	# --nothing and --merged answer the same question ("where did the work go?") with opposite
+	# findings, so asking both is a mistake, not a combination. --rewritten answers it a third way
+	# and names a sha, so it excludes both: one answer, one flag.
+	if [ -n "$nothing_given" ] && [ -n "$merged" ]; then
+		die "--nothing and --merged cannot be combined: --nothing says no commit landed, --merged names the PR that carried one"
+	fi
+	if [ -n "$rewritten_given" ]; then
+		if [ -n "$nothing_given" ]; then
+			die "--rewritten and --nothing cannot be combined: --rewritten names the commit that landed, rewritten, and --nothing says none did"
+		fi
+		if [ -n "$merged" ]; then
+			die "--rewritten and --merged cannot be combined: --merged says the change landed in trunk, and --rewritten says it is a local rewrite of another worker's branch"
+		fi
+	fi
+	if [ -n "$nothing_given" ] && [ -z "$nothing" ]; then
+		die "--nothing needs a reason: delegate close $slug --nothing \"<why this worker landed no commit>\""
+	fi
+	if [ -n "$rewritten_given" ] && [ -z "$rewritten" ]; then
+		die "--rewritten needs a sha: delegate close $slug --rewritten <sha> \"<why this worker only landed another worker's commit, rewritten>\""
+	fi
+	DELEGATIONS=$(delegations_all)
+	[ -f "$DELEGATIONS" ] || die "no such worker: $slug"
+	# The worker's space, from the record: close is run for a slug, not from a folder, and a
+	# worker's report lives in the space that started it.
+	local worker_space
+	worker_space=$(delegation_field "$slug" spaceName)
+	[ -n "$worker_space" ] || worker_space=$(space_of_slug "$slug")
+	if [ -n "$worker_space" ] && space_exists "$worker_space"; then use_space "$worker_space"; fi
+	DELEGATIONS=$(delegations_all)
+	local space_git=true
+	if [ -n "$worker_space" ] && space_exists "$worker_space"; then
+		space_git=$(space_field "$worker_space" git)
+		[ -n "$space_git" ] || space_git=true
+	fi
+	local space cwd branch meta report
+	meta=$(node -e '
+		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+		const e=j[process.argv[2]]||{};
+		process.stdout.write(JSON.stringify({space:e.space||"",cwd:e.cwd||"",branch:e.branch||""}))' "$DELEGATIONS" "$slug")
+	space=$(printf '%s' "$meta" | json_field space)
+	[ -n "$space" ] || die "no such worker: $slug"
+	cwd=$(printf '%s' "$meta" | json_field cwd)
+	branch=$(printf '%s' "$meta" | json_field branch)
+
+	# Evidence before the space goes: a close is the last moment a claim can be checked, and a
+	# closed worker is not coming back to paste the output. Refuse, name what is missing, and
+	# leave the space open — the fix is one edit to the report, then this command again.
+	report=$(report_path "$slug")
+	if [ -s "$report" ]; then
+		if ! report_has_evidence "$report"; then
+			printf '%s: refusing to close %s: %s has no Evidence block, so the report proves nothing.\n' "$prog" "$slug" "$report" >&2
+			printf 'Fix: add a "## Evidence" heading with the exact command you ran and the last 20 lines of its output, then close again:\n' >&2
+			printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+			return 1
+		fi
+		local placeholders
+		placeholders=$(report_placeholders "$report")
+		if [ -n "$placeholders" ]; then
+			printf '%s: refusing to close %s: %s still has fill-in placeholders.\n' "$prog" "$slug" "$report" >&2
+			printf '%s\n' "$placeholders" | head -n 5 | sed "s|^|  $report:|" >&2
+			printf 'Fix: replace each of them with the real value or delete the line, then close again:\n' >&2
+			printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+			return 1
+		fi
+		# After the placeholders: an unfilled scaffold is an unfinished report, and its own refusal
+		# names the line to fill in. The gate is asked about once the report is a report.
+		if [ "$space_git" = true ] && ! report_has_preflight_evidence "$report" "$slug"; then
+			printf '%s: refusing to close %s: %s names no bin/preflight run under ## Evidence, so the checks CI would run were never proved here.\n' "$prog" "$slug" "$report" >&2
+			printf 'Fix: run the gate, then paste its last lines into the Evidence block and close again:\n' >&2
+			printf '  %s/preflight --slug %s\n' "$BIN" "$slug" >&2
+			printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+			printf 'If the gate itself is broken on this machine, record why instead and publish anyway:\n' >&2
+			printf '  %s/delegate finish %s --skip-preflight "<why the gate cannot run>"\n' "$BIN" "$slug" >&2
+			return 1
+		fi
+	fi
+
+	# --nothing (a worker that legitimately landed no commit): a PR merged before the work finished,
+	# or the change it was sent for turned out to be unnecessary. Without this the report is refused
+	# forever for recording no sha, and the worker is tracked for nothing — so there is one exit, and
+	# it is narrow on purpose: a written reason of real length, an Evidence block, no commit named at
+	# all, and the wipe step. The reason is printed and recorded, so the record says why it landed
+	# nothing instead of silently forgetting the space. Every other close path keeps its checks.
+	if [ -n "$nothing_given" ]; then
+		if [ ! -s "$report" ]; then
+			printf '%s: refusing to close %s with --nothing: %s does not exist, so there is no report that says why nothing landed.\n' "$prog" "$slug" "$report" >&2
+			return 1
+		fi
+		if ! report_has_evidence "$report"; then
+			printf '%s: refusing to close %s with --nothing: %s has no Evidence block, so nothing shows the work was tried.\n' "$prog" "$slug" "$report" >&2
+			printf 'Fix: add a "## Evidence" heading with the exact command you ran and the last 20 lines of its output, then close again:\n' >&2
+			printf '  %s close %s --nothing "<why nothing landed>"\n' "$BIN/delegate" "$slug" >&2
+			return 1
+		fi
+		if [ "$space_git" = true ] && ! report_has_preflight_evidence "$report" "$slug"; then
+			printf '%s: refusing to close %s with --nothing: %s names no bin/preflight run under ## Evidence, so the checks CI would run were never proved here.\n' "$prog" "$slug" "$report" >&2
+			printf 'Fix: run the gate, paste its last lines under ## Evidence, then close again:\n' >&2
+			printf '  %s/preflight --slug %s\n' "$BIN" "$slug" >&2
+			return 1
+		fi
+		if [ "${#nothing}" -lt 20 ]; then
+			printf '%s: refusing to close %s with --nothing: the reason is %d characters, and a no-op close needs 20 or more — "%s" does not tell the next reader why the worker landed nothing.\n' \
+				"$prog" "$slug" "${#nothing}" "$nothing" >&2
+			printf 'Fix: say what happened, in one sentence:\n' >&2
+			printf '  %s close %s --nothing "the PR merged before the work finished, so nothing was committed"\n' "$BIN/delegate" "$slug" >&2
+			return 1
+		fi
+		local nosha nosha_msg=""
+		nosha=$(report_commit_sha "$report")
+		if [ -n "$nosha" ]; then
+			if [ -n "$cwd" ] && [ -d "$cwd" ]; then nosha_msg=$(commit_message "$cwd" "$nosha" || true); fi
+			if [ -n "$nosha_msg" ]; then
+				printf '%s: refusing to close %s with --nothing: %s records commit %s, and that commit resolves, so something did land — close it the normal way so the commit and its Agent-Slug trailer are checked.\n' \
+					"$prog" "$slug" "$report" "$nosha" >&2
+				printf 'Fix: drop --nothing and close it on its provenance:\n' >&2
+				printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+				return 1
+			fi
+			printf '%s: refusing to close %s with --nothing: %s names commit %s, and a --nothing close is for a report that names no commit at all.\n' \
+				"$prog" "$slug" "$report" "$nosha" >&2
+			printf 'Fix: if that commit is the work, record it on the Commit: line and close normally; if nothing landed, remove the Commit line and say why in the --nothing reason:\n' >&2
+			printf '  %s close %s --nothing "<why nothing landed>"\n' "$BIN/delegate" "$slug" >&2
+			return 1
+		fi
+	fi
+
+	# --rewritten (a worker whose work WAS the rebase): the tip of another worker's branch carries
+	# that worker's Agent-Slug trailer, because a rebase rewrites a commit without changing whose
+	# trailer it is. Plain close refuses it as "not this worker"; --nothing refuses it for naming a
+	# commit at all; the change did land, on a branch this worker was sent to rebase. Narrow on
+	# purpose, and every way out of it names the one check that failed. The record carries the sha,
+	# the branch and the commit it replaces, so "rewritten" is checkable rather than declared.
+	if [ -n "$rewritten_given" ]; then
+		if [ ! -s "$report" ]; then
+			printf '%s: refusing to close %s with --rewritten: %s does not exist, so there is no report that says what was rewritten.\n' "$prog" "$slug" "$report" >&2
+			return 1
+		fi
+		if [ "${#rewritten_reason}" -lt 20 ]; then
+			printf '%s: refusing to close %s with --rewritten: the reason is %d characters, and a rewrite close needs 20 or more — "%s" does not tell the next reader what was rewritten.\n' \
+				"$prog" "$slug" "${#rewritten_reason}" "$rewritten_reason" >&2
+			printf 'Fix: say whose branch was rebased and onto what, in one sentence:\n' >&2
+			printf '  %s close %s --rewritten %s "rebased <other-worker> onto trunk; the tip is that worker commit, rewritten"\n' "$BIN/delegate" "$slug" "$rewritten" >&2
+			return 1
+		fi
+		local full trunk trailer tipbranch pred why
+		if [ -z "$cwd" ] || [ ! -d "$cwd" ] || ! git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
+			printf '%s: refusing to close %s with --rewritten: %s is not a git repository, so %s cannot be checked.\n' "$prog" "$slug" "${cwd:-$slug}" "$rewritten" >&2
+			return 1
+		fi
+		full=$(git -C "$cwd" rev-parse --verify --quiet "$rewritten^{commit}" 2>/dev/null) || full=""
+		if [ -z "$full" ]; then
+			printf '%s: refusing to close %s with --rewritten: %s does not resolve in %s, so nobody can check what was rewritten.\n' "$prog" "$slug" "$rewritten" "$cwd" >&2
+			printf 'Fix: name the commit the branch actually points at, then close again:\n' >&2
+			printf '  git -C %q log -1 --format=%%H\n' "$cwd" >&2
+			return 1
+		fi
+		trunk=$(fresh_trunk_branch "$cwd")
+		if [ -z "$trunk" ]; then
+			printf '%s: refusing to close %s with --rewritten: %s has no origin/trunk, origin/main or origin/master, so there is no trunk to check %s against.\n' "$prog" "$slug" "$cwd" "$full" >&2
+			printf 'Fix: fetch the remote first, then close again:\n' >&2
+			printf '  git -C %q fetch origin\n' "$cwd" >&2
+			return 1
+		fi
+		if git -C "$cwd" merge-base --is-ancestor "$full" "refs/remotes/origin/$trunk" 2>/dev/null; then
+			printf '%s: refusing to close %s with --rewritten: %s is in origin/%s, so it landed rather than being rewritten here — close it on the usual path, or with --merged when its trailer is missing only because trunk already holds it.\n' "$prog" "$slug" "$full" "$trunk" >&2
+			return 1
+		fi
+		trailer=$(commit_message "$cwd" "$full" 2>/dev/null | awk -F':[ \t]*' '/^Agent-Slug:/ { v = $2; sub(/[ \t\r]+$/, "", v); print v; exit }')
+		if [ -z "$trailer" ]; then
+			printf '%s: refusing to close %s with --rewritten: %s carries no Agent-Slug trailer, so there is no other worker whose commit this could be — --merged is the path for a commit that landed with no trailer.\n' "$prog" "$slug" "$full" >&2
+			return 1
+		fi
+		if [ "$trailer" = "$slug" ]; then
+			printf '%s: refusing to close %s with --rewritten: %s carries Agent-Slug: %s, this worker own trailer, so it is this worker commit and nothing was rewritten. Close it the normal way.\n' "$prog" "$slug" "$full" "$slug" >&2
+			printf 'Fix:\n' >&2
+			printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+			return 1
+		fi
+		tipbranch=$(git -C "$cwd" for-each-ref --points-at "$full" --format='%(refname:short)' refs/heads/ 2>/dev/null | grep -xF "$trailer" || true)
+		if [ -z "$tipbranch" ]; then
+			printf '%s: refusing to close %s with --rewritten: %s is not the tip of %s, the branch its Agent-Slug: %s trailer names (tips here: %s), so it is not another worker branch rewritten — a commit taken from the middle of a branch is not a rewrite of it.\n' \
+				"$prog" "$slug" "$full" "$trailer" "$trailer" "$(git -C "$cwd" for-each-ref --points-at "$full" --format='%(refname:short)' refs/heads/ 2>/dev/null | paste -sd' ' - || true)" >&2
+			return 1
+		fi
+		pred=$(rewritten_predecessor "$cwd" "$trailer" "$full")
+		if [ -z "$pred" ]; then
+			printf '%s: refusing to close %s with --rewritten: %s has no predecessor on %s with the same subject and author, so nothing shows it was rewritten rather than invented (a reflog that expired reads the same).\n' \
+				"$prog" "$slug" "$full" "$trailer" >&2
+			printf 'Fix: name the commit that the rebase rewrote, if the branch reflog still holds it:\n' >&2
+			printf '  git -C %q reflog show %s\n' "$cwd" "$trailer" >&2
+			return 1
+		fi
+		# Recorded below, after the wipe gate, with the --nothing row: a row for a worker whose
+		# close then failed would say a rewrite was accepted that never closed. The values are
+		# local to this function, so they are still here when the close reaches that point.
+		rewritten_full=$full
+		rewritten_branch=$trailer
+		rewritten_pred=$pred
+		rewritten_trunk=$trunk
+		rewritten_why="commit $full is the tip of $trailer, carries Agent-Slug: $trailer (not this worker), is not in origin/$trunk, and replaces $(git -C "$cwd" rev-parse --short "$pred" 2>/dev/null || printf '%s' "$pred") on that branch with the same subject and author: this worker rewrote that branch rather than inventing a commit. Why: $rewritten_reason"
+	fi
+
+	# Provenance (Radar blip 79): a report names the commit it stands for, and that commit names the
+# worker in an Agent-Slug trailer. Refused in the same voice as the evidence block: name what is
+# missing, print the exact command that fixes it, leave the space open. Nothing is checked when
+# the worker's cwd is not a git repo — there is no commit to resolve a sha against, and a guard
+# that refuses every report on a plain folder is a guard nobody keeps. A --nothing close has no
+# commit to check by definition, and its own block above has already asked for the rest.
+if [ -z "$nothing_given" ] && [ -z "$rewritten_given" ] && [ -n "$cwd" ] && [ -d "$cwd" ] && git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
+	local sha msg
+	sha=$(report_commit_sha "$report" "$slug" "$cwd")
+	if [ -z "$sha" ]; then
+		printf '%s: refusing to close %s: %s records no commit sha, so nothing ties the change to this worker.\n' "$prog" "$slug" "$report" >&2
+		printf 'Fix: add a line "Commit: <sha>" to the report naming the commit that carries the work, then close again:\n' >&2
+		printf '  git -C %q log -1 --format=%%H\n' "$cwd" >&2
+		printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+		return 1
+	fi
+	msg=$(commit_message "$cwd" "$sha" || true)
+	if [ -z "$msg" ]; then
+		printf '%s: refusing to close %s: %s records commit %s, and it does not resolve in %s, so nobody can check it.\n' "$prog" "$slug" "$report" "$sha" "$cwd" >&2
+		printf 'Fix: record the sha of the commit that carries the work, then close again:\n' >&2
+		printf '  git -C %q log -1 --format=%%H\n' "$cwd" >&2
+		printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+		report_provenance_note "$report" "$slug" "$cwd" "$sha"
+		return 1
+	fi
+	# The trailer has to name THIS worker. A commit carrying another worker's Agent-Slug is a sha
+	# the report quotes, not provenance: it ties the change to that worker and says nothing about
+	# this one. merged_escape stays what it is — the path for a commit that landed with no trailer
+	# at all — so a wrong-slug commit is refused here with its own message rather than routed
+	# through a permission that exists for a different problem.
+	if ! printf '%s\n' "$msg" | grep -qE '^Agent-Slug:[[:space:]]*[^[:space:]]'; then
+		if ! merged_escape "$slug" "$sha" "$cwd" "$merged"; then
+			report_provenance_note "$report" "$slug" "$cwd" "$sha"
+			return 1
+		fi
+	elif ! commit_carries_slug "$cwd" "$sha" "$slug"; then
+		printf '%s: refusing to close %s: %s records commit %s, and that commit carries %s, not Agent-Slug: %s — it ties the change to another worker.\n' \
+			"$prog" "$slug" "$report" "$sha" \
+			"$(printf '%s\n' "$msg" | sed -nE 's/^Agent-Slug:[[:space:]]*([^[:space:]]+).*/Agent-Slug: \1/p' | head -n 1)" "$slug" >&2
+		printf 'Fix: name the commit that carries this worker\047s own work on a "Commit: <sha>" line, then close again:\n' >&2
+		printf '  git -C %q log --format=%%h%%x09%%s -20\n' "$cwd" >&2
+		printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+		report_provenance_note "$report" "$slug" "$cwd" "$sha"
+		return 1
+	fi
+fi
+
+	# The report has been read and checked by the time a close gets here: mark it, so a cwd whose
+	# worker just closed is free for the next one.
+	mark_read "$slug"
+
+	if ! wipe_recorded "$slug"; then
+		printf '%s: refusing to close %s: no wipe step recorded for it.\n' "$prog" "$slug" >&2
+		printf 'Run the consolidation step first, or record why it does not apply:\n' >&2
+		printf '  %s wipe %s [--skip "<reason>"]\n' "$BIN/delegate" "$slug" >&2
+		return 1
+	fi
+
+	# A --nothing close is an accepted no-op, and an accepted no-op that leaves no trace is
+	# indistinguishable from a worker somebody forgot: print the reason and put it in the log, so
+	# the space going away is explained by the record rather than by its absence.
+	if [ -n "$nothing_given" ]; then
+		printf '%s: closing %s with --nothing: %s\n' "$prog" "$slug" "$nothing" >&2
+		record_decision nothing "$slug" accepted "$nothing" false "$slug"
+	fi
+
+	if [ -n "$rewritten_given" ]; then
+		printf '%s: closing %s with --rewritten: %s\n' "$prog" "$slug" "$rewritten_why" >&2
+		record_decision provenance "$slug" rewritten "$rewritten_why" false "$slug" "" \
+			"$(printf '{"sha":"%s","branch":"%s","replaces":"%s","trunk":"origin/%s"}' "$rewritten_full" "$rewritten_branch" "$rewritten_pred" "$rewritten_trunk")"
+	fi
+
+	# A close that cannot confirm the space is gone is not a close: the delegation entry is what
+	# a retry reads, so it stays, and `finish` stops at step 3 saying the space is still open.
+	if ! space_close "$space" "$slug"; then
+		printf '%s: refusing to close %s: its space %s would not close, and herdr still lists it. The delegation entry is kept, so this is the fix once the space is gone:\n' \
+			"$prog" "$slug" "$space" >&2
+		printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+		return 1
+	fi
+	node -e '
+		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+		delete j[process.argv[2]];
+		fs.writeFileSync(process.argv[1],JSON.stringify(j,null,2)+"\n");' "$DELEGATIONS_WRITE" "$slug"
+
+	# Catch a worker that switched the boss's live checkout anyway. Non-fatal in both halves: a
+	# warning plus a best-effort checkout, never a refused close and never a reset or a force.
+	if [ -n "$branch" ] && [ -n "$cwd" ] && [ -d "$cwd" ]; then
+		local live=""
+		live=$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+		if [ -n "$live" ] && [ "$live" != "$branch" ]; then
+			printf '%s: warning: %s left %s on %s; it started on %s — putting it back\n' \
+				"$prog" "$slug" "$cwd" "$live" "$branch" >&2
+			git -C "$cwd" checkout "$branch" >/dev/null 2>&1 \
+				|| printf '%s: warning: could not check %s out of %s (dirty tree?); it is still on %s\n' \
+					"$prog" "$branch" "$cwd" "$live" >&2
+		fi
+	fi
+
+	printf '{"closed":"%s","space":"%s"}\n' "$slug" "$space"
+}
+
+# cmd_finish -- the boss's whole tail for a finished worker, in one turn: publish, wipe, close.
+#
+# Four commands for one intent (wait, publish, wipe, close) is four chances to stop halfway, and
+# three of them are gates that only work in one order. So the order is built into one command:
+# each step runs because the one before it succeeded, a failure stops the run, names the step and
+# says which state the worker is in. `closed but not published` is unreachable by construction —
+# close is the last step — and nothing half-done is ever printed as done.
+#
+# The steps are not reimplemented here: publish is the real `bin/publish`, run the way a person
+# runs it (found on PATH, else next to this script), and wipe and close are cmd_wipe and cmd_close
+# in a subshell, so their own refusals stop the step instead of the whole command and their own
+# checks — the `## Thrown away` block, the Evidence block, the Agent-Slug trailer, the recorded
+# wipe, the placeholders — stay exactly where they are. Fewer turns, not fewer checks.
+#
+# Rerunning after a close refusal is clean: publish prints the existing PR instead of opening a
+# second one, and a wipe already recorded is kept rather than recorded twice.
+cmd_finish() {
+	local slug=${1:-} lookup_cwd="" skip="" skip_given="" pf="" preflight_skip="" preflight_skip_given="" pub
+	[ -n "$slug" ] || die 'usage: delegate finish <slug> [--cwd DIR] [--skip "<reason>"] [--skip-preflight "<reason>"]'
+	shift || true
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--cwd)
+			[ "$#" -ge 2 ] && [ -n "$2" ] || die "--cwd needs a directory"
+			lookup_cwd=$2
+			shift 2
+			;;
+		--skip)
+			skip=${2:-}
+			skip_given=1
+			if [ "$#" -ge 2 ]; then shift 2; else shift 1; fi
+			;;
+		--skip-preflight)
+			preflight_skip=${2:-}
+			preflight_skip_given=1
+			if [ "$#" -ge 2 ]; then shift 2; else shift 1; fi
+			;;
+		*) die "unknown option $1 — usage: delegate finish <slug> [--cwd DIR] [--skip \"<reason>\"] [--skip-preflight \"<reason>\"]" ;;
+		esac
+	done
+	[ -n "$slug" ] || die 'usage: delegate finish <slug> [--cwd DIR] [--skip "<reason>"] [--skip-preflight "<reason>"]'
+	# A skip with no reason is the one thing a skip may not be: it says the step does not apply,
+	# and only the sentence says why. Refused before the report is published, so a typo costs
+	# nothing (the wipe refuses it too; this is the cheap, first refusal).
+	if [ -n "$skip_given" ] && [ -z "${skip// /}" ]; then
+		die "--skip needs a reason: delegate finish $slug --skip \"<why the step does not apply>\""
+	fi
+	if [ -n "$preflight_skip_given" ] && [ -z "${preflight_skip// /}" ]; then
+		die "--skip-preflight needs a reason: delegate finish $slug --skip-preflight \"<why the gate cannot run on this machine>\""
+	fi
+
+	DELEGATIONS=$(delegations_all)
+	# The worker's space decides where its report is and whether there is a remote at all.
+	local worker_space="" space_git=true
+	worker_space=$(delegation_field "$slug" spaceName)
+	[ -n "$worker_space" ] || worker_space=$(space_of_slug "$slug")
+	if [ -n "$worker_space" ] && space_exists "$worker_space"; then
+		use_space "$worker_space"
+		space_git=$(space_field "$SPACE" git)
+		[ -n "$space_git" ] || space_git=true
+	fi
+	DELEGATIONS=$(delegations_all)
+
+	pub=$(command -v publish 2>/dev/null || true)
+	[ -n "$pub" ] || pub=$(bin_prog publish)
+	[ -x "$pub" ] || die "cannot publish $slug: no publish command on PATH, and none at $self_bin/publish"
+
+	# A best-effort extra step, before the gates: a finish is where the leftovers can be closed
+	# without a new command to remember. It never changes the exit status and never blocks.
+	reap_finished_learners
+
+	# 0/4. The gate, before anything leaves the machine: the checks CI would run, on this branch,
+	# here. Red CI rounds are what this workspace pays most for — #177 three rebases, #180 three
+	# rounds, #183 two, #66 and #184 one each — and every one of those was a check that runs in
+	# seconds locally. A failing check stops the run here, so the report stays for a follow-up
+	# worker instead of a PR that CI will refuse ten minutes later. Escape hatch, recorded the way
+	# a wipe skip is: --skip-preflight "<why>" in state/decisions.jsonl.
+	if [ -n "$preflight_skip_given" ]; then
+		record_decision preflight "$slug" skipped "$preflight_skip" false "$slug"
+		say "finish: $slug — 1/4 preflight: skipped, reason recorded in state/decisions.jsonl: $preflight_skip"
+	else
+		pf=$(command -v preflight 2>/dev/null || true)
+		[ -n "$pf" ] || pf=$self_bin/preflight
+		if [ ! -x "$pf" ]; then
+			printf '%s: finish stopped at step 1 of 4 (preflight) for %s: no preflight command on PATH and none at %s, so the gate CI would run cannot be proved here. Nothing was published, wiped or closed.\n' \
+				"$prog" "$slug" "$self_bin/preflight" >&2
+			printf 'Fix: restore %s, or say why the gate does not apply and run this again:\n' "$self_bin/preflight" >&2
+			printf '  %s finish %s --skip-preflight "<why the gate cannot run>"\n' "$BIN/delegate" "$slug" >&2
+			return 1
+		fi
+		say "finish: $slug — 1/4 preflight"
+		# A folder with no .git has no trunk to be behind and no PR body to build: the checks that
+		# are about a branch (behind) and about a pull request (body) are dropped, and the four
+		# that are about the code stay. Named one by one, so the gate is the same gate.
+		local pf_args=( --slug "$slug" )
+		[ -z "$lookup_cwd" ] || pf_args+=( --cwd "$lookup_cwd" )
+		if [ "$space_git" != true ]; then
+			pf_args+=( --only syntax --only suites --only semgrep --only scrub )
+		fi
+		if ! "$pf" "${pf_args[@]}"; then
+			printf '%s: finish stopped at step 1 of 4 (preflight) for %s: nothing was pushed, the PR body was not touched, nothing was wiped, nothing was closed, and the space is still open.\n' "$prog" "$slug" >&2
+			printf 'Fix: the FAIL line above names the check and the exact command that reproduces it — run that, fix it, commit, then run this again:\n' >&2
+			printf '  %s finish %s\n' "$BIN/delegate" "$slug" >&2
+			printf 'If the check itself is broken on this machine, record why and publish anyway:\n' >&2
+			printf '  %s finish %s --skip-preflight "<why the gate cannot run>"\n' "$BIN/delegate" "$slug" >&2
+			return 1
+		fi
+	fi
+
+	if [ "$space_git" != true ]; then
+		say "finish: $slug — 2/4 publish: none, $SPACE has no git"
+		# No branch, no remote, no PR: what the boss records instead is the change itself, taken
+		# from the folder against the moment the worker was started.
+		local changed
+		changed=$(non_git_changes "$(space_field "$SPACE" project)" "$(delegation_field "$slug" spec)")
+		record_decision publish "$slug" "none" "non-git space $SPACE: no branch and no PR. Changed since the spec was written: ${changed:-nothing found}" false "$slug"
+		say "finish: $slug — changed in $(space_field "$SPACE" project):"
+		if [ -n "$changed" ]; then printf '%s\n' "$changed"; else say "  (nothing newer than the spec)"; fi
+		say "finish: $slug — 3/4 wipe: none, nothing to consolidate without a trunk"
+		record_decision wipe "$slug" skipped "non-git space $SPACE: no branch to consolidate" false "$slug"
+		say "finish: $slug — 4/4 close"
+		if ! ( cmd_close "$slug" --nothing "non-git space: the change is in $(space_field "$SPACE" project), not in a commit" ); then
+			printf '%s: finish stopped at step 4 of 4 (close) for %s: nothing was published, and the space is still open.\n' "$prog" "$slug" >&2
+			return 1
+		fi
+		say "finish: $slug — preflighted, recorded, no PR, closed"
+		return 0
+	fi
+	say "finish: $slug — 2/4 publish"
+	# publish's own last line is the verdict, and a verdict over a branch that did not move is not a
+	# publish: `nothing new to push` means the work was already on origin, so the last line says
+	# `already published` instead of claiming this run pushed something. The output is captured and
+	# replayed unchanged, so nothing publish said is lost — only read.
+	local pub_out="" publish_word=published
+	if ! pub_out=$("$pub" "$slug" ${lookup_cwd:+--cwd "$lookup_cwd"}); then
+		printf '%s: finish stopped at step 2 of 4 (publish) for %s: nothing was wiped, nothing was closed, and the space is still open.\n' "$prog" "$slug" >&2
+		printf 'Fix: the refusal above names what the report is missing. Once it is fixed, run this again:\n' >&2
+		printf '  %s finish %s\n' "$BIN/delegate" "$slug" >&2
+		return 1
+	fi
+	printf '%s\n' "$pub_out"
+	case $pub_out in
+	*"nothing new to push: "*) publish_word="already published" ;;
+	esac
+
+	if wipe_recorded "$slug"; then
+		say "finish: $slug — 3/4 wipe: already recorded, keeping that line"
+	else
+		say "finish: $slug — 3/4 wipe"
+		local wipe_args=( "$slug" )
+		[ -z "$skip_given" ] || wipe_args+=( --skip "$skip" )
+		if ! ( cmd_wipe "${wipe_args[@]}" ); then
+			printf '%s: finish stopped at step 3 of 4 (wipe) for %s: the report is published, so its PR exists, but nothing was wiped, nothing was closed, and the space is still open.\n' "$prog" "$slug" >&2
+			printf 'Fix: write the five answers under "## Thrown away" in %s — or say why the step does not apply — then run this again:\n' "$REPORTS/$slug.md" >&2
+			printf '  %s finish %s\n' "$BIN/delegate" "$slug" >&2
+			return 1
+		fi
+	fi
+
+	say "finish: $slug — 4/4 close"
+	if ! ( cmd_close "$slug" ); then
+		printf '%s: finish stopped at step 4 of 4 (close) for %s: the report is published and the wipe is recorded, but the space is still open.\n' "$prog" "$slug" >&2
+		printf 'Fix: the refusal above names what the report still needs; then run this again — the wipe is kept and the PR is not opened twice:\n' >&2
+		printf '  %s finish %s\n' "$BIN/delegate" "$slug" >&2
+		return 1
+	fi
+	say "finish: $slug — preflighted, $publish_word, wiped, closed"
+}
+
+# cmd_sweep -- close every worker whose report exists and does not need a user decision.
+# Kept: no report yet (still working), and a report carrying the DECISION NEEDED marker.
+cmd_sweep() {
+	local closed=0 kept=0 slug report
+	if [ "$#" -gt 0 ]; then die "unknown option $1 — usage: delegate sweep (it takes no options; --count belongs to delegate spawn)"; fi
+	local slugs=""
+	DELEGATIONS=$(delegations_all)
+	if [ -f "$DELEGATIONS" ]; then
+		slugs=$(node -e '
+			const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+			Object.keys(j).forEach(k=>process.stdout.write(k+"\n"))' "$DELEGATIONS")
+	fi
+	# set -euo pipefail: a here-string keeps the read out of a pipeline's exit status.
+	while IFS= read -r slug; do
+		[ -n "$slug" ] || continue
+		report=$(report_path "$slug")
+		if ! report_written "$report"; then
+			case $(worker_state "$slug") in
+			gone) say "keep   $slug (gone: its herdr terminal is no longer listed and it never reported — nothing to publish, nothing to close)" ;;
+			*) say "keep   $slug (still working)" ;;
+			esac
+			kept=$((kept + 1))
+			continue
+		fi
+		if report_needs_decision "$report"; then
+			say "keep   $slug (decision needed, ask the user)"
+			kept=$((kept + 1))
+			continue
+		fi
+		if cmd_close "$slug" >/dev/null; then
+			say "closed $slug"
+			closed=$((closed + 1))
+		else
+			say "keep   $slug (close refused: no evidence block, placeholders left, no wipe step recorded, or its space would not close)"
+			kept=$((kept + 1))
+		fi
+	done <<<"$slugs"
+	say "$closed closed, $kept kept"
+}
+
+# Dispatch only when executed: sourcing this file just gives you the functions.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+	case ${1:-} in
+	spawn) shift; cmd_spawn "$@" ;;
+	wait) shift; cmd_wait "$@" ;;
+	list | ls) shift; cmd_list "$@" ;;
+	close) shift; cmd_close "$@" ;;
+	ask) shift; cmd_ask "$@" ;;
+	stats)
+		shift
+		_stats=$(self_bin_stats)
+		PI_BOSS_ROOT=$ROOT exec node "$_stats" "$@"
+		;;
+	sweep) shift; cmd_sweep "$@" ;;
+	wipe) shift; cmd_wipe "$@" ;;
+	finish) shift; cmd_finish "$@" ;;
+	*) die 'usage: delegate spawn|wait|list|close|ask|stats|sweep|wipe|finish ...' ;;
+	esac
+fi

@@ -6,7 +6,8 @@
 # never run is a gate that can go dead quietly), #38 CI hardening, #72 agent
 # package manager, #7 agent plugin marketplace.
 #
-# scripts/test-*.sh is the contract: one file per behaviour, plain bash, its
+# scripts/test-*.sh is the contract, and scripts/tests/test-*.sh is the same
+# contract in its own folder once a suite grows past one file: one file per behaviour, plain bash, its
 # own temp directories, its own git config, no network and no model. This
 # runner is deliberately dumb — it globs, runs each suite in its own process,
 # and keeps going after a red one so a second failure is visible in the same
@@ -23,7 +24,7 @@ set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 shopt -s nullglob
-suites=("$DIR"/test-*.sh)
+suites=("$DIR"/test-*.sh "$DIR"/tests/test-*.sh)
 shopt -u nullglob
 
 if [ "${#suites[@]}" -eq 0 ]; then

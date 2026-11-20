@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# space — the durable project spaces, and the only command the UI calls.
+#
+#   bin/space new --name <slug> [--project PATH | --clone URL] [--no-git] [--tab-name Boss]
+#   bin/space list
+#   bin/space show <slug>
+#   bin/space forget <slug>
+#
+# A space is one project. It is durable: the record at state/spaces/<slug>/space.json outlives
+# the terminals in it, so later workers can reopen the tabs and read where the work goes.
+# `bin/delegate` reads the space from the directory it is run in, and refuses in a folder no
+# space claims — creating one here is the fix that refusal names.
+#
+# The project's AGENTS.md gets one block between two markers (agent/space-rules.md): one project
+# per space, another project's work is answered with the command to run in its space, one worker
+# at a time, merged before the next. Replacing means a re-run never grows a second copy.
+set -euo pipefail
+
+here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
+# shellcheck source=bin/shell-resolve.sh
+if [ -f "$here/shell-resolve.sh" ]; then . "$here/shell-resolve.sh"; fi
+# shellcheck source=bin/space-lib.sh
+. "$here/space-lib.sh"
+
+prog=space
+die() { printf '%s: error: %s\n' "$prog" "$*" >&2; exit 1; }
+say() { printf '%s\n' "$*"; }
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 is not on PATH"; }
+
+usage() {
+	cat >&2 <<'EOF'
+usage: bin/space new --name <slug> [--project PATH | --clone URL] [--no-git] [--tab-name Boss]
+       bin/space list
+       bin/space show <slug>
+       bin/space forget <slug>
+EOF
+	exit 1
+}
+
+json_field() {
+	node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{let j={};try{j=JSON.parse(d)}catch{}const v=process.argv[1].split(".").reduce((a,k)=>a?.[k],j);if(v!==undefined&&v!==null)process.stdout.write(String(v))})' "${1:-}"
+}
+
+cmd_new() {
+	local name="" project="" clone="" no_git=0 tabname="Boss"
+	[ "$#" -ge 1 ] || usage
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--name) name=${2:-}; shift 2 ;;
+		--project) project=${2:-}; shift 2 ;;
+		--clone) clone=${2:-}; shift 2 ;;
+		--no-git) no_git=1; shift ;;
+		--tab-name) tabname=${2:-Boss}; shift 2 ;;
+		-h | --help) usage ;;
+		*) die "unknown option $1" ;;
+		esac
+	done
+	space_valid_slug "$name" || die "a space name is a slug: [a-z0-9][a-z0-9-]{0,30} — '$name' is not"
+	# A name is the whole handle a person types later, so a second space under it would make
+	# `delegate --space <slug>` ambiguous. Refused by name, naming the project already using it.
+	if space_exists "$name"; then
+		die "space '$name' already exists for $(space_field "$name" project) — pick another name, or bin/space show $name"
+	fi
+	[ -n "$project" ] || [ -n "$clone" ] || die "space new needs --project PATH (a folder already on disk) or --clone URL"
+	[ -z "$project" ] || [ -z "$clone" ] || die "--project and --clone answer the same question; give one"
+
+	need node
+	need herdr-app
+	need hc
+
+	local remote=""
+	if [ -n "$clone" ]; then
+		project=$HOME/projects/$name
+		if [ -d "$project" ] && [ -n "$(ls -A "$project" 2>/dev/null)" ]; then
+			die "cannot clone $name into $project: that folder exists and is not empty — move it aside, or bin/space new --name $name --project $project"
+		fi
+		mkdir -p "$HOME/projects"
+		if ! git clone -- "$clone" "$project" >&2; then
+			die "git clone $clone $project failed — nothing was recorded, nothing was opened"
+		fi
+	else
+		[ -d "$project" ] || die "no such project folder: $project — create it first, or use --clone URL"
+		project=$(readlink -f -- "$project")
+		space_writable "$project" ||
+			die "project folder $project is not writable — a space there could not be worked in"
+	fi
+
+	local git=false
+	if [ "$no_git" = 0 ] && [ -e "$project/.git" ]; then git=true; fi
+	if [ "$git" = true ]; then
+		remote=$(git -C "$project" remote get-url origin 2>/dev/null || true)
+	fi
+
+	mkdir -p "$(space_specs "$name")" "$(space_reports "$name")"
+	local out space tab terminal
+	out=$(herdr-app do space.new --name "$name" --folder "$project" --tab "$tabname" 2>&1) ||
+		die "space.new failed for $name: $out"
+	space=$(json_field space <<<"$out")
+	[ -n "$space" ] || space=$(json_field id <<<"$out")
+	tab=$(json_field tab <<<"$out")
+	terminal=$(json_field terminal <<<"$out")
+	[ -n "$space" ] || die "could not read the new space id from: $out"
+
+	NAME=$name PROJECT=$project GIT=$git REMOTE=$remote TAB=$tab TERMINAL=$terminal node -e '
+		const fs = require("fs");
+		const rec = {
+			name: process.env.NAME,
+			project: process.env.PROJECT,
+			git: process.env.GIT === "true",
+			remote: process.env.REMOTE || "",
+			created: new Date().toISOString(),
+			uberboss_tab: process.env.TAB || "",
+			terminals: process.env.TERMINAL ? [process.env.TERMINAL] : [],
+		};
+		fs.writeFileSync(process.argv[1], JSON.stringify(rec, null, 2) + "\n");
+	' "$(space_record "$name")"
+
+	if ! space_rules_write "$name" "$project"; then
+		printf '%s: warning: %s was created, but %s holds no rules block (%s is missing)\n' \
+			"$prog" "$name" "$project/AGENTS.md" "$SPACE_RULES_TEMPLATE" >&2
+	fi
+
+	say "space $name: $project ($( [ "$git" = true ] && echo git || echo no-git )), ${tabname} tab opened"
+	say "next: cd $project && bin/delegate spawn <worker> --cwd $project \"<task>\""
+}
+
+# space_list — one line per durable space: slug, project, git, tabs, state.
+cmd_list() {
+	command -v node >/dev/null 2>&1 || die "node is not on PATH"
+	local slugs s project git tabs state open_names=""
+	if command -v herdr-app >/dev/null 2>&1; then
+		open_names=$(herdr-app ls 2>/dev/null | node -e '
+			let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+				let j={};try{j=JSON.parse(d)}catch{return}
+				for (const s of (Array.isArray(j.spaces)?j.spaces:[])) if (s&&s.name) process.stdout.write(String(s.name)+"\n");
+			})' || true)
+	fi
+	slugs=$(space_slugs)
+	[ -n "$slugs" ] || { say "no spaces — bin/space new --name <slug> --project <path>"; return 0; }
+	while IFS= read -r s; do
+		[ -n "$s" ] || continue
+		project=$(space_field "$s" project)
+		git=$(space_field "$s" git)
+		[ "$git" = true ] && git=git || git=no-git
+		tabs=$(node -e '
+			const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+			process.stdout.write(String(Array.isArray(j.terminals)?j.terminals.length:0));' "$(space_record "$s")")
+		# The record holds the name, so herdr's own list is matched by name: the id is herdr's,
+		# not something this record should be the second copy of.
+		if [ -z "$open_names" ]; then state=unknown
+		elif printf '%s\n' "$open_names" | grep -qxF "$s"; then state=open
+		else state=closed
+		fi
+		printf '%s\t%s\t%s\t%s\t%s\n' "$s" "$project" "$git" "$tabs tabs" "$state"
+	done <<<"$slugs" | awk -F'\t' '{ printf "%-20s %-40s %-7s %-8s %s\n", $1, $2, $3, $4, $5 }'
+}
+
+cmd_show() {
+	local slug=${1:-}
+	[ -n "$slug" ] || usage
+	space_exists "$slug" || die "no such space: $slug — bin/space list"
+	node -e '
+		const fs=require("fs");
+		const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+		const order=["name","project","git","remote","created","uberboss_tab","terminals"];
+		for (const k of order) if (k in j) {
+			const v=j[k];
+			console.log(k+": "+(Array.isArray(v)?(v.length?v.join(", "):"(none)"):(v===true?"true":v===false?"false":(v||"-"))));
+		}
+	' "$(space_record "$slug")"
+	printf 'specs: %s\n' "$(space_specs "$slug")"
+	printf 'reports: %s\n' "$(space_reports "$slug")"
+}
+
+cmd_forget() {
+	local slug=${1:-}
+	[ -n "$slug" ] || usage
+	space_exists "$slug" || die "no such space: $slug — bin/space list"
+	# The record is dropped; the space itself is not closed, and the folder it was is said out
+	# loud rather than deleted. Forgetting is about the list, not about the person's work.
+	rm -f "$(space_record "$slug")"
+	say "forgot $slug (its herdr space is still open, and $(space_dir "$slug") is still on disk)"
+}
+
+case ${1:-} in
+new) shift; cmd_new "$@" ;;
+list | ls) shift; [ "$#" -eq 0 ] || die "list takes no options"; cmd_list ;;
+show) shift; cmd_show "$@" ;;
+forget) shift; cmd_forget "$@" ;;
+-h | --help | help) usage ;;
+*) usage ;;
+esac
