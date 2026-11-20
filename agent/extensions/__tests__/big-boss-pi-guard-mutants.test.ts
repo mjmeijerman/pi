@@ -58,6 +58,21 @@ const SHELL: [string, string, string | null][] = [
 	["rm ~/pi-master/x", "/home/mark/big-boss-pi", "`rm` into /home/mark/pi-master/x"],
 	["sed -i.bak 's/a/b/' /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`sed -i` into /home/mark/pi-master/x"],
 	["sudo rm /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`rm` into /home/mark/pi-master/x"],
+	// `sed -i`/`perl -i`: the script is code, the file it edits is not. A script flag
+	// with a next word (`-e xs`) hides that word, so a positional script behind it is
+	// still skipped and the file stays a write — and a flag that is not a script flag
+	// (`-1e`) must not hide the only argument. The cwd is outside the guarded roots
+	// where a relative word (`FOO=1`, `AB=1`, `a.b=c`) would otherwise land inside one
+	// and the two decisions would both block, for different reasons.
+	["sed -i -e 's/a/b/' x.ts", "/home/mark/big-boss-pi", "`sed -i` into /home/mark/big-boss-pi/x.ts"],
+	["perl -i -1e /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/pi-master/x"],
+	["sed -i 1A=2 /home/mark/pi-master/x", "/home/mark/projects/bakmark", "`sed -i` into /home/mark/pi-master/x"],
+	["sed -i a.b=c /home/mark/pi-master/x", "/home/mark/projects/bakmark", "`sed -i` into /home/mark/pi-master/x"],
+	["sed -i AB=1 /home/mark/pi-master/x", "/home/mark/projects/bakmark", null],
+	["sed -i FOO=1 /home/mark/pi-master/x", "/home/mark/projects/bakmark", null],
+	// Two spaces: the script is the word after `-i`, not the empty string a single
+	// whitespace split leaves behind, which would hide `s/a/b/` and keep the write.
+	["sed -i  's/a/b/' x.ts", "/home/mark/big-boss-pi", "`sed -i` into /home/mark/big-boss-pi/x.ts"],
 ];
 
 const TOOL: ToolCase[] = [
