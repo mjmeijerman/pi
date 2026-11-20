@@ -2073,9 +2073,10 @@ function readTerminal(terminal: string): Promise<string> {
  * first user turn names the queue file, or a pane whose screen shows the prompt.
  * The session is the strong one — a booting pi writes its header before it can
  * swallow a send — so every `spawned` row records which proof it stood on
- * (`confirmed: "session"` or `"terminal"`). A run of terminal-only rows with no
- * proposal file behind them is the next thing to tighten; until then the log
- * says which it was instead of pretending both are equal.
+ * (`confirmed: "session"` or `"terminal"`). The echo is the launcher's word, not
+ * the learner's, so a launch standing on it alone is no longer recorded as one:
+ * `launchLearner` waits for the session file that proves a pi exists, and calls a
+ * launch that never produces one a `spawn-failed` (see `sessionProof`).
  *
  * A space with neither proof is the six-of-seven failure this check exists for.
  */
@@ -2104,6 +2105,49 @@ export async function confirmTurn(input: ConfirmInput): Promise<TurnEvidence> {
 	}
 	const tail = seen ? `; terminal showed: ${seen.slice(0, 120)}` : "";
 	return { ok: false, detail: `no session took the prompt within ${timeoutMs}ms${tail}` };
+}
+
+/**
+ * How long a launch that stood on the pane's echo gets to produce the session
+ * file that proves a pi process took the prompt.
+ *
+ * Generous on purpose: this machine has been seen making a space fourteen
+ * minutes after the row that asked for it (`learn-10-14`, 2026-11-20: pane at
+ * 10:28 for a launch stamped 10:14), so a minute-sized window would fail launches
+ * that are merely slow. The wait runs after the host session has moved on and
+ * costs nothing a person sees.
+ */
+export const SESSION_PROOF_MS = 10 * 60 * 1000;
+
+/**
+ * Wait, bounded, for the session file that proves a pi process consumed the prompt.
+ *
+ * The pane's screen shows the prompt whether or not anything read it, so a launch
+ * confirmed that way is not a learner yet: with no session file the outcome watch
+ * has nothing to judge — `exited` is null for a visible space and `session` is null
+ * without a file — and can only time out to `unknown`, which writes no `died` row
+ * and closes no space. `learn-10-14` (2026-11-20) is that shape: `spawned`,
+ * `confirmed: "terminal"`, no session file in that cwd at any point, its space
+ * still in `.agent-panes.json` an hour later, and the next compaction spending a
+ * whole learner on a queue nobody had read.
+ */
+export async function sessionProof(
+	sessionsRoot: string,
+	input: { cwd: string; queuePath: string; since: number },
+	timeoutMs: number = SESSION_PROOF_MS,
+	pollMs: number = CONFIRM_POLL_MS,
+): Promise<string | null> {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		try {
+			const found = await turnSession(sessionsRoot, input);
+			if (found) return found;
+		} catch {
+			// Keep polling: a half-written session file is not a verdict.
+		}
+		if (Date.now() >= deadline) return null;
+		await new Promise<void>((resolve) => setTimeout(resolve, pollMs));
+	}
 }
 
 /**
@@ -2260,6 +2304,8 @@ export interface SelfLearnDeps {
 	transcriptPath?: (ctx: any) => string | null;
 	/** Does the proposal file exist yet? The outcome watch judges death by it. */
 	proposalExists?: (path: string) => boolean;
+	/** How long a launch standing on the pane's echo waits for its session file. */
+	sessionProofMs?: number;
 	/** Outcome-watch interval and window, in ms. Tests set these; nothing else does. */
 	outcomePollMs?: number;
 	outcomeTimeoutMs?: number;
@@ -2494,7 +2540,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		// person. There is no second, quieter path to fall back to: a learner the
 		// person cannot see is one they cannot stop, and a detached `pi -p` looked
 		// like a sub-agent of this session for seven launches in a row.
-		const ran = await attempt(
+		let ran = await attempt(
 			pickLauncher(has, plan.slug, plan.queuePath, fileExists, REPO, {
 				PI_SELF_LEARN: env.PI_SELF_LEARN,
 				PI_SELF_LEARN_SLUG: env.PI_SELF_LEARN_SLUG,
@@ -2510,6 +2556,40 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 				notify(plan.ctx, `no learner took the turn: ${clipDetail(whyFailed(ran))}`, "warning");
 			}
 			return;
+		}
+
+		// A turn read off the pane's screen is the launcher's word, not the learner's: the
+		// prompt shows there whether or not a pi ever consumed it. So that proof buys no
+		// `spawned` row on its own — the session file is the proof of life, and a launch
+		// without one is a `spawn-failed` that also closes the space it left open.
+		const turn = ran.turn;
+		if (turn && turn.source === "terminal") {
+			const found = await sessionProof(
+				SESSIONS,
+				{ cwd: ran.launcher.cwd, queuePath: plan.queuePath, since: plan.at },
+				deps.sessionProofMs ?? SESSION_PROOF_MS,
+			);
+			if (!found) {
+				const reason = `the pane showed the prompt, but no pi session in ${ran.launcher.cwd} named ${plan.queuePath}: the space was made and no agent took it`;
+				await record({
+					ts,
+					kind: "spawn-failed",
+					slug: plan.slug,
+					launcher: ran.launcher.kind,
+					status: ran.space.status ?? null,
+					stderr: clipDetail(reason),
+					reason: plan.decision.reason,
+				});
+				// The space is real and nothing is in it: closing it is the point of knowing
+				// the launch failed.
+				await close(plan.slug);
+				notify(plan.ctx, `no learner took the turn: ${clipDetail(reason)}`, "warning");
+				return;
+			}
+			// Stryker disable next-line BooleanLiteral: `ok` is read once, by `started()`,
+			// which this launch has already passed; `true` is the honest label for a turn a
+			// session file now proves, and flipping it changes nothing downstream.
+			ran.turn = { ok: true, source: "session", detail: found };
 		}
 
 		errors = new Map();
