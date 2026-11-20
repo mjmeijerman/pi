@@ -883,6 +883,17 @@ const FAILURE_LINE = /\b(fail(?:ed|s|ing|ure)?|non-zero|exit (?:code )?[1-9]|not
 const PASS_LINE = /^\s*(ok\b|✔|✓|PASS\b|# Subtest:)/i;
 /** A quoted command, not a result: `$ bash scripts/harness-check.sh | grep FAIL`. */
 const COMMAND_LINE = /^\$ /;
+/**
+ * A line that announces something the harness can now do, not something that
+ * broke: `Now possible: a learner reading "CI check tests failed" on 22 branches
+ * gets the job names inside it`. The quoted phrase carries a check name and a
+ * verdict word, so it passed every rule above and became the `what it said`
+ * column for `tests` — 26 failing runs — while the probe's own job names, which
+ * say *which* job inside `tests` is red, were thrown away. A row that names the
+ * job is what a learner can act on; a capability note is what a worker wrote
+ * after fixing one.
+ */
+const ANNOUNCEMENT_LINE = /^now possible\b/i;
 /** A negated failure: "0 failed", "no failures", "zero errors". */
 const NO_FAILURE = /\b(0|no|zero)\s+(fail(?:ed|ures?)?|errors?|failing)\b/i;
 
@@ -900,6 +911,7 @@ export function failureLines(text: string, cap = MAX_LINES_PER_REPORT): string[]
 		const line = raw.replace(/^[\s\-*>#|]+/, "").trim();
 		if (line.length < 8 || !FAILURE_LINE.test(line)) continue;
 		if (PASS_LINE.test(line) || NO_FAILURE.test(line) || COMMAND_LINE.test(line)) continue;
+		if (ANNOUNCEMENT_LINE.test(line)) continue;
 		out.push(clipSample(redact(line)));
 		if (out.length >= cap) break;
 	}

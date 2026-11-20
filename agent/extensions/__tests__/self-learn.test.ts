@@ -1499,6 +1499,35 @@ describe("repeated failing CI checks", () => {
 		assert.equal(jobSample(undefined), "", "a check no probe asked about says nothing about jobs");
 	});
 
+	test("a capability note is not a failure, so the job names behind it survive", () => {
+		// 2026-11-20T12-28: `tests` was red on 22 branches and the row said only
+		// "Now possible: a learner reading \"CI check tests failed\" on 22 branches
+		// gets the job names inside it" — a worker announcing #192, read as a verdict
+		// on the check itself, with the probe's job names discarded behind it.
+		const note = [
+			'Now possible: a learner reading "CI check tests failed" on 22 branches gets the job names inside it, and the gate that proves it cannot be skipped.',
+			"FAIL prose-review: the body states no Mission line",
+		].join("\n");
+		assert.deepEqual(failureLines(note), ["FAIL prose-review: the body states no Mission line"]);
+		// The anchor is what makes this rule safe: only a line that *starts* with the
+		// announcement is one. A failure line that merely mentions the phrase is a
+		// verdict on the run, and dropping it would hide a red check behind a word.
+		assert.deepEqual(
+			failureLines("FAIL tests: the note says now possible, but the job was skipped"),
+			["FAIL tests: the note says now possible, but the job was skipped"],
+			"a mid-line announcement is not an announcement",
+		);
+		const redJobs = ["mutation score (stryker)", "extension tests (node 22)"];
+		const red = (branch: string, failedJobs: string[]) => ({ ...run("tests", branch), failedJobs });
+		const fired = ciFailuresFrom([red("one", redJobs), red("two", redJobs), { ...run("prose-review", "three"), failedJobs: ["prose review"] }], [
+			report("192-pr.md", note),
+		]);
+		const tests = fired.find((ci) => ci.check === "tests");
+		assert.equal(tests?.reports.length, 0, "no worker reported `tests`; the sentence quoted the evidence");
+		assert.equal(tests?.sample, "jobs: extension tests (node 22) ×2, mutation score (stryker) ×2");
+		assert.equal(fired.find((ci) => ci.check === "prose-review")?.reports.length, 1, "a real failure line still counts");
+	});
+
 	test("a verdict has to be attached to the name, in either of the two shapes", () => {
 		const counts: [string, string, boolean][] = [
 			["FAIL tests", "tests", true],
