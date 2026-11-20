@@ -1,0 +1,4 @@
+`durable.new` asks name, project (a folder, or a URL to clone) and "not a git project", then runs `~/.pi/bin/space new`; `durable.forget` drops a space's record; `durable.list` shows the recorded spaces with the guard's last line for each, read only.
+It shells out to `~/.pi/bin/space new|list|forget` (and `bin/guard --dry-run`) resolved from `$HOME`, and builds no argv of its own — `argv.mjs` maps the form to argv, and nothing is created until Create.
+Forgetting keeps the folder and its work on disk: the space simply stops being reopened, and nothing here closes a space, closes a tab, or deletes a file.
+Open it with `alt-shift-d` (merge `keys.json` beside this file into `~/.config/herdr-app/keys.json`) or without any keys: `herdr-app do mod.open --name durable`.

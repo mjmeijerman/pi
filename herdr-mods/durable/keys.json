@@ -1,0 +1,10 @@
+{
+  "global": {
+    "alt-shift-d": { "command": "mod.open", "args": { "name": "durable" } }
+  },
+  "mod:durable": {
+    "alt-shift-n": "durable.new",
+    "alt-shift-f": "durable.forget",
+    "alt-shift-w": "durable.list"
+  }
+}
