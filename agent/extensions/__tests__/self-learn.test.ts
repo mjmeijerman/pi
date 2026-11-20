@@ -38,6 +38,8 @@ const {
 	paneTerminal,
 	paneLaunch,
 	verifyLaunch,
+	sessionProof,
+	SESSION_PROOF_MS,
 	clipDetail,
 	turnSession,
 	ciFailuresFrom,
@@ -378,6 +380,44 @@ describe("turn confirmation", () => {
 			await rm(root, { recursive: true, force: true });
 		}
 	});
+
+	test("a session file that lands late is proof; one that never lands is not", async () => {
+		const root = await mkdtemp(join(tmpdir(), "self-learn-proof-"));
+		try {
+			// `learn-10-14`: the pane echoed the prompt and no pi ever wrote a session.
+			assert.equal(
+				await sessionProof(root, { cwd: join(tmpdir(), "nobody"), queuePath: queue, since: Date.now() - 60_000 }, 40, 5),
+				null,
+				"an echo with no session file behind it is not a learner",
+			);
+			// The file this helper writes names no queue file, so it is not proof either.
+			await sessionFile(root, cwd, "");
+			assert.equal(
+				await sessionProof(root, { cwd, queuePath: queue, since: Date.now() - 60_000 }, 40, 5),
+				null,
+				"a session whose turn names another queue is another learner",
+			);
+			// And the late one is found: the proof wait polls rather than looking once.
+			const late = setTimeout(() => {
+				void sessionFile(root, cwd, `Read ${queue} and do it`);
+			}, 30);
+			// A window that is already closed costs no poll: `>=` and not `>`, or a zero-length
+			// wait would sleep one interval before answering.
+			const started = Date.now();
+			assert.equal(
+				await sessionProof(root, { cwd: join(tmpdir(), "nobody"), queuePath: queue, since: 0 }, 0, 5_000),
+				null,
+				"a zero window is one look and out",
+			);
+			assert.ok(Date.now() - started < 2_000, "and it did not sit out a poll interval to say so");
+			const found = await sessionProof(root, { cwd, queuePath: queue, since: Date.now() - 60_000 }, 5_000, 5);
+			clearTimeout(late);
+			assert.ok(found !== null, "a session file a few polls late is still proof of life");
+			assert.equal(SESSION_PROOF_MS, 600_000, "ten minutes: this machine has made a space fourteen minutes late");
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("wiring", () => {
@@ -464,6 +504,9 @@ describe("wiring", () => {
 			proposalExists: () => true,
 			outcomePollMs: 5,
 			outcomeTimeoutMs: 100,
+			// The session-file proof a terminal-confirmed launch waits for: a test must not
+			// sit out the real ten minutes.
+			sessionProofMs: 30,
 			// The publish watch rides the outcome watch. A window of zero is one look and
 			// out: a test must not leave a broker polling behind it.
 			publishPollMs: 5,
@@ -641,6 +684,78 @@ describe("wiring", () => {
 			assert.ok(Date.now() - at < 250, "the space is closed when the learner is, not when the publish window ends");
 		} finally {
 			await rm(session, { force: true });
+		}
+	});
+
+	test("a pane that echoed the prompt and no session is a spawn-failed, not a learner", async () => {
+		// `learn-10-14` (2026-11-20): `spawned`, confirmed "terminal", no session file in
+		// that cwd at any point. The row claimed a learner, the space stayed open, and the
+		// next compaction spent a whole learner on a queue nobody had read.
+		const closed: string[] = [];
+		const { emit, ctx, notices } = setup({
+			launch: () => ({ ok: true, status: 3, detail: "t7" }),
+			confirm: async () => ({ ok: true, source: "terminal" as const, detail: "t7" }),
+			sessionProofMs: 30,
+			closeSpace: async (slug: string) => {
+				closed.push(slug);
+			},
+		});
+		await trip(emit, ctx);
+		await settle();
+		const before = (await readRuns()).length;
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		const failed = await waitForRun((row, index) => index >= before && row.kind === "spawn-failed");
+		await settle();
+		assert.match(failed.stderr, /the pane showed the prompt/, "the row says what the proof was");
+		assert.match(failed.stderr, /no pi session in .* named .*queue/, "and what was missing");
+		assert.match(failed.stderr, /no agent took it/, "and what that means");
+		assert.equal(failed.status, 3, "the launcher's own exit status rides the row, as it does for any failed launch");
+		const spawned = (await readRuns()).filter((row, index) => index >= before && row.kind === "spawned");
+		assert.equal(spawned.length, 0, "a launch with no proof of life is never recorded as one");
+		assert.deepEqual(closed, [failed.slug], "and the space it made is closed, not left looking busy");
+		assert.ok(
+			notices.some((notice: any) => notice.level === "warning" && /no learner took the turn/.test(notice.message)),
+			"the person is told in the session, at warning level",
+		);
+	});
+
+	test("an echo that turns into a session file is recorded as the session proof it became", async () => {
+		// The other half of the rule above: the wait is not a rejection. When the session
+		// file lands, the row is the ordinary `spawned` one — and it can be watched,
+		// which a screen-only confirmation never could.
+		const home = join(homedir(), ".pi");
+		const { emit, ctx, now: base } = setup({
+			launch: () => ({ ok: true, status: 0, detail: "t7" }),
+			confirm: async () => ({ ok: true, source: "terminal" as const, detail: "t7" }),
+			sessionProofMs: 5_000,
+		});
+		const { queue: queuePath } = runPaths(base);
+		const dir = join(scratch, "sessions", `--${home.replace(/^\/+/, "").replace(/\//g, "-")}--`);
+		await mkdir(dir, { recursive: true });
+		const file = join(dir, `learn-${process.pid}.jsonl`);
+		await writeFile(
+			file,
+			`${[
+				{ type: "session", version: 3, id: "s9", timestamp: new Date(base).toISOString(), cwd: home },
+				{ type: "message", message: { role: "user", content: [{ type: "text", text: `Read ${queuePath} and do it` }] } },
+			]
+				.map((entry) => JSON.stringify(entry))
+				.join("\n")}\n`,
+			"utf8",
+		);
+		try {
+			await trip(emit, ctx);
+			await settle();
+			const before = (await readRuns()).length;
+			await emit("session_compact", { reason: "threshold" }, ctx);
+			const row = await waitForRun((entry, index) => index >= before && entry.kind === "spawned");
+			await settle();
+			assert.equal(row.queue, queuePath, "the learner the row names is the one that took the prompt");
+			assert.equal(row.confirmed, "session", "a session file behind the echo makes it a session proof");
+			const failed = (await readRuns()).filter((entry, index) => index >= before && entry.kind === "spawn-failed");
+			assert.deepEqual(failed, [], "nothing failed: the file the wait looked for was there");
+		} finally {
+			await rm(file, { force: true });
 		}
 	});
 
