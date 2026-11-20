@@ -16,6 +16,11 @@
  * them read-write. Blocking them made a worker unable to file its own report. Everything
  * else under the guarded roots, `state/` included, stays blocked for the boss session.
  *
+ * `.worktrees/` is carved out in the live workspace only: a worker's checkout has its own
+ * branch and is not the live trunk the guard protects, so the boss may fix a mechanical
+ * rebase conflict in it — the rollback copy's `.worktrees/` stays blocked, it is not the
+ * boss's to touch.
+ *
  * During the rename both trees are guarded: `/home/mark/big-boss-pi` (the live workspace)
  * and `/home/mark/pi-master` (the rollback copy, which must not be edited either).
  *
@@ -71,6 +76,26 @@ export function delegationPath(path: string): boolean {
 	const target = real(path);
 	const base = real(DELEGATION_ROOT);
 	return DELEGATION_DIRS.some((dir) => target === `${base}/${dir}` || target.startsWith(`${base}/${dir}/`));
+}
+
+/**
+ * True when `path` is inside a worker checkout under the live workspace's `.worktrees/`.
+ *
+ * A rebase conflict is resolved by editing files in `<root>/.worktrees/<slug>/`: that
+ * subtree has its own branch, nothing in it is the trunk the guard exists to protect.
+ * Only the live workspace is carved out — `/home/mark/pi-master` is the rollback copy and
+ * a `.worktrees/` under it is not the boss's to touch.
+ */
+export function worktreePath(path: string): boolean {
+	if (!path) return false;
+	const target = real(path);
+	const base = real(DELEGATION_ROOT);
+	return target.startsWith(`${base}/.worktrees/`);
+}
+
+/** The paths the guard lets through: the delegation flow's files and worker checkouts. */
+function carvedOut(path: string): boolean {
+	return delegationPath(path) || worktreePath(path);
 }
 
 /** Drop quoted text so a path inside `echo "…"` is still seen, but a mention in prose is not. */
@@ -182,6 +207,16 @@ function pathTokens(segment: string, cwd: string, bare: boolean, verb: string | 
 	const targets = redirectTargets(segment, cwd);
 	if (!bare) return targets;
 	const skip = new Set([segment.split(/\s+/)[0] ?? "", verb?.split(/\s+/)[0] ?? ""]);
+	// `sed -i`/`perl -i` take their script as code, not as a path: without this the
+	// `s/a/b/` in `sed -i 's/a/b/' x.ts` resolved to `<cwd>/s/a/b` and blocked it.
+	if (verb === "sed -i" || verb === "perl -i") {
+		const script = segment
+			.split(/\s+/)
+			.filter(Boolean)
+			.slice(1)
+			.find((word) => !word.startsWith("-") && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+		if (script) skip.add(script);
+	}
 	for (const token of segment.split(/\s+/)) {
 		if (!token || token.startsWith("-") || /^[<>&|]+$/.test(token) || skip.has(token)) continue;
 		const path = toPath(token, cwd);
@@ -202,7 +237,7 @@ export function shellWriteReason(command: string, cwd: string): string | null {
 		if (!verb && !redirected) continue;
 		for (const path of pathTokens(segment, cwd, Boolean(verb), verb)) {
 			if (!insideGuarded(path)) continue;
-			if (delegationPath(path)) continue;
+			if (carvedOut(path)) continue;
 			return `${verb ? `\`${verb}\`` : "a shell redirect"} into ${path}`;
 		}
 	}
@@ -233,9 +268,9 @@ export default function bigBossPiGuard(pi: ExtensionAPI) {
 		if (!cwdIsGuarded(ctx.cwd)) return;
 
 		if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
-			// The spec and the report are the delegation flow's own files.
+			// The delegation flow's own files, and a worker's own checkout.
 			const target = toPath(String((event.input as { path?: string }).path ?? ""), ctx.cwd);
-			if (delegationPath(target)) return;
+			if (carvedOut(target)) return;
 			ctx.ui.notify("big-boss-pi-guard: this workspace is for delegation, not direct edits", "warning");
 			return {
 				block: true,
