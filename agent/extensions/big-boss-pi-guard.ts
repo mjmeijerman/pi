@@ -87,7 +87,6 @@ export function delegationPath(path: string): boolean {
  * a `.worktrees/` under it is not the boss's to touch.
  */
 export function worktreePath(path: string): boolean {
-	if (!path) return false;
 	const target = real(path);
 	const base = real(DELEGATION_ROOT);
 	return target.startsWith(`${base}/.worktrees/`);
@@ -213,13 +212,17 @@ const SCRIPT_FLAG = /^-[a-zA-Z]*[eEf]/;
  * Without a script flag, `sed -i 's/a/b/' x` still passes its script positionally.
  */
 function scriptWords(words: string[], verb: string): string[] {
+	// Stryker disable next-line ArrayDeclaration: equivalent — a seed word can never equal a
+	// whitespace-free token, so a non-empty seed only adds a skip nothing matches.
 	const scripts: string[] = [];
 	let positionalScriptSeen = false;
 	for (let i = 1; i < words.length; i += 1) {
 		const word = words[i];
 		if (word.startsWith("-")) {
 			if (!SCRIPT_FLAG.test(word)) continue;
-			if (words[i + 1] !== undefined) scripts.push(words[i + 1]);
+			// `words[i + 1]` is `undefined` when the flag ends the segment; `undefined` in the skip
+			// set matches no token, so a trailing flag needs no check of its own.
+			scripts.push(words[i + 1]);
 			// the script came from a flag, so no positional script is left to skip
 			positionalScriptSeen = true;
 			i += 1;
@@ -236,14 +239,19 @@ function scriptWords(words: string[], verb: string): string[] {
 
 /**
  * Every token in the segment that could name a path, absolute or relative to `cwd`.
- * With `bare`, plain words count too (a write verb makes `rm specs` a write);
- * without it only redirect targets count, so `echo hi > /tmp/x` is not a hit.
+ * With a write verb, plain words count too (the verb makes `rm specs` a write);
+ * without one only redirect targets count, so `echo hi > /tmp/x` is not a hit.
+ * `verb` is the flag as well as the verb: the only caller passes the two together, and a
+ * segment with no verb has no bare word worth reading.
  */
-function pathTokens(segment: string, cwd: string, bare: boolean, verb: string | undefined): string[] {
+function pathTokens(segment: string, cwd: string, verb: string | undefined): string[] {
 	const targets = redirectTargets(segment, cwd);
-	if (!bare) return targets;
-	const words = segment.split(/\s+/).filter(Boolean);
-	const skip = new Set([words[0] ?? "", verb?.split(/\s+/)[0] ?? ""]);
+	if (!verb) return targets;
+	// `segments()` trims, so this split leaves no empty word to filter out.
+	const words = segment.split(/\s+/);
+	// `commandVerb` answers either a bare command or `${command} -i`, so dropping that suffix
+	// is the command word itself — `sed -i` → `sed`.
+	const skip = new Set([words[0], verb.replace(" -i", "")]);
 	// `sed -i`/`perl -i` take their script as code, not as a path: without this the
 	// `s/a/b/` in `sed -i 's/a/b/' x.ts` resolved to `<cwd>/s/a/b` and blocked it.
 	if (verb === "sed -i" || verb === "perl -i") for (const word of scriptWords(words, verb)) skip.add(word);
@@ -265,7 +273,7 @@ export function shellWriteReason(command: string, cwd: string): string | null {
 		const verb = commandVerb(segment);
 		const redirected = redirectsInto(segment).length > 0;
 		if (!verb && !redirected) continue;
-		for (const path of pathTokens(segment, cwd, Boolean(verb), verb)) {
+		for (const path of pathTokens(segment, cwd, verb)) {
 			if (!insideGuarded(path)) continue;
 			if (carvedOut(path)) continue;
 			return `${verb ? `\`${verb}\`` : "a shell redirect"} into ${path}`;

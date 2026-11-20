@@ -73,6 +73,19 @@ const SHELL: [string, string, string | null][] = [
 	// Two spaces: the script is the word after `-i`, not the empty string a single
 	// whitespace split leaves behind, which would hide `s/a/b/` and keep the write.
 	["sed -i  's/a/b/' x.ts", "/home/mark/big-boss-pi", "`sed -i` into /home/mark/big-boss-pi/x.ts"],
+	// `SCRIPT_FLAG` is anchored and its body is `[a-zA-Z]*`: a word that only *ends* in `e`
+	// (`-a-e`, a second dash) is not a script flag, and `-e` with nothing between the dash
+	// and the `e` is. Both directions change which word is taken for code instead of a path,
+	// so one row each:
+	["sed 's/a/b/' -i -a-e /home/mark/pi-master/x", "/home/mark/big-boss-pi", "`sed -i` into /home/mark/pi-master/x"],
+	["perl -i -e 's/a/b/'", "/home/mark/big-boss-pi", null],
+	// A flag the pattern does not see (`-1e` is a digit, not `[a-zA-Z]`) leaves its script to be
+	// read as a path, and a flag that is exactly `-i` must not be read as a script flag either:
+	["perl -i -1e 's/a/b/'", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/big-boss-pi/s/a/b"],
+	["perl -i 's/a/b/'", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/big-boss-pi/s/a/b"],
+	// The skip set keeps the command itself (`sed`, `perl`) out of the path scan even when a
+	// wrapper holds first position, and `perl -i` has no positional script to pull it in:
+	["sudo perl -i 's/a/b/' x.ts", "/home/mark/big-boss-pi", "`perl -i` into /home/mark/big-boss-pi/s/a/b"],
 ];
 
 const TOOL: ToolCase[] = [
