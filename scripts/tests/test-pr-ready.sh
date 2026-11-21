@@ -124,9 +124,11 @@ write_rollup() {
 	local file=$1 head=$2 items="" spec i=0
 	local -a list=()
 	shift 2
-	# "$*" joins on a space and this splits on one, so a caller may hand the specs
-	# over as one quoted line ("$(repeat_spec ...)") instead of unquoted words.
-	IFS=' ' read -r -a list <<<"$*"
+	# "$*" joins on a space and read -a splits on the shell's default IFS, which is
+	# whitespace, so a caller may hand the specs over as one quoted line
+	# ("$(repeat_spec ...)") instead of unquoted words. No IFS assignment: the default
+	# already splits on that space, and semgrep refuses a line that sets it.
+	read -r -a list <<<"$*"
 	for spec in "${list[@]}"; do
 		i=$((i + 1))
 		case $spec in
