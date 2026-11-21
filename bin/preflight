@@ -46,6 +46,14 @@
 #             checkout has the script: a project checkout has no harness-check.sh and says so
 #             instead of passing. The recipe is that script's exit code, never a summary parsed
 #             out of its text, and a run that hits its cap is a FAIL, not a pass
+#   offline   the checkout's own scripts/ci-offline.sh, which is the second step of that same job
+#             and the one preflight never ran: on #229 every check here was green while the PR was
+#             red on scripts/tests/test-preflight-semgrep.sh, a file only the offline suite runs.
+#             Applies when a changed file is under bin/ or scripts/ (the shapes its globs cover) and
+#             the checkout has the script. The verdict is its exit code; a FAIL prints the tail and
+#             then every failing case line it found. Its answer is kept in the shared ledger under
+#             the same `script:scripts/ci-offline.sh` name another gate would write, so a run that
+#             already answered it on this tree is a file read here
 #   semgrep   the changed files only, with every --config every workflow passes (a ruleset pinned by
 #             commit, `${SEMGREP_RULES}/bash`, is unpacked from its SEMGREP_RULES_SHA into
 #             ~/.cache/pi/semgrep-rules and handed over as a path), else p/default plus
@@ -165,6 +173,9 @@ PF_GATE_TMP=""
 PF_GATE_REPO=""
 PF_GATE_SELECTED=""
 PF_GATE_DIR=""
+# The tree the changed files are read from: --cwd by default, a worker's own worktree when --slug's
+# branch lives in one. Every file-reading check names it with a `tree: <path>` line.
+PF_READ=""
 cleanup() {
 	pf_gate_checkout_cleanup
 	[ -z "$PREFLIGHT_TMP" ] || rm -rf "$PREFLIGHT_TMP"
@@ -321,12 +332,13 @@ pf_receipt_write() {
 
 # --- the checks, in the order they run ---------------------------------------------------------
 
-preflight_ids=(behind syntax suites harness semgrep scrub body mutation)
+preflight_ids=(behind syntax suites harness offline semgrep scrub body mutation)
 preflight_names=(
 	"behind (did a touched path also move on trunk?)"
 	"syntax (bash -n, node --check, shellcheck)"
 	"suites (the repo's own tests)"
 	"harness (scripts/harness-check.sh, as the harness-check job runs it)"
+	"offline (scripts/ci-offline.sh, the job's other step)"
 	"semgrep (the changed files)"
 	"scrub (env -i, the runner does not have your PATH)"
 	"body (docs budget and the body gate)"
@@ -415,6 +427,17 @@ pf_collect() {
 	return 0
 }
 
+# pf_offline_scope — true when a changed file is one the offline suite's own verdict can depend on:
+# a gate under bin/, or a test under scripts/. Deliberately not "any changed file": a docs edit moved
+# a review date once and went red on harness-check, which is the `harness` check's job, not this one.
+pf_offline_scope() {
+	local f
+	for f in "${PF_CHANGED[@]}"; do
+		case $f in bin/* | scripts/*) return 0 ;; esac
+	done
+	return 1
+}
+
 # pf_applies <id> — true when the check has something to look at.
 pf_applies() {
 	case $1 in
@@ -425,6 +448,10 @@ pf_applies() {
 	# test file builds a RegExp from a value — so this one is not narrowed by file type. A checkout
 	# with no harness-check.sh has no harness to check, and says so by name.
 	harness) [ -f "$PF_CWD/scripts/harness-check.sh" ] && [ "${#PF_CHANGED[@]}" -gt 0 ] ;;
+	# The other half of the harness-check job. Its suite is the gate tests under scripts/, and
+	# bin/ holds the gates those tests run, so a change to either is one its verdict depends on.
+	# A checkout without the script has no offline suite, and says so by name.
+	offline) [ -f "$PF_CWD/scripts/ci-offline.sh" ] && pf_offline_scope ;;
 	body) return 0 ;;
 	behind) return 0 ;;
 	# Opt-in, and then only where the diff holds a mutant host and the checkout holds a way to run
@@ -470,6 +497,13 @@ pf_skip_reason() {
 			printf 'no scripts/harness-check.sh in %s (a project checkout has no harness to check)' "$PF_CWD"
 		else
 			printf 'no changed file: there is no branch state for harness-check.sh to read'
+		fi
+		;;
+	offline)
+		if [ ! -f "$PF_CWD/scripts/ci-offline.sh" ]; then
+			printf 'no scripts/ci-offline.sh in %s (a checkout without the offline suite has none)' "$PF_CWD"
+		else
+			printf 'no changed file under bin/ or scripts/: the offline suite reads neither'
 		fi
 		;;
 	mutation)
@@ -628,14 +662,22 @@ pf_ts_checker() {
 # valid TypeScript, so a green TS diff could never publish. node --check cannot read types either,
 # so the only honest verdict for a TS file is the checkout's own compiler, or a skip named per file.
 pf_check_syntax() {
-	local f rc=0 nb=0 nm=0 nts=0 nts_skip=0 nunk=0 out tsc_cmd=""
-	local tsfiles=() unk=()
+	local f rc=0 nb=0 nm=0 nts=0 nts_skip=0 nunk=0 out tsc_cmd="" path tstree=""
+	local tsfiles=() unk=() missing=()
+	# The tree these files are read from, named on the output: a verdict that does not say which
+	# checkout it read is a verdict a reader has to guess about.
+	printf 'tree: %s\n' "$PF_READ"
 	for f in "${PF_CODE[@]}"; do
-		[ -f "$PF_CWD/$f" ] || continue
+		# The branch's tree first, the caller's checkout second, and a file in neither is named
+		# below: `continue` here was a check that parsed nothing and passed.
+		path=$(pf_read_path "$f") || {
+			missing+=("$f")
+			continue
+		}
 		case $f in
 		*.mjs | *.js)
 			nm=$((nm + 1))
-			if ! out=$(node --check "$PF_CWD/$f" 2>&1); then
+			if ! out=$(node --check "$path" 2>&1); then
 				rc=1
 				printf '%s:\n%s\n' "$f" "$(printf '%s\n' "$out" | head -n 3 | sed 's/^/  /')"
 			fi
@@ -643,10 +685,11 @@ pf_check_syntax() {
 		*.ts | *.tsx)
 			nts=$((nts + 1))
 			tsfiles+=("$f")
+			[ -n "$tstree" ] || tstree=${path%/*}
 			;;
 		*.sh | *.bash | bin/*)
 			nb=$((nb + 1))
-			if ! out=$(bash -n "$PF_CWD/$f" 2>&1); then
+			if ! out=$(bash -n "$path" 2>&1); then
 				rc=1
 				printf '%s:\n%s\n' "$f" "$(printf '%s\n' "$out" | head -n 3 | sed 's/^/  /')"
 			fi
@@ -661,10 +704,11 @@ pf_check_syntax() {
 		esac
 	done
 	if [ "$nts" -gt 0 ]; then
-		if tsc_cmd=$(pf_ts_checker "$PF_CWD"); then
-			if ! out=$(cd "$PF_CWD" && bash -c "$tsc_cmd" 2>&1); then
+		[ -n "$tstree" ] || tstree=$PF_READ
+		if tsc_cmd=$(pf_ts_checker "$tstree"); then
+			if ! out=$(cd "$tstree" && bash -c "$tsc_cmd" 2>&1); then
 				rc=1
-				printf 'TypeScript: %s failed on %d changed TS file(s) in %s:\n%s\n' "$tsc_cmd" "$nts" "$PF_CWD" \
+				printf 'TypeScript: %s failed on %d changed TS file(s) in %s:\n%s\n' "$tsc_cmd" "$nts" "$tstree" \
 					"$(printf '%s\n' "$out" | head -n 12 | sed 's/^/  /')"
 			fi
 		else
@@ -684,21 +728,41 @@ pf_check_syntax() {
 	# The linter, on the changed shell files, when it is installed. Absence is said out loud rather
 	# than read as clean — the same line scripts/ci-local.sh prints — but it is not a failure: the
 	# gate refuses work, and a missing linter is not the work's fault.
-	local shells=()
+	local shells=() shell_abs=() shell_in_read=1
 	for f in "${PF_CODE[@]}"; do
-		case $f in *.sh | bin/*) [ -f "$PF_CWD/$f" ] && shells+=("$f") ;; esac
+		case $f in
+		*.sh | bin/*)
+			path=$(pf_read_path "$f") || continue
+			shells+=("$f")
+			shell_abs+=("$path")
+			case $path in "$PF_READ"/*) [ -n "$PF_READ" ] || shell_in_read=0 ;; *) shell_in_read=0 ;; esac
+			;;
+		esac
 	done
 	if [ "${#shells[@]}" -eq 0 ]; then
 		printf 'shellcheck: no changed shell file\n'
 	elif ! want_cmd shellcheck; then
 		printf 'shellcheck: not installed here, so %d changed shell file(s) went unlinted — install it (apt install shellcheck) to have the linter CI runs\n' "${#shells[@]}"
-	else
-		if ! out=$(cd "$PF_CWD" && shellcheck --severity=error "${shells[@]}" 2>&1); then
+	elif [ "$shell_in_read" = 1 ]; then
+		if ! out=$(cd "$PF_READ" && shellcheck --severity=error "${shells[@]}" 2>&1); then
 			rc=1
 			printf 'shellcheck --severity=error on %s:\n%s\n' "${shells[*]}" "$(printf '%s\n' "$out" | head -n 12 | sed 's/^/  /')"
 		else
 			printf 'shellcheck --severity=error: %d changed shell file(s) clean\n' "${#shells[@]}"
 		fi
+	else
+		# One of the changed shell files is not in the read tree, so its path is the one the
+		# fallback found. Named absolutely: a path is not the same file in two checkouts.
+		if ! out=$(shellcheck --severity=error "${shell_abs[@]}" 2>&1); then
+			rc=1
+			printf 'shellcheck --severity=error on %s:\n%s\n' "${shell_abs[*]}" "$(printf '%s\n' "$out" | head -n 12 | sed 's/^/  /')"
+		else
+			printf 'shellcheck --severity=error: %d changed shell file(s) clean\n' "${#shell_abs[@]}"
+		fi
+	fi
+	if [ "${#missing[@]}" -gt 0 ]; then
+		rc=1
+		pf_read_missing "${missing[@]}"
 	fi
 	return "$rc"
 }
@@ -929,6 +993,56 @@ pf_check_harness() {
 	return 1
 }
 
+# --- check: offline, the gate tests CI runs beside harness-check.sh -----------------------------
+
+# Why this exists. `.github/workflows/harness-check.yml` runs `bash scripts/harness-check.sh` and
+# `bash scripts/ci-offline.sh` as two separate steps, and this file ran only the first: on #229 every
+# check here was green while the pull request was red on scripts/tests/test-preflight-semgrep.sh,
+# which lives in the offline suite. A gate that cannot see the suite CI runs is a gate that hands
+# over a branch CI has already failed.
+#
+# The verdict is the script's exit code, never a summary parsed out of its text. Its transcript is
+# kept in the shared ledger under the same `script:scripts/ci-offline.sh` name `make offline-test`
+# and `scripts/ci-local.sh` would write, so a run already answered on this tree under these gates is
+# a file read here — and the answer reached here is not paid for again by them.
+pf_check_offline() {
+	local out unit started ended rc ms cases rest fail_lines
+	out=$PREFLIGHT_TMP/offline.log
+	# The ledger's handle, when the caller sourced this file instead of running it.
+	[ -n "${RECEIPT_TREE_ROOT:-}" ] || receipt_init "${PF_READ:-$PF_CWD}"
+	unit=$(receipt_unit_name "bash scripts/ci-offline.sh")
+	if receipt_lookup "$unit" "$out"; then
+		rc=$RECEIPT_RC
+		rest=" from a receipt $(pf_age_human "$RECEIPT_AGE") old"
+	else
+		rest=""
+		started=$(date +%s%N)
+		(cd "${PF_READ:-$PF_CWD}" && bash scripts/ci-offline.sh) >"$out" 2>&1
+		rc=$?
+		ended=$(date +%s%N)
+		ms=$(((ended - started) / 1000000))
+		receipt_write "$unit" "$rc" "$ms" "$out"
+	fi
+	if [ "$rc" -eq 0 ]; then
+		cases=$(grep -a -c -E '^ok( |$)' "$out" 2>/dev/null || true)
+		printf 'offline: %s case(s) green (bash scripts/ci-offline.sh%s)\n' "${cases:-0}" "$rest"
+		return 0
+	fi
+	# The tail, then the cases named: a reader of a red needs the last words of the run and the one
+	# line per failing case, not a 400-line transcript.
+	printf 'scripts/ci-offline.sh exited %s%s — CI runs this same suite and goes red on it\n' "$rc" "$rest"
+	tail -n 20 "$out" 2>/dev/null | sed 's/^/  /'
+	fail_lines=$(grep -a -E '^(FAIL |== ci-offline: FAILED )' "$out" 2>/dev/null || true)
+	if [ -n "$fail_lines" ]; then
+		printf 'failing case(s):\n'
+		printf '%s\n' "$fail_lines" | sed 's/^/  /'
+	else
+		printf 'failing case(s): none named — the run died before a case printed one\n'
+	fi
+	printf 'the full run: bash scripts/ci-offline.sh (transcript: %s)\n' "$out"
+	return 1
+}
+
 # --- check: semgrep, on the changed files only --------------------------------------------------
 
 # pf_semgrep_cache_dir — where a ruleset pinned by commit is unpacked, once per SHA. Overridable so
@@ -1101,14 +1215,38 @@ pf_semgrep_configs() {
 
 pf_check_semgrep() {
 	local configs=() unresolved=() f cfg out files=() raw resolved rc=0
+	local tree="" absent=() in_read=0
 	if ! want_cmd semgrep; then
+		printf 'tree: %s\n' "$PF_READ"
 		printf 'semgrep is not installed here, so this check cannot pass — install it (pipx install semgrep) and run it again\n'
 		return 1
 	fi
+	# The tree semgrep is pointed at: the branch's own, when it holds every changed code file, else the
+	# caller's checkout. A file in neither is named — the scan is not narrowed to whatever happened to
+	# be there, which is how `no changed code file` used to read as a pass.
 	for f in "${PF_CODE[@]}"; do
-		[ -f "$PF_CWD/$f" ] || continue
-		files+=("$f")
+		if [ -f "${PF_READ:-/nonexistent}/$f" ]; then
+			in_read=$((in_read + 1))
+		elif [ ! -f "${PF_CWD:-/nonexistent}/$f" ]; then
+			absent+=("$f")
+		fi
 	done
+	if [ "${#absent[@]}" -eq 0 ] && [ "${#PF_CODE[@]}" -gt 0 ]; then
+		if [ "$in_read" -eq "${#PF_CODE[@]}" ]; then tree=$PF_READ; else tree=$PF_CWD; fi
+	fi
+	printf 'tree: %s\n' "${tree:-$PF_READ}"
+	if [ "${#absent[@]}" -gt 0 ]; then
+		pf_read_missing "${absent[@]}"
+		return 1
+	fi
+	local not_in_tree=()
+	for f in "${PF_CODE[@]}"; do
+		if [ -f "$tree/$f" ]; then files+=("$f"); else not_in_tree+=("$f"); fi
+	done
+	[ "${#not_in_tree[@]}" -eq 0 ] || {
+		pf_read_missing "${not_in_tree[@]}"
+		return 1
+	}
 	[ "${#files[@]}" -gt 0 ] || {
 		printf 'no changed code file\n'
 		return 0
@@ -1132,7 +1270,7 @@ pf_check_semgrep() {
 	fi
 	local args=( --error --quiet --metrics=off --disable-version-check --no-git-ignore )
 	for cfg in "${configs[@]}"; do args+=( --config "$cfg" ); done
-	out=$(cd "$PF_CWD" && semgrep "${args[@]}" "${files[@]}" 2>&1)
+	out=$(cd "$tree" && semgrep "${args[@]}" "${files[@]}" 2>&1)
 	rc=$?
 	if [ "$rc" -ne 0 ]; then
 		# Name the files and the rules rather than dumping the banner: a finding without its file is
@@ -1156,16 +1294,24 @@ pf_check_semgrep() {
 # throwaway HOME. Any test that needs one of the user's own tools fails here, which is what CI
 # would have said ten minutes later.
 pf_check_scrub() {
-	local tmp stub f rc=0 n=0 out
+	local tmp stub f rc=0 n=0 out path dir=
+	local missing=()
+	printf 'tree: %s\n' "$PF_READ"
 	tmp=$PREFLIGHT_TMP/scrub
 	mkdir -p "$tmp/stub" "$tmp/home"
 	stub=$tmp/stub
 	for f in "${PF_TESTS[@]}"; do
-		[ -f "$PF_CWD/$f" ] || continue
+		# The branch's tree first, the caller's checkout second: a test file the read tree does not
+		# hold is still a test this branch changed, and skipping it left the env -i gate empty.
+		path=$(pf_read_path "$f") || {
+			missing+=("$f")
+			continue
+		}
 		n=$((n + 1))
+		dir=${path%/*}
 		case $f in
-		*.mjs | *.js) out=$(cd "$PF_CWD" && env -i PATH="$stub:/usr/bin:/bin" HOME="$tmp/home" TMPDIR="$tmp" node --test "$PF_CWD/$f" 2>&1) ;;
-		*) out=$(cd "$PF_CWD" && env -i PATH="$stub:/usr/bin:/bin" HOME="$tmp/home" TMPDIR="$tmp" bash "$PF_CWD/$f" 2>&1) ;;
+		*.mjs | *.js) out=$(cd "$dir" && env -i PATH="$stub:/usr/bin:/bin" HOME="$tmp/home" TMPDIR="$tmp" node --test "$path" 2>&1) ;;
+		*) out=$(cd "$dir" && env -i PATH="$stub:/usr/bin:/bin" HOME="$tmp/home" TMPDIR="$tmp" bash "$path" 2>&1) ;;
 		esac
 		if [ $? -ne 0 ]; then
 			rc=1
@@ -1174,6 +1320,10 @@ pf_check_scrub() {
 		fi
 	done
 	printf 'the runner does not have your PATH: %d changed test file(s) under env -i\n' "$n"
+	if [ "${#missing[@]}" -gt 0 ]; then
+		rc=1
+		pf_read_missing "${missing[@]}"
+	fi
 	return "$rc"
 }
 
@@ -1258,6 +1408,57 @@ pf_branch_checkout() {
 			;;
 		esac
 	done < <(git -C "$repo" worktree list --porcelain 2>/dev/null)
+	return 1
+}
+
+# pf_read_tree <cwd> <branch> <slug> — the checkout the changed files are read from.
+#
+# A worker's branch usually lives in its own worktree (`.worktrees/<slug>`), while `--cwd` is the
+# project the space names — the trunk checkout. Reading `--cwd` there lints trunk's copy of a file the
+# branch rewrote, so a syntax error the worker introduced passes the gate and a good file FAILs for
+# something the branch already fixed. With a slug, the branch's own checkout wins; every
+# file-reading check prints `tree: <path>`, so a report says which tree its verdict came from.
+pf_read_tree() {
+	local cwd=$1 branch=$2 slug=$3 dir=""
+	[ -n "$slug" ] || {
+		printf '%s' "$cwd"
+		return 0
+	}
+	dir=$(pf_branch_checkout "$cwd" "$branch" 2>/dev/null) || dir=""
+	if [ -n "$dir" ] && [ -d "$dir" ]; then
+		printf '%s' "$dir"
+		return 0
+	fi
+	printf '%s' "$cwd"
+}
+
+# pf_read_path <path> — where a changed <path> is read from: the branch's own tree when it holds the
+# file, else the caller's checkout. A tree named by --slug is one commit behind the branch more
+# often than not (a fixture, a checkout that has not pulled, a worktree that holds a subset), and
+# dropping every file it does not hold turned a changed-file list into an empty one — `no changed
+# code file`, an empty --config argv, and a refusal test that passed by scanning nothing. Prints the
+# path to read; prints nothing and returns nonzero when neither tree holds the file, which the
+# caller says as a FAIL naming the file and both trees.
+pf_read_path() {
+	local f=$1
+	if [ -n "$PF_READ" ] && [ -f "$PF_READ/$f" ]; then
+		printf '%s/%s' "$PF_READ" "$f"
+		return 0
+	fi
+	if [ -n "$PF_CWD" ] && [ -f "$PF_CWD/$f" ]; then
+		printf '%s/%s' "$PF_CWD" "$f"
+		return 0
+	fi
+	return 1
+}
+
+# pf_read_missing <tree> <path...> — the FAIL a check prints when the tree it reads does not hold
+# files the branch changed. A gate that reads fewer files than the branch changed is a FAIL, never a
+# pass: the one thing it may not do is call a narrower scan clean.
+pf_read_missing() {
+	printf 'changed file(s) in neither the read tree (%s) nor the checkout (%s):\n' "${PF_READ:-none}" "${PF_CWD:-none}"
+	printf '  %s\n' "$@"
+	printf 'the gate reads fewer files than the branch changed, so this is a FAIL, not a skip\n'
 	return 1
 }
 
@@ -1432,7 +1633,8 @@ pf_check_body() {
 # minutes-long check is tolerable inside a pre-publish gate.
 pf_check_mutation() {
 	local out rc conf=$PF_CWD/agent/stryker.conf.json
-	out=$(cd "$PF_CWD" && bash scripts/mutate-changed.sh 2>&1)
+	printf 'tree: %s\n' "$PF_READ"
+	out=$(cd "$PF_READ" && bash scripts/mutate-changed.sh 2>&1)
 	rc=$?
 	printf '%s\n' "$out"
 	if [ "$rc" -ne 0 ]; then
@@ -1621,6 +1823,9 @@ preflight_main() {
 	*) PF_SHAPE_NAME="a checkout with no suite" ;;
 	esac
 	pf_collect "$cwd" "$branch"
+	# The tree the changed files are read from. With a slug whose branch lives in a worktree, that is
+	# the worktree: the files this gate reads are the branch's, not the trunk checkout's copies.
+	PF_READ=$(pf_read_tree "$cwd" "$branch" "$slug")
 	# The ledger's handle is already exported above: receipt_init keeps it and takes the tree hash
 	# from the checkout being checked, not from the tree this program sits in.
 	receipt_init "$cwd"
@@ -1660,6 +1865,9 @@ preflight_main() {
 	PF_CACHE_VERSION=$(pf_gate_version)
 	PF_RAN_FP=$(pf_sha "$(printf '%s\n' "${run_ids[@]}")")
 	PF_TREE=$(pf_tree_hash "$cwd")
+	# The receipt's tree is the one the files were read from: a key that ignored the read tree would
+	# serve trunk's verdict for a worktree the branch has since changed.
+	[ -z "$PF_READ" ] || [ "$PF_READ" = "$cwd" ] || PF_TREE=$(pf_tree_hash "$PF_READ")
 	local ttl now_i age stamp crc cms cts cached=0 ran_now=0 now_list=" "
 	local -a run_now=()
 	local -A cached_age=() cached_rc=() cached_ms=() cached_ts=()
