@@ -1894,19 +1894,20 @@ export async function readSpaceRecords(root: string = spaceRoot()): Promise<Spac
 	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
 		if (!entry.isDirectory()) continue;
 		let raw: string;
+		// Stryker disable BlockStatement: equivalent. With the `continue` gone, `raw` is
+		// undefined and `JSON.parse(undefined)` throws into the parse catch below, which skips
+		// the same record for the same reason. (A directive inside the `try` is not seen: it
+		// hangs off the try statement, so the region starts above it.)
 		try {
 			// Stryker disable next-line StringLiteral: equivalent. An empty encoding is "no
 			// encoding" to node, which returns a Buffer, and `JSON.parse` coerces that Buffer
 			// with the same text: measured, `JSON.parse(readFileSync(p, ""))` is the object.
 			raw = await readFile(join(root, entry.name, "space.json"), "utf8");
-			// Stryker disable BlockStatement: equivalent. With the `continue` gone, `raw` is
-			// undefined and `JSON.parse(undefined)` throws into the parse catch below, which
-			// skips the same record for the same reason.
 		} catch {
 			continue;
 		}
-		// Stryker restore BlockStatement
 		let value: Record<string, unknown>;
+		// Stryker restore BlockStatement
 		try {
 			value = JSON.parse(raw) as Record<string, unknown>;
 		} catch {
