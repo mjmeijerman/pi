@@ -24,6 +24,12 @@
 #               either direction. Reuse is therefore symmetric: what ci-offline wrote, preflight
 #               reads, and what preflight wrote, ci-offline reads.
 #
+# The tree is only a tree when it is this one: `git rev-parse --show-toplevel` walks upward, so a
+# directory that merely sits inside some other checkout (a test fixture, a scratch dir under $HOME)
+# would otherwise be keyed by that enclosing repo — whose dirty state the run itself changes. A
+# toplevel that is not $root and not inside it is not this tree's root, and the tree is then keyed
+# by its own path instead of a commit nobody here asked for.
+#
 # The ledger lives at $PI_RECEIPT_DIR when a caller pinned one — bin/preflight exports it to every
 # suite it runs, so a gate that runs inside another writes where its parent reads — and otherwise
 # at <checkout>/state/preflight. `state/` is generated and gitignored, so writing a receipt cannot
@@ -37,10 +43,15 @@ _receipt_sha() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
 
 # receipt_init <checkout> — where this gate sits (for the gate hashes) and where its receipts go.
 receipt_init() {
-	local root=$1
+	local root=$1 top
 	root=$(cd -- "$root" 2>/dev/null && pwd) || return 1
 	RECEIPT_HOME=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
-	RECEIPT_TREE_ROOT=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$root")
+	top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || true)
+	case $top in
+	"$root" | "$root"/*) RECEIPT_GIT=1 ;;
+	*) top="" ; RECEIPT_GIT=0 ;;
+	esac
+	RECEIPT_TREE_ROOT=${top:-$root}
 	RECEIPT_DIR=${PI_RECEIPT_DIR:-$RECEIPT_TREE_ROOT/state/preflight}
 	export PI_RECEIPT_DIR=$RECEIPT_DIR
 	RECEIPT_TREE=""
@@ -60,6 +71,13 @@ receipt_tree() {
 		printf '%s' "$RECEIPT_TREE"
 		return 0
 	}
+	if [ "${RECEIPT_GIT:-0}" = 0 ]; then
+		# No checkout of its own: the tree is the directory, so two scratch dirs never share a
+		# receipt and nothing an enclosing repo does can change this key.
+		RECEIPT_TREE=$(_receipt_sha "no-git"$'\n'"$RECEIPT_TREE_ROOT")
+		printf '%s' "$RECEIPT_TREE"
+		return 0
+	fi
 	head=$(git -C "$RECEIPT_TREE_ROOT" rev-parse HEAD 2>/dev/null || printf 'no-head')
 	st=$(git -C "$RECEIPT_TREE_ROOT" status --porcelain 2>/dev/null | LC_ALL=C sort)
 	RECEIPT_TREE=$(_receipt_sha "$head"$'\n'"$st")
@@ -115,45 +133,46 @@ receipt_stamp() { # <epoch> — the ISO second the verdict was reached
 # receipt_read <name> <transcript-file> — prints "exit elapsed_ms ts" and writes the stored
 # transcript to <transcript-file>; nonzero when there is no receipt for this key. Age is never
 # judged here: freshness is the caller's decision, and receipt_lookup is where it is made.
+#
+# Plain text, read with what a POSIX box already has: metadata lines, a `---output---` marker, then
+# the transcript verbatim. It used to be JSON parsed by `node`, which made the ledger depend on node
+# being on PATH — CI's node is not in /usr/bin, so the receipt was never found and every suite ran
+# twice. The ledger is read on the way into a run, so it may not need a runtime to be read.
 receipt_read() {
-	local key file
-	command -v node >/dev/null 2>&1 || return 1
+	local key file line rc="" ts="" ms=""
 	key=$(receipt_key "$1") || return 1
-	file=$RECEIPT_DIR/$key.json
+	file=$RECEIPT_DIR/$key.receipt
 	[ -f "$file" ] || return 1
-	node -e '
-		const fs = require("fs");
-		const [path, into] = process.argv.slice(1);
-		let j;
-		try { j = JSON.parse(fs.readFileSync(path, "utf8")); } catch { process.exit(1); }
-		if (typeof j.exit !== "number" || typeof j.ts !== "number") process.exit(1);
-		fs.writeFileSync(into, String(j.output == null ? "" : j.output));
-		process.stdout.write(`${j.exit} ${j.elapsed_ms || 0} ${j.ts}`);' "$file" "$2"
+	while IFS= read -r line; do
+		case $line in
+		'exit: '*) rc=${line#exit: } ;;
+		'ts: '*) ts=${line#ts: } ;;
+		'elapsed_ms: '*) ms=${line#elapsed_ms: } ;;
+		'---output---') break ;;
+		esac
+	done <"$file"
+	case $rc in '' | *[!0-9]*) return 1 ;; esac
+	case $ts in '' | *[!0-9]*) return 1 ;; esac
+	case $ms in '' | *[!0-9]*) ms=0 ;; esac
+	# Everything after the marker is the transcript, byte for byte.
+	awk 'seen { print } !seen && $0 == "---output---" { seen = 1 }' "$file" >"$2" || return 1
+	printf '%s %s %s' "$rc" "$ms" "$ts"
 }
 
 # receipt_write <name> <exit> <elapsed_ms> <transcript-file> — record a verdict that was reached.
 receipt_write() {
-	local key tmp
+	local key tmp now
 	key=$(receipt_key "$1") || return 0
 	[ -f "$4" ] || return 0
 	mkdir -p "$RECEIPT_DIR" 2>/dev/null || return 0
 	tmp=$RECEIPT_DIR/.$key.$$.tmp
-	node -e '
-		const fs = require("fs");
-		const [dest, tmp, check, rc, ms, out, tree, gate] = process.argv.slice(1);
-		const rec = {
-			check,
-			exit: Number(rc),
-			elapsed_ms: Number(ms),
-			ts: Math.floor(Date.now() / 1000),
-			at: new Date().toISOString(),
-			tree: tree,
-			gate: gate,
-			output: fs.readFileSync(out, "utf8"),
-		};
-		fs.writeFileSync(tmp, JSON.stringify(rec, null, 1) + "\n");
-		fs.renameSync(tmp, dest);' "$RECEIPT_DIR/$key.json" "$tmp" "$1" "$2" "$3" "$4" \
-		"$(receipt_tree)" "$(receipt_gate)" 2>/dev/null || rm -f "$tmp"
+	now=$(date +%s)
+	{
+		printf 'check: %s\nexit: %s\nelapsed_ms: %s\nts: %s\nat: %s\ntree: %s\ngate: %s\n---output---\n' \
+			"$1" "$2" "$3" "$now" "$(receipt_stamp "$now")" "$(receipt_tree)" "$(receipt_gate)"
+		cat -- "$4"
+	} >"$tmp" 2>/dev/null && mv -f -- "$tmp" "$RECEIPT_DIR/$key.receipt" 2>/dev/null ||
+		rm -f -- "$tmp"
 	return 0
 }
 
@@ -187,9 +206,9 @@ receipt_forget() {
 	local f tree
 	[ -d "${RECEIPT_DIR:-}" ] || return 0
 	tree=$(receipt_tree)
-	for f in "$RECEIPT_DIR"/*.json; do
+	for f in "$RECEIPT_DIR"/*.receipt; do
 		[ -f "$f" ] || continue
-		grep -qF "\"tree\": \"$tree\"" "$f" 2>/dev/null && rm -f -- "$f"
+		grep -qxF "tree: $tree" "$f" 2>/dev/null && rm -f -- "$f"
 	done
 	return 0
 }

@@ -32,7 +32,14 @@ PREFLIGHT="${PREFLIGHT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../bin" && pwd)/
 
 WORK="$(mktemp -d)"
 trap 'rm -rf -- "$WORK"' EXIT
-mkdir -p "$WORK/stub" "$WORK/home" "$WORK/cache" "$WORK/repo"
+mkdir -p "$WORK/stub" "$WORK/home" "$WORK/cache" "$WORK/repo" "$WORK/bin"
+# A PATH with everything this test needs and no `node`: the ledger is read on the way into a run and
+# may not need a runtime to be read. CI's node is not in /usr/bin, which is where this case's red came
+# from — a receipt that only a laptop could read.
+for f in /usr/bin/*; do
+	case $f in */node | */nodejs) continue ;; esac
+	ln -s "$f" "$WORK/bin/" 2>/dev/null
+done
 
 PASS_N=0
 FAIL_N=0
@@ -111,12 +118,13 @@ run_semgrep() {
 	RC=$?
 }
 
-# run_offline <repo> [receipt-dir] — pf_check_offline over <repo>, with the shared ledger pinned to a
-# directory of its own so one case cannot answer another.
+# run_offline <repo> [receipt-dir] [path] — pf_check_offline over <repo>, with the shared ledger
+# pinned to a directory of its own so one case cannot answer another. <path> replaces the runner's
+# PATH, which is how the no-node case is run.
 run_offline() {
-	local repo=$1 ledger=${2:-}
+	local repo=$1 ledger=${2:-} path=${3:-$WORK/stub:/usr/bin:/bin}
 	[ -n "$ledger" ] || ledger=$(mktemp -d -p "$WORK" ledger.XXXXXX)
-	OUT=$(env -i PATH="$WORK/stub:/usr/bin:/bin" HOME="$WORK/home" TMPDIR="$WORK" \
+	OUT=$(env -i PATH="$path" HOME="$WORK/home" TMPDIR="$WORK" \
 		bash -c '. "$1" >/dev/null 2>&1 || true
 			PF_CWD=$2 PF_READ=$2
 			PREFLIGHT_TMP=$4
@@ -226,6 +234,47 @@ if [ "$first_runs" = "$second_runs" ]; then
 	pass "scripts/ci-offline.sh ran once for two runs ($first_runs byte(s) of marker)"
 else
 	fail "scripts/ci-offline.sh ran once for two runs" "marker grew from $first_runs to $second_runs"
+fi
+
+case_start "the ledger is read where node is not on PATH"
+write_offline "$WORK/repo" 0 "$WORK/offline-runs-c" \
+	'ok   case one: it holds' \
+	'ok   case two: it holds too'
+ledger_nobin=$WORK/ledger-nobin
+run_offline "$WORK/repo" "$ledger_nobin" "$WORK/stub:$WORK/bin"
+first_runs=$(wc -c <"$WORK/offline-runs-c" | tr -d ' ')
+run_offline "$WORK/repo" "$ledger_nobin" "$WORK/stub:$WORK/bin"
+second_runs=$(wc -c <"$WORK/offline-runs-c" | tr -d ' ')
+[ "$RC" -eq 0 ] && pass "the receipt answers the second run without node" ||
+	fail "the receipt answers the second run without node" "exit $RC" "$OUT"
+out_has "from a receipt" "the pass says the answer came from the ledger"
+if [ "$first_runs" = "$second_runs" ]; then
+	pass "a ledger with no runtime on PATH still answers ($first_runs byte(s) of marker)"
+else
+	fail "a ledger with no runtime on PATH still answers" "marker grew from $first_runs to $second_runs"
+fi
+
+case_start "a fixture inside another checkout is keyed by its own directory, not that repo"
+git init -q -b outer "$WORK/outer"
+git -C "$WORK/outer" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m one
+# Not a checkout of its own: `rev-parse --show-toplevel` here walks up to $WORK/outer. Keyed by it,
+# a directory that only sits inside a checkout would move whenever anything — this suite's logs, a
+# worktree's leftovers — dirtied that enclosing repo, and the receipt would never be found.
+write_offline "$WORK/outer/fixture" 0 "$WORK/outer/fixture/runs" \
+	'ok   case one: it holds' \
+	'ok   case two: it holds too'
+run_offline "$WORK/outer/fixture" "$WORK/ledger-outer"
+first_runs=$(wc -c <"$WORK/outer/fixture/runs" | tr -d ' ')
+printf 'artifact\n' >"$WORK/outer/left-behind.log"
+run_offline "$WORK/outer/fixture" "$WORK/ledger-outer"
+second_runs=$(wc -c <"$WORK/outer/fixture/runs" | tr -d ' ')
+[ "$RC" -eq 0 ] && pass "the fixture's own receipt answers its second run" ||
+	fail "the fixture's own receipt answers its second run" "exit $RC" "$OUT"
+out_has "from a receipt" "the pass says the answer came from the ledger"
+if [ "$first_runs" = "$second_runs" ]; then
+	pass "the enclosing repo's dirt did not change the key ($first_runs byte(s) of marker)"
+else
+	fail "the enclosing repo's dirt did not change the key" "marker grew from $first_runs to $second_runs"
 fi
 
 # ---------------------------------------------------------------------------
