@@ -2,3 +2,5 @@
 It shells out to `~/.pi/bin/space new|list|forget` (and `bin/guard --dry-run`) resolved from `$HOME`, and builds no argv of its own — `argv.mjs` maps the form to argv, and nothing is created until Create.
 Forgetting keeps the folder and its work on disk: the space simply stops being reopened, and nothing here closes a space, closes a tab, or deletes a file.
 Open it with `alt-shift-d` (merge `keys.json` beside this file into `~/.config/herdr-app/keys.json`) or without any keys: `herdr-app do mod.open --name durable`.
+
+That file's `global` section holds the other half: `alt-shift-n` opens a **tab** running `space new`, so a person who wants a durable space gets the questions without opening this mod first. It is an app command (`terminal.open`), not `durable.new`, because a mod's own messages reach only a mod that is already open — and the mod is a `"place": "none"` overlay. `install.mjs` merges that one key into an existing `keys.json` and resolves the argv to the installed `space` (`.cmd` on Windows); `keys.mjs` is the single place the binding is built.

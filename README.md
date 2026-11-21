@@ -112,7 +112,11 @@ stop, not grind:
 ### Spaces
 
 A **space is a project**. One Herdr space holds one project, one worker at a
-time, and the record that says so:
+time, and the record that says so. To make one, press `alt-shift-n` in Herdr: a
+new tab asks name, folder and create it? and writes the record, so the guard
+keeps it. From a shell the same thing is `space new <name>`. The `+` beside the
+spaces is Herdr's own `space.new` — a space with no record, which the guard does
+not keep.
 
 ```bash
 bin/space new --name myproject --project ~/projects/myproject   # or --clone <url>, --no-git, --kind harness, --tab-name Boss, --argv '["pi"]'

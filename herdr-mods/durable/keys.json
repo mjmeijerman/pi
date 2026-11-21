@@ -1,6 +1,7 @@
 {
   "global": {
-    "alt-shift-d": { "command": "mod.open", "args": { "name": "durable" } }
+    "alt-shift-d": { "command": "mod.open", "args": { "name": "durable" } },
+    "alt-shift-n": { "command": "terminal.open", "args": { "argv": ["space", "new"], "place": "tab" } }
   },
   "mod:durable": {
     "alt-shift-n": "durable.new",
