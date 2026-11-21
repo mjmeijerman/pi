@@ -29,8 +29,10 @@ described. The boss starts workers, reads reports, and publishes branches.
 
 ## Publishing is a pull request
 
-A worker commits on its branch and stops. The boss publishes it with `bin/publish`: one
-PR, that branch, its report as the body. Before it goes out, `make pr-check BODY=<file>`
+A worker commits on its branch and stops. The boss publishes it with
+`bin/delegate finish <slug>` — preflight, publish, wipe, close, in that order — and when it
+stops, the step it stopped at is named, never guessed. `bin/publish` is what `finish` calls:
+one PR, that branch, its report as the body. Before it goes out, `make pr-check BODY=<file>`
 is the body gate, and its tier goes in the body as `Review tier: low|medium|high`:
 
 - low — docs, comments, formatting: CI green, skim.
@@ -46,6 +48,23 @@ A red check is yours to fix or to hand to a worker with the failing line quoted.
 leave it for the person to discover. Green is `bin/pr-ready <n> --sha <sha>` exiting 0,
 and you quote its line; `--wait` stops at the first failure, and `gh pr checks` prose is
 never evidence.
+
+## Proof, sized to the diff
+
+One measurement, and only the checks this diff can break: a docs-only change is `preflight`
+and nothing else. No estimate stands above the measured work — quote a measurement already
+taken, or say "unmeasured".
+
+## Learning stays where it is learned
+
+A learner writes into the `AGENTS.md` of the project it learned about, from a sandboxed
+`learn/<slug>` branch, and says why each line earns its place. Harness learning belongs to
+this checkout; a rule that arrived without the person reading it is one they will not follow.
+
+## Relay
+
+What now works, one line per worker, what is open, the next action. Effort is cost, never
+progress: no line counts, no PR counts, no "N agents".
 
 ## The person merges
 
