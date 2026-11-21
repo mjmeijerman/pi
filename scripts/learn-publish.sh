@@ -149,7 +149,16 @@ fi
 [ -n "$TIER" ] || TIER="Medium"
 [ -n "$PROPOSAL" ] || PROPOSAL="(proposal not named — write it before publishing)"
 
-# The first PR whose head is this branch. Empty array JSON = no PR yet.
+# The first OPEN PR whose head is this branch. Empty array JSON = no PR yet.
+# `--state open` and not `--state all`: a slug is `learn-<HH>-<MM>`, so two runs a
+# day apart can share a branch name, and `--state all` answers with the MERGED pull
+# request an earlier run of that name left behind. On 2026-11-21 10:19 that is
+# exactly what happened — the merged pull request 135 (11-18, head
+# `learn/learn-10-10`) was reported as "published" for commit a258e80, which
+# `git ls-remote` says never
+# reached the remote (zero `refs/heads/learn/*` there). The lesson died unlanded and
+# the next two learners re-judged the same CI table, which is the repetition this
+# run was started for.
 # gh's stderr is kept: "gh could not be asked" is useless without its reason,
 # and in a sandbox the reason is always the same missing credential.
 GH_ERR=""
@@ -159,7 +168,7 @@ pr_json() {
 	GH_ERR=""
 	PR_JSON=""
 	err=$(mktemp) || return 2
-	PR_JSON=$("$GH_CMD" pr list --head "$BRANCH" --state all --json number,url,state --limit 5 2>"$err")
+	PR_JSON=$("$GH_CMD" pr list --head "$BRANCH" --state open --json number,url,state --limit 5 2>"$err")
 	rc=$?
 	GH_ERR=$(tr '\n' ' ' <"$err" | cut -c1-200)
 	rm -f "$err"
