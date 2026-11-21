@@ -13,7 +13,7 @@
 - Never merge, push to trunk, or commit on trunk without the user's explicit permission in this session. Ask, wait for a yes, then `/mergeguard allow` and run that one command. `merge-guard` blocks all of those; green CI is not permission.
 - Body gates: run `make pr-check BODY=<file>` before the PR goes out — seconds, same `pr-tier` verdict; the tier goes in the body (blips 17, 42): High = `agent/extensions/`, `agent/AGENTS.md`, `.github/`, `git-hooks/`, `sandbox/`, auth, secrets, money, deletion → read line by line, never auto-merged; Medium = code, tests, migrations → diff read, tests green; Low = docs, comments, formatting → CI green, skim. A mission is a literal `Mission:` line (20+ chars); a harness path in the diff is High whatever the body says.
 - Green is `bin/pr-ready <n> --sha <sha>` exiting 0; quote its line. No hand-rolled poll loop: `--wait` stops at the first failure, and `gh pr checks` prose is never evidence.
-- Report once, when the PR is green and mergeable. A worker starting or reporting is not news.
+- Report once, when the PR is green and mergeable, and stay on the PR until it is. A worker starting or reporting is not news.
 - Vague request, more than one file, or a design choice → `/grill` first; no code before the answers (blip 13).
 
 ## Harness sources
