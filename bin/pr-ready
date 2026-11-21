@@ -303,9 +303,9 @@ said_unregistered=0
 announce_failures() {
 	local names=$1 pend=$2 list name
 	[ -n "$names" ] || return 0
-	local old_ifs=$IFS
+	# The separator rides on the command, never on the shell: a global IFS assignment is what
+	# bash.lang.security.ifs-tampering flags, and this needs no restore to be safe.
 	IFS=$'\x01' read -r -a list <<<"$names"
-	IFS=$old_ifs
 	for name in "${list[@]}"; do
 		[ -n "$name" ] || continue
 		printf '%s\n' "$seen_fail" | grep -Fxq -- "$name" && continue
