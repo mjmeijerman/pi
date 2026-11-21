@@ -1819,6 +1819,11 @@ const trimSlashes = (path: string): string => (path.length > 1 ? path.replace(/\
  * answers `null` instead of guessing — a cwd no space claims teaches nothing at all.
  */
 export function learnerSpace(records: readonly SpaceRecord[], cwd: string): LearnerSpace | null {
+	// Stryker disable next-line StringLiteral: equivalent. `cwd` is typed string, so the default
+	// only runs for a caller that passes undefined or null; the replacement text is a non-empty
+	// string, and nothing in a record list matches it — `readSpaceRecords` only yields absolute
+	// projects, a record without a project is skipped below, and a `/` project requires a leading
+	// slash the replacement lacks. Every such caller reaches the same `null` either way.
 	const here = trimSlashes(String(cwd ?? "").trim());
 	// Stryker disable next-line ConditionalExpression: equivalent. An empty `here` matches no
 	// record — a project that trims to empty is skipped two lines below — so falling through
