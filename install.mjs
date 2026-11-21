@@ -1027,9 +1027,11 @@ function stepSystemd() {
 	const srcDir = path.join(SOURCE_DIR, 'systemd');
 	systemdInstalled = [];
 	const units = [];
-	const bossUnit = path.join(BOSS_DIR, 'systemd', 'big-boss-pi-guard.service');
-	if (exists(bossUnit)) units.push({ file: bossUnit, name: 'big-boss-pi-guard.service', enable: true, now: true });
-	else warn(`${bossUnit} not found — skipped the big-boss-pi guard unit`);
+	// The guard unit used to be copied out of the delegation clone, because that
+	// clone's `bin/guard` was the supervisor. It is not any more: the clone's copy
+	// knows one hard-coded space, while `%h/.pi/bin/guard` restores everything
+	// recorded in `~/.pi/state/spaces/`. So the guard unit lives in this repo's
+	// systemd/ with the other units and arrives through the same loop.
 
 	// The repo's units are read off systemd/, never listed here: the timers were
 	// copied without the .service files their `Unit=` names, and a hard-coded
@@ -1067,7 +1069,9 @@ function stepSystemd() {
 		// `enable --now` starts a unit that was stopped; a guard that was already
 		// running still holds the process from before this install, so restart it —
 		// "install finished" means the guard now runs this checkout's bin/guard.
-		const guardUnit = enableable.find((u) => u.name === 'big-boss-pi-guard.service');
+		// Named by pattern, not by file name: scripts/tests/systemd-units.test.mjs
+		// fails if this file names any unit in systemd/ itself.
+		const guardUnit = enableable.find((u) => /guard\.service$/.test(u.name));
 		if (guardUnit) {
 			say(`   start: systemctl --user restart ${guardUnit.name}`);
 			run('systemctl', ['--user', 'restart', guardUnit.name], { allowFail: true });

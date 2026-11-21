@@ -473,13 +473,17 @@ repairs the `big-boss-pi` space, and an install that registered nothing opened
 Herdr with no space in it. See
 [Herdr opens with no `big-boss-pi` space](#herdr-opens-with-no-big-boss-pi-space).
 
-The systemd step copies every unit in the clone's `systemd/` directory, because it
-reads that directory instead of a list: the guard, `pi-evals.timer` with its
+The systemd step copies every unit in this repo's `systemd/` directory, because it
+reads that directory instead of a list: the guard's
+`big-boss-pi-guard.service` (the supervisor, `%h/.pi/bin/guard`),
+`pi-evals.timer` with its
 `pi-evals.service`, `pi-retro.timer` with its `pi-retro.service`, and
 `herdr-resume.service`. The timers are enabled `--now`, `herdr-resume.service`
 without `--now` (it runs at the next login), and the two timer services are
 copied but not enabled — they carry no `[Install]` section, and their timer's
-`Unit=` line is what starts them. Nothing is left for you to run by hand after an
+`Unit=` line is what starts them. The guard unit is enabled at login and
+restarted by the install, so the supervisor in `~/.pi/bin/guard` is what runs
+next; the retired `~/big-boss-pi/bin/guard` is not installed any more. Nothing is left for you to run by hand after an
 install: `systemctl --user list-timers` shows both timers with a next run.
 
 Removing an install without touching sessions or keys:

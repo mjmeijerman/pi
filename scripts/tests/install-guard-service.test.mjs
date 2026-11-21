@@ -39,8 +39,9 @@ function cloneWithGuard(home) {
 	const guard = path.join(boss, 'bin', 'guard');
 	fs.mkdirSync(path.dirname(guard), { recursive: true });
 	fs.writeFileSync(guard, '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-	// The Linux plan copies the guard unit out of the clone, so a stand-in clone
-	// needs one for the alias test to say "copied, not enabled".
+	// A stand-in clone with its own systemd/ copy of the old pre-space guard unit:
+	// the install must now take the guard unit from this repo instead, so the
+	// Linux test below can prove the clone's copy does not win.
 	fs.mkdirSync(path.join(boss, 'systemd'), { recursive: true });
 	fs.writeFileSync(
 		path.join(boss, 'systemd', 'big-boss-pi-guard.service'),
@@ -150,7 +151,7 @@ test('nothing is started when no entry was registered', (t) => {
 	assert.doesNotMatch(macSkip.stdout, /launchctl kickstart/);
 });
 
-test('Linux: a default run copies the guard unit', (t) => {
+test('Linux: a default run copies the guard unit out of this repo, pointed at the supervisor', (t) => {
 	const home = tempHome(t);
 	cloneWithGuard(home);
 
@@ -158,9 +159,15 @@ test('Linux: a default run copies the guard unit', (t) => {
 	assert.equal(out.status, 0, out.stderr);
 	const unit = path.join(home, '.config', 'systemd', 'user', 'big-boss-pi-guard.service');
 	assert.ok(fs.existsSync(unit), 'no big-boss-pi guard unit copied');
-	// The unit is the clone's, with %h resolved, so a fresh HOME does not point a
-	// service at somebody else's workspace.
-	assert.ok(fs.readFileSync(unit, 'utf8').includes(path.join(home, 'big-boss-pi', 'bin', 'guard')));
+	// The installed unit is this repo's `systemd/big-boss-pi-guard.service` with %h
+	// resolved: it starts `~/.pi/bin/guard`, the supervisor that restores every
+	// recorded space — not the clone's pre-space copy that knew one workspace.
+	const text = fs.readFileSync(unit, 'utf8');
+	assert.ok(text.includes(`ExecStart=${path.join(home, '.pi', 'bin', 'guard')}`), text);
+	assert.ok(
+		!text.includes(path.join(home, 'big-boss-pi', 'bin', 'guard')),
+		"the clone's pre-space guard is still what the unit starts",
+	);
 	assert.match(out.stdout, /^== big-boss-pi-guard\.service -> /m);
 });
 
