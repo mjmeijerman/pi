@@ -28,7 +28,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { GUARD_LABEL, LEGACY_GUARD } from '../install-lib.mjs';
+import { GUARD_LABEL, GUARD_UNIT_NAME, LEGACY_GUARD } from '../install-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -141,7 +141,7 @@ test('Linux: an upgrade removes the old unit file before copying the new one', (
 	assert.ok(fs.existsSync(path.join(home, '.config', 'systemd', 'user', 'pi-guard.service')), 'the new unit was not copied');
 	assert.match(
 		out.stdout,
-		new RegExp(`^== guard unit: ${LEGACY_GUARD.unit} -> pi-guard\\.service \\(`, 'm'),
+		new RegExp(`^== guard unit: ${LEGACY_GUARD.unit} -> ${GUARD_UNIT_NAME} \\(`, 'm'),
 		`the upgrade does not say what it replaced:\n${out.stdout}`,
 	);
 });

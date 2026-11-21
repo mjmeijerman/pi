@@ -70,6 +70,7 @@ import {
 	GUARD_SPACE_NAME,
 	GUARD_SPACE_WAIT_MS,
 	GUARD_TASK_NAME,
+	GUARD_UNIT_NAME,
 	HARNESS_TOOLS,
 	LEGACY_GUARD,
 	PI_WRAPPER_BEGIN,
@@ -929,6 +930,15 @@ function skipServicesVar() {
  * enabled — the old file is still removed there, because an enabled unit this install no longer
  * writes is exactly the entry that would start beside the new one at the next logon.
  */
+function systemdGuardUnitName() {
+	try {
+		const units = systemdUnitsIn(path.join(P.piHome, 'systemd'), fs);
+		const found = units.map((u) => u.name).find((name) => /guard\.service$/.test(name));
+		if (found) return found;
+	} catch {}
+	return GUARD_UNIT_NAME;
+}
+
 function removeLegacyGuardEntry({ systemd = false } = {}) {
 	const old = LEGACY_GUARD;
 	if (systemd) {
@@ -940,7 +950,7 @@ function removeLegacyGuardEntry({ systemd = false } = {}) {
 		try {
 			fs.rmSync(file);
 		} catch {}
-		note(`guard unit: ${old.unit} -> the one this repo ships (disabled and removed first — two login entries would race on the same records)`);
+		note(`guard unit: ${old.unit} -> ${systemdGuardUnitName()} (disabled and removed first — two login entries would race on the same records)`);
 		return true;
 	}
 	if (PLAN.service === 'launchd') {
@@ -964,7 +974,7 @@ function removeLegacyGuardEntry({ systemd = false } = {}) {
 		pid = fs.readFileSync(pidFile, 'utf8').trim();
 	} catch {}
 	if (/^[0-9]+$/.test(pid)) run('taskkill', ['/F', '/PID', pid], { allowFail: true });
-	note(`guard task: ${old.taskName} -> pi-guard (the old entry is deleted and stopped — two login entries would race on the same records)`);
+	note(`guard task: ${old.taskName} -> ${GUARD_TASK_NAME} (the old entry is deleted and stopped — two login entries would race on the same records)`);
 	return true;
 }
 
