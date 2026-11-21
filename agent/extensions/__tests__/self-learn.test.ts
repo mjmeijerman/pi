@@ -12,7 +12,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile, chmod, append
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, describe, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 import { createFakeCtx, createFakePi, waitFor } from "./helpers/fake-pi.ts";
 
 /**
@@ -110,6 +110,18 @@ const {
 	PUBLISH_POLL_MS,
 	runOnce,
 } = mod;
+
+// The premise every test in this file shares, asserted at import time: the fixture space
+// resolves from its own project, so `learn()` has a space to launch into. Stated here
+// because a boundary that breaks would otherwise turn each wiring test into a three-second
+// wait for a learner that is never started: the file would spend the whole per-mutant
+// budget waiting, and a broken line would be reported as a timeout instead of as the bug it
+// is. A file that cannot even state its premise fails in milliseconds, which is the answer.
+assert.equal(
+	learnerSpace(await readSpaceRecords(), SPACE.project)?.slug,
+	SPACE.slug,
+	"the fixture space resolves from the project the session sits in",
+);
 const REPO = join(homedir(), ".pi");
 
 after(async () => {
@@ -285,11 +297,105 @@ describe("which space teaches a compaction", () => {
 			await writeFile(join(root, "broken", "space.json"), "{not json");
 			await mkdir(join(root, "empty"), { recursive: true });
 			await writeFile(join(root, "empty", "space.json"), JSON.stringify({ name: "empty" }));
+			// A space.json that is not an object at all is a broken record too.
+			await mkdir(join(root, "list"), { recursive: true });
+			await writeFile(join(root, "list", "space.json"), "[]");
+			// A file where a space directory would be is not a space either.
+			await writeFile(join(root, "loose.json"), "{}");
 			assert.deepEqual(await readSpaceRecords(root), [{ slug: "pi", project: "/pi", kind: "harness" }], "a broken or projectless record is skipped, not fatal");
 			assert.deepEqual(await readSpaceRecords(join(root, "nope")), [], "no directory yet is no spaces");
+			// Written with padding, read without it: the record and the folder are one thing.
+			await mkdir(join(root, "padded"), { recursive: true });
+			await writeFile(join(root, "padded", "space.json"), JSON.stringify({ name: "padded", project: "  /padded  " }));
+			const padded = (await readSpaceRecords(root)).find((record) => record.slug === "padded");
+			assert.equal(padded?.project, "/padded", "an on-disk project is trimmed the way a cwd is");
+			// A kind that is not a string is no kind at all, which the boundary reads as project.
+			await mkdir(join(root, "weird"), { recursive: true });
+			await writeFile(join(root, "weird", "space.json"), JSON.stringify({ name: "weird", project: "/weird", kind: 42 }));
+			const weird = (await readSpaceRecords(root)).find((record) => record.slug === "weird");
+			assert.equal(weird?.kind, undefined, "a number is not a kind");
+			assert.equal(learnerSpace([weird!], "/weird")?.kind, "project", "and an unknown kind teaches the project");
+			// The default root is the one the extension reads in `learn()`: `PI_SPACE_ROOT`
+			// plus `state/spaces`, which is where `bin/space` writes.
+			const found = await readSpaceRecords();
+			assert.deepEqual(
+				found.map((record) => record.slug),
+				[SPACE.slug],
+				"the root this session resolves is the one the fixture wrote, not the repo's own",
+			);
+			assert.equal(found[0].project, SPACE.project, "and the project is the folder, verbatim");
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
+	});
+
+	test("the records are sorted by name, so the order does not depend on the filesystem", async () => {
+		// `readdir` order is the filesystem's business. A tie between two spaces on one folder
+		// is decided by this order, so it must be a name order and not whichever inode came
+		// back first: created in reverse, read in order.
+		const root = await mkdtemp(join(scratch, "spaces-order-"));
+		try {
+			for (const name of ["delta", "charlie", "bravo", "alpha"]) {
+				await mkdir(join(root, name), { recursive: true });
+				await writeFile(join(root, name, "space.json"), JSON.stringify({ name, project: `/${name}` }));
+			}
+			assert.deepEqual(
+				(await readSpaceRecords(root)).map((record) => record.slug),
+				["alpha", "bravo", "charlie", "delta"],
+				"the order a tie is decided in is the alphabet, not the disk",
+			);
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("the root project claims everything under it, and nothing relative", () => {
+		// `/` is the one project whose path does not end in a slash when it is joined, so it
+		// has its own branch. A record on `/` owns every absolute folder and no relative one:
+		// a relative cwd is not a path any space can be matched against.
+		const ROOT = { slug: "root", project: "/" };
+		assert.deepEqual(learnerSpace([ROOT], "/etc/hosts"), { slug: "root", kind: "project", project: "/" });
+		assert.deepEqual(learnerSpace([ROOT], "/"), { slug: "root", kind: "project", project: "/" }, "the root itself");
+		assert.equal(learnerSpace([ROOT], "etc/hosts"), null, "a relative cwd is nobody's project");
+		assert.equal(learnerSpace([ROOT], "a/b"), null);
+	});
+
+	test("a trailing slash is stripped however many there are", () => {
+		assert.equal(learnerSpace([{ slug: "web", project: "/a/b///" }], "/a/b")?.slug, "web");
+		assert.equal(learnerSpace([{ slug: "web", project: "/a/b" }], "/a/b///")?.slug, "web");
+	});
+
+	test("a padded cwd and a padded project are the same folder", () => {
+		assert.equal(learnerSpace([{ slug: "web", project: "  /a/b  " }], "  /a/b  ")?.slug, "web");
+		assert.equal(learnerSpace([{ slug: "web", project: "/a/b" }], "\t/a/b/deep\n")?.slug, "web");
+	});
+
+	test("a relative pair is still a path pair", () => {
+		// The function answers the records it is given and does not pretend a relative path is
+		// unmatched: `a/b` owns `a/b/c`, the same way an absolute one does.
+		assert.equal(learnerSpace([{ slug: "rel", project: "a/b" }], "a/b/c")?.slug, "rel");
+	});
+
+	test("a project that only looks like a prefix does not own the folder", () => {
+		assert.equal(learnerSpace([WEB], "/home/person/projects/webapp"), null, "`webapp` is not inside `web`");
+		assert.equal(learnerSpace([WEB], "/home/person/projects/web-2"), null);
+	});
+
+	test("a null record, or one with no project, is skipped instead of throwing", () => {
+		const withJunk = [null, undefined, { slug: "nope" }, { slug: "", project: "  " }, WEB] as any;
+		assert.equal(learnerSpace(withJunk, "/home/person/projects/web")?.slug, "web", "the junk is skipped, the record is found");
+		assert.equal(learnerSpace([null, undefined] as any, "/a"), null, "and junk alone matches nothing");
+		// A cwd that is not a string is not a folder: no record is matched against "42".
+		assert.equal(learnerSpace([WEB], 42 as any), null);
+		assert.equal(learnerSpace([WEB], null as any), null);
+	});
+
+	test("two records on one folder: the first listed wins, and neither is dropped", () => {
+		// A tie is not an exception and not a crash: the order `state/spaces` lists them in
+		// decides, and the record that loses is still a record.
+		const twin = { slug: "web-2", project: "/home/person/projects/web" };
+		assert.equal(learnerSpace([WEB, twin], "/home/person/projects/web")?.slug, "web");
+		assert.equal(learnerSpace([twin, WEB], "/home/person/projects/web")?.slug, "web-2");
 	});
 });
 
@@ -311,6 +417,32 @@ describe("what a learner of each kind may touch", () => {
 			assert.match(refusal, /AGENTS\.md and nothing else/, `${path} is not this project's rules file`);
 		}
 		assert.match(learnerPathRefusal("project", "") ?? "", /no path/);
+	});
+
+	test("spaces around a path are not a different path", () => {
+		// `agent-pane.sh` copies the paths out of a queue file, and a person pasting one adds a
+		// space: trimming is what makes the two the same entry, not a second rule.
+		assert.equal(learnerPathRefusal("harness", "  bin/agent-pane.sh  "), null);
+		assert.equal(learnerPathRefusal("project", "\tAGENTS.md\n"), null);
+		assert.match(learnerPathRefusal("project", "  ") ?? "", /no path is not a change/);
+	});
+
+	test("a path is matched at the boundary, so a lookalike folder is not inside", () => {
+		// `bin/` is a directory and `bin/x` is inside it; `x/bin/y` is not, and `AGENTS.md.bak`
+		// is not `AGENTS.md`. A prefix match without the boundary would allow all three.
+		assert.equal(learnerPathRefusal("harness", "bin/agent-pane.sh"), null);
+		assert.match(learnerPathRefusal("harness", "x/bin/agent-pane.sh") ?? "", /belongs to a project space/);
+		assert.match(learnerPathRefusal("project", "AGENTS.md.bak") ?? "", /AGENTS\.md and nothing else/);
+		assert.match(learnerPathRefusal("project", "bin/AGENTS.md") ?? "", /AGENTS\.md and nothing else/);
+	});
+
+	test("a `./` is stripped at the front, not anywhere in the path", () => {
+		// `a/./AGENTS.md` is not this project's rules file, and stripping the `./` from the
+		// middle of a path would make it one.
+		assert.equal(learnerPathRefusal("project", "./AGENTS.md"), null);
+		assert.equal(learnerPathRefusal("harness", "./bin/agent-pane.sh"), null, "a path written as `./bin/...` is `bin/...`");
+		assert.match(learnerPathRefusal("project", "a/./AGENTS.md") ?? "", /AGENTS\.md and nothing else/);
+		assert.match(learnerPathRefusal("harness", "src/./bin/x") ?? "", /belongs to a project space/);
 	});
 
 	test("the queue file names the paths, so the learner does not have to remember", () => {
@@ -574,21 +706,24 @@ describe("wiring", () => {
 	 * Wait until the audit trail stops moving.
 	 *
 	 * A previous test's launch is verified in the background (`outcomePollMs` 5,
-	 * `outcomeTimeoutMs` 100) and appends its row when it is done. A fixed 50 ms here was a
+	 * `outcomeTimeoutMs` 25) and appends its row when it is done. A fixed 50 ms here was a
 	 * bet that the write had landed; on a box running 31 stryker workers the bet loses, the
 	 * late row arrives inside the *next* test and reads as "a spawned row for a learner that
 	 * never existed". Poll the file instead: quiet for two looks means the trail is done.
+	 *
+	 * The dwell is measured against the verifier's own budget, not guessed: a shorter
+	 * `outcomeTimeoutMs` (25 ms here) is a shorter settle, which is why the suite stays
+	 * inside stryker's 15 s per-mutant window instead of spending it waiting.
 	 */
 	const settle = async (): Promise<void> => {
 		// One dwell longer than the verifier's own budget (`outcomePollMs` 5 +
-		// `outcomeTimeoutMs` 100) so a launch still being watched cannot be mistaken for a
-		// finished one, then two quiet looks at the file. Longer than the old 50 ms, never
-		// shorter.
-		await new Promise((resolve) => setTimeout(resolve, 150));
+		// `outcomeTimeoutMs` 25) so a launch still being watched cannot be mistaken for a
+		// finished one, then two quiet looks at the file.
+		await new Promise((resolve) => setTimeout(resolve, 40));
 		const deadline = Date.now() + 5000;
 		let seen = (await readRuns()).length;
 		for (;;) {
-			await new Promise((resolve) => setTimeout(resolve, 25));
+			await new Promise((resolve) => setTimeout(resolve, 5));
 			const now = (await readRuns()).length;
 			if (now === seen) return;
 			seen = now;
@@ -636,7 +771,10 @@ describe("wiring", () => {
 			transcriptPath: () => null,
 			proposalExists: () => true,
 			outcomePollMs: 5,
-			outcomeTimeoutMs: 100,
+			// The verifier's whole budget (`outcomePollMs` 5 + this) is what every negative
+			// assertion waits out, and `settle()` above is sized from it. 25 ms is long enough
+			// for several polls and short enough that the suite fits stryker's window.
+			outcomeTimeoutMs: 25,
 			// The session-file proof a terminal-confirmed launch waits for: a test must not
 			// sit out the real ten minutes.
 			sessionProofMs: 30,
@@ -657,6 +795,21 @@ describe("wiring", () => {
 		await emit("tool_result", boom, ctx);
 		await emit("tool_result", boom, ctx);
 	}
+
+	// A launch path that cannot find its space, or cannot start, would turn every test below
+	// into a wait for a learner that never comes: one bug, twenty timeouts. Fail here, in
+	// milliseconds, and let node cancel the rest. The guard is the first witness to a broken
+	// launcher, which is what a mutation of that path really is.
+	before(async () => {
+		const { emit, api, started } = setup();
+		const { ctx } = learnerCtx();
+		await trip(emit, ctx);
+		const decision = await api.learn("compact", ctx);
+		assert.equal(decision.spawn, true, "a compaction in the fixture space starts a learner, not a skip");
+		await waitFor(() => started.length === 1, 2000, "and the launcher is called, so the wiring below has one");
+		await settle();
+		assert.equal(existsSync(join(scratch, "proposals", "runs.jsonl")), true, "and the attempt is on the trail");
+	});
 
 	test("a quiet compaction starts nothing", async () => {
 		const { emit, ctx, started } = setup();
@@ -704,6 +857,57 @@ describe("wiring", () => {
 		const told = notices.filter((notice) => /no space owns/.test(notice.message));
 		assert.equal(told.length, 1, "told once, in the session");
 		assert.equal(told[0].level, "info");
+	});
+
+	test("an empty, padded or non-string cwd is the process's own folder, and a padded one is trimmed", async () => {
+		// `ctx.cwd` is the session's answer to "where am I". An empty or non-string one is not
+		// a folder, so the process's own directory is used; a padded one is the same folder
+		// with spaces around it, and typing those must not cost the project its learner.
+		const unclaimed = `no space owns ${process.cwd()}, so this compaction teaches nothing`;
+		for (const cwd of ["", "   ", undefined, 42]) {
+			const { emit, api } = setup();
+			const { ctx } = learnerCtx({ cwd });
+			await trip(emit, ctx);
+			const decision = await api.learn("compact", ctx);
+			assert.equal(decision.spawn, false, `${JSON.stringify(cwd)} is not a project`);
+			assert.equal(decision.reason, unclaimed, `and ${JSON.stringify(cwd)} fell back to the process's folder`);
+		}
+
+		const padded = setup();
+		const paddedCtx = learnerCtx({ cwd: `  ${SPACE.project}  ` });
+		await trip(padded.emit, paddedCtx.ctx);
+		await padded.emit("session_compact", { reason: "threshold" }, paddedCtx.ctx);
+		await waitFor(() => padded.started.length === 1, 3000, "a padded cwd is still the project");
+		assert.equal(padded.started[0].launcher.cwd, SPACE.project, "and the learner sits in the project, not in the padding");
+	});
+
+	test("a padded cwd no space owns names the folder without the padding", async () => {
+		// The sentence a person reads has to be a path they can recognise and check, so the
+		// padding they typed is not part of the folder it names.
+		const { emit, api } = setup();
+		const { ctx } = learnerCtx({ cwd: "  /nope  " });
+		await trip(emit, ctx);
+		const decision = await api.learn("compact", ctx);
+		assert.equal(decision.spawn, false);
+		assert.equal(decision.reason, "no space owns /nope, so this compaction teaches nothing");
+	});
+
+	test("a session with no ctx at all is the process's own folder, not a crash", async () => {
+		// The handler is called with whatever pi passes, and a ctx-free evaluation must still
+		// answer with a sentence and a row instead of throwing on the way to the boundary.
+		const { emit, api } = setup();
+		const before = (await readRuns()).length;
+		await emit("tool_result", boom);
+		await emit("tool_result", boom);
+		const line = `no space owns ${process.cwd()}, so this compaction teaches nothing`;
+		const decision = await api.learn("compact", undefined);
+		assert.equal(decision.spawn, false);
+		assert.equal(decision.reason, line);
+		const skipped = (await readRuns()).slice(before).filter((row) => row.kind === "spawn-skipped");
+		assert.equal(skipped.length, 1, "one row, so a compaction that teaches nothing is not silent");
+		assert.equal(skipped[0].reason, line, "the row carries the sentence the person was told");
+		assert.equal(skipped[0].stderr, line, "and the same sentence where every other row keeps its detail");
+		assert.match(skipped[0].ts, /^\d{4}-\d{2}-\d{2}T/, "stamped, so the trail can be ordered");
 	});
 
 	test("a launch that exits 0 without a space is a failure, and nothing else is tried", async () => {
@@ -1080,6 +1284,48 @@ describe("wiring", () => {
 		assert.equal(spawned.launcher, "pane", "the log names the launcher that really ran");
 		assert.equal(spawned.sandboxed, true, "and that the pi inside it ran through the sandbox");
 		assert.equal(spawned.confirmed, "session", "and how the turn was proven");
+	});
+
+	test("a harness learner is a tab too, runs bare, and says so in the row", async () => {
+		// The one worker that may push its own branch is not sandboxed, and the trail has to
+		// say which kind ran: `sandboxed: true` for a bare worker is a lie the reviewer cannot
+		// check. The paths the queue file names are the harness list, joined for reading.
+		const harnessProject = join(scratch, "harness");
+		const dir = join(scratch, "state", "spaces", "hpi");
+		await mkdir(dir, { recursive: true });
+		await writeFile(join(dir, "space.json"), JSON.stringify({ name: "hpi", project: harnessProject, kind: "harness" }), "utf8");
+		const queueDir = join(scratch, "proposals", "queue");
+		try {
+			const { emit, started } = setup();
+			const { ctx } = learnerCtx({ cwd: join(harnessProject, "agent", "extensions") });
+			await trip(emit, ctx);
+			await settle();
+			const before = (await readRuns()).length;
+			await emit("session_compact", { reason: "threshold" }, ctx);
+			const spawned = await waitForRun((row, index) => index >= before && row.kind === "spawned");
+			assert.equal(spawned.space, "hpi", "the space that owns the harness project");
+			assert.equal(spawned.spaceKind, "harness");
+			assert.equal(spawned.sandboxed, false, "a harness learner publishes its own branch, so the pi inside it is bare");
+			assert.equal(spawned.confirmed, "session");
+			// A session in a subfolder still teaches the project: the learner's cwd is the root.
+			assert.equal(started[0].launcher.cwd, harnessProject);
+			assert.ok(!started[0].launcher.argv.includes("--sandbox"), "and nothing sandboxes it");
+
+			// The spec the learner is told to read, by the path the launcher was given.
+			const specPath = started[0].launcher.argv.find((arg) => arg.endsWith(".md"));
+			const body = await readFile(specPath, "utf8");
+			const lines = body.split("\n");
+			assert.ok(
+				lines.includes(`Space: hpi (\`${harnessProject}\`), kind: harness. Your cwd is \`${harnessProject}\`.`),
+				"the spec names the space, the project it teaches and the kind, so the learner does not guess",
+			);
+			assert.ok(
+				lines.includes(`Paths you may touch: ${HARNESS_PATHS.join(", ")} — anything else is refused.`),
+				"and the whole harness list, joined the way a person reads it",
+			);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("one confirmed launch writes exactly one row", async () => {
@@ -1517,7 +1763,10 @@ describe("wiring", () => {
 			const before = (await readRuns()).length;
 			await emit("session_compact", { reason: "threshold" }, ctx);
 			await waitForRun((row, index) => index >= before && row.kind === "spawned");
-			await new Promise((done) => setTimeout(done, 200));
+			// The outcome watch decides inside `outcomeTimeoutMs` (25 ms here); one window plus
+			// a look is all a "no died row" claim has to survive, and waiting longer only
+			// spends the mutant's budget.
+			await new Promise((done) => setTimeout(done, 40));
 			const written = (await readRuns()).slice(before);
 			assert.equal(written.filter((row) => row.kind === "died").length, 0, "a talking learner is not a dead one");
 		} finally {
@@ -3233,17 +3482,40 @@ describe("the publish broker", () => {
 		assert.equal(row?.slug, "learn-1200", "the first look is not a look that is thrown away");
 	});
 
-	test("the watch waits five seconds between looks, not one millisecond", async () => {
+	test("the watch waits five seconds between looks, not one millisecond", async (t) => {
 		// The bound, not a race: an empty queue and a window shorter than the beat means
 		// one look, one five-second wait, then out. A poll of a millisecond would spin
-		// through the window in a few hundred microseconds and return just as null.
+		// through the window in a few microseconds and return just as null.
+		//
+		// The clock is driven by hand (node:test's mock timers) instead of sat out: the same
+		// claim — the beat is `PUBLISH_POLL_MS` and the loop does not spin — costs the suite
+		// no real seconds, which is what keeps this file inside stryker's window.
 		const f = await publishFixture();
+		t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 		const started = Date.now();
-		const row = await watchPublish({ dir: f.dir, run: f.deps.run, record: f.deps.record, windowMs: 700 });
-		const elapsed = Date.now() - started;
+		let done = false;
+		const pending = watchPublish({ dir: f.dir, run: f.deps.run, record: f.deps.record, windowMs: 700 }).then(
+			(row) => {
+				done = true;
+				return row;
+			},
+		);
+		// The first look is filesystem work, so flush the loop until it parks on the beat.
+		for (let i = 0; i < 500 && !done; i += 1) await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(done, false, "an empty queue under a 700 ms window is a wait, not an answer");
+		// One millisecond short of the beat is still a wait: a spinning loop would have
+		// finished here, hundreds of looks deep.
+		t.mock.timers.tick(PUBLISH_POLL_MS - 1);
+		for (let i = 0; i < 500 && !done; i += 1) await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(done, false, `a wait of ${PUBLISH_POLL_MS - 1}ms did not end the watch, so the beat is not shorter`);
+		t.mock.timers.tick(1);
+		const row = await pending;
 		assert.equal(row, null);
 		assert.equal(f.calls.length, 0);
-		assert.ok(elapsed >= 4_000, `the beat is ${PUBLISH_POLL_MS}ms, and this wait lasted ${elapsed}ms`);
+		assert.ok(
+			Date.now() - started >= PUBLISH_POLL_MS,
+			`the beat is ${PUBLISH_POLL_MS}ms, and this wait lasted ${Date.now() - started}ms of the broker's own clock`,
+		);
 	});
 });
 
@@ -3634,7 +3906,10 @@ describe("a launch that ends in a request is published", () => {
 			await fake.emit("tool_result", boom, ctx);
 			await fake.emit("tool_result", boom, ctx);
 			await fake.emit("session_compact", { reason: "threshold" }, ctx);
-			await new Promise((resolve) => setTimeout(resolve, 700));
+			// The broker is only reached from a "proposal" outcome, and this fixture's watch
+			// decides inside its own 100 ms window: one window plus a look is the whole
+			// decision, where a flat 700 ms was seven of them.
+			await new Promise((resolve) => setTimeout(resolve, 130));
 			assert.equal(launched, 1, "the learner started, so this is a death and not a missing launch");
 			assert.equal(published.length, 0, "the proposal is the learner's product, not the request");
 			assert.equal(existsSync(file), true, "so the file stays for the next run");
@@ -3743,6 +4018,21 @@ describe("a launch handed to the host session", () => {
 		}
 	}
 
+	// Same reason as the wiring guard: a broker that cannot resolve a space or start a learner
+	// would make every test below wait for a launch that never happens, and a timeout is not a
+	// kill. Assert the hand-off once, in milliseconds.
+	before(async () => {
+		const file = await writeRequest({ slug: "learn-06-01" });
+		const { fake, ctx } = hostSession();
+		try {
+			await fake.emit("session_start", {}, ctx);
+			await waitFor(() => launched.length === 1, 2000, "a request in the fixture space starts a learner, so the broker below works");
+		} finally {
+			await rm(queueDir(), { recursive: true, force: true });
+			assert.equal(existsSync(file), false, "and the claimed request is gone");
+		}
+	});
+
 	test("the host session writes the evidence and starts the learner the request names", async () => {
 		const file = await writeRequest();
 		const { fake, ctx } = hostSession();
@@ -3805,6 +4095,24 @@ describe("a launch handed to the host session", () => {
 			assert.equal(launched.length, 0, "evidence about a compaction nobody remembers is not a learner");
 			assert.match(stale.stderr, /min old/);
 			assert.equal(existsSync(outside), false, "a stale request is retired, not left to age further");
+		} finally {
+			await rm(queueDir(), { recursive: true, force: true });
+		}
+	});
+
+	test("a request for a folder no space owns is refused in words, and starts nothing", async () => {
+		// The host is a courier: it resolves the space from the request's project and, when no
+		// record owns that folder, it writes a refusal instead of launching into a guess.
+		const gone = join(scratch, "gone");
+		const file = await writeRequest({ slug: "learn-07-21", cwd: gone });
+		const { fake, ctx } = hostSession();
+		try {
+			await fake.emit("session_start", {}, ctx);
+			const refused = await waitForRow((row) => row.kind === "spawn-refused" && row.request === file);
+			assert.equal(refused.slug, "learn-07-21", "the row names the learner that was asked for");
+			assert.equal(refused.status, null, "nothing ran, so there is no exit status");
+			assert.equal(refused.stderr, `no space owns ${gone}, so this compaction teaches nothing`);
+			assert.equal(launched.length, 0, "a folder nobody owns is not a learner");
 		} finally {
 			await rm(queueDir(), { recursive: true, force: true });
 		}
@@ -3906,6 +4214,13 @@ describe("a launch handed to the host session", () => {
 		assert.equal(parse({ ts: "yesterday" }).ok, false);
 		assert.equal(parse({ ts: undefined }).ok, false);
 		assert.equal(parse({ cwd: "relative/project" }).ok, false, "a cwd is absolute or it is a guess about the host's folder");
+		const relative = parse({ cwd: "relative/project" });
+		if (!relative.ok) assert.match(relative.why, /cwd is not an absolute path: "relative\/project"/, "the refusal quotes what was written");
+		const notString = parse({ cwd: 42 });
+		if (!notString.ok) assert.match(notString.why, /cwd is not an absolute path: 42/, "and quotes it even when it is not a string");
+		const padded = parse({ cwd: `  ${SPACE.project}\t` });
+		assert.equal(padded.ok, true, "a cwd with spaces around it is the same folder");
+		if (padded.ok) assert.equal(padded.request.cwd, SPACE.project, "trimmed before it is matched against a space");
 		assert.equal(parse({ cwd: "" }).ok, false);
 		assert.equal(parse({ cwd: undefined }).ok, false);
 		assert.equal(parse({ judged: ["a", 3, null] }).ok === true, true, "a non-string in judged is dropped, not fatal");

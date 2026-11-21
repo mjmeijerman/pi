@@ -612,6 +612,10 @@ export function parseSpawnRequest(raw: string, options: { now: number; ttlMs?: n
 	// Absolute, because an unresolved path is a cwd this side cannot match a space against:
 	// a relative one would be read against the host session's own directory, which is not
 	// the directory the compaction happened in.
+	// Stryker disable next-line StringLiteral: equivalent. If `object.cwd` is not a string the
+	// fallback is not a path either way, so `startsWith("/")` refuses it, and the refusal
+	// quotes `object.cwd` and never this default: "" and any replacement return the same
+	// object, byte for byte.
 	const cwd = typeof object.cwd === "string" ? object.cwd.trim() : "";
 	if (!cwd.startsWith("/")) return { ok: false, why: `cwd is not an absolute path: ${JSON.stringify(object.cwd ?? null)}` };
 	return { ok: true, request: { slug, trigger, queue, proposal, reason, evidence, at, judged, cwd } };
@@ -1816,10 +1820,16 @@ const trimSlashes = (path: string): string => (path.length > 1 ? path.replace(/\
  */
 export function learnerSpace(records: readonly SpaceRecord[], cwd: string): LearnerSpace | null {
 	const here = trimSlashes(String(cwd ?? "").trim());
+	// Stryker disable next-line ConditionalExpression: equivalent. An empty `here` matches no
+	// record — a project that trims to empty is skipped two lines below — so falling through
+	// this guard returns null at the end of the loop anyway.
 	if (!here) return null;
 	let best: LearnerSpace | null = null;
 	let bestLength = -1;
 	for (const record of records) {
+		// Stryker disable next-line StringLiteral: unreachable. `readSpaceRecords` never returns
+		// a record without a project, and a projectless record in a hand-built array is skipped
+		// by the `!project` guard below with either text: the replacement is not a path.
 		const project = trimSlashes(String(record?.project ?? "").trim());
 		if (!project) continue;
 		if (here !== project && !here.startsWith(project === "/" ? "/" : `${project}/`)) continue;
@@ -1828,6 +1838,9 @@ export function learnerSpace(records: readonly SpaceRecord[], cwd: string): Lear
 		if (project.length <= bestLength) continue;
 		bestLength = project.length;
 		best = {
+			// Stryker disable next-line OptionalChaining,StringLiteral: unreachable. Every record
+			// from this machine has a slug (the directory name) and a project, so a record that
+			// reached this line is non-null and its slug is never missing.
 			slug: String(record?.slug ?? ""),
 			kind: record?.kind === "harness" ? "harness" : "project",
 			project,
@@ -1873,11 +1886,20 @@ export async function readSpaceRecords(root: string = spaceRoot()): Promise<Spac
 	}
 	const records: SpaceRecord[] = [];
 	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+		// Stryker disable next-line ConditionalExpression: equivalent. A file's `<name>/space.json`
+		// read fails with ENOTDIR and is swallowed by the read's own catch two lines below, so
+		// the entry is skipped whether the guard is read or not.
 		if (!entry.isDirectory()) continue;
 		let raw: string;
 		try {
+			// Stryker disable next-line StringLiteral: equivalent. An empty encoding is "no
+			// encoding" to node, which returns a Buffer, and `JSON.parse` coerces that Buffer
+			// with the same text: measured, `JSON.parse(readFileSync(p, ""))` is the object.
 			raw = await readFile(join(root, entry.name, "space.json"), "utf8");
 		} catch {
+			// Stryker disable next-line BlockStatement: equivalent. With the `continue` gone,
+			// `raw` is undefined and `JSON.parse(undefined)` throws into the parse catch below,
+			// which skips the same record for the same reason.
 			continue;
 		}
 		let value: Record<string, unknown>;
