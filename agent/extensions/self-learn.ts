@@ -1899,12 +1899,13 @@ export async function readSpaceRecords(root: string = spaceRoot()): Promise<Spac
 			// encoding" to node, which returns a Buffer, and `JSON.parse` coerces that Buffer
 			// with the same text: measured, `JSON.parse(readFileSync(p, ""))` is the object.
 			raw = await readFile(join(root, entry.name, "space.json"), "utf8");
-			// Stryker disable next-line BlockStatement: equivalent. With the `continue` gone,
-			// `raw` is undefined and `JSON.parse(undefined)` throws into the parse catch below,
-			// which skips the same record for the same reason.
+			// Stryker disable BlockStatement: equivalent. With the `continue` gone, `raw` is
+			// undefined and `JSON.parse(undefined)` throws into the parse catch below, which
+			// skips the same record for the same reason.
 		} catch {
 			continue;
 		}
+		// Stryker restore BlockStatement
 		let value: Record<string, unknown>;
 		try {
 			value = JSON.parse(raw) as Record<string, unknown>;
