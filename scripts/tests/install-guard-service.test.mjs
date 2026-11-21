@@ -122,9 +122,8 @@ test('macOS: an upgrade removes the old login item before writing the new name',
 	assert.ok(fs.existsSync(plistPath(home)), 'the new login item was not written');
 	// One line saying what was replaced, naming both: a silent migration is a second guard nobody
 	// can see.
-	assert.match(
-		out.stdout,
-		new RegExp(`^== guard login item: ${LEGACY_GUARD.label} -> ${GUARD_LABEL} \\(`, 'm'),
+	assert.ok(
+		out.stdout.includes(`== guard login item: ${LEGACY_GUARD.label} -> ${GUARD_LABEL} (`),
 		`the upgrade does not say what it replaced:\n${out.stdout}`,
 	);
 });
@@ -139,9 +138,8 @@ test('Linux: an upgrade removes the old unit file before copying the new one', (
 	assert.equal(out.status, 0, out.stderr);
 	assert.equal(fs.existsSync(old), false, 'the old unit is still on disk — an enabled unit beside the new one');
 	assert.ok(fs.existsSync(path.join(home, '.config', 'systemd', 'user', 'pi-guard.service')), 'the new unit was not copied');
-	assert.match(
-		out.stdout,
-		new RegExp(`^== guard unit: ${LEGACY_GUARD.unit} -> ${GUARD_UNIT_NAME} \\(`, 'm'),
+	assert.ok(
+		out.stdout.includes(`== guard unit: ${LEGACY_GUARD.unit} -> ${GUARD_UNIT_NAME} (`),
 		`the upgrade does not say what it replaced:\n${out.stdout}`,
 	);
 });
@@ -163,9 +161,8 @@ test('Windows: an upgrade deletes the old task entry before registering pi-guard
 	assert.ok(removed >= 0, `the old task was not removed:\n${out.stdout}`);
 	assert.ok(created >= 0, 'no /Create line');
 	assert.ok(removed < created, 'the new entry was registered before the old one was removed');
-	assert.match(
-		out.stdout,
-		new RegExp(`^== guard task: ${LEGACY_GUARD.taskName} -> pi-guard \\(`, 'm'),
+	assert.ok(
+		out.stdout.includes(`== guard task: ${LEGACY_GUARD.taskName} -> pi-guard (`),
 		`the upgrade does not say what it replaced:\n${out.stdout}`,
 	);
 });
@@ -178,7 +175,7 @@ test('a fresh install removes no old entry, because there is none', (t) => {
 	const linux = install(home, 'linux');
 	assert.doesNotMatch(linux.stdout, /^guard unit: .* -> /m, linux.stdout);
 	const win = install(home, 'win32', ['--dry-run'], { PI_GIT_BASH: '/usr/bin/bash' });
-	assert.doesNotMatch(win.stdout, new RegExp(`schtasks /Delete /TN ${LEGACY_GUARD.taskName}`), win.stdout);
+	assert.ok(!win.stdout.includes(`/Delete /TN ${LEGACY_GUARD.taskName}`), win.stdout);
 });
 
 test('Windows: the entry is started after it is registered, in that order', (t) => {
