@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Worker mode: no network at all, for running untrusted repository scripts.
+# Never for an agent that needs a model: no network means no model.
+#
+# Specs and reports are bound read-write for the same reason as in pi-sandboxed, and both the pi
+# path and the sandbox runner are resolved at runtime for the same reason: this file carries no
+# home directory.
+#
+# Windows: no bwrap, no pisandbox, so this mode refuses with the same honest line as
+# pi-sandboxed — a no-net worker that silently ran bare would be the opposite of what it asks for.
+# The WSL2 entry point is the marked place in bin/pi-sandboxed.
+set -uo pipefail
+here=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)
+root=$(cd -- "$here/.." && pwd)
+# This script's own tree is the workspace, exactly as in bin/pi-sandboxed: no PI_BOSS_ROOT override,
+# because a stale one would seed the writable trees from a directory that is being deleted.
+# shellcheck source=bin/pi-resolve.sh
+. "$here/pi-resolve.sh"
+
+win=0
+pi_is_win && win=1
+if [ "$win" = 1 ]; then
+	printf 'pi-nonet: no sandbox on native Windows; run pi under WSL2 (docs/install.md#sandboxing-on-windows)\n' >&2
+	exit 1
+fi
+
+pi_resolve || exit 127
+export PATH="${PATH:-/usr/local/bin:/usr/bin:/bin}:$PI_RESOLVED_DIR"
+
+# This session is the worker, not the boss: the boss-side write guard returns early for it.
+# The sandbox inherits the environment, so the marker survives into it.
+export PI_WORKER=1
+sandbox=${PI_BOSS_PISANDBOX:-${HOME:-}/.pi/scripts/pisandbox}
+if [ ! -x "$sandbox" ]; then
+	printf 'pi-nonet: no sandbox runner at %s (install the harness, or set PI_BOSS_PISANDBOX)\n' "$sandbox" >&2
+	exit 127
+fi
+seeds=()
+for d in "$root/specs" "$root/reports"; do
+	[ -d "$d" ] && seeds+=(--rw "$d")
+done
+exec "$sandbox" --no-net "${seeds[@]+"${seeds[@]}"}" -- "$@"

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Worker mode: bare. Host access, no sandbox, no network restrictions.
+# Only when Jev says the work needs what the sandbox refuses.
+#
+# PI_BARE says "not sandboxed"; PI_WORKER says "this session is the worker, not the boss", which
+# is what the boss-side write guard reads to let the worker write in the workspace.
+#
+# Where pi is lives in bin/pi-resolve.sh, shared with the two sandboxed modes: this file carries no
+# home directory, so the same wrapper starts pi on Linux, macOS and Git Bash on Windows.
+set -uo pipefail
+here=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)
+# shellcheck source=bin/pi-resolve.sh
+. "$here/pi-resolve.sh"
+pi_resolve || exit 127
+export PI_BARE=1 PI_WORKER=1
+pi_exec "$@"

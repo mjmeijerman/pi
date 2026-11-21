@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# jev — thin launcher so ~/.local/bin/jev can be a symlink to a file without a .mjs suffix.
+# bash is resolved at runtime, before anything else runs: see bin/shell-resolve.sh. It re-execs this
+# script under a bash it finds when the shell that started it is not bash (cmd.exe, PowerShell, or a
+# minimal Git Bash with only sh.exe), and says so when there is none. A copy a Windows shim starts is
+# already bash and needs no resolver beside it; a shell that is not bash and has none is stopped here.
+# shellcheck source=bin/shell-resolve.sh
+shell_dir=$(dirname -- "$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")")
+if [ -f "$shell_dir/shell-resolve.sh" ]; then
+	. "$shell_dir/shell-resolve.sh"
+elif [ -z "${BASH_VERSION:-}" ]; then
+	printf '%s: no shell-resolve.sh next to %s — it is what finds bash: set PI_GIT_BASH or run this under bash\n' "${0##*/}" "$0" >&2
+	exit 127
+fi
+
+set -uo pipefail
+here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+exec node "$here/jev.mjs" "$@"
