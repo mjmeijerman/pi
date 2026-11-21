@@ -107,6 +107,23 @@ function runningPi(overrides = {}) {
 	});
 }
 
+/**
+ * A sandboxed Boss as the machine actually shows it: `argv[0]` is `bash`, and `pi` is four
+ * words further along. `isShellArgv(argv[0])` called this a recovered shell, and the resume line
+ * was pasted into a live Boss.
+ */
+function wrappedPi(overrides = {}) {
+	return recoveredTerminal({
+		argv: ["bash", "/home/mark/.pi/sandbox/pi-sandbox.sh", "--", "pi", "--session", sessionPath],
+		foreground: {
+			argv: ["bash", "/home/mark/.pi/sandbox/pi-sandbox.sh", "--", "pi", "--session", sessionPath],
+			name: "bash",
+			pid: process.pid,
+		},
+		...overrides,
+	});
+}
+
 function writeState(terminal, extra = {}) {
 	writeFileSync(stateFile, JSON.stringify({ terminals: { t3: terminal }, known: ["t3"], ...extra }));
 }
@@ -394,4 +411,54 @@ test("no terminal list means no pruning", () => {
 	const out = run();
 	assert.match(out, /skip pruning/);
 	assert.equal(existsSync(join(stateRoot, "t3.json")), true);
+});
+
+// ------------------------------------------------ a wrapped pi is busy, not a shell --
+
+test("a sandboxed Boss that reads as `bash` is busy, and nothing is typed into it", () => {
+	writeState(wrappedPi());
+	writeEntry();
+
+	const out = run([], { PI_HERDR_RESUME_ENTRY_MS: "20000" });
+	assert.equal(sends().length, 0, "a live Boss must never be sent an exec line");
+	assert.match(out, /terminal is busy \(foreground bash \/home\/mark\/\.pi\/sandbox\/pi-sandbox\.sh/);
+});
+
+test("hc's own status.app is a second witness: `pi` there is busy too", () => {
+	// The foreground is a plain shell and the app still says pi: one witness saw a live Boss
+	// while the argv said nothing.
+	writeState(recoveredTerminal({ status: { app: "pi", state: "done" }, foreground: { argv: ["/usr/bin/zsh"], name: "zsh", pid: process.pid } }));
+	writeEntry();
+
+	const out = run([], { PI_HERDR_RESUME_ENTRY_MS: "20000" });
+	assert.equal(sends().length, 0);
+	assert.match(out, /terminal is busy \(app pi\)/);
+});
+
+test("a paste that lands in a wrapped pi marks the entry for this boot, and is not retried", () => {
+	// The recovered shell swallows the line, and what comes back is a wrapped pi. The first run
+	// is today's two attempts; the second run must not type a third.
+	writeState(recoveredTerminal(), { afterSend: wrappedPi() });
+	writeEntry();
+
+	const first = run([], { PI_HERDR_RESUME_START_MS: "200" });
+	assert.equal(sends().length, 2);
+	assert.match(first, /failed terminal t3 \(worker\): the line was typed into something that is not a shell/);
+	assert.match(first, /marked for this boot/);
+	const saved = JSON.parse(readFileSync(join(stateRoot, "t3.json"), "utf8"));
+	assert.equal(saved.restored_at, undefined, "nothing was restored");
+	assert.match(saved.attempted_boot_id, /./);
+
+	const second = run([], { PI_HERDR_RESUME_START_MS: "200" });
+	assert.equal(sends().length, 2, "the same boot must not paste the line again");
+	assert.match(second, /typed into a program that was not a shell earlier in this boot/);
+});
+
+test("a swallowed line in a real shell is still retried on the next pass", () => {
+	// The first-run-prompt case is safe to retype, so it must not be marked for the boot.
+	writeState(recoveredTerminal(), { afterSend: runningPi(), ignoreSends: 99 });
+	writeEntry();
+
+	run([], { PI_HERDR_RESUME_START_MS: "200" });
+	assert.equal(JSON.parse(readFileSync(join(stateRoot, "t3.json"), "utf8")).attempted_at, undefined);
 });

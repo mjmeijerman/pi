@@ -137,6 +137,14 @@ mk_session() { # <folder-slug> <file> <cwd> <mtime-epoch>
 	touch -d "@$4" "$dir/$2"
 	printf '%s' "$dir/$2"
 }
+# The same, plus the first user message — the only thing that says whose conversation it is.
+mk_session_msg() { # <folder-slug> <file> <cwd> <mtime-epoch> <first-user-text>
+	local path
+	path=$(mk_session "$1" "$2" "$3" "$4")
+	node -e 'process.stdout.write(JSON.stringify({ type: "message", id: "m1", message: { role: "user", content: [{ type: "text", text: process.argv[1] }] } }) + "\n")' "$5" >>"$path"
+	touch -d "@$4" "$path"
+	printf '%s' "$path"
+}
 resume_entry() { # <terminal> <space-id> <session> <cwd> <argv-json>
 	node -e '
 		const fs = require("fs"), [dir, terminal, space, session, cwd, argv] = process.argv.slice(1);
@@ -225,6 +233,43 @@ if [ "$(printf '%s\n' "$(herdr)" | grep -o -- '--session' | wc -l)" -eq 1 ]; the
 	pass 'exactly one --session: the argv never carries two'
 else
 	fail 'the argv carries more than one --session' "$(herdr)"
+fi
+
+# --------------------------- a closed space comes back with its conversation --
+new_case 'a rebuilt space resumes the newest session, and never a dispatch transcript'
+# The worker's transcript is newer than the Boss's, and it shares the Boss's folder: the first
+# user message is what tells them apart.
+BOSSSESS=$(mk_session_msg --proj-boss-- 2026-03-02T00-00-00Z_boss.jsonl "$PROJ" 1772409600 'what did we land today?')
+DISPATCH=$(mk_session_msg --proj-worker-- 2026-05-01T00-00-00Z_worker.jsonl "$PROJ" 1777593600 '<hc from="t1hb">read the spec and do it</hc>')
+make_record closed closed "$PROJ" sp-closed-old
+spaces '{"spaces":[]}'
+clear_log
+run "$GUARD" --once --space closed
+if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'the pass failed' "$OUT"; fi
+if grep -qF "do space.new --name closed --folder $PROJ --tab Boss --argv [\"$BARE\",\"--session\",\"$BOSSSESS\"] --focus false" "$HERDR_LOG"; then
+	pass 'a rebuilt space opens the Boss on the newest session of its folder'
+else
+	fail 'the rebuilt Boss tab carries no session' "$(herdr)"
+fi
+if printf '%s\n' "$(herdr)" | grep -qF -- "$DISPATCH"; then
+	fail 'a dispatch transcript was opened as the Boss' "$(herdr)"
+else
+	pass 'a finished worker session in the same folder is never picked'
+fi
+if [ "$(field "$(record closed)" boss_argv)" = "[\"$BARE\",\"--session\",\"$BOSSSESS\"]" ]; then
+	pass 'the record keeps the argv the tab was opened with, session included'
+else
+	fail 'the record lost the session it opened' "$(cat "$(record closed)")"
+fi
+if printf '%s\n' "$OUT" | grep -qF 'Boss tab resumes session'; then pass 'the log names the session it picked'; else fail 'the pick is not in the log' "$OUT"; fi
+# The second rebuild reads the argv the record kept — still exactly one `--session`, no second.
+spaces '{"spaces":[]}'
+clear_log
+run "$GUARD" --once --space closed
+if [ "$(printf '%s\n' "$(herdr)" | grep -o -- '--session' | wc -l)" -eq 1 ]; then
+	pass 'a rebuild of a record that already carries a session adds no second one'
+else
+	fail 'the second rebuild carries more than one --session' "$(herdr)"
 fi
 
 # ------------------------------------------------- the Boss is bare: space new's default --

@@ -36,11 +36,15 @@ fi
 #      `bin/pi-bare` on the pass that reads it, and said once.
 #   1c. a Boss is never resumed into an empty session: the tab is opened with the newest session
 #      whose own `cwd` is the record's project, found by folder, not by the terminal id an entry
-#      still remembers from before a reboot.
+#      still remembers from before a reboot. A session whose first user message is a dispatch
+#      (`<hc from="…`) is somebody's worker, never the Boss, and is skipped — every worker shares
+#      the Boss's folder, so the newest file in it is often the last learner to finish.
 #   2. the space is there but its Boss tab is not → respawn that tab with `--session <the newest
 #      session for the record's project>` whenever one exists: the same conversation, and the guard
 #      types nothing into a terminal itself. A tab that is there is left alone — that is the "never
-#      type twice in one boot" rule, kept by not typing at all.
+#      type twice in one boot" rule, kept by not typing at all. Rebuilding (1) and respawning (2)
+#      build the Boss's argv with the same helper: two paths that drifted apart left a closed space
+#      coming back as an idle Boss while a killed one resumed.
 #   3. a worker's tab is not the guard's business: a slug in the space's `delegations.json` is
 #      resurrected only by `delegate wait --forever`, so a finished worker's tab stays closed and a
 #      recorded tab carrying a worker's name is never opened here.
@@ -274,6 +278,11 @@ normalise_boss_argv() {
 # by folder, never by terminal id: the resume entry that carries a dead terminal's id is exactly
 # what made a Boss come back as an empty `pi` (the session was never opened). Nothing found is an
 # empty answer, and the caller then falls back to the resume entry.
+#
+# A session whose first user message is a dispatch — `<hc from="…"` is how `bin/delegate` and
+# `agent-pane.sh` hand a worker its spec — is not the Boss's transcript. Every learner and worker
+# shares the Boss's project folder, so one that finished after the Boss is the newest match, and a
+# rebuild would open the Boss on a worker's conversation.
 newest_session() {
 	local project=${1:-}
 	[ -n "$project" ] || return 0
@@ -282,6 +291,26 @@ newest_session() {
 		const fs = require("fs"), path = require("path");
 		const dir = process.env.PI_SESSIONS_DIR || "", want = process.env.SESSION_PROJECT || "";
 		if (!dir || !want) process.exit(0);
+		const DISPATCH = /^\s*<hc\s+from=/;
+		// The first user message, read line by line until it turns up: a session starts with a few
+		// header lines, and a whole 8 KiB head is not always enough to reach the first prompt.
+		function firstUserText(p) {
+			let text = "";
+			const lines = fs.readFileSync(p, "utf8").split("\n");
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				let o;
+				try { o = JSON.parse(line); } catch { continue; }
+				if (!o || o.type !== "message" || !o.message || o.message.role !== "user") continue;
+				const c = o.message.content;
+				if (typeof c === "string") { text = c; break; }
+				if (Array.isArray(c)) {
+					text = c.filter((b) => b && b.type === "text").map((b) => String(b.text || "")).join("");
+					break;
+				}
+			}
+			return text;
+		}
 		let folders = [];
 		try { folders = fs.readdirSync(dir); } catch { process.exit(0); }
 		let best = null;
@@ -300,6 +329,7 @@ newest_session() {
 					cwd = String(JSON.parse(head).cwd || "");
 				} catch { continue; }
 				if (cwd !== want) continue;
+				try { if (DISPATCH.test(firstUserText(p))) continue; } catch { continue; }
 				let st;
 				try { st = fs.statSync(p); } catch { continue; }
 				if (!best || st.mtimeMs >= best.at) best = { at: st.mtimeMs, p };
@@ -307,6 +337,40 @@ newest_session() {
 		}
 		if (best) process.stdout.write(best.p);
 	'
+}
+
+# boss_session <slug> <project> — the session a Boss tab opens with: the newest for the record's
+# project, or the path a resume entry names when the folder holds none.
+boss_session() {
+	local slug=$1 project=$2 session entry
+	session=$(newest_session "$project")
+	if [ -z "$session" ]; then
+		entry=$(resume_entry "$slug")
+		[ -z "$entry" ] || session=$(printf '%s' "$entry" | field_of session_path)
+	fi
+	printf '%s' "$session"
+}
+
+# boss_argv_with_session <slug> <boss> <session> — the argv both resume paths open the Boss tab
+# with: the record's own command (never a resume entry's, and never a wrapper), exactly one
+# `--session`, and the newest session when there is one. One helper for both paths because the
+# two drifting apart is the bug: `restore_boss` resumed the conversation and `rebuild_space` did
+# not, so a closed space came back as a brand-new idle Boss.
+boss_argv_with_session() {
+	local base
+	base=$(boss_argv_json "${1:-}" "${2:-Boss}")
+	BASE=$base BARE=$PI_BARE SESSION=${3:-} node -e '
+		let a = [];
+		try { a = JSON.parse(process.env.BASE || "[]"); } catch {}
+		if (!Array.isArray(a) || !a.length) a = process.env.BARE ? [process.env.BARE] : [];
+		const out = [];
+		for (let i = 0; i < a.length; i++) {
+			if (a[i] === "--session") { i++; continue; }
+			out.push(a[i]);
+		}
+		const s = process.env.SESSION || "";
+		if (s) out.push("--session", s);
+		process.stdout.write(JSON.stringify(out));'
 }
 
 # boss_argv_json <slug> <boss> — the argv the Boss tab is opened with, as JSON: the record's own, or
@@ -514,7 +578,7 @@ resume_sweep() {
 # rebuild_space <slug> <name> <boss> — the space itself is gone: make it again exactly as the
 # record says, then the tabs the record lists.
 rebuild_space() {
-	local slug=$1 name=$2 boss=$3 project out spaceid extras tname tfolder targv count bossargv
+	local slug=$1 name=$2 boss=$3 project out spaceid extras tname tfolder targv count bossargv session
 	project=$(space_field "$slug" project)
 	extras=$(record_extras "$slug" "$boss")
 	count=1
@@ -522,7 +586,11 @@ rebuild_space() {
 	# The Boss tab's own argv is passed on to `space.new`, the same way `bin/space new` does it: a
 	# rebuilt Boss tab that comes back as a bare shell is the thing this record exists to prevent,
 	# and a record that keeps none is opened bare rather than sandboxed.
-	bossargv=$(boss_argv_json "$slug" "$boss")
+	# The command is built by the same helper `restore_boss` uses, session included: a space a
+	# person closed came back as an idle Boss on a new session while a killed Boss resumed, and
+	# that difference was this path not asking for a session at all.
+	session=$(boss_session "$slug" "$project")
+	bossargv=$(boss_argv_with_session "$slug" "$boss" "$session")
 	if [ -n "$bossargv" ]; then
 		out=$("$HERDR_APP" do space.new --name "$name" --folder "$project" --tab "$boss" --argv "$bossargv" --focus false 2>&1) || {
 			say "harness: space.new failed for $name: $out"
@@ -535,6 +603,12 @@ rebuild_space() {
 		}
 	fi
 	say "harness: space gone, recreating with $count tabs"
+	# Which conversation came back, so the choice is visible and a wrong one is one line away.
+	if [ -n "$session" ]; then
+		say "harness: $name: Boss tab resumes session $session"
+	else
+		say "harness: $name: no session to resume, Boss tab starts a new one"
+	fi
 	spaceid=$(printf '%s' "$out" | field_of space)
 	# The argv the tab was opened with is what the record now keeps for it.
 	record_boss_tab "$slug" "$bossargv"
@@ -554,36 +628,20 @@ rebuild_space() {
 
 # restore_boss <slug> <name> <boss> <space> — the space is there and its Boss tab is not.
 restore_boss() {
-	local slug=$1 name=$2 boss=$3 space="$4" project spaceid entry base session argv
+	local slug=$1 name=$2 boss=$3 space="$4" project spaceid session argv
 	project=$(space_field "$slug" project)
 	spaceid=$(printf '%s' "$space" | field_of id)
-	entry=$(resume_entry "$slug")
 	# The session is found by the record's project folder, not by the terminal an entry happens to
 	# name: after a reboot the parked tab carries the dead terminal's id, and a stale id is not a
 	# reason to hand the Boss an empty session when the real conversation is on disk.
-	session=$(newest_session "$project")
-	if [ -z "$session" ] && [ -n "$entry" ]; then
-		session=$(printf '%s' "$entry" | field_of session_path)
-	fi
+	session=$(boss_session "$slug" "$project")
 	# The Boss's command is the record's, never the resume entry's. An entry written before the
 	# bare-Boss rule carries `["pi"]` — or a sandbox wrapper — and using it as the base hands the
 	# person a sandboxed Boss on every resume, which `record_boss_tab` then spreads into the record.
 	# A flag in an entry is the same stale trust as an interpreter in an entry, so the entry says
 	# nothing about the command either. It is only asked for a session path when the folder has none.
-	base=$(boss_argv_json "$slug" "$boss")
-	# One `--session`, and the newest one: an argv that already carried one is not given a second.
-	argv=$(BASE=$base BARE=$PI_BARE SESSION=$session node -e '
-		let a = [];
-		try { a = JSON.parse(process.env.BASE || "[]"); } catch {}
-		if (!Array.isArray(a) || !a.length) a = process.env.BARE ? [process.env.BARE] : [];
-		const out = [];
-		for (let i = 0; i < a.length; i++) {
-			if (a[i] === "--session") { i++; continue; }
-			out.push(a[i]);
-		}
-		const s = process.env.SESSION || "";
-		if (s) out.push("--session", s);
-		process.stdout.write(JSON.stringify(out));')
+	# One `--session`, and the newest one: the helper drops one the record already carried.
+	argv=$(boss_argv_with_session "$slug" "$boss" "$session")
 	if tab_new "$spaceid" "$boss" "$project" "$argv" >/dev/null 2>&1; then
 		if [ -n "$session" ]; then
 			say "harness: Boss tab resumed from session $session"

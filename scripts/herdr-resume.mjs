@@ -20,9 +20,14 @@
 //
 // It touches no terminal that never held pi: an entry only exists because a pi
 // session ran there. It never leaves two pi in one tab: a terminal whose
-// foreground is not a shell is skipped, and every action is recorded in the
-// entry so a second run in the same boot is a no-op. It never reads or writes
-// terminal output: no screen capture, no pane history, no scrollback.
+// foreground carries a pi launcher *anywhere* in its argv is skipped — a
+// sandboxed Boss reads as `bash …/pi-sandbox.sh -- pi …`, so `argv[0]` alone
+// called a live Boss a shell and typed `exec …` into it — and hc's own
+// `status.app` is asked as a second witness. That skip and every other action
+// are recorded in the entry, so a second run in the same boot is a no-op; a
+// line that was typed into something which turned out not to be a shell marks
+// the entry for the boot instead of being retried on every pass. It never reads
+// or writes terminal output: no screen capture, no pane history, no scrollback.
 //
 // It also prunes the map instead of walking it forever: the core's terminal
 // list is asked once, and an entry whose terminal the core has never heard of
@@ -45,6 +50,14 @@ import { basename, join } from "node:path";
 
 /** Mirrors `isShellArgv` in agent/extensions/herdr-resume-map.ts. */
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "nu", "pwsh", "powershell", "elvish", "xonsh"]);
+
+/**
+ * Every word that means a pi session is the thing in the terminal: the bare launcher, the
+ * sandbox wrappers `install.sh` puts on PATH, and `sandbox/pi-sandbox.sh` by name. A sandboxed
+ * Boss is started as `bash ~/.pi/sandbox/pi-sandbox.sh -- pi --session …`, so `argv[0]` says
+ * `bash` and only the *whole* argv says `pi` — that is how `exec …` was typed into a live Boss.
+ */
+const PI_LAUNCHERS = new Set(["pi", "pi-bare", "pi-sandboxed", "pisandbox", "pi-sandbox.sh"]);
 
 const env = process.env;
 const home = env.HOME ?? "";
@@ -101,6 +114,40 @@ function isShellArgv(argv) {
 			.toLowerCase()
 			.replace(/\.exe$/, ""),
 	);
+}
+
+/** One word of an argv, as the kernel would name the program: no folder, no `.exe`. */
+function programName(word) {
+	return basename(String(word ?? ""))
+		.toLowerCase()
+		.replace(/\.exe$/, "");
+}
+
+/**
+ * Does any word of this argv name a pi launcher? The whole argv, not `argv[0]`: a sandboxed Boss
+ * reads as `["bash", "…/pi-sandbox.sh", "--", "pi", "--session", …]`, and `argv[0]` alone
+ * called that a plain shell.
+ */
+function isPiArgv(argv) {
+	return Array.isArray(argv) && argv.some((word) => PI_LAUNCHERS.has(programName(word)));
+}
+
+/**
+ * The reason a terminal is busy because pi is in it, or `""`. Two witnesses, because either one
+ * alone was fooled: the whole foreground argv (a wrapper in front of pi), and hc's own `status.app`
+ * — a live Boss answered `status {app: "pi"}` while its `foreground.argv[0]` was `bash`.
+ */
+function piWitness(facts) {
+	const foreground = facts?.foreground?.argv;
+	if (isPiArgv(foreground)) return `foreground ${foreground.join(" ")}`;
+	const app = programName(facts?.status?.app ?? facts?.app ?? "");
+	if (PI_LAUNCHERS.has(app)) return `app ${app}`;
+	return "";
+}
+
+/** A plain shell at a prompt: recovery's outcome, and the only thing safe to type into. */
+function isQuietShell(facts) {
+	return isShellArgv(facts?.foreground?.argv) && piWitness(facts) === "";
 }
 
 /** A word as the recovered shell should read it. */
@@ -175,7 +222,9 @@ function waitForTerminal(terminal, deadline) {
 		if (next) {
 			facts = next;
 			if (facts.state !== "live") return facts;
-			if (isShellArgv(facts.foreground?.argv)) return facts;
+			// A wrapped pi (`bash …/pi-sandbox.sh -- pi …`) reads as a shell by `argv[0]` and is
+			// a live Boss: returning here is what let a resume line be typed into one.
+			if (isQuietShell(facts)) return facts;
 			if (runningProgram(facts)) return facts;
 		}
 		if (Date.now() >= deadline) return facts;
@@ -275,6 +324,18 @@ function markRestored(path, entry, bootId) {
 	renameSync(temp, path);
 }
 
+/**
+ * A paste that landed in something which was not a shell. Not `restored_at` (nothing was restored)
+ * and not left unmarked either: the entry would be typed into the same live program on every
+ * guard pass. The mark is per boot, so the next boot tries again.
+ */
+function markAttempted(path, entry, bootId) {
+	const next = { ...entry, attempted_at: new Date().toISOString(), attempted_boot_id: bootId };
+	const temp = `${path}.${process.pid}.tmp`;
+	writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`);
+	renameSync(temp, path);
+}
+
 function main() {
 	const entries = readEntries();
 	if (entries.length === 0) {
@@ -325,6 +386,10 @@ function main() {
 			log(`skip ${where}: already restored in this boot at ${entry.restored_at}`);
 			continue;
 		}
+		if (boot && entry.attempted_boot_id === boot) {
+			log(`skip ${where}: typed into a program that was not a shell earlier in this boot at ${entry.attempted_at}`);
+			continue;
+		}
 
 		const facts = waitForTerminal(terminal, Date.now() + entryMs);
 		if (!facts) {
@@ -336,6 +401,12 @@ function main() {
 		}
 		if (facts.state !== "live") {
 			log(`skip ${where}: terminal is ${facts.state}`);
+			continue;
+		}
+		const busy = piWitness(facts);
+		if (busy) {
+			// A live pi, whoever wraps it: one paste into a person's Boss is the bug.
+			log(`skip ${where}: terminal is busy (${busy})`);
 			continue;
 		}
 		if (!isShellArgv(facts.foreground?.argv)) {
@@ -378,6 +449,14 @@ function main() {
 			}
 		}
 		if (!started) {
+			const after = hcJson(["get", terminal, "--json"]);
+			if (after && !isQuietShell(after)) {
+				// The line went into something that was not a shell — a live program that
+				// ignores pasted text. Marked for this boot, never retried on every pass.
+				log(`failed ${where}: the line was typed into something that is not a shell (${piWitness(after) || (after.foreground?.argv ?? []).join(" ")}), marked for this boot`);
+				markAttempted(path, entry, boot);
+				continue;
+			}
 			log(`failed ${where}: nothing started after two attempts, entry left unmarked`);
 			continue;
 		}
