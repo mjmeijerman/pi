@@ -17,7 +17,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+	GUARD_LABEL,
 	GUARD_SPACE_NAME,
+	GUARD_TASK_NAME,
 	guardDoor,
 	guardStartCommand,
 	spaceIdIn,
@@ -51,14 +53,14 @@ function recorder() {
 
 test('Windows: the start is schtasks /Run on the absolute exe, after /Create', () => {
 	const start = guardStartCommand({ platform: 'win32' });
-	assert.deepEqual(start.args, ['/Run', '/TN', 'big-boss-pi-guard']);
+	assert.deepEqual(start.args, ['/Run', '/TN', GUARD_TASK_NAME]);
 	assert.match(start.exe, /schtasks\.exe$/, 'a bare schtasks goes through cmd.exe');
-	assert.equal(start.program, 'schtasks /Run /TN big-boss-pi-guard');
+	assert.equal(start.program, `schtasks /Run /TN ${GUARD_TASK_NAME}`);
 });
 
 test('macOS: the start is launchctl kickstart -k on the label that was loaded', () => {
 	const start = guardStartCommand({ platform: 'darwin', uid: 501 });
-	assert.deepEqual(start.args, ['kickstart', '-k', 'gui/501/dev.herdr.big-boss-pi-guard']);
+	assert.deepEqual(start.args, ['kickstart', '-k', `gui/501/${GUARD_LABEL}`]);
 	assert.equal(start.exe, 'launchctl');
 });
 
@@ -131,7 +133,7 @@ test('a start that fails does not abort, and prints the door', async () => {
 		assert.ok(r.lines.includes(line), `missing door line: ${line}`);
 	}
 	// The point of the door: the task, the guard's own log, the app.
-	assert.ok(r.lines.some((l) => l.includes('schtasks /Query /TN big-boss-pi-guard /V /FO LIST')));
+	assert.ok(r.lines.some((l) => l.includes(`schtasks /Query /TN ${GUARD_TASK_NAME} /V /FO LIST`)));
 	assert.ok(r.lines.some((l) => l.includes('state\\guard.log')));
 	assert.ok(r.lines.some((l) => l.includes('herdr-app ls')));
 });
@@ -146,7 +148,7 @@ test('an app that is not running passes with the "when Herdr starts" line', asyn
 		probe: () => ({ running: false, id: null }),
 		out: r.out,
 	});
-	assert.deepEqual(r.calls, [['launchctl', 'kickstart', '-k', 'gui/501/dev.herdr.big-boss-pi-guard']]);
+	assert.deepEqual(r.calls, [['launchctl', 'kickstart', '-k', `gui/501/${GUARD_LABEL}`]]);
 	assert.equal(verdict.state, 'app-down');
 	assert.ok(
 		r.lines.some((l) => /registered and started — Herdr is not running yet/.test(l)),
@@ -197,6 +199,6 @@ test('a dry run plans the start and starts nothing', async () => {
 	const verdict = await startAndVerifyGuard({ platform: 'win32', piHome: 'C:\\b', dry: true, run: r.run, probe: () => ({ running: true, id: null }), out: r.out });
 	assert.equal(verdict.state, 'dry');
 	assert.deepEqual(r.calls, []);
-	assert.ok(r.lines.includes('   start: schtasks /Run /TN big-boss-pi-guard'));
+	assert.ok(r.lines.includes(`   start: schtasks /Run /TN ${GUARD_TASK_NAME}`));
 	assert.ok(r.lines.includes('   [dry-run] not started'));
 });

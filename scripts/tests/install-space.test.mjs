@@ -16,10 +16,11 @@
 // PATH entries that carry a `herdr-app`, which is the same machine without the
 // app rather than a mocked absence.
 //
-// The last test is the retirement itself: the installer and its docs may not
-// name the clone any more. `big-boss-pi-guard` is allowed by name — it is the
-// identity of the login entry every machine already has registered, not the
-// workspace, and renaming it would orphan that registration.
+// The install half of the retirement — no step and no doc points at the checkout
+// that is going away — used to be a test here, over this file's own list of steps
+// and docs. It is the one retirement test in scripts/tests/ now: every tracked
+// file, with the few names that must stay allow-listed by path and a reason. A
+// second, narrower copy of that claim is a copy that can disagree.
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -162,32 +163,3 @@ test('without herdr-app the install still exits 0 and prints the by-hand command
 	assert.equal(fs.existsSync(RECORD(home)), false, 'a record was written with no app to open the space in');
 });
 
-test('no step, and no doc, names the retired workspace clone', () => {
-	// The installer and the docs a person reads; `big-boss-pi-guard` is the one
-	// allowed spelling, and it is stripped before the search rather than listed
-	// per file, so a new entry name cannot hide the workspace behind it.
-	const files = [
-		'install.mjs',
-		'install.sh',
-		'setup.mjs',
-		'setup.sh',
-		'setup.ps1',
-		'INSTALL.md',
-		'README.md',
-		'docs/install.md',
-		'scripts/install-lib.mjs',
-		'scripts/verify-install.mjs',
-	];
-	const hits = [];
-	for (const file of files) {
-		const full = path.join(ROOT, file);
-		if (!fs.existsSync(full)) continue;
-		fs.readFileSync(full, 'utf8')
-			.replaceAll('big-boss-pi-guard', '')
-			.split('\n')
-			.forEach((line, i) => {
-				if (line.includes('big-boss-pi')) hits.push(`${file}:${i + 1}: ${line.trim()}`);
-			});
-	}
-	assert.deepEqual(hits, [], `the retired workspace is still named — the install must not clone anything:\n${hits.join('\n')}`);
-});

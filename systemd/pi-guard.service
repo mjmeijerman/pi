@@ -1,11 +1,13 @@
-# big-boss-pi-guard.service — the space supervisor, started at login.
+# pi-guard.service — the space supervisor, started at login.
 #
 # `%h/.pi/bin/guard` reads the recorded spaces in `~/.pi/state/spaces/` and keeps
 # them alive: a space that is gone is rebuilt from its record, a Boss tab that is
-# gone is resumed from its session, and nothing is ever closed or renamed. It is
-# not one workspace's keeper any more — the old single-space copy that knew only
-# `big-boss-pi` is retired and is not installed (Radar Vol. 35 blip 20, stateful
-# guardrails: a promise that survives a restart beats one a person repeats).
+# gone is resumed from its session, and nothing is ever closed or renamed. The
+# unit is named after the program, not after a workspace: it supervises every
+# recorded space, and it predates the checkouts it outlives (Radar Vol. 35 blip
+# 20, stateful guardrails: a promise that survives a restart beats one a person
+# repeats). An install that finds the old name registered disables and removes
+# it first — two login entries running one guard race on the same records.
 #
 # Copied into ~/.config/systemd/user/ and enabled by the pi installer, which
 # reads `systemd/` instead of a list. The installed copy has `%h` expanded, so

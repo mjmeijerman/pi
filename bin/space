@@ -6,6 +6,7 @@
 #   bin/space new              (on a terminal: ask for the name and the folder, with defaults)
 #   bin/space list [--json]
 #   bin/space show <slug>
+#   bin/space move <slug> --project PATH [--json]
 #   bin/space forget <slug> [--yes]
 #
 # A space is one project. It is durable: the record at state/spaces/<slug>/space.json outlives
@@ -54,6 +55,7 @@ usage: bin/space new [<slug>] [--project PATH | --here | --clone URL] [--kind ha
        bare: an --argv naming pi, pisandbox or pi-sandboxed is refused.
        bin/space list [--json]
        bin/space show <slug>
+       bin/space move <slug> --project PATH [--json]
        bin/space forget <slug> [--yes]
 EOF
 	exit 1
@@ -355,6 +357,87 @@ cmd_show() {
 	printf 'reports: %s\n' "$(space_reports "$slug")"
 }
 
+# cmd_move — point a record at another folder, and change nothing else.
+#
+# A record outlives the folder it was made in: a checkout renamed, a clone replaced, a workspace
+# retired. The move keeps `id`, `boss`, `boss_argv`, the tabs and every report — they live beside
+# the record, not in the project — so the guard still recognises the live space and opens no
+# second one. The tabs that sat in the old folder follow it, because a tab with a dead cwd is a
+# tab the app cannot start; the two ways to make the record a lie are refused by name: a folder
+# that is not there, and a folder another record already claims (one folder is one space).
+cmd_move() {
+	local slug="" project="" json=0
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--project) project=${2:-}; shift 2 ;;
+		--json) json=1; shift ;;
+		-*) die "unknown option $1" ;;
+		*)
+			[ -z "$slug" ] || die "move takes one space name, and '$1' is a second one"
+			slug=$1
+			shift
+			;;
+		esac
+	done
+	[ -n "$slug" ] || usage
+	space_exists "$slug" || die "no such space: $slug — bin/space list"
+	[ -n "$project" ] || die "space move needs --project PATH — bin/space move $slug --project /the/new/folder"
+	[ -d "$project" ] || die "no such folder: $project — a space points at a folder that is there"
+	project=$(readlink -f -- "$project")
+	local other other_project
+	while IFS= read -r other; do
+		[ -n "$other" ] || continue
+		[ "$other" = "$slug" ] && continue
+		other_project=$(space_field "$other" project)
+		[ -n "$other_project" ] || continue
+		other_project=$(cd -- "$other_project" 2>/dev/null && pwd -P) || other_project=""
+		[ -n "$other_project" ] || continue
+		[ "$other_project" = "$project" ] || continue
+		die "$project is already the project of space '$other' — one folder is one space, so give the move another folder (bin/space show $other)"
+	done <<<"$(space_slugs)"
+	command -v node >/dev/null 2>&1 || die "node is not on PATH"
+	MOVE_SLUG=$slug MOVE_PROJECT=$project SPACES_DIR=$SPACES_DIR node -e '
+		const fs = require("fs"), path = require("path");
+		const file = path.join(process.env.SPACES_DIR, process.env.MOVE_SLUG, "space.json");
+		let r;
+		try { r = JSON.parse(fs.readFileSync(file, "utf8")); } catch { process.exit(3); }
+		const before = String(r.project || "");
+		r.project = String(process.env.MOVE_PROJECT);
+		// The tabs in the old folder follow it; a tab deliberately placed elsewhere is left where
+		// the person put it.
+		for (const t of Array.isArray(r.tabs) ? r.tabs : []) {
+			if (t && typeof t === "object" && String(t.folder || "") === before) t.folder = r.project;
+		}
+		fs.writeFileSync(file, JSON.stringify(r, null, 2) + "\n");
+	' "$(space_record "$slug")" || die "could not rewrite $(space_record "$slug") — nothing changed"
+	if [ "$json" = 1 ]; then
+		cat "$(space_record "$slug")"
+		return 0
+	fi
+	say "space: $slug -> $project"
+	# herdr cannot move a tab, so the Boss's next command opens the same tab in the new folder, in
+	# the same space (the record's id) and with the argv the record keeps. No id recorded means no
+	# live space to aim at, and then the one command is the guard adopting the record.
+	local next
+	next=$(NEXT_RECORD=$(space_record "$slug") node -e '
+		const fs = require("fs");
+		let r = {};
+		try { r = JSON.parse(fs.readFileSync(process.env.NEXT_RECORD, "utf8")); } catch {}
+		const id = String(r.id || "");
+		if (!id) { process.stdout.write("bin/guard --once"); process.exit(0); }
+		const boss = String(r.boss || "Boss");
+		let out = "herdr-app do tab.new --name " + boss + " --space " + id + " --folder " + r.project;
+		if (Array.isArray(r.boss_argv) && r.boss_argv.length) {
+			// One shell word, apostrophes escaped the way sh reads them back.
+			const q = String.fromCharCode(39);
+			const argv = JSON.stringify(r.boss_argv).split(q).join(q + "\\" + q + q);
+			out += " --argv " + q + argv + q;
+		}
+		process.stdout.write(out + " --focus false");
+	')
+	say "next: $next"
+}
+
 # cmd_forget — drop the record, and nothing else. The record is what the guard reopens from, so
 # dropping it is a decision: on a terminal it is asked, and only `y`/`yes` does it. A script has
 # nobody to answer, so it passes `--yes` — the question is not skipped, it is answered up front.
@@ -397,6 +480,7 @@ case ${1:-} in
 new) shift; cmd_new "$@" ;;
 list | ls) shift; cmd_list "$@" ;;
 show) shift; cmd_show "$@" ;;
+move) shift; cmd_move "$@" ;;
 forget) shift; cmd_forget "$@" ;;
 -h | --help | help) usage ;;
 *) usage ;;

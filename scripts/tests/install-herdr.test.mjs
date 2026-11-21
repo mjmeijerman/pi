@@ -85,7 +85,7 @@ function envFor(home, extra = {}) {
 	const env = { ...process.env, HOME: home, PI_SKIP_SYSTEMD: '1', PI_ALLOW_MISSING_PI: '1', ...extra };
 	// Inherited from the host that runs the suite: any of them would decide the
 	// platform or the paths before the test does.
-	for (const name of ['USERPROFILE', 'LOCALAPPDATA', 'PI_DRY_RUN', 'PI_PLATFORM', 'PI_SKIP_NETWORK', 'PI_BOSS_DIR', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM']) delete env[name];
+	for (const name of ['USERPROFILE', 'LOCALAPPDATA', 'PI_DRY_RUN', 'PI_PLATFORM', 'PI_SKIP_NETWORK', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM']) delete env[name];
 	return { ...env, ...extra };
 }
 
@@ -213,16 +213,10 @@ test('win32: %LOCALAPPDATA%\\Programs\\herdr-app, and the shell follows the PATH
 	const home = tempDir(t);
 	const local = path.join(home, 'AppData', 'Local');
 	const binPath = path.join(local, 'Programs', 'herdr-app', 'herdr-app.exe');
-	// An existing boss workspace: the step that clones it is then a `note`, so a
-	// real run below reaches herdr-app without touching the network.
-	const boss = path.join(home, 'big-boss-pi');
-	fs.mkdirSync(boss, { recursive: true });
-
 	const winEnv = (stub) => ({
 		PI_PLATFORM: 'win32',
 		LOCALAPPDATA: local,
 		USERPROFILE: home,
-		PI_BOSS_DIR: boss,
 		PATH: stub,
 	});
 

@@ -69,7 +69,9 @@ import {
 	GUARD_LABEL,
 	GUARD_SPACE_NAME,
 	GUARD_SPACE_WAIT_MS,
+	GUARD_TASK_NAME,
 	HARNESS_TOOLS,
+	LEGACY_GUARD,
 	PI_WRAPPER_BEGIN,
 	PI_WRAPPER_BLOCK,
 	PI_WRAPPER_END,
@@ -95,6 +97,7 @@ import {
 	resolveApiKey,
 	resolveGitBash as resolveGitBashAt,
 	sandboxSummary,
+	schtasksExe,
 	spawnPlan,
 	spaceIdIn,
 	spliceManagedBlock,
@@ -911,6 +914,60 @@ function skipServicesVar() {
 	return null;
 }
 
+/**
+ * removeLegacyGuardEntry — the login entry registered under the guard's old name, gone.
+ *
+ * A machine that upgrades must not end up with two entries running one guard: both repair the same
+ * records, and a rebuild one is halfway through is what the other adopts. So the old name is
+ * disabled and removed **before** the new one is registered, this one time, and the line says what
+ * replaced what — a silence here is a second guard nobody can see.
+ *
+ * What counts as "the old entry exists" is per platform, and each one is a fact on disk: the unit
+ * file and the plist have the old name in them, so `exists` answers directly; on Windows the task
+ * name changed and the hidden launcher's path did not, so a launcher is the mark an earlier install
+ * left behind. `systemd: true` is the one caller that also runs with the units copied and nothing
+ * enabled — the old file is still removed there, because an enabled unit this install no longer
+ * writes is exactly the entry that would start beside the new one at the next logon.
+ */
+function removeLegacyGuardEntry({ systemd = false } = {}) {
+	const old = LEGACY_GUARD;
+	if (systemd) {
+		const file = path.join(P.serviceDir, old.unit);
+		if (!exists(file)) return false;
+		if (systemdUserUp() && !skipServicesVar()) {
+			run('systemctl', ['--user', 'disable', '--now', old.unit], { allowFail: true });
+		}
+		try {
+			fs.rmSync(file);
+		} catch {}
+		note(`guard unit: ${old.unit} -> the one this repo ships (disabled and removed first — two login entries would race on the same records)`);
+		return true;
+	}
+	if (PLAN.service === 'launchd') {
+		const plist = path.join(P.serviceDir, `${old.label}.plist`);
+		if (!exists(plist)) return false;
+		run('launchctl', ['unload', '-w', plist], { allowFail: true });
+		try {
+			fs.rmSync(plist);
+		} catch {}
+		note(`guard login item: ${old.label} -> ${GUARD_LABEL} (the old one is unloaded and removed — two login entries would race on the same records)`);
+		return true;
+	}
+	const launcher = guardLauncherPath({ piHome: P.piHome });
+	const pidFile = guardPidPath({ piHome: P.piHome });
+	if (!exists(launcher)) return false;
+	run(schtasksExe(), ['/Delete', '/TN', old.taskName, '/F'], { allowFail: true });
+	// Deleting the task cancels the next logon; the guard it started is still running, so the pid
+	// the launcher wrote is stopped too.
+	let pid = '';
+	try {
+		pid = fs.readFileSync(pidFile, 'utf8').trim();
+	} catch {}
+	if (/^[0-9]+$/.test(pid)) run('taskkill', ['/F', '/PID', pid], { allowFail: true });
+	note(`guard task: ${old.taskName} -> pi-guard (the old entry is deleted and stopped — two login entries would race on the same records)`);
+	return true;
+}
+
 /** guardByHand — the line that starts the guard once, for the OS at hand. */
 function guardByHand() {
 	const guard = harnessBin('guard');
@@ -941,6 +998,7 @@ function stepServices() {
 		return;
 	}
 	if (PLAN.service === 'launchd') {
+		removeLegacyGuardEntry();
 		const plist = path.join(P.serviceDir, `${GUARD_LABEL}.plist`);
 		writeText(plist, launchdPlist(GUARD_LABEL, guard), { mode: 0o644 });
 		note(`guard login item -> ${plist}`);
@@ -968,6 +1026,8 @@ function stepServices() {
 	// Disable line can stop the process the task delete does not reach.
 	const launcher = guardLauncherPath({ piHome: P.piHome });
 	const pidFile = guardPidPath({ piHome: P.piHome });
+	// Before the new name is registered: the old entry must not be left running beside it.
+	removeLegacyGuardEntry();
 	if (writeText(launcher, hiddenLauncher({ bashPath: bash, guardPath: guard, pidPath: pidFile })))
 		note(`guard launcher (hidden, no console window) -> ${launcher}`);
 	const task = guardTaskCommand({ launcherPath: launcher, pidPath: pidFile });
@@ -980,7 +1040,7 @@ function stepServices() {
 	// task.exe, not task.program: a bare name goes through cmd.exe, whose quotes
 	// would double the ones inside /TR and register a different command line.
 	else run(task.exe, task.args, { allowFail: true });
-	guardService = { label: `Task Scheduler entry big-boss-pi-guard (hidden: ${launcher})`, remove: task.remove, stop: task.stop };
+	guardService = { label: `Task Scheduler entry ${GUARD_TASK_NAME} (hidden: ${launcher})`, remove: task.remove, stop: task.stop };
 	say(`   disable: ${task.remove}`);
 	say(`   disable: ${task.stop}`);
 	return startGuardNow();
@@ -1106,6 +1166,9 @@ function stepSystemd() {
 	// knows one hard-coded space, while `%h/.pi/bin/guard` restores everything
 	// recorded in `~/.pi/state/spaces/`. So the guard unit lives in this repo's
 	// systemd/ with the other units and arrives through the same loop.
+	// The unit's name changed with the harness: the old entry is disabled and removed here,
+	// before the new name is enabled, so a machine that upgrades has one entry and not two.
+	removeLegacyGuardEntry({ systemd: true });
 
 	// The repo's units are read off systemd/, never listed here: the timers were
 	// copied without the .service files their `Unit=` names, and a hard-coded

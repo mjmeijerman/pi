@@ -9,12 +9,16 @@
 # record from where it was run). Sourcing defines functions and variables only.
 #
 # PI_SPACE_ROOT points the whole record somewhere else (a test, a second machine). It defaults to
-# the tree this file lives in. PI_LEGACY_BOSS_ROOT is the pre-space record, read and never written.
+# the tree this file lives in. PI_LEGACY_BOSS_ROOT, when a caller sets it, names the pre-space
+# record: read and never written.
 
 _space_lib_dir=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)
 : "${SPACE_STATE:=${PI_SPACE_ROOT:-$(cd -- "$_space_lib_dir/.." && pwd)}/state}"
 SPACES_DIR=$SPACE_STATE/spaces
-SPACE_LEGACY_ROOT=${PI_LEGACY_BOSS_ROOT:-$HOME/big-boss-pi}
+# The pre-space checkout is retired: its name must not be a default anywhere, or a deleted
+# folder stays alive as a fallback path. PI_LEGACY_BOSS_ROOT still names one for a caller that
+# keeps records made before the move, and an empty value is the ordinary case.
+SPACE_LEGACY_ROOT=${PI_LEGACY_BOSS_ROOT:-}
 SPACE_RULES_TEMPLATE=${PI_SPACE_RULES_TEMPLATE:-$(cd -- "$_space_lib_dir/.." && pwd)/agent/space-rules.md}
 SPACE_CEILING=8
 
@@ -182,7 +186,7 @@ space_of_slug() {
 # (read once, for one release; never written back). One document, because every reader of
 # state/delegations.json parses the whole file as a single object.
 space_merge_delegations() {
-	SPACES_DIR=$SPACES_DIR SPACE_LEGACY_DELEGATIONS="$SPACE_LEGACY_ROOT/state/delegations.json" \
+	SPACES_DIR=$SPACES_DIR SPACE_LEGACY_DELEGATIONS="${SPACE_LEGACY_ROOT:+$SPACE_LEGACY_ROOT/state/delegations.json}" \
 		node -e '
 		const fs = require("fs"), path = require("path");
 		const out = {};

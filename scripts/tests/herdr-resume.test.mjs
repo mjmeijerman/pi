@@ -93,7 +93,7 @@ function recoveredTerminal(overrides = {}) {
 		keep: true,
 		state: "live",
 		foreground: { argv: ["/usr/bin/zsh"], name: "zsh", pid: 4242 },
-		labels: { "herdr.space": "big-boss-pi", "herdr.tab": "worker" },
+		labels: { "herdr.space": "harness", "herdr.tab": "worker" },
 		...overrides,
 	};
 }

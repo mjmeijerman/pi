@@ -112,7 +112,6 @@ function envFor(home, extra = {}) {
 		PI_SKIP_SYSTEMD: '1',
 		PI_ALLOW_MISSING_PI: '1',
 		PI_SKIP_PREREQS: '1',
-		PI_BOSS_DIR: path.join(home, 'big-boss-pi'),
 		...extra,
 	};
 	// Any of these would decide the answer before the test does.

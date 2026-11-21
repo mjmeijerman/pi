@@ -28,7 +28,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { GUARD_LABEL, GUARD_LAUNCHER_NAME, GUARD_PID_NAME, GUARD_SPACE_NAME, POSIX_WRAPPERS, homePaths, launcherTargets, planFor, samePath, spaceIdIn } from './install-lib.mjs';
+import { GUARD_LABEL, GUARD_LAUNCHER_NAME, GUARD_PID_NAME, GUARD_SPACE_NAME, GUARD_TASK_NAME, GUARD_UNIT_NAME, POSIX_WRAPPERS, homePaths, launcherTargets, planFor, samePath, spaceIdIn } from './install-lib.mjs';
 
 const HOME = process.env.HOME || process.env.USERPROFILE;
 let agentDirArg = null;
@@ -157,7 +157,7 @@ function programArguments(plist) {
 
 if (PLAN.service === 'systemd') {
 	mustExist('guard unit', path.join(P.serviceDir, 'herdr-resume.service'));
-	mustExist('guard unit', path.join(P.serviceDir, 'big-boss-pi-guard.service'));
+	mustExist('guard unit', path.join(P.serviceDir, GUARD_UNIT_NAME));
 	// A timer without the unit its `Unit=` names is the failure this row exists
 	// for: both files are copied by the same step, so nothing notices until the
 	// schedule fires weeks later. Read off the installed timers, not a list.
@@ -170,7 +170,7 @@ if (PLAN.service === 'systemd') {
 		}
 	}
 } else if (PLAN.service === 'launchd') {
-	const plist = path.join(P.serviceDir, 'dev.herdr.big-boss-pi-guard.plist');
+	const plist = path.join(P.serviceDir, `${GUARD_LABEL}.plist`);
 	if (guardSkip) pass('launchd login item', `not checked — ${guardSkip} turns the entry off`);
 	else if (!fs.existsSync(plist)) fail('launchd login item', `${plist} missing — nothing repairs a space after the next logon`);
 	else {
@@ -189,11 +189,11 @@ if (PLAN.service === 'systemd') {
 	// Asked of Task Scheduler, not of a file: the registration lives in the task
 	// store, and "the .cmd is there" answers a different question.
 	const exe = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'schtasks.exe') : 'schtasks';
-	const query = spawnSync(exe, ['/Query', '/TN', 'big-boss-pi-guard', '/FO', 'LIST'], { encoding: 'utf8' });
+	const query = spawnSync(exe, ['/Query', '/TN', GUARD_TASK_NAME, '/FO', 'LIST'], { encoding: 'utf8' });
 	if (query.error) pass('scheduled task', `not checked — no schtasks on this host (${query.error.code || 'unknown'})`);
-	else if (query.status !== 0) fail('scheduled task', `schtasks /Query /TN big-boss-pi-guard exited ${query.status} — not registered, and nothing repairs a space after the next logon`);
+	else if (query.status !== 0) fail('scheduled task', `schtasks /Query /TN ${GUARD_TASK_NAME} exited ${query.status} — not registered, and nothing repairs a space after the next logon`);
 	else {
-		pass('scheduled task', 'big-boss-pi-guard is registered');
+		pass('scheduled task', `${GUARD_TASK_NAME} is registered`);
 		// "Task To Run" is where the interpreter and the guard are, both quoted:
 		// the task runs Git Bash on a bash script, and a bare path would break at the
 		// first space in `C:\Program Files`.
@@ -212,12 +212,12 @@ if (PLAN.service === 'systemd') {
 			pid = '';
 		}
 		if (!pid) {
-			fail('guard pid', `${pidFile} is missing or empty — the hidden launcher wrote no pid, so the guard never started; start it: schtasks /Run /TN big-boss-pi-guard`);
+			fail('guard pid', `${pidFile} is missing or empty — the hidden launcher wrote no pid, so the guard never started; start it: schtasks /Run /TN ${GUARD_TASK_NAME}`);
 		} else if (PLAN.platform === 'win32') {
 			const alive = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH'], { encoding: 'utf8' });
 			if (alive.status === 0 && new RegExp(`\\b${pid}\\b`).test(alive.stdout || ''))
 				pass('guard pid', `${pid} is running (tasklist /FI "PID eq ${pid}" shows it)`);
-			else fail('guard pid', `pid ${pid} from ${pidFile} is not a running process — the guard stopped; start it: schtasks /Run /TN big-boss-pi-guard`);
+			else fail('guard pid', `pid ${pid} from ${pidFile} is not a running process — the guard stopped; start it: schtasks /Run /TN ${GUARD_TASK_NAME}`);
 		} else pass('guard pid', `${pid} recorded in ${pidFile} (answered on the platform that has the launcher)`);
 		if (named.length < 2) fail('scheduled task program', `the registered command line names no quoted launcher: ${toRun || 'nothing'}`);
 		else {
@@ -275,7 +275,7 @@ function assertGuardSpace() {
 		fail(
 			'harness space',
 			`herdr-app is running and has no ${GUARD_SPACE_NAME} space — ` +
-				`the entry: ${PLAN.platform === 'win32' ? 'schtasks /Query /TN big-boss-pi-guard /V /FO LIST' : `launchctl print gui/${typeof process.getuid === 'function' ? process.getuid() : 0}/${GUARD_LABEL}`}; ` +
+				`the entry: ${PLAN.platform === 'win32' ? `schtasks /Query /TN ${GUARD_TASK_NAME} /V /FO LIST` : `launchctl print gui/${typeof process.getuid === 'function' ? process.getuid() : 0}/${GUARD_LABEL}`}; ` +
 				`the guard log: ${path.join(P.piHome, 'state', 'guard.log')}; the app: herdr-app ls`,
 		);
 }

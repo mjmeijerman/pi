@@ -175,12 +175,14 @@ done
 # gates envs and tasks, not reads of an installed tool. The data directory above
 # is the one that matters: without it the same commands report "not a mise bin".
 # A symlink in ~/.local/bin can point outside every tree bound so far: jev and
-# local-run are symlinks into ~/big-boss-pi/bin, so inside the sandbox the link
+# local-run were symlinks into a checkout outside the sandbox, so inside the link
 # dangled and a worker's mandatory `jev route` check died with "command not
 # found". Bind the resolved target's directory read-only: jev.mjs imports its
 # sibling jev-model.mjs, so binding the single file is not enough, and the
-# surrounding repo stays unmounted — nothing under ~/big-boss-pi is writable
-# and no tree is handed out beyond the directory the binary actually lives in.
+# surrounding tree stays unmounted — nothing outside the directory the binary
+# actually lives in is handed out, and nothing there is writable. Those two
+# resolve into ~/.pi/bin now, which is bound whole and skipped here by
+# covered_link_dir; the rule stays for the next tool to arrive by symlink.
 link_dirs=()
 covered_link_dir() {
 	local d=$1 x

@@ -20,8 +20,8 @@
 # module      the code the "must name" value was read from. The check reads it
 #             too (comments ignored), so a transport that moves in code fails
 #             the day it moves, before anyone remembers the prose. Filenames are
-#             looked up in bin/, agent/bin/, then the delegation workspace's bin
-#             (install.sh: PI_BOSS_DIR, default ~/big-boss-pi/bin).
+#             looked up in bin/, then agent/bin/. PI_BOSS_DIR overrides which bin/
+#             is read, which is how the check follows a file that moved.
 #
 # A clause boundary is `;`, a dash, or `, and/but/while/whereas/yet/or`, so
 # "local-run stays on ollama ... and jev never moves to them" is one true

@@ -8,7 +8,7 @@
 # script's own message never appeared. The fix is: nothing runs until the shell running it *is* bash,
 # and a shell that is not bash re-execs under one it resolves, original argv untouched, once. This
 # file is the check that the "once", the argv and the one-line miss still hold — and that the file
-# copied from ~/big-boss-pi/bin into ~/.pi/bin still parses under `sh`, which is the shell that
+# copied out of a separate checkout into ~/.pi/bin still parses under `sh`, which is the shell that
 # reaches it before any of that.
 #
 # Cheap on purpose: no network, no pi session, no Windows host, temp dirs under one mktemp -d.

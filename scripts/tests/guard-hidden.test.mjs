@@ -26,8 +26,10 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+	GUARD_LABEL,
 	GUARD_LAUNCHER_NAME,
 	GUARD_PID_NAME,
+	GUARD_TASK_NAME,
 	guardLauncherPath,
 	guardPidPath,
 	guardStopCommand,
@@ -48,26 +50,26 @@ test('the launcher is generated from the resolved bash on a fake Program Files l
 	const bashPath = resolveGitBash({ platform: 'win32', env, exists: (p) => p === 'C:\\Program Files\\Git\\bin\\bash.exe' });
 	assert.equal(bashPath, 'C:\\Program Files\\Git\\bin\\bash.exe');
 
-	const guardPath = 'C:\\Users\\mj\\big-boss-pi\\bin\\guard';
-	const pidPath = 'C:\\Users\\mj\\big-boss-pi\\state\\guard.pid';
+	const guardPath = 'C:\\Users\\mj\\.pi\\bin\\guard';
+	const pidPath = 'C:\\Users\\mj\\.pi\\state\\guard.pid';
 	const text = hiddenLauncher({ bashPath, guardPath, pidPath });
 
 	// One VBScript line, both paths quoted, a quote inside a string spelled by
 	// doubling it — the space in `Program Files` is the reason for all of it.
-	assert.ok(text.includes('command = """C:\\Program Files\\Git\\bin\\bash.exe"" ""C:\\Users\\mj\\big-boss-pi\\bin\\guard"""'), text);
+	assert.ok(text.includes('command = """C:\\Program Files\\Git\\bin\\bash.exe"" ""C:\\Users\\mj\\.pi\\bin\\guard"""'), text);
 	// 0 = hidden, False = do not wait: the guard is a loop and outlives this file.
 	assert.match(text, /^    shell\.Run command, 0, False$/m);
 	// A guard that is already running is not started a second time: the launcher
 	// looks first and records that pid, which is what makes a second install (or a
 	// logon over a live guard) one guard and not two.
-	assert.ok(text.includes('pid = GuardPid("C:\\Users\\mj\\big-boss-pi\\bin\\guard")'), text);
+	assert.ok(text.includes('pid = GuardPid("C:\\Users\\mj\\.pi\\bin\\guard")'), text);
 	assert.ok(
 		text.indexOf('pid = GuardPid(') < text.indexOf('shell.Run command, 0, False'),
 		'the launcher starts a guard before looking whether one is running',
 	);
 	assert.match(text, /^If pid = 0 Then$/m);
 	// The pid the disable line needs, in the file it names.
-	assert.ok(text.includes('pidPath = "C:\\Users\\mj\\big-boss-pi\\state\\guard.pid"'), text);
+	assert.ok(text.includes('pidPath = "C:\\Users\\mj\\.pi\\state\\guard.pid"'), text);
 	assert.match(text, /^Set out = fso\.CreateTextFile\(pidPath, True\)$/m);
 	// A .vbs written for Windows, with Windows line endings, and nothing that
 	// depends on the locale of the machine that generated it.
@@ -77,8 +79,8 @@ test('the launcher is generated from the resolved bash on a fake Program Files l
 
 test('a path with a space survives the round trip, through the task and the pid', () => {
 	const bashPath = 'C:\\Program Files\\Git\\bin\\bash.exe';
-	const guardPath = 'C:\\Users\\John Smith\\big-boss-pi\\bin\\guard';
-	const pidPath = 'C:\\Users\\John Smith\\big-boss-pi\\state\\guard.pid';
+	const guardPath = 'C:\\Users\\John Smith\\.pi\\bin\\guard';
+	const pidPath = 'C:\\Users\\John Smith\\.pi\\state\\guard.pid';
 
 	assert.deepEqual(launcherTargets(hiddenLauncher({ bashPath, guardPath, pidPath })), { bashPath, guardPath, pidPath });
 
@@ -96,13 +98,13 @@ test('a path with a space survives the round trip, through the task and the pid'
 });
 
 test('the disable line can stop the process the task delete does not reach', () => {
-	const pidPath = 'C:\\Users\\John Smith\\big-boss-pi\\state\\guard.pid';
+	const pidPath = 'C:\\Users\\John Smith\\.pi\\state\\guard.pid';
 	const stop = guardStopCommand({ pidPath });
 	// `usebackq` is what makes the quoted path a file name: the pid lives under a
 	// profile directory, and `John Smith` is why it is quoted.
-	assert.equal(stop, 'for /f "usebackq" %p in ("C:\\Users\\John Smith\\big-boss-pi\\state\\guard.pid") do taskkill /F /PID %p');
+	assert.equal(stop, 'for /f "usebackq" %p in ("C:\\Users\\John Smith\\.pi\\state\\guard.pid") do taskkill /F /PID %p');
 	const task = guardTaskCommand({ launcherPath: 'C:\\x\\.pi\\state\\guard-hidden.vbs', pidPath });
-	assert.equal(task.remove, 'schtasks /Delete /TN big-boss-pi-guard /F');
+	assert.equal(task.remove, `schtasks /Delete /TN ${GUARD_TASK_NAME} /F`);
 	assert.equal(task.stop, stop);
 	assert.equal(guardTaskCommand({ launcherPath: 'C:\\x\\.pi\\state\\guard-hidden.vbs' }).stop, '', 'no pid file, no second line');
 });
@@ -139,7 +141,6 @@ function envFor(home, extra = {}) {
 		PI_SKIP_NETWORK: '1',
 		PI_ALLOW_MISSING_PI: '1',
 		PI_SKIP_PREREQS: '1',
-		PI_BOSS_DIR: path.join(home, 'big-boss-pi'),
 		// The Windows layout, as the platform's own variables spell it.
 		ProgramFiles: 'C:\\Program Files',
 		LOCALAPPDATA: 'C:\\Users\\mj\\AppData\\Local',
@@ -185,7 +186,7 @@ test('a Windows install writes the launcher with the bash it resolved and the gu
 	assert.match(registered, /wscript\.exe/i, registered);
 	assert.ok(registered.includes(launcher), registered);
 	assert.doesNotMatch(registered, /bash\.exe/i, registered);
-	assert.match(out.stdout, /^   start: schtasks \/Run \/TN big-boss-pi-guard$/m);
+	assert.ok(out.stdout.includes(`   start: schtasks /Run /TN ${GUARD_TASK_NAME}`), out.stdout);
 });
 
 test('a second install rewrites the launcher byte-identically, and does not even touch it', (t) => {
@@ -221,7 +222,7 @@ test('the macOS plist is byte-identical to the golden', (t) => {
 	const out = install(home, [], { PI_PLATFORM: 'darwin' });
 	assert.equal(out.status, 0, out.stderr);
 
-	const plist = path.join(home, 'Library', 'LaunchAgents', 'dev.herdr.big-boss-pi-guard.plist');
+	const plist = path.join(home, 'Library', 'LaunchAgents', `${GUARD_LABEL}.plist`);
 	const text = fs.readFileSync(plist, 'utf8').split(home).join('~');
 	assert.equal(
 		text,
@@ -231,7 +232,7 @@ test('the macOS plist is byte-identical to the golden', (t) => {
 <plist version="1.0">
     <dict>
         <key>Label</key>
-        <string>dev.herdr.big-boss-pi-guard</string>
+        <string>${GUARD_LABEL}</string>
         <key>ProgramArguments</key>
         <array>
         <string>${path.join(ROOT, 'bin', 'guard').split(home).join('~')}</string>
@@ -239,9 +240,9 @@ test('the macOS plist is byte-identical to the golden', (t) => {
         <key>RunAtLoad</key>
         <true/>
         <key>StandardOutPath</key>
-        <string>~/Library/Logs/dev.herdr.big-boss-pi-guard.log</string>
+        <string>~/Library/Logs/${GUARD_LABEL}.log</string>
         <key>StandardErrorPath</key>
-        <string>~/Library/Logs/dev.herdr.big-boss-pi-guard.log</string>
+        <string>~/Library/Logs/${GUARD_LABEL}.log</string>
     </dict>
 </plist>
 `,

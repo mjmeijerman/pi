@@ -154,10 +154,10 @@ else
 	bad "network allowed by default" "curl exited $rc"
 fi
 
-# 11. the rest of the home directory simply is not there. big-boss-pi appears as a
-#     mountpoint for its bin directory (see 17); only that subdirectory is real.
+# 11. the rest of the home directory simply is not there: only the trees the
+#     launcher names are bound, so a checkout sitting in $HOME is not visible.
 out=$(inside --exec -- sh -c 'ls "$HOME"' 2>&1)
-allowed='^(achterhoek-uitagenda|pi-projects|projects|git-templates|gitconfig|pi|big-boss-pi)$'
+allowed='^(achterhoek-uitagenda|pi-projects|projects|git-templates|gitconfig|pi)$'
 unexpected=$(printf '%s\n' "$out" | sed 's/^\.//' | grep -v -E "$allowed" || true)
 if [ -z "$unexpected" ]; then
 	ok "only the allow-listed home entries are visible"
@@ -232,9 +232,9 @@ case $out in
 *) bad "gh inside the sandbox has no stored credentials" "${out:-no output}" ;;
 esac
 
-# 17. jev answers the route check inside. It is a symlink into ~/big-boss-pi/bin,
-#     outside every other read-only bind, so a dangling link here is a harness
-#     defect: the routing check is mandatory before a worker starts.
+# 17. jev answers the route check inside. It reaches the sandbox through a symlink
+#     in ~/.local/bin, so a link that dangles here is a harness defect: the
+#     routing check is mandatory before a worker starts.
 out=$(inside --exec -- sh -c "jev route 'summarise this log entry' 2>&1")
 rc=$?
 case $out in
@@ -242,15 +242,11 @@ case $out in
 *) bad "jev answers the route check inside the sandbox" "rc=$rc ${out:-no output}" ;;
 esac
 
-# 18. ... and the rest of that repo stays hidden: binding the bin directory must
-#     not become binding ~/big-boss-pi.
-out=$(inside --exec -- sh -c 'ls -A "$HOME/big-boss-pi" 2>&1' 2>&1)
-rc=$?
-if [ "$rc" -eq 0 ] && [ "$out" = bin ]; then
-	ok "only ~/big-boss-pi/bin is mounted, not the repo"
-else
-	bad "only ~/big-boss-pi/bin is mounted, not the repo" "rc=$rc ${out:-no output}"
-fi
+# 18. There is no "only the binary's directory, not the repo" check any more, and
+#     its absence is the assertion: the tools that used to resolve into a separate
+#     checkout are on PATH from ~/.pi/bin now, and ~/.pi is bound whole, so there
+#     is no outside-tree bind left to be too wide. Check 11 is what holds that
+#     line — a checkout in $HOME is not in the allow-list.
 
 printf '\n'
 if [ "$failures" -eq 0 ]; then

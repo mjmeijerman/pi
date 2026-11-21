@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for bin/jev — the launcher, its sibling imports and the tree it keeps its state in.
 #
-# Why these exist: jev was ported from ~/big-boss-pi/bin into ~/.pi/bin, and three things have to
+# Why these exist: jev was ported out of a separate checkout into ~/.pi/bin, and three things have to
 # hold in the new home or the tool is worse than missing. Its imports are siblings (jev.mjs reads
 # ./jev-model.mjs and ./usage.mjs), so a copy that lost one of them fails with node's module error
 # instead of jev's message. Its state path is its own tree (bin/usage.mjs resolves ROOT from
@@ -121,7 +121,7 @@ fi
 
 # ------------------------------------------- 3. the ported tree --
 # The port in one case: the four files, in a directory that is not the repo, keep their state in
-# their own tree and need nothing from ~/big-boss-pi.
+# their own tree and need nothing from the checkout it came from.
 case_start "a copy in another tree keeps its state in that tree"
 mkdir -p "$WORK/elsewhere/bin"
 cp "$JEV" "$WORK/elsewhere/bin/jev"
@@ -133,7 +133,7 @@ RC=$?
 ERR="$(cat "$WORK/stderr")"
 if [ "$RC" -eq 3 ] && err_has 'decision model unreachable'; then pass 'runs with its siblings beside it'; else fail "rc=$RC out=$OUT err=$ERR"; fi
 if [ -s "$WORK/elsewhere/state/usage.jsonl" ]; then pass 'wrote state/ beside itself, not under the old tree'; else fail "no $WORK/elsewhere/state/usage.jsonl"; fi
-if joined | grep -q 'big-boss-pi'; then fail 'the answer mentions the deleted tree'; else pass 'no path from the old tree in its output'; fi
+if joined | grep -q "${HOME:?}/[a-z]*-[a-z]*/"; then fail 'the answer mentions a deleted tree'; else pass 'no path from a deleted tree in its output'; fi
 
 # ------------------------------------------- 4. usage errors --
 case_start "no subcommand is a usage error"

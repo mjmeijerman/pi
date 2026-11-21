@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# delegate — the only way an agent in big-boss-pi starts work.
+# delegate — the only way an agent in a space starts work.
 # bash is resolved at runtime, before anything else runs: see bin/shell-resolve.sh. It re-execs this
 # script under a bash it finds when the shell that started it is not bash (cmd.exe, PowerShell, or a
 # minimal Git Bash with only sh.exe), and says so when there is none. A copy a Windows shim starts is
@@ -275,17 +275,27 @@ json_field() { node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
 
 valid_slug() { case $1 in [a-z0-9]*) ;; *) return 1 ;; esac; printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]{0,30}$'; }
 
-# bin_prog <name> — a program from this tree, or from the pre-move tree when this one has not got
-# it yet. bin/ is the tool's single home now; ~/big-boss-pi/bin is where the rest still lives
-# until its own move, so a delegate here runs against the same jev, runners and preflight it did
-# before. Once the move is finished this fallback is one line to delete.
+# bin_prog <name> — a program from this tree, or from a pre-space tree a caller still names in
+# PI_LEGACY_BOSS_ROOT. bin/ is the tool's single home now, and the fallback exists only for that
+# caller: when neither has the program this dies, because an empty path in a command line is a
+# worse answer than a sentence.
 bin_prog() {
-	if [ -x "$BIN/$1" ]; then printf '%s' "$BIN/$1"; else printf '%s' "$SPACE_LEGACY_ROOT/bin/$1"; fi
+	if [ -x "$BIN/$1" ]; then printf '%s' "$BIN/$1"; return 0; fi
+	if [ -n "${SPACE_LEGACY_ROOT:-}" ] && [ -x "$SPACE_LEGACY_ROOT/bin/$1" ]; then
+		printf '%s' "$SPACE_LEGACY_ROOT/bin/$1"
+		return 0
+	fi
+	die "no $1 in $BIN${SPACE_LEGACY_ROOT:+ or $SPACE_LEGACY_ROOT/bin} — bin/ of this checkout is where the tools live"
 }
 
-# self_bin_stats — the stats program, from this tree or the pre-move one.
+# self_bin_stats — the stats program, from this tree or from the tree a caller still names.
 self_bin_stats() {
-	if [ -f "$self_bin/stats.mjs" ]; then printf '%s' "$self_bin/stats.mjs"; else printf '%s' "$SPACE_LEGACY_ROOT/bin/stats.mjs"; fi
+	if [ -f "$self_bin/stats.mjs" ]; then printf '%s' "$self_bin/stats.mjs"; return 0; fi
+	if [ -n "${SPACE_LEGACY_ROOT:-}" ] && [ -f "$SPACE_LEGACY_ROOT/bin/stats.mjs" ]; then
+		printf '%s' "$SPACE_LEGACY_ROOT/bin/stats.mjs"
+		return 0
+	fi
+	die "no stats.mjs in $self_bin — bin/ of this checkout is where the tools live"
 }
 
 # non_git_changes <project> <since-file> — what changed in a folder that has no git to ask. The
@@ -326,7 +336,7 @@ use_space() {
 	REPORTS=$(space_reports "$SPACE")
 	DELEGATIONS_WRITE=$(space_delegations "$SPACE")
 	DELEGATIONS=$DELEGATIONS_WRITE
-	if [ ! -f "$DELEGATIONS" ] && [ -f "$SPACE_LEGACY_ROOT/state/delegations.json" ]; then
+	if [ ! -f "$DELEGATIONS" ] && [ -n "${SPACE_LEGACY_ROOT:-}" ] && [ -f "$SPACE_LEGACY_ROOT/state/delegations.json" ]; then
 		DELEGATIONS=$SPACE_LEGACY_ROOT/state/delegations.json
 	fi
 	# The decisions a space records — a wipe row, an override, a --skip-preflight reason — belong to
@@ -557,10 +567,16 @@ reap_finished_learners() {
 			if (!terms.length) return;
 			let deleg = {};
 			try { deleg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
-			// The live delegations and the two permanent spaces are never reaped.
+			// The live delegations and every space with a record are never reaped: a record is
+			// what the guard restores at the next logon, so closing that space would undo the
+			// repair the harness itself made.
 			const keep = new Set(Object.keys(deleg || {}));
-			keep.add("big-boss-pi");
-			keep.add("pi-master");
+			const path = require("path");
+			try {
+				for (const name of fs.readdirSync(process.argv[2])) {
+					if (fs.existsSync(path.join(process.argv[2], name, "space.json"))) keep.add(name);
+				}
+			} catch {}
 			const spaces = new Map();
 			for (const t of terms) {
 				const where = String((t && t.where) || "");
@@ -580,7 +596,7 @@ reap_finished_learners() {
 				const phrase = s.seen.size === 1 ? "all " + [...s.seen][0] : "all done or idle";
 				process.stdout.write([name, String(s.all), phrase].join("\t") + "\n");
 			}
-		});' "$DELEGATIONS") || candidates=""
+		});' "$DELEGATIONS" "$SPACES_DIR") || candidates=""
 	[ -n "$candidates" ] || return 0
 
 	# space.close takes the space id, and the terminal list only carries the space's name: the
@@ -3056,11 +3072,11 @@ cmd_finish() {
 	fi
 	DELEGATIONS=$(delegations_all)
 
-	# The gate and the publisher from this tree, never whichever copy PATH happens to hold: the
-	# pre-space copies in ~/big-boss-pi/bin resolve a report under $PI_BOSS_ROOT/reports, so a
-	# worker in a space was refused with "does not exist, so there is no report to publish" and
-	# #205 and #206 were published by hand. The ported pair resolves the space itself, and this
-	# passes the one it selected so the two cannot disagree about it.
+	# The gate and the publisher from this tree, never whichever copy PATH happens to hold: a copy
+	# from an older checkout resolved a report under that checkout's root, so a worker in a space
+	# was refused with "does not exist, so there is no report to publish" and #205 and #206 were
+	# published by hand. The pair that lives here resolves the space itself, and this passes the
+	# one it selected so the two cannot disagree about it.
 	local pub=$self_bin/publish
 	[ -x "$pub" ] || die "cannot publish $slug: no publish command at $pub"
 

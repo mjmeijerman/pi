@@ -28,6 +28,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { GUARD_LABEL, LEGACY_GUARD } from '../install-lib.mjs';
+
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
 function tempHome(t) {
@@ -62,7 +64,7 @@ function install(home, platform, args = [], extra = {}) {
 	});
 }
 
-const plistPath = (home) => path.join(home, 'Library', 'LaunchAgents', 'dev.herdr.big-boss-pi-guard.plist');
+const plistPath = (home) => path.join(home, 'Library', 'LaunchAgents', 'dev.herdr.pi-guard.plist');
 
 test('macOS: a default run writes the launchd plist, pointed at bin/guard', (t) => {
 	const home = tempHome(t);
@@ -72,15 +74,15 @@ test('macOS: a default run writes the launchd plist, pointed at bin/guard', (t) 
 
 	const plist = plistPath(home);
 	assert.ok(fs.existsSync(plist), 'no launchd plist written on a default run');
-	assert.match(out.stdout, /^== guard login item -> .*dev\.herdr\.big-boss-pi-guard\.plist$/m);
+	assert.match(out.stdout, /^== guard login item -> .*dev\.herdr\.pi-guard\.plist$/m);
 	// The entry is only an entry if ProgramArguments names the guard itself.
 	const text = fs.readFileSync(plist, 'utf8');
 	assert.match(text, /<key>ProgramArguments<\/key>/);
 	assert.ok(text.includes(`<string>${theGuard}</string>`), `the plist does not name ${theGuard}`);
 	assert.match(text, /<key>RunAtLoad<\/key>\s*<true\/>/);
 	// And the summary says what was installed and how to undo it.
-	assert.match(out.stdout, /^Installed: launchd login item .*dev\.herdr\.big-boss-pi-guard\.plist$/m);
-	assert.match(out.stdout, /^Disable: launchctl unload -w .*dev\.herdr\.big-boss-pi-guard\.plist$/m);
+	assert.match(out.stdout, /^Installed: launchd login item .*dev\.herdr\.pi-guard\.plist$/m);
+	assert.match(out.stdout, /^Disable: launchctl unload -w .*dev\.herdr\.pi-guard\.plist$/m);
 });
 
 test('Windows: a default run registers the Task Scheduler entry', (t) => {
@@ -98,22 +100,94 @@ test('Windows: a default run registers the Task Scheduler entry', (t) => {
 	const launcher = path.join(home, '.pi', 'state', 'guard-hidden.vbs');
 	assert.ok(registered[1].includes(`"\\"C:\\Windows\\System32\\wscript.exe\\" \\"${launcher}\\""`), registered[1]);
 	assert.doesNotMatch(registered[1], /bash/i, registered[1]);
-	assert.match(out.stdout, /^Would install: Task Scheduler entry big-boss-pi-guard \(.*\)$/m);
-	assert.match(out.stdout, /^Disable: schtasks \/Delete \/TN big-boss-pi-guard \/F$/m);
+	assert.match(out.stdout, /^Would install: Task Scheduler entry pi-guard \(.*\)$/m);
+	assert.match(out.stdout, /^Disable: schtasks \/Delete \/TN pi-guard \/F$/m);
 	assert.match(out.stdout, /^Disable: for \/f "usebackq" %p in \(".*guard\.pid"\) do taskkill \/F \/PID %p$/m);
 });
 
-// Registering is not starting: `/SC ONLOGON` is a promise about the next logon,
-// and the Windows run that found no space was exactly that promise, unkept. So
-// the start comes after the registration, on the same entry — and never when
-// nothing was registered, because there is nothing to start.
+// Upgrading is the case the rename exists for. An install that finds the entry under the guard's
+// old name must disable and remove it, not register a second one beside it: two login entries run
+// two guards, both repairing the same records, and a rebuild one is halfway through is what the
+// other adopts. The old names are read from install-lib.mjs rather than spelled here, so a name
+// that changes again changes in one place.
+test('macOS: an upgrade removes the old login item before writing the new name', (t) => {
+	const home = tempHome(t);
+	const old = path.join(home, 'Library', 'LaunchAgents', `${LEGACY_GUARD.label}.plist`);
+	fs.mkdirSync(path.dirname(old), { recursive: true });
+	fs.writeFileSync(old, '<plist/>\n');
+
+	const out = install(home, 'darwin');
+	assert.equal(out.status, 0, out.stderr);
+	assert.equal(fs.existsSync(old), false, 'the old login item is still on disk — two plists, two guards');
+	assert.ok(fs.existsSync(plistPath(home)), 'the new login item was not written');
+	// One line saying what was replaced, naming both: a silent migration is a second guard nobody
+	// can see.
+	assert.match(
+		out.stdout,
+		new RegExp(`^== guard login item: ${LEGACY_GUARD.label} -> ${GUARD_LABEL} \\(`, 'm'),
+		`the upgrade does not say what it replaced:\n${out.stdout}`,
+	);
+});
+
+test('Linux: an upgrade removes the old unit file before copying the new one', (t) => {
+	const home = tempHome(t);
+	const old = path.join(home, '.config', 'systemd', 'user', LEGACY_GUARD.unit);
+	fs.mkdirSync(path.dirname(old), { recursive: true });
+	fs.writeFileSync(old, '[Unit]\nDescription=old\n');
+
+	const out = install(home, 'linux');
+	assert.equal(out.status, 0, out.stderr);
+	assert.equal(fs.existsSync(old), false, 'the old unit is still on disk — an enabled unit beside the new one');
+	assert.ok(fs.existsSync(path.join(home, '.config', 'systemd', 'user', 'pi-guard.service')), 'the new unit was not copied');
+	assert.match(
+		out.stdout,
+		new RegExp(`^== guard unit: ${LEGACY_GUARD.unit} -> pi-guard\\.service \\(`, 'm'),
+		`the upgrade does not say what it replaced:\n${out.stdout}`,
+	);
+});
+
+test('Windows: an upgrade deletes the old task entry before registering pi-guard', (t) => {
+	const home = tempHome(t);
+	// The hidden launcher's path never changed, so a launcher on disk is the mark an earlier
+	// install left: that install registered the guard's old task name.
+	const launcher = path.join(home, '.pi', 'state', 'guard-hidden.vbs');
+	fs.mkdirSync(path.dirname(launcher), { recursive: true });
+	fs.writeFileSync(launcher, "' an earlier install wrote this\n");
+
+	const out = install(home, 'win32', ['--dry-run'], { PI_GIT_BASH: '/usr/bin/bash' });
+	assert.equal(out.status, 0, out.stderr);
+	// The delete goes to schtasks.exe by absolute path (a bare name would be re-quoted by
+	// cmd.exe), so match the arguments and not the program.
+	const removed = out.stdout.indexOf(`/Delete /TN ${LEGACY_GUARD.taskName} /F`);
+	const created = out.stdout.indexOf('/Create /F /SC ONLOGON /TN pi-guard');
+	assert.ok(removed >= 0, `the old task was not removed:\n${out.stdout}`);
+	assert.ok(created >= 0, 'no /Create line');
+	assert.ok(removed < created, 'the new entry was registered before the old one was removed');
+	assert.match(
+		out.stdout,
+		new RegExp(`^== guard task: ${LEGACY_GUARD.taskName} -> pi-guard \\(`, 'm'),
+		`the upgrade does not say what it replaced:\n${out.stdout}`,
+	);
+});
+
+test('a fresh install removes no old entry, because there is none', (t) => {
+	const home = tempHome(t);
+
+	const mac = install(home, 'darwin');
+	assert.doesNotMatch(mac.stdout, /^guard login item: .* -> /m, mac.stdout);
+	const linux = install(home, 'linux');
+	assert.doesNotMatch(linux.stdout, /^guard unit: .* -> /m, linux.stdout);
+	const win = install(home, 'win32', ['--dry-run'], { PI_GIT_BASH: '/usr/bin/bash' });
+	assert.doesNotMatch(win.stdout, new RegExp(`schtasks /Delete /TN ${LEGACY_GUARD.taskName}`), win.stdout);
+});
+
 test('Windows: the entry is started after it is registered, in that order', (t) => {
 	const home = tempHome(t);
 
 	const out = install(home, 'win32', ['--dry-run'], { PI_GIT_BASH: '/usr/bin/bash' });
 	assert.equal(out.status, 0, out.stderr);
 	const created = out.stdout.indexOf('   command: schtasks /Create');
-	const started = out.stdout.indexOf('   start: schtasks /Run /TN big-boss-pi-guard');
+	const started = out.stdout.indexOf('   start: schtasks /Run /TN pi-guard');
 	assert.ok(created >= 0, 'no /Create line: ' + out.stdout);
 	assert.ok(started >= 0, 'no /Run line: ' + out.stdout);
 	assert.ok(created < started, 'the entry was started before it was registered');
@@ -140,14 +214,14 @@ test('Linux: a default run copies the guard unit out of this repo, pointed at th
 
 	const out = install(home, 'linux');
 	assert.equal(out.status, 0, out.stderr);
-	const unit = path.join(home, '.config', 'systemd', 'user', 'big-boss-pi-guard.service');
-	assert.ok(fs.existsSync(unit), 'no big-boss-pi guard unit copied');
-	// The installed unit is this repo's `systemd/big-boss-pi-guard.service` with %h
+	const unit = path.join(home, '.config', 'systemd', 'user', 'pi-guard.service');
+	assert.ok(fs.existsSync(unit), 'no pi-guard unit copied');
+	// The installed unit is this repo's `systemd/pi-guard.service` with %h
 	// resolved: it starts `~/.pi/bin/guard`, the supervisor that restores every
 	// recorded space — not the clone's pre-space copy that knew one workspace.
 	const text = fs.readFileSync(unit, 'utf8');
 	assert.ok(text.includes(`ExecStart=${path.join(home, '.pi', 'bin', 'guard')}`), text);
-	assert.match(out.stdout, /^== big-boss-pi-guard\.service -> /m);
+	assert.match(out.stdout, /^== pi-guard\.service -> /m);
 });
 
 test('PI_SKIP_SYSTEMD=1 registers nothing and names the variable', (t) => {
@@ -178,7 +252,7 @@ test('PI_SKIP_SERVICES=1 is the same way out, spelled honestly on all three plat
 	const linux = install(home, 'linux', [], { PI_SKIP_SERVICES: '1' });
 	assert.match(linux.stdout, /^== PI_SKIP_SERVICES=1 — units copied, none enabled$/m);
 	assert.ok(
-		fs.existsSync(path.join(home, '.config', 'systemd', 'user', 'big-boss-pi-guard.service')),
+		fs.existsSync(path.join(home, '.config', 'systemd', 'user', 'pi-guard.service')),
 		'the alias must still copy the units it says it copied',
 	);
 });

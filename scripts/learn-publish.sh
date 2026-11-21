@@ -18,8 +18,8 @@
 # sandbox has no git credentials and no `gh` login (`gh auth status` → hosts.yml
 # missing), so a push from there cannot succeed — which is exactly what the old
 # version asked `pi-bare` to do, and then recorded the network failure as "the
-# agent did not open a PR". The hand-off is now a big-boss-pi agent space
-# (`scripts/agent-pane.sh spawn <slug>-pr`) started in `~/big-boss-pi`,
+# agent did not open a PR". The hand-off is now a pi agent space
+# (`scripts/agent-pane.sh spawn <slug>-pr`) started in this checkout,
 # where `gh` and the ssh key live: that agent pushes, opens the PR, appends the
 # publish-log row and closes its own space. The learner closes its own space
 # after the hand-off and never needs host access.
@@ -59,7 +59,7 @@
 #
 # Usage:
 #   scripts/learn-publish.sh <slug> --proposal FILE [--tier T]
-#       spawn the big-boss-pi agent space, then verify. Exit 0 = PR exists,
+#       spawn the pi agent space, then verify. Exit 0 = PR exists,
 #       1 = no PR (and the row is appended here), 2 = gh could not be asked.
 #   scripts/learn-publish.sh <slug> --check
 #       verify only, spawn nothing. Exit 0 = PR exists, 1 = none, 2 = gh
@@ -72,8 +72,8 @@
 #                  ~/.pi)
 #   --pane SCRIPT  agent-pane.sh (default $LEARN_PUBLISH_PANE or
 #                  <repo>/scripts/agent-pane.sh); tests stub it
-#   --bbp DIR      where the publishing agent starts (default
-#                  $LEARN_PUBLISH_BBP or ~/big-boss-pi)
+#   --pane-cwd DIR where the publishing agent starts (default
+#                  $LEARN_PUBLISH_CWD or the repo above)
 #   --gh CMD       gh command (default $LEARN_PUBLISH_GH or gh); tests stub it
 #   --tier T       review tier, read from the proposal when omitted
 #
@@ -89,7 +89,9 @@
 set -uo pipefail
 
 REPO="${LEARN_PUBLISH_ROOT:-$HOME/.pi}"
-BBP="${LEARN_PUBLISH_BBP:-$HOME/big-boss-pi}"
+# The publishing agent starts in the checkout whose gh and ssh credentials it uses, and that is
+# this repo: the workspace it used to start in is retired.
+CWD="${LEARN_PUBLISH_CWD:-$REPO}"
 PANE="${LEARN_PUBLISH_PANE:-$REPO/scripts/agent-pane.sh}"
 GH_CMD="${LEARN_PUBLISH_GH:-gh}"
 PROPOSAL=""
@@ -113,7 +115,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		--repo) [ $# -ge 2 ] || die "--repo needs a value"; REPO="$2"; [ -z "${LEARN_PUBLISH_PANE:-}" ] && PANE="$REPO/scripts/agent-pane.sh"; shift 2 ;;
 		--pane) [ $# -ge 2 ] || die "--pane needs a value"; PANE="$2"; shift 2 ;;
-		--bbp) [ $# -ge 2 ] || die "--bbp needs a value"; BBP="$2"; shift 2 ;;
+		--pane-cwd) [ $# -ge 2 ] || die "--pane-cwd needs a value"; CWD="$2"; shift 2 ;;
 		--gh) [ $# -ge 2 ] || die "--gh needs a value"; GH_CMD="$2"; shift 2 ;;
 		--proposal) [ $# -ge 2 ] || die "--proposal needs a value"; PROPOSAL="$2"; shift 2 ;;
 		--tier) [ $# -ge 2 ] || die "--tier needs a value"; TIER="$2"; shift 2 ;;
@@ -309,7 +311,7 @@ pr_body_body() {
 	proof=$(no_test_line)
 	[ -z "$proof" ] || printf 'No test: %s\n' "$proof"
 	printf 'Proposal: %s\n' "$PROPOSAL"
-	printf 'Written by a self-learn learner; published by a big-boss-pi agent.\n'
+	printf 'Written by a self-learn learner; published by a pi agent space.\n'
 }
 
 # Run the repo's own gate over the body before anything is spawned. Exit 1 is a
@@ -349,14 +351,14 @@ preflight_gate() {
 	esac
 }
 
-# The spec the big-boss-pi agent reads. Written without backticks so a shell
+# The spec the publishing agent reads. Written without backticks so a shell
 # never expands them, and named loudly: this agent is the only one here that may
 # push, and it has to close its own space.
 spec_body() {
 	printf '%s\n' \
 		"# Publish $BRANCH" \
 		"" \
-		"You are a big-boss-pi agent space, started by scripts/learn-publish.sh." \
+		"You are a pi agent space, started by scripts/learn-publish.sh." \
 		"The learner that wrote this branch runs sandboxed and has no git or gh" \
 		"credentials, so it could commit and nothing more. You run on the host," \
 		"where gh and the ssh key live: push, open the pull request, log it, and" \
@@ -461,7 +463,7 @@ case "$MODE" in
 		exit $?
 		;;
 	dry-run)
-		echo "learn-publish: would run: $PANE spawn $SPACE $SPEC --cwd $BBP"
+		echo "learn-publish: would run: $PANE spawn $SPACE $SPEC --cwd $CWD"
 		echo "learn-publish: the spec would say:"
 		spec_body
 		echo "learn-publish: the pull request body would be:"
@@ -481,15 +483,15 @@ preflight_gate
 test_requirement
 spec_body >"$SPEC" || die "cannot write $SPEC"
 
-# The publishing agent is only bare because it starts in the workspace whose gh and
-# ssh credentials are the host's. A missing workspace means an agent without them,
+# The publishing agent is only bare because it starts in the checkout whose gh and
+# ssh credentials are the host's. A missing directory means an agent without them,
 # so it is an error here and not a "no PR" later.
-[ -d "$BBP" ] || die "$BBP is not a directory — no big-boss-pi workspace to hand $BRANCH to"
+[ -d "$CWD" ] || die "$CWD is not a directory — no checkout to hand $BRANCH to"
 
-echo "learn-publish: handing $BRANCH ($SHA) to a big-boss-pi agent space $SPACE"
-if ! "$PANE" spawn "$SPACE" "$SPEC" --cwd "$BBP"; then
+echo "learn-publish: handing $BRANCH ($SHA) to a pi agent space $SPACE"
+if ! "$PANE" spawn "$SPACE" "$SPEC" --cwd "$CWD"; then
 	echo "learn-publish: the pane script could not start $SPACE (see above)" >&2
-	echo "learn-publish: $BRANCH is unverified and unpublished; run $PANE spawn $SPACE $SPEC --cwd $BBP by hand" >&2
+	echo "learn-publish: $BRANCH is unverified and unpublished; run $PANE spawn $SPACE $SPEC --cwd $CWD by hand" >&2
 	exit 2
 fi
 

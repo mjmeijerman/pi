@@ -418,21 +418,21 @@ are named as comments and stopped by their timers):
 systemctl --user disable herdr-resume.service
 systemctl --user disable --now pi-evals.timer
 systemctl --user disable --now pi-retro.timer
-systemctl --user disable --now big-boss-pi-guard.service
+systemctl --user disable --now pi-guard.service
 # pi-evals.service: started by its timer — nothing to disable
 # pi-retro.service: started by its timer — nothing to disable
 ```
 
 ```bash
 # macOS
-launchctl unload -w ~/Library/LaunchAgents/dev.herdr.big-boss-pi-guard.plist
+launchctl unload -w ~/Library/LaunchAgents/dev.herdr.pi-guard.plist
 launchctl unload -w ~/Library/LaunchAgents/*.plist   # every pi login item
 ```
 
 ```cmd
 rem Windows: the delete stops the next logon, the second line stops the guard that
 rem is running now — its pid is in the file the hidden launcher wrote
-schtasks /Delete /TN big-boss-pi-guard /F
+schtasks /Delete /TN pi-guard /F
 for /f "usebackq" %p in ("%USERPROFILE%\.pi\state\guard.pid") do taskkill /F /PID %p
 ```
 
@@ -446,13 +446,20 @@ line with window style 0 (hidden, not waited on) and exits. The guard itself is
 unchanged: same script, same interval, same space. The installer runs the very
 same entry on the spot with `schtasks /Run`, so neither start opens a window.
 
+The login entry is named after the program, not after a workspace: `pi-guard`.
+Every machine that installed an earlier version has the entry registered under
+the old name, and two login entries running one guard race on the same records —
+so a re-install disables and removes the old entry first, and says which one it
+replaced. Nothing to do by hand: an upgrade that prints `== guard unit: ...` or
+`== guard task: ...` did it.
+
 To see whether it is running, read the pid the launcher leaves beside the guard's
 log, and ask Windows whether it is alive. Task Scheduler reads `Ready` even while
 the guard runs — the launcher is not the loop — so the task's `Status:` is not the
 answer, the pid file is:
 
 ```cmd
-schtasks /Query /TN big-boss-pi-guard /FO LIST          rem the entry exists (On Logon)
+schtasks /Query /TN pi-guard /FO LIST                   rem the entry exists (On Logon)
 type "%USERPROFILE%\.pi\state\guard.pid"               rem the guard's process id
 tasklist /FI "PID eq <that id>"                         rem and that process is alive
 tail -n 20 ~/.pi/state/guard.log                        rem what it did (Git Bash)
@@ -485,7 +492,7 @@ registered, and the guard's job is to repair it after a reboot. See
 
 The systemd step copies every unit in this repo's `systemd/` directory, because it
 reads that directory instead of a list: the guard's
-`big-boss-pi-guard.service` (the supervisor, `%h/.pi/bin/guard`),
+`pi-guard.service` (the supervisor, `%h/.pi/bin/guard`),
 `pi-evals.timer` with its
 `pi-evals.service`, `pi-retro.timer` with its `pi-retro.service`, and
 `herdr-resume.service`. The timers are enabled `--now`, `herdr-resume.service`
@@ -637,9 +644,9 @@ says `== guard: registered and started, but no harness space appeared` and these
 commands are the whole diagnosis:
 
 ```bash
-schtasks /Query /TN big-boss-pi-guard /V /FO LIST     # Windows: is the entry registered (and its Task To Run)
+schtasks /Query /TN pi-guard /V /FO LIST     # Windows: is the entry registered (and its Task To Run)
 type "%USERPROFILE%\.pi\state\guard.pid"               # Windows: the pid the launcher started
-launchctl print gui/$(id -u)/dev.herdr.big-boss-pi-guard   # macOS: is the login item loaded?
+launchctl print gui/$(id -u)/dev.herdr.pi-guard   # macOS: is the login item loaded?
 tail -n 20 ~/.pi/state/guard.log                      # what the guard itself did
 herdr-app ls                                          # does the app show the space?
 ```

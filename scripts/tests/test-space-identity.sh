@@ -10,7 +10,7 @@
 #   2. two records on one folder are told apart by name, and neither is cloned;
 #   3. a resume with a terminal the record never had opens the newest session for the folder;
 #   4. `space new` writes `bin/pi-bare` and refuses a sandboxed `--argv`;
-#   5. a record pointing into the retired `~/big-boss-pi` is rewritten to this tree's `bin/pi-bare`,
+#   5. a record pointing into a retired checkout is rewritten to this tree's `bin/pi-bare`,
 #      and nothing is opened twice.
 #
 # `--dry-run` is checked last: it names what it would do and calls no `space.new`.
@@ -47,7 +47,7 @@ export PI_SPACE_ROOT="$WORK/root"
 export PI_BOSS_ROOT="$WORK/root"
 export PI_SPACE_RULES_TEMPLATE="$ROOT/agent/space-rules.md"
 # The retired checkout is a fixture path, not this machine's: the guard rewrites it, never reads it.
-export PI_LEGACY_BOSS_ROOT="$WORK/big-boss-pi"
+export PI_LEGACY_BOSS_ROOT="$WORK/retired-checkout"
 mkdir -p "$HOME" "$PI_SPACE_ROOT" "$WORK/stub" "$WORK/resume" "$WORK/sessions" "$PI_LEGACY_BOSS_ROOT"
 PATH="$WORK/stub:$PATH"
 export PATH

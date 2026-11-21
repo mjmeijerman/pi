@@ -6,7 +6,7 @@
 //      "no PR" — the sandbox has no gh login, so the old version's only possible
 //      answer was the wrong one.
 //
-// The hand-off is a big-boss-pi agent space (`agent-pane.sh spawn <slug>-pr`),
+// The hand-off is a pi agent space (`agent-pane.sh spawn <slug>-pr`),
 // because that agent runs on the host where gh and the ssh key live. Every case
 // runs the real script against a throwaway repo, a stub `gh` and a stub pane
 // script; nothing here touches GitHub or spawns pi.
@@ -48,7 +48,7 @@ let caseId = 0;
 function fixture(prState) {
 	const dir = join(tmp, `case-${++caseId}`);
 	mkdirSync(join(dir, "agent", "proposals"), { recursive: true });
-	mkdirSync(join(dir, "bbp"), { recursive: true });
+	mkdirSync(join(dir, "pane-cwd"), { recursive: true });
 	const git = (...args) => {
 		const r = spawnSync("git", args, { cwd: dir, env: GIT_ENV, encoding: "utf8" });
 		assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
@@ -162,7 +162,7 @@ exit 1
 		publishingPane,
 		slowPane,
 		failingPane,
-		bbp: join(dir, "bbp"),
+		cwd: join(dir, "pane-cwd"),
 		log: join(dir, "agent", "proposals", "publish-log.jsonl"),
 		paneCalled: () => readFileSync(join(dir, "pane-called"), "utf8").trim().split("\n"),
 		specPath: () => join(dir, "agent", "proposals", "publish", "test-slug-pr.md"),
@@ -176,7 +176,7 @@ function run(f, args, extraEnv = {}) {
 			LEARN_PUBLISH_ROOT: f.dir,
 			LEARN_PUBLISH_GH: f.gh,
 			LEARN_PUBLISH_PANE: f.pane,
-			LEARN_PUBLISH_BBP: f.bbp,
+			LEARN_PUBLISH_CWD: f.cwd,
 			// A caller's sandbox marker must not leak in: one case sets it on purpose.
 			PI_SANDBOX_MODE: "",
 			...extraEnv,
@@ -237,7 +237,7 @@ test("--check exits 2, not 1, when gh cannot be asked from here", () => {
 	assert.equal(readdirSync(join(f.dir, "agent", "proposals")).includes("publish-log.jsonl"), false);
 });
 
-test("a run hands the branch to a big-boss-pi agent space and publishes", () => {
+test("a run hands the branch to a pi agent space and publishes", () => {
 	const f = fixture("after");
 	f.pane = f.publishingPane;
 	const proposal = join(f.dir, "agent", "proposals", "p.md");
@@ -250,7 +250,7 @@ test("a run hands the branch to a big-boss-pi agent space and publishes", () => 
 	assert.equal(called[0], "spawn", "the hand-off is a pane spawn");
 	assert.equal(called[1], "test-slug-pr", "the space is named after the slug's PR");
 	assert.equal(called[2], f.specPath(), "the spec file is what the agent reads");
-	assert.deepEqual(called.slice(3), ["--cwd", f.bbp], "and it starts in the big-boss-pi workspace");
+	assert.deepEqual(called.slice(3), ["--cwd", f.cwd], "and it starts in the checkout it hands the branch to");
 
 	const spec = readFileSync(f.specPath(), "utf8");
 	assert.match(spec, /learn\/test-slug/, "the spec names the branch");
@@ -419,7 +419,7 @@ test("the body the spec hands to gh passes the repo's own pr-gate", () => {
 test("the old one-line body is what pr-tier was failing on", () => {
 	const f = fixture("none");
 	const old = join(f.dir, "old-body.md");
-	writeFileSync(old, "Tier: Medium. Proposal: agent/proposals/x.md. Written by a self-learn learner; published by a big-boss-pi agent.\n");
+	writeFileSync(old, "Tier: Medium. Proposal: agent/proposals/x.md. Written by a self-learn learner; published by a pi agent space.\n");
 	// A script and its test, the pair every learner branch changes: the gate then
 	// asks for all three lines the literal has none of.
 	const changed = join(f.dir, "changed-static.txt");

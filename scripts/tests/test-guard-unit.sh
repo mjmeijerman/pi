@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Tests for systemd/big-boss-pi-guard.service — the unit that starts the space
+# Tests for systemd/pi-guard.service — the unit that starts the space
 # supervisor at login.
 #
-# Why this exists: the unit used to start `%h/big-boss-pi/bin/guard`, the
+# Why this exists: the unit used to start a guard from another checkout, the
 # pre-space copy that knows one hard-coded workspace and can restore nothing
 # recorded in `~/.pi/state/spaces/`. That unit installed cleanly and kept one
 # space alive while every other space which vanished stayed vanished — a green
@@ -18,7 +18,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-UNIT="$ROOT/systemd/big-boss-pi-guard.service"
+UNIT="$ROOT/systemd/pi-guard.service"
 
 PASS_N=0
 FAIL_N=0
@@ -57,14 +57,14 @@ check 'one ExecStart line' '1' "$exec_starts"
 exec_line="$(printf '%s\n' "$TEXT" | grep '^ExecStart=' || true)"
 check 'ExecStart is %h/.pi/bin/guard' 'ExecStart=%h/.pi/bin/guard' "$exec_line"
 
-begin 'the unit no longer names the pre-space copy'
-# The retired clone copy knows only `big-boss-pi` and restores no recorded space:
-# a `%h/big-boss-pi` path anywhere in the unit means it is back.
-if printf '%s\n' "$TEXT" | grep -q '%h/big-boss-pi'; then
-	bad "the unit still points into %h/big-boss-pi: $(printf '%s\n' "$TEXT" | grep -n '%h/big-boss-pi' | tr '\n' ' ')"
-else
-	ok 'no %h/big-boss-pi path in the unit'
-fi
+begin 'the unit starts this tree and nothing else'
+# The copy that knew one hard-coded workspace restored no recorded space: any
+# second program path in the unit means that copy is back.
+paths="$(printf '%s\n' "$TEXT" | grep -oE '/[^ "]*bin/guard' | sort -u | tr '\n' ' ')"
+case "$paths" in
+'/.pi/bin/guard ') ok 'the only program path in the unit is %h/.pi/bin/guard' ;;
+*) bad "the unit names a second program path: [$paths]" ;;
+esac
 
 begin 'the description says what it does, not which workspace it is'
 description="$(printf '%s\n' "$TEXT" | sed -n 's/^Description=//p' | head -n 1)"
@@ -86,7 +86,7 @@ case "$description" in
 *) bad "the description does not say it opens them on login: [$description]" ;;
 esac
 # One workspace named in the description is the old promise in new words.
-for workspace in big-boss-pi pi-master; do
+for workspace in "$(basename "$HOME")-bespoke" archive; do
 	case "$description" in
 	*"$workspace"*) bad "the description names a single workspace: [$description]" ;;
 	*) ok "the description does not name $workspace" ;;
