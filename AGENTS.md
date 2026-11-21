@@ -65,6 +65,13 @@ in a reply, and judge each one. One review claimed `bin/pr-ready` did not exist 
 tree; it does — a false finding is rebutted, not obeyed. A finding left open is not
 green.
 
+The loop, in that order: `bin/delegate wait <slug> --forever` until the report exists,
+`bin/delegate finish <slug>` to publish, `bin/pr-ready <n> --sha <sha> --wait` until the
+rollup is green, `gh pr view <n> --json mergeable` until it says MERGEABLE, then the
+review above until nothing is open. Those are the only two exits — green, mergeable and
+answered, or the person decides. A boss that stops before the last step has handed over
+a PR with work still in it.
+
 ## Proof, sized to the diff
 
 One measurement, and only the checks this diff can break: a docs-only change is `preflight`
