@@ -104,6 +104,7 @@ import {
 	wslMountWarnings,
 } from './scripts/install-lib.mjs';
 import { prereqsSkipped, stepPrereqs } from './scripts/prereqs.mjs';
+import { DURABLE_KEY, durableBinding, mergeDurableKeys } from './herdr-mods/durable/keys.mjs';
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
@@ -550,6 +551,41 @@ function stepHerdrMods() {
 		added++;
 	}
 	if (added > 0) note(`${added} herdr mod(s) new in ${HERDR_MODS} — in place before herdr-app is first opened`);
+}
+
+// --- 1d. the key that makes a durable space ---------------------------------
+/**
+ * stepHerdrKeys — `alt-shift-n` pressed anywhere opens a tab running `space new`.
+ *
+ * The mods' own keys live in each mod's `keys.json` and Herdr merges them by hand; that
+ * merge is this step, for the one key that has to work on a fresh install. The other
+ * half is the argv: `terminal.open` with the installed `space` (and the `.cmd` on
+ * Windows), so no machine's home folder is written into a file that travels.
+ *
+ * A missing keys.json is deliberately not created. Herdr only replaces a keys file whose
+ * bytes are a shipped original, so any file written before the app's first start becomes
+ * the person's whole key map — one section in it would erase every shortcut it does not
+ * mention, ctrl-shift-p among them. The step says the sentence instead, and the next run
+ * (after Herdr has written its own) adds the key beside them.
+ */
+function stepHerdrKeys() {
+	const binding = durableBinding({ platform: PLAN.platform, binDir: P.binDir });
+	const file = path.join(P.herdrConfigDir, 'keys.json');
+	if (!exists(file)) {
+		note(`${path.basename(file)}: not there yet — Herdr writes it on its first start, then run this again and ${DURABLE_KEY} lands beside the shipped keys`);
+		return;
+	}
+	const { text, state } = mergeDurableKeys(read(file), binding);
+	if (state === 'added') {
+		writeText(file, text);
+		note(`${DURABLE_KEY} -> ${binding.args.argv.join(' ')} (new tab) in ${file}`);
+	} else if (state === 'kept') {
+		say(`== kept ${DURABLE_KEY} in ${path.basename(file)}: already ${binding.args.argv.join(' ')}`);
+	} else if (state === 'taken') {
+		warn(`${DURABLE_KEY} is already bound to something else in ${file} — left as it is; bind it yourself or free the key`);
+	} else {
+		warn(`${file} is not the JSON Herdr expects — nothing written; fix it, then run this again`);
+	}
 }
 
 // --- 2. git hooks -----------------------------------------------------------
@@ -1121,6 +1157,7 @@ function stepSystemd() {
 function summary() {
 	say('');
 	note(`done — ${changed} change(s) written${DRY ? ' (dry run: nothing written)' : ''}`);
+	say(`new durable space: ${DURABLE_KEY} (or: space new <name>)`);
 	say('Verify:');
 	say('   git config --global --get core.hooksPath        # global hooks');
 	say(`   ${path.join(P.binDir, 'git-vuln-scan')} --help`);
@@ -1202,6 +1239,7 @@ async function main() {
 	stepBins();
 	await stepHerdrApp();
 	stepBinsOnPath();
+	stepHerdrKeys();
 	stepSpace();
 	await stepServices();
 	summary();
