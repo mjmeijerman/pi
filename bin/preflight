@@ -165,6 +165,9 @@ PF_GATE_TMP=""
 PF_GATE_REPO=""
 PF_GATE_SELECTED=""
 PF_GATE_DIR=""
+# The tree the changed files are read from: --cwd by default, a worker's own worktree when --slug's
+# branch lives in one. Every file-reading check names it with a `tree: <path>` line.
+PF_READ=""
 cleanup() {
 	pf_gate_checkout_cleanup
 	[ -z "$PREFLIGHT_TMP" ] || rm -rf "$PREFLIGHT_TMP"
@@ -630,12 +633,15 @@ pf_ts_checker() {
 pf_check_syntax() {
 	local f rc=0 nb=0 nm=0 nts=0 nts_skip=0 nunk=0 out tsc_cmd=""
 	local tsfiles=() unk=()
+	# The tree these files are read from, named on the output: a verdict that does not say which
+	# checkout it read is a verdict a reader has to guess about.
+	printf 'tree: %s\n' "$PF_READ"
 	for f in "${PF_CODE[@]}"; do
-		[ -f "$PF_CWD/$f" ] || continue
+		[ -f "$PF_READ/$f" ] || continue
 		case $f in
 		*.mjs | *.js)
 			nm=$((nm + 1))
-			if ! out=$(node --check "$PF_CWD/$f" 2>&1); then
+			if ! out=$(node --check "$PF_READ/$f" 2>&1); then
 				rc=1
 				printf '%s:\n%s\n' "$f" "$(printf '%s\n' "$out" | head -n 3 | sed 's/^/  /')"
 			fi
@@ -646,7 +652,7 @@ pf_check_syntax() {
 			;;
 		*.sh | *.bash | bin/*)
 			nb=$((nb + 1))
-			if ! out=$(bash -n "$PF_CWD/$f" 2>&1); then
+			if ! out=$(bash -n "$PF_READ/$f" 2>&1); then
 				rc=1
 				printf '%s:\n%s\n' "$f" "$(printf '%s\n' "$out" | head -n 3 | sed 's/^/  /')"
 			fi
@@ -661,10 +667,10 @@ pf_check_syntax() {
 		esac
 	done
 	if [ "$nts" -gt 0 ]; then
-		if tsc_cmd=$(pf_ts_checker "$PF_CWD"); then
-			if ! out=$(cd "$PF_CWD" && bash -c "$tsc_cmd" 2>&1); then
+		if tsc_cmd=$(pf_ts_checker "$PF_READ"); then
+			if ! out=$(cd "$PF_READ" && bash -c "$tsc_cmd" 2>&1); then
 				rc=1
-				printf 'TypeScript: %s failed on %d changed TS file(s) in %s:\n%s\n' "$tsc_cmd" "$nts" "$PF_CWD" \
+				printf 'TypeScript: %s failed on %d changed TS file(s) in %s:\n%s\n' "$tsc_cmd" "$nts" "$PF_READ" \
 					"$(printf '%s\n' "$out" | head -n 12 | sed 's/^/  /')"
 			fi
 		else
@@ -686,14 +692,14 @@ pf_check_syntax() {
 	# gate refuses work, and a missing linter is not the work's fault.
 	local shells=()
 	for f in "${PF_CODE[@]}"; do
-		case $f in *.sh | bin/*) [ -f "$PF_CWD/$f" ] && shells+=("$f") ;; esac
+		case $f in *.sh | bin/*) [ -f "$PF_READ/$f" ] && shells+=("$f") ;; esac
 	done
 	if [ "${#shells[@]}" -eq 0 ]; then
 		printf 'shellcheck: no changed shell file\n'
 	elif ! want_cmd shellcheck; then
 		printf 'shellcheck: not installed here, so %d changed shell file(s) went unlinted — install it (apt install shellcheck) to have the linter CI runs\n' "${#shells[@]}"
 	else
-		if ! out=$(cd "$PF_CWD" && shellcheck --severity=error "${shells[@]}" 2>&1); then
+		if ! out=$(cd "$PF_READ" && shellcheck --severity=error "${shells[@]}" 2>&1); then
 			rc=1
 			printf 'shellcheck --severity=error on %s:\n%s\n' "${shells[*]}" "$(printf '%s\n' "$out" | head -n 12 | sed 's/^/  /')"
 		else
@@ -1101,12 +1107,13 @@ pf_semgrep_configs() {
 
 pf_check_semgrep() {
 	local configs=() unresolved=() f cfg out files=() raw resolved rc=0
+	printf 'tree: %s\n' "$PF_READ"
 	if ! want_cmd semgrep; then
 		printf 'semgrep is not installed here, so this check cannot pass — install it (pipx install semgrep) and run it again\n'
 		return 1
 	fi
 	for f in "${PF_CODE[@]}"; do
-		[ -f "$PF_CWD/$f" ] || continue
+		[ -f "$PF_READ/$f" ] || continue
 		files+=("$f")
 	done
 	[ "${#files[@]}" -gt 0 ] || {
@@ -1132,7 +1139,7 @@ pf_check_semgrep() {
 	fi
 	local args=( --error --quiet --metrics=off --disable-version-check --no-git-ignore )
 	for cfg in "${configs[@]}"; do args+=( --config "$cfg" ); done
-	out=$(cd "$PF_CWD" && semgrep "${args[@]}" "${files[@]}" 2>&1)
+	out=$(cd "$PF_READ" && semgrep "${args[@]}" "${files[@]}" 2>&1)
 	rc=$?
 	if [ "$rc" -ne 0 ]; then
 		# Name the files and the rules rather than dumping the banner: a finding without its file is
@@ -1157,15 +1164,16 @@ pf_check_semgrep() {
 # would have said ten minutes later.
 pf_check_scrub() {
 	local tmp stub f rc=0 n=0 out
+	printf 'tree: %s\n' "$PF_READ"
 	tmp=$PREFLIGHT_TMP/scrub
 	mkdir -p "$tmp/stub" "$tmp/home"
 	stub=$tmp/stub
 	for f in "${PF_TESTS[@]}"; do
-		[ -f "$PF_CWD/$f" ] || continue
+		[ -f "$PF_READ/$f" ] || continue
 		n=$((n + 1))
 		case $f in
-		*.mjs | *.js) out=$(cd "$PF_CWD" && env -i PATH="$stub:/usr/bin:/bin" HOME="$tmp/home" TMPDIR="$tmp" node --test "$PF_CWD/$f" 2>&1) ;;
-		*) out=$(cd "$PF_CWD" && env -i PATH="$stub:/usr/bin:/bin" HOME="$tmp/home" TMPDIR="$tmp" bash "$PF_CWD/$f" 2>&1) ;;
+		*.mjs | *.js) out=$(cd "$PF_READ" && env -i PATH="$stub:/usr/bin:/bin" HOME="$tmp/home" TMPDIR="$tmp" node --test "$PF_READ/$f" 2>&1) ;;
+		*) out=$(cd "$PF_READ" && env -i PATH="$stub:/usr/bin:/bin" HOME="$tmp/home" TMPDIR="$tmp" bash "$PF_READ/$f" 2>&1) ;;
 		esac
 		if [ $? -ne 0 ]; then
 			rc=1
@@ -1259,6 +1267,27 @@ pf_branch_checkout() {
 		esac
 	done < <(git -C "$repo" worktree list --porcelain 2>/dev/null)
 	return 1
+}
+
+# pf_read_tree <cwd> <branch> <slug> — the checkout the changed files are read from.
+#
+# A worker's branch usually lives in its own worktree (`.worktrees/<slug>`), while `--cwd` is the
+# project the space names — the trunk checkout. Reading `--cwd` there lints trunk's copy of a file the
+# branch rewrote, so a syntax error the worker introduced passes the gate and a good file FAILs for
+# something the branch already fixed. With a slug, the branch's own checkout wins; every
+# file-reading check prints `tree: <path>`, so a report says which tree its verdict came from.
+pf_read_tree() {
+	local cwd=$1 branch=$2 slug=$3 dir=""
+	[ -n "$slug" ] || {
+		printf '%s' "$cwd"
+		return 0
+	}
+	dir=$(pf_branch_checkout "$cwd" "$branch" 2>/dev/null) || dir=""
+	if [ -n "$dir" ] && [ -d "$dir" ]; then
+		printf '%s' "$dir"
+		return 0
+	fi
+	printf '%s' "$cwd"
 }
 
 # pf_throwaway_checkout <repo> <branch> — a detached worktree of the commit <branch> points at, for
@@ -1432,7 +1461,8 @@ pf_check_body() {
 # minutes-long check is tolerable inside a pre-publish gate.
 pf_check_mutation() {
 	local out rc conf=$PF_CWD/agent/stryker.conf.json
-	out=$(cd "$PF_CWD" && bash scripts/mutate-changed.sh 2>&1)
+	printf 'tree: %s\n' "$PF_READ"
+	out=$(cd "$PF_READ" && bash scripts/mutate-changed.sh 2>&1)
 	rc=$?
 	printf '%s\n' "$out"
 	if [ "$rc" -ne 0 ]; then
@@ -1621,6 +1651,9 @@ preflight_main() {
 	*) PF_SHAPE_NAME="a checkout with no suite" ;;
 	esac
 	pf_collect "$cwd" "$branch"
+	# The tree the changed files are read from. With a slug whose branch lives in a worktree, that is
+	# the worktree: the files this gate reads are the branch's, not the trunk checkout's copies.
+	PF_READ=$(pf_read_tree "$cwd" "$branch" "$slug")
 	# The ledger's handle is already exported above: receipt_init keeps it and takes the tree hash
 	# from the checkout being checked, not from the tree this program sits in.
 	receipt_init "$cwd"
@@ -1660,6 +1693,9 @@ preflight_main() {
 	PF_CACHE_VERSION=$(pf_gate_version)
 	PF_RAN_FP=$(pf_sha "$(printf '%s\n' "${run_ids[@]}")")
 	PF_TREE=$(pf_tree_hash "$cwd")
+	# The receipt's tree is the one the files were read from: a key that ignored the read tree would
+	# serve trunk's verdict for a worktree the branch has since changed.
+	[ -z "$PF_READ" ] || [ "$PF_READ" = "$cwd" ] || PF_TREE=$(pf_tree_hash "$PF_READ")
 	local ttl now_i age stamp crc cms cts cached=0 ran_now=0 now_list=" "
 	local -a run_now=()
 	local -A cached_age=() cached_rc=() cached_ms=() cached_ts=()

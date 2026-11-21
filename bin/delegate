@@ -14,11 +14,13 @@ elif [ -z "${BASH_VERSION:-}" ]; then
 fi
 
 #   delegate spawn <slug> --cwd DIR [--space SLUG] [--mode bare|sandboxed|no-net] [--thinking LEVEL]
-#                  [--acceptance] [--allow-matrix --reason TEXT]
+#                  [--acceptance] [--patch FILE]
+#                  [--allow-matrix --reason TEXT]
 #                  [--override-jev --reason TEXT] "<task>"
 #   delegate wait <slug> [--space SLUG] [--timeout SECONDS] [--forever]
 #   delegate list [--space SLUG]
 #   delegate status <slug> [--json]   (one word: working, reported, closed or unknown)
+#   delegate tell <slug> "<text>"   (send one line to the worker's own terminal)
 #   delegate close <slug> [--space SLUG] [--merged PR-URL-OR-NUMBER]
 #   delegate close <slug> --space SLUG --nothing "<why nothing landed>"   (a worker whose change never landed)
 #   delegate close <slug> --rewritten <sha> "<why the tip is another worker's, rewritten>"
@@ -77,6 +79,18 @@ fi
 # not yet done. The mode is auditable: the spawn's state line and its printed result both carry
 # `acceptance`, so a later reader can tell a second opinion from an implementer without reading
 # the spec.
+#
+# `delegate tell <slug> "<text>"` is the one message into a running worker's own terminal, and the
+# second half of a refused `finish`: a preflight FAIL stops the run and the fix belongs in the worker
+# that caused it, so `finish` prints the failing line with that command beside it. A tell is refused
+# for a slug nothing tracks and for a worker that is not `working` (a written report closes its tab by
+# rule, so a message there lands nowhere), prints the state word either way, and records the send in
+# state/decisions.jsonl — the record says the worker was told, not only a scrollback that close wipes.
+#
+# `delegate spawn <slug> --patch FILE` is the worker whose change is already written: the patch is
+# copied into the space as specs/<slug>.patch and the spec orders it applied with `patch -p1`, word
+# for word, refusing the hand-edit that makes it apply. A missing patch file is refused before a space
+# is made, and the copied path is in spawn's JSON output for a caller that reads it.
 #
 # A spec measures one thing, and spawn checks that before anything is started. The task text's
 # `Measure:` lines are counted: two of them, or none plus prose asking for before/after numbers, is
@@ -1761,7 +1775,7 @@ EOF
 }
 
 cmd_spawn() {
-	local slug="" cwd="" space_opt="" mode="" thinking="" task="" override_jev=0 allow_matrix=0 reason="" runner="" acceptance=0
+	local slug="" cwd="" space_opt="" mode="" thinking="" task="" override_jev=0 allow_matrix=0 reason="" runner="" acceptance=0 patch="" patch_given=0
 	[ "$#" -ge 1 ] || die 'usage: delegate spawn <slug> --cwd DIR [--space SLUG] [--mode M] [--thinking LEVEL] [--acceptance] [--allow-matrix --reason TEXT] [--override-jev --reason TEXT] "<task>"'
 	slug=$1; shift
 	local words=()
@@ -1772,6 +1786,7 @@ cmd_spawn() {
 		--thinking) thinking=${2:-}; shift 2 ;;
 		--space) space_opt=${2:-}; shift 2 ;;
 		--acceptance) acceptance=1; shift ;;
+		--patch) patch=${2:-}; patch_given=1; shift 2 ;;
 		--allow-matrix) allow_matrix=1; shift ;;
 		--override-jev) override_jev=1; shift ;;
 		--reason) reason=${2:-}; shift 2 ;;
@@ -1783,7 +1798,18 @@ cmd_spawn() {
 	valid_slug "$slug" || die "slug must match [a-z0-9][a-z0-9-]{0,30}: '$slug'"
 	[ -n "$cwd" ] || die "spawn needs --cwd: the directory the worker works in"
 	[ -d "$cwd" ] || die "no such directory: $cwd"
-	[ -n "$task" ] || die "spawn needs a task description"
+	# --patch names a change that is already written, so a file that is not there is refused here:
+	# before jev is asked, before a space is touched, and before a tab exists to be left empty.
+	if [ "$patch_given" = 1 ] && [ -z "$patch" ]; then
+		die "--patch needs a file: delegate spawn $slug --cwd $cwd --patch <file> \"<task>\""
+	fi
+	if [ "$patch_given" = 1 ] && [ ! -f "$patch" ]; then
+		die "--patch names no file: '$patch' does not exist, so there is no change to apply. Refused before a space was made."
+	fi
+	[ -n "$task" ] || [ "$patch_given" = 1 ] || die "spawn needs a task description"
+	# A patch spawn with no task text is still a task: the patch is the change, and the spec below is
+	# where it is described. Named with its own path so the measure check and the spec agree on it.
+	[ -n "$task" ] || task="Apply the patch at \`$patch\` to \`$cwd\`, word for word."
 	# The space decides where the spec, the report and the record live. It is read from --cwd
 	# unless --space names it, and a folder no space claims is refused before jev costs a call.
 	# --space against a --cwd another space claims is refused naming both: a space is one project,
@@ -2043,6 +2069,14 @@ Forcing a second worker in the same area needs --override-jev --reason '<why the
 	fi
 
 	mkdir -p "$SPECS" "$REPORTS" "$STATE"
+	# --patch: the change already exists. It is copied into the space beside the spec, so the bytes
+	# the worker applies are the bytes that were handed over even after the original moves, edited or
+	# is deleted with its worktree. The path travels in the spec and in spawn's JSON output.
+	if [ "$patch_given" = 1 ]; then
+		patch_spec=$SPECS/$slug.patch
+		cp -- "$patch" "$patch_spec" || die "could not copy $patch to $patch_spec, so the worker would have no patch to apply"
+		patch_json=$patch_spec
+	fi
 	# overridden is the word "false" when nothing was overridden: test it, do not test for a value.
 	local overridden_note=""
 	if [ "$overridden" = true ]; then overridden_note=", overridden: $reason"; fi
@@ -2060,7 +2094,7 @@ Forcing a second worker in the same area needs --override-jev --reason '<why the
 	# mission line, the worktree rule, the report shape — is the same worker, so it is the same
 	# template rather than a second one that drifts.
 	local acceptance_block="" acceptance_task="" task_block=$task base_task=$task
-	local acceptance_bool=false
+	local acceptance_bool=false patch_spec="" patch_block="" patch_json=""
 	if [ "$acceptance" = 1 ]; then
 		acceptance_bool=true
 		acceptance_task="Acceptance tests for the spec at \`$source_spec\`. You are the second opinion: the
@@ -2091,6 +2125,26 @@ ACCEPTANCE
 	# Every refusal is behind us: this spawn really starts work, so the leftover learner spaces
 	# from earlier compactions get their one chance to be closed. Never fatal, never blocking.
 	reap_finished_learners
+
+	# --patch adds one block and nothing else: the change is written, and the worker's job is to land
+	# it exactly. "Change no word" is the rule the block exists for — a patch that nearly applies is
+	# the patch that gets hand-edited into something nobody reviewed.
+	if [ -n "$patch_spec" ]; then
+		patch_block=$(cat <<PATCH
+
+## Patch
+
+The change is already written: \`$patch_spec\`. Apply it from the repo root, on your branch, with
+
+    patch -p1 < $patch_spec
+
+and change no word of it — not a path, not a comment, not a line ending, not a hunk header. A hunk
+that fails is not yours to rewrite into one that applies. If it does not apply, make the first line
+of your report \`DECISION NEEDED: <what the patch expected and what it found>\` and stop. When it
+applies cleanly, commit the applied change and nothing else.
+PATCH
+		)
+	fi
 
 	# One spawn, one worker, one space. A second worker in the same space is the refusal two lines
 	# up; a task that needs more is a second spawn, after this one merged, in its own space.
@@ -2134,6 +2188,7 @@ You are the genie. Prove it runs.
 
 $task_block
 $acceptance_block
+$patch_block
 
 ## Rules
 
@@ -2233,8 +2288,8 @@ Open it again, or make a new space and start there:
 	hc send "$terminal" "Read $spec and do it. Report to $report." >/dev/null 2>&1 \
 		|| printf '%s: warning: could not send the task to %s\n' "$prog" "$terminal" >&2
 
-	printf '{"slug":"%s","space":"%s","herdr_space":"%s","mode":"%s","thinking":"%s","thinking_effort":"%s","route":"%s","overridden":%s,"acceptance":%s,"cwd":"%s","report":"%s","branch":"%s"}\n' \
-		"$spawn_slug" "$SPACE" "$space" "$mode" "$jev_level" "$jev_effort" "$jev_route" "$overridden" "$acceptance_bool" "$cwd" "$report" "$base_branch"
+	printf '{"slug":"%s","space":"%s","herdr_space":"%s","mode":"%s","thinking":"%s","thinking_effort":"%s","route":"%s","overridden":%s,"acceptance":%s,"patch":"%s","cwd":"%s","report":"%s","branch":"%s"}\n' \
+		"$spawn_slug" "$SPACE" "$space" "$mode" "$jev_level" "$jev_effort" "$jev_route" "$overridden" "$acceptance_bool" "$patch_spec" "$cwd" "$report" "$base_branch"
 	fi
 }
 
@@ -2486,6 +2541,52 @@ cmd_status() {
 	return "$rc"
 }
 
+# cmd_tell <slug> "<text>" -- the one message into a running worker's own terminal.
+#
+# `finish` stops at a failing preflight and leaves the worker open; the fix belongs in that worker's
+# tab, and typing into a tab the boss cannot see is where a turn dies. `tell` sends the line to the
+# terminal the record already names, prints the state word it found, and records the send in
+# state/decisions.jsonl, so "the worker was told what failed" is on the record and not only in a
+# scrollback the next close wipes.
+#
+# Refused twice, and the word is printed first so the reader sees which one: a slug nothing tracks
+# (there is nothing to send to), and a worker that is not `working` — a written report closes the tab
+# by rule, so a message sent there would land nowhere and prove nothing.
+cmd_tell() {
+	local slug=${1:-} text="" word terminal worker_space
+	[ -n "$slug" ] || die 'usage: delegate tell <slug> "<text>"'
+	shift || true
+	text="$*"
+	[ -n "${text// /}" ] || die "tell needs a message: delegate tell $slug \"<text>\""
+	DELEGATIONS=$(delegations_all)
+	worker_space=$(delegation_field "$slug" spaceName)
+	[ -n "$worker_space" ] || worker_space=$(space_of_slug "$slug")
+	if [ -n "$worker_space" ] && space_exists "$worker_space"; then use_space "$worker_space"; fi
+	DELEGATIONS=$(delegations_all)
+	word=$(worker_word "$slug") ||
+		die "no such worker: $slug — nothing to tell.
+What is tracked:  $BIN/delegate list"
+	printf '%s\n' "$word"
+	if [ "$word" != working ]; then
+		printf '%s: refusing to tell %s: its state is %s, so its terminal is not there to read a message.\n' \
+			"$prog" "$slug" "$word" >&2
+		printf 'A tell is for a worker that is still working; what a finished one said is in its report:\n  %s/delegate wait %s\n' \
+			"$BIN" "$slug" >&2
+		return 1
+	fi
+	terminal=$(delegation_field "$slug" terminal)
+	[ -n "$terminal" ] ||
+		die "refusing to tell $slug: its record names no terminal, so there is nowhere to send a message. Start it again, or do the work in the space by hand."
+	need hc
+	if ! hc send "$terminal" "$text" >/dev/null 2>&1; then
+		printf '%s: refusing to tell %s: hc did not accept a message for terminal %s, so nothing was said to the worker.\n' \
+			"$prog" "$slug" "$terminal" >&2
+		return 1
+	fi
+	record_decision tell "$text" sent "sent to the worker's terminal $terminal" false "$slug"
+	printf 'told %s: %s\n' "$slug" "$text"
+}
+
 # ask — put a question to Jev before it reaches the user. The question is not the person's to
 # answer until Jev says it is.
 #
@@ -2666,6 +2767,9 @@ tab_close() {
 
 cmd_close() {
 	local slug=${1:-} merged="" nothing="" nothing_given="" rewritten="" rewritten_reason="" rewritten_given=""
+	# The reason that reaches state/decisions.jsonl and the reader. --nothing sets it below, with what
+	# the report's own Commit: line turned out to say; it is written once, at the end.
+	local nothing_reason=""
 	[ "$#" -ge 1 ] || die 'usage: delegate close <slug> [--merged <pr-url-or-number>] [--nothing "<why nothing landed>"] [--rewritten <sha> "<why the tip is another worker commit, rewritten>"]'
 	slug=$1; shift
 	while [ "$#" -gt 0 ]; do
@@ -2739,6 +2843,18 @@ cmd_close() {
 	# closed worker is not coming back to paste the output. Refuse, name what is missing, and
 	# leave the space open — the fix is one edit to the report, then this command again.
 	report=$(report_path "$slug")
+	# A worker that landed nothing has no branch to be gated and no changed file to check: a report
+	# with no `Commit:` line, on a record whose branch does not exist, is exactly that case, and asking
+	# it for a preflight run asks it to prove a branch that was never made. Decided once, here, so the
+	# general gate below and --nothing's own gate cannot disagree about it; no other close path is
+	# touched, and a report that names a commit or a branch that exists still has to show the gate.
+	local gate_skipped=0
+	if [ -n "$nothing_given" ] && [ -s "$report" ] && [ -z "$(report_commit_sha "$report")" ]; then
+		if [ -z "$branch" ] || [ -z "$cwd" ] || [ ! -d "$cwd" ] ||
+			! git -C "$cwd" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
+			gate_skipped=1
+		fi
+	fi
 	if [ -s "$report" ]; then
 		if ! report_has_evidence "$report"; then
 			printf '%s: refusing to close %s: %s has no Evidence block, so the report proves nothing.\n' "$prog" "$slug" "$report" >&2
@@ -2757,7 +2873,10 @@ cmd_close() {
 		fi
 		# After the placeholders: an unfilled scaffold is an unfinished report, and its own refusal
 		# names the line to fill in. The gate is asked about once the report is a report.
-		if [ "$space_git" = true ] && ! report_has_preflight_evidence "$report" "$slug"; then
+		if [ "$space_git" = true ] && [ "$gate_skipped" = 1 ]; then
+			printf '%s: closing %s with --nothing: %s names no Commit: line and branch %s does not exist, so there is no branch for the gate to check — preflight evidence is not asked for.\n' \
+				"$prog" "$slug" "$report" "${branch:-<none>}" >&2
+		elif [ "$space_git" = true ] && ! report_has_preflight_evidence "$report" "$slug"; then
 			printf '%s: refusing to close %s: %s names no bin/preflight run under ## Evidence, so the checks CI would run were never proved here.\n' "$prog" "$slug" "$report" >&2
 			printf 'Fix: run the gate, then paste its last lines into the Evidence block and close again:\n' >&2
 			printf '  %s/preflight --slug %s\n' "$BIN" "$slug" >&2
@@ -2785,7 +2904,8 @@ cmd_close() {
 			printf '  %s close %s --nothing "<why nothing landed>"\n' "$BIN/delegate" "$slug" >&2
 			return 1
 		fi
-		if [ "$space_git" = true ] && ! report_has_preflight_evidence "$report" "$slug"; then
+		if [ "$space_git" = true ] && [ "$gate_skipped" = 0 ] && ! report_has_preflight_evidence "$report" "$slug"; then
+			# The branchless case is already settled above (gate_skipped), and said out loud there.
 			printf '%s: refusing to close %s with --nothing: %s names no bin/preflight run under ## Evidence, so the checks CI would run were never proved here.\n' "$prog" "$slug" "$report" >&2
 			printf 'Fix: run the gate, paste its last lines under ## Evidence, then close again:\n' >&2
 			printf '  %s/preflight --slug %s\n' "$BIN" "$slug" >&2
@@ -2800,20 +2920,33 @@ cmd_close() {
 		fi
 		local nosha nosha_msg=""
 		nosha=$(report_commit_sha "$report")
+		nothing_reason=$nothing
 		if [ -n "$nosha" ]; then
 			if [ -n "$cwd" ] && [ -d "$cwd" ]; then nosha_msg=$(commit_message "$cwd" "$nosha" || true); fi
 			if [ -n "$nosha_msg" ]; then
-				printf '%s: refusing to close %s with --nothing: %s records commit %s, and that commit resolves, so something did land — close it the normal way so the commit and its Agent-Slug trailer are checked.\n' \
-					"$prog" "$slug" "$report" "$nosha" >&2
-				printf 'Fix: drop --nothing and close it on its provenance:\n' >&2
-				printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+				# A commit carrying THIS worker's trailer is this worker's work, however the report
+				# shrugs: it closes on the normal path, where the trailer and the branch are checked. A
+				# commit carrying no `Agent-Slug: <slug>` — no trailer at all, or another worker's —
+				# ties nothing to this worker: it is a sha the report quoted (a trunk commit, a sibling
+				# branch tip), and refusing the no-op over it refuses it forever. Accepted, and the
+				# reason says which commit was waved through and why.
+				if commit_carries_slug "$cwd" "$nosha" "$slug"; then
+					printf '%s: refusing to close %s with --nothing: %s records commit %s, and that commit carries Agent-Slug: %s — it is this worker own work, so it closes the normal way and its trailer is checked.\n' \
+						"$prog" "$slug" "$report" "$nosha" "$slug" >&2
+					printf 'Fix: drop --nothing and close it on its provenance:\n' >&2
+					printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
+					return 1
+				fi
+				printf '%s: closing %s with --nothing: %s records commit %s, which carries no Agent-Slug: %s trailer, so it is not this worker own work — the no-op stands.\n' \
+					"$prog" "$slug" "$report" "$nosha" "$slug" >&2
+				nothing_reason="$nothing — the Commit: line names $nosha, which carries no Agent-Slug: $slug trailer, so that commit is not this worker own work"
+			else
+				printf '%s: refusing to close %s with --nothing: %s names commit %s, and that commit does not resolve in %s, so nobody can check whose work it is.\n' \
+					"$prog" "$slug" "$report" "$nosha" "${cwd:-?}" >&2
+				printf 'Fix: name the commit that carries the work, or remove the Commit line if nothing landed and say why in the --nothing reason:\n' >&2
+				printf '  %s close %s --nothing "<why nothing landed>"\n' "$BIN/delegate" "$slug" >&2
 				return 1
 			fi
-			printf '%s: refusing to close %s with --nothing: %s names commit %s, and a --nothing close is for a report that names no commit at all.\n' \
-				"$prog" "$slug" "$report" "$nosha" >&2
-			printf 'Fix: if that commit is the work, record it on the Commit: line and close normally; if nothing landed, remove the Commit line and say why in the --nothing reason:\n' >&2
-			printf '  %s close %s --nothing "<why nothing landed>"\n' "$BIN/delegate" "$slug" >&2
-			return 1
 		fi
 	fi
 
@@ -2955,8 +3088,9 @@ fi
 	# indistinguishable from a worker somebody forgot: print the reason and put it in the log, so
 	# the space going away is explained by the record rather than by its absence.
 	if [ -n "$nothing_given" ]; then
-		printf '%s: closing %s with --nothing: %s\n' "$prog" "$slug" "$nothing" >&2
-		record_decision nothing "$slug" accepted "$nothing" false "$slug"
+		[ -n "$nothing_reason" ] || nothing_reason=$nothing
+		printf '%s: closing %s with --nothing: %s\n' "$prog" "$slug" "$nothing_reason" >&2
+		record_decision nothing "$slug" accepted "$nothing_reason" false "$slug"
 	fi
 
 	if [ -n "$rewritten_given" ]; then
@@ -3112,10 +3246,21 @@ cmd_finish() {
 		if [ "$space_git" != true ]; then
 			pf_args+=( --only syntax --only suites --only semgrep --only scrub )
 		fi
-		if ! "$pf" "${pf_args[@]}"; then
+		# The output is kept as well as shown: a stopped finish hands the failing line back as the
+		# one command that puts it in the worker's own terminal, and a line nobody captured cannot be
+		# quoted. Nothing preflight said is lost — the whole run is replayed unchanged.
+		local pf_out="" pf_rc=0 pf_fail=""
+		pf_out=$("$pf" "${pf_args[@]}" 2>&1) || pf_rc=$?
+		printf '%s\n' "$pf_out"
+		if [ "$pf_rc" -ne 0 ]; then
+			pf_fail=$(printf '%s\n' "$pf_out" | grep -a '^FAIL ' | head -n 1)
 			printf '%s: finish stopped at step 1 of 4 (preflight) for %s: nothing was pushed, the PR body was not touched, nothing was wiped, nothing was closed, and the worker is still open.\n' "$prog" "$slug" >&2
 			printf 'Fix: the FAIL line above names the check and the exact command that reproduces it — run that, fix it, commit, then run this again:\n' >&2
 			printf '  %s finish %s\n' "$BIN/delegate" "$slug" >&2
+			if [ -n "$pf_fail" ]; then
+				printf 'Or hand the failing line to the worker that caused it, in its own terminal:\n' >&2
+				printf 'fix in place: bin/delegate tell %s %s\n' "$slug" "${pf_fail@Q}" >&2
+			fi
 			printf 'If the check itself is broken on this machine, record why and publish anyway:\n' >&2
 			printf '  %s finish %s --skip-preflight "<why the gate cannot run>"\n' "$BIN/delegate" "$slug" >&2
 			return 1
@@ -3232,6 +3377,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 	wait) shift; cmd_wait "$@" ;;
 	list | ls) shift; cmd_list "$@" ;;
 	status) shift; cmd_status "$@" ;;
+	tell) shift; cmd_tell "$@" ;;
 	close) shift; cmd_close "$@" ;;
 	ask) shift; cmd_ask "$@" ;;
 	stats)
@@ -3242,6 +3388,6 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 	sweep) shift; cmd_sweep "$@" ;;
 	wipe) shift; cmd_wipe "$@" ;;
 	finish) shift; cmd_finish "$@" ;;
-	*) die 'usage: delegate spawn|wait|list|status|close|ask|stats|sweep|wipe|finish ...' ;;
+	*) die 'usage: delegate spawn|wait|list|status|tell|close|ask|stats|sweep|wipe|finish ...' ;;
 	esac
 fi
