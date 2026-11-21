@@ -7,7 +7,8 @@
 # fix is checked in the record itself and in the argv a stub `herdr-app` saw: `space new` writes
 # `boss` + `boss_argv` and opens the tab with that argv, the guard names the Boss tab from `boss`,
 # a Boss tab that is already there is recorded and never opened twice, and a space with no record
-# is not touched at all. No network, no desktop app, nothing written outside $WORK.
+# is not touched at all. The default argv is this tree's bare `bin/pi-bare`: a Boss comes back bare,
+# never sandboxed. No network, no desktop app, nothing written outside $WORK.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -119,6 +120,9 @@ tabs_name() { # <record> — every recorded tab name, one per line
 }
 
 ID="tbe0cd445bff056584e86051e0c782ea74"
+# The Boss is bare: when --argv is not given, what `space new` opens is this tree's `bin/pi-bare`,
+# so that is what the record keeps and what every assertion below compares against.
+BARE="$ROOT/bin/pi-bare"
 PROJ="$WORK/proj"
 mkdir -p "$PROJ"
 printf 'x\n' >"$PROJ/a.txt"
@@ -129,19 +133,19 @@ clear_log
 run "$SPACE" new --name demo --project "$PROJ" --kind harness
 if [ "$RC" -eq 0 ]; then pass 'the space is made'; else fail 'space new failed' "$OUT"; fi
 if grep -q '"boss": "Boss"' "$(record demo)"; then pass 'the record names the Boss tab'; else fail 'the record has no boss name' "$(cat "$(record demo)")"; fi
-if [ "$(argv_of "$(record demo)" boss_argv)" = '["pi"]' ]; then pass 'the argv it was opened with is recorded'; else fail 'boss_argv is missing or wrong' "$(cat "$(record demo)")"; fi
+if [ "$(argv_of "$(record demo)" boss_argv)" = "[\"$BARE\"]" ]; then pass 'the argv it was opened with is recorded'; else fail 'boss_argv is missing or wrong' "$(cat "$(record demo)")"; fi
 if [ "$(argv_of "$(record demo)" uberboss_tab)" = "$ID" ]; then pass 'uberboss_tab is still the tab id'; else fail 'uberboss_tab is no longer the id' "$(cat "$(record demo)")"; fi
 case $(herdr) in
-*"do space.new --name demo --folder $PROJ --tab Boss --argv [\"pi\"]"*)
+*"do space.new --name demo --folder $PROJ --tab Boss --argv [\"$BARE\"]"*)
 	pass 'space.new is asked to open the Boss tab with that argv'
 	;;
 *) fail 'space.new was not given --argv' "$(herdr)" ;;
 esac
 if node -e '
 	const j = require(process.argv[1]);
-	const want = ["pi"], got = j.boss_argv || [];
+	const want = [process.argv[2]], got = j.boss_argv || [];
 	process.exit(JSON.stringify(want) === JSON.stringify(got) ? 0 : 1);
-' "$(record demo)"; then
+' "$(record demo)" "$BARE"; then
 	pass 'the file holds the argv as an array, not as text'
 else
 	fail 'boss_argv is not a JSON array' "$(cat "$(record demo)")"
@@ -201,7 +205,7 @@ esac
 if printf '%s\n' "$(herdr)" | grep -qF -- "$ID"; then fail 'the id was used as a name'; else pass 'the id never becomes a name'; fi
 
 new_case 'a Boss tab that is already there is recorded, never opened again'
-make_record live live "$PROJ" '{"boss":"Boss","tabs":[{"name":"Boss","folder":"'"$PROJ"'","argv":["pi"]}]}'
+make_record live live "$PROJ" '{"boss":"Boss","tabs":[{"name":"Boss","folder":"'"$PROJ"'","argv":["sh","-lc","pi"]}]}'
 spaces '{"spaces":[{"id":"sp-live","name":"live","tabs":[{"id":"tb-boss","name":"Boss"}]}]}'
 clear_log
 run "$GUARD" --once --space live
@@ -215,7 +219,7 @@ fi
 if node -e '
 	const j = require(process.argv[1]);
 	const t = (j.tabs || []).find((x) => x && x.name === "Boss");
-	process.exit(t && JSON.stringify(t.argv) === JSON.stringify(["pi"]) ? 0 : 1);
+	process.exit(t && JSON.stringify(t.argv) === JSON.stringify(["sh", "-lc", "pi"]) ? 0 : 1);
 ' "$(record live)"; then
 	pass 'the recorded Boss tab keeps its argv'
 else
@@ -223,13 +227,13 @@ else
 fi
 
 new_case 'a tabs[] entry with an empty argv does not erase boss_argv'
-make_record shadow shadow "$PROJ" '{"boss":"Boss","boss_argv":["pi"],"tabs":[{"name":"Boss","folder":"'"$PROJ"'","argv":[]}]}'
+make_record shadow shadow "$PROJ" '{"boss":"Boss","boss_argv":["sh","-lc","pi"],"tabs":[{"name":"Boss","folder":"'"$PROJ"'","argv":[]}]}'
 spaces '{"spaces":[{"id":"sp-shadow","name":"shadow","tabs":[]}]}'
 clear_log
 run "$GUARD" --once --space shadow
 if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'the pass failed' "$OUT"; fi
 case $(herdr) in
-*"--argv [\"pi\"]"*) pass 'the Boss tab comes back with the argv space new opened it with' ;;
+*"--argv [\"sh\",\"-lc\",\"pi\"]"*) pass 'the Boss tab comes back with the argv space new opened it with' ;;
 *) fail 'the empty tabs[] argv shadowed boss_argv, so the tab came back bare' "$(herdr)" ;;
 esac
 if grep -qF -- '--focus false' "$HERDR_LOG"; then pass 'the tab it repairs is opened without taking the focus'; else fail 'tab.new would steal the focus' "$(herdr)"; fi

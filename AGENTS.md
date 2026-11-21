@@ -22,6 +22,9 @@ A worker is a tab in this space, opened `--focus false` so nobody is moved off w
 were reading. A finished worker's tab is closed and never reopened. Nothing closes the
 Boss tab but the person.
 
+The Boss is bare (`bin/pi-bare`), workers are sandboxed, and a sandboxed Boss is refused:
+`bin/space new` will not record one, and `bin/guard` rewrites a record that holds one.
+
 ## The boss does not edit project files
 
 Reading is fine. A change is a worker's job, and its report is where the change is
