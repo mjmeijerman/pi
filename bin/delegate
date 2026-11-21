@@ -18,6 +18,7 @@ fi
 #                  [--override-jev --reason TEXT] "<task>"
 #   delegate wait <slug> [--space SLUG] [--timeout SECONDS] [--forever]
 #   delegate list [--space SLUG]
+#   delegate status <slug> [--json]   (one word: working, reported, closed or unknown)
 #   delegate close <slug> [--space SLUG] [--merged PR-URL-OR-NUMBER]
 #   delegate close <slug> --space SLUG --nothing "<why nothing landed>"   (a worker whose change never landed)
 #   delegate close <slug> --rewritten <sha> "<why the tip is another worker's, rewritten>"
@@ -466,6 +467,17 @@ delegation_field() {
 		"$DELEGATIONS" "${1:-}" "${2:-}"
 }
 
+# delegation_tracked <slug> — true when the delegation record has an entry for this worker. The
+# entry, not the report, is what makes a slug a worker here; a report with no entry is the report
+# of a worker that was closed.
+delegation_tracked() {
+	node -e '
+		const fs = require("fs");
+		let j = {};
+		try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
+		process.exit(j[process.argv[2]] ? 0 : 1);' "$DELEGATIONS" "${1:-}"
+}
+
 # delegation_kind <slug> — the shape the record says this worker was started in: `tab` (a tab in
 # the boss's space) or `space` (its own space, before workers became tabs). A record with no
 # `kind` is read as `space`, which is what it was, so an older worker keeps the close and the
@@ -639,6 +651,54 @@ worker_state() {
 		fi
 	fi
 	printf 'working'
+}
+
+# worker_word <slug> -- the one word a reader acts on: `reported`, `working`, `gone`, `closed` or
+# `unknown`. This is the answer to "is it done?" and the only place it is computed, so `delegate
+# list` and `delegate status` can never disagree about the same worker.
+#
+# It is read from the delegation record and from the report's required fields (report_written), never
+# from the report's prose. A boss answered that question by grepping the report for `^Commit: [0-9a-f]`,
+# the report wrote `Commit: `e8d8358`` with a backtick, and the boss said "working" for twelve minutes
+# after `delegate list` had said `reported`. The word was fine; the poll was wrong. (Radar basis:
+# #29 harness quality evaluation — a state read from a guess is a gate that goes dead quietly.)
+#
+# An untracked slug is `closed` when it left a spec or a report behind (a close deletes the entry and
+# keeps both), and `unknown` when nothing anywhere names it -- exit 1, because there is no worker to
+# act on.
+worker_word() {
+	local slug=${1:-} dir
+	if delegation_tracked "$slug"; then
+		worker_state "$slug"
+		return 0
+	fi
+	for dir in "$SPACES_DIR"/*/; do
+		[ -d "$dir" ] || continue
+		if [ -e "$dir/specs/$slug.md" ] || [ -e "$dir/specs/archive/$slug.md" ] || [ -e "$dir/reports/$slug.md" ]; then
+			printf 'closed'
+			return 0
+		fi
+	done
+	if [ -e "$ROOT/specs/$slug.md" ] || [ -e "$ROOT/reports/$slug.md" ]; then
+		printf 'closed'
+		return 0
+	fi
+	printf 'unknown'
+	return 1
+}
+
+# report_of <slug> -- the report on disk for a slug, or nothing. The record's path first, then any
+# space's reports/: a closed worker has no entry left to ask, and its report is still the file a
+# reader wants named.
+report_of() {
+	local slug=${1:-} p dir
+	p=$(delegation_field "$slug" report)
+	[ -n "$p" ] || p=$(report_path "$slug")
+	if [ -f "$p" ]; then printf '%s' "$p"; return 0; fi
+	for dir in "$SPACES_DIR"/*/; do
+		[ -f "$dir/reports/$slug.md" ] && { printf '%s' "$dir/reports/$slug.md"; return 0; }
+	done
+	return 1
 }
 
 # report_needs_decision <report> -- true when the report opens with a DECISION NEEDED line.
@@ -2328,7 +2388,7 @@ cmd_list() {
 	local slug states=""
 	while IFS= read -r slug; do
 		[ -n "$slug" ] || continue
-		states="$states$slug=$(worker_state "$slug")"$'\n'
+		states="$states$slug=$(worker_word "$slug")"$'\n'
 	done <<<"$(node -e '
 		const fs = require("fs");
 		let j = {};
@@ -2378,6 +2438,36 @@ cmd_list() {
 		# believing `working`.
 		printf '%s: herdr lists no terminals at all, so reported/working is what state/delegations.json records, not what herdr still runs\n' "$prog" >&2
 	fi
+}
+
+# cmd_status <slug> -- one word, from the tool: `working`, `reported`, `closed` or `unknown` (exit 1
+# for the last), and `gone` when herdr says the worker's terminal died before it reported -- the word
+# `delegate list` already prints, kept here so the two agree instead of one guessing about the other.
+#
+# Nothing else: no polling (`delegate wait` is the loop), no colour, no sentence. A boss that needs to
+# know whether a worker is done asks this, and quotes its one word, instead of grepping the report for
+# a field the worker wrote in its own prose. `--json` gives the same word with the slug and the report
+# path, for a script that asked.
+cmd_status() {
+	local slug="" json=0 word report rc=0
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--json) json=1; shift ;;
+		--) shift; break ;;
+		-*) die "unknown option $1 -- usage: delegate status <slug> [--json]" ;;
+		*) slug=$1; shift ;;
+		esac
+	done
+	[ -n "$slug" ] || die 'usage: delegate status <slug> [--json]'
+	DELEGATIONS=$(delegations_all)
+	word=$(worker_word "$slug") || rc=1
+	report=$(report_of "$slug") || report=""
+	if [ "$json" = 1 ]; then
+		printf '{"slug":"%s","status":"%s","report":"%s"}\n' "$slug" "$word" "$report"
+	else
+		printf '%s\n' "$word"
+	fi
+	return "$rc"
 }
 
 # ask — put a question to Jev before it reaches the user. The question is not the person's to
@@ -3125,6 +3215,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 	spawn) shift; cmd_spawn "$@" ;;
 	wait) shift; cmd_wait "$@" ;;
 	list | ls) shift; cmd_list "$@" ;;
+	status) shift; cmd_status "$@" ;;
 	close) shift; cmd_close "$@" ;;
 	ask) shift; cmd_ask "$@" ;;
 	stats)
@@ -3135,6 +3226,6 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 	sweep) shift; cmd_sweep "$@" ;;
 	wipe) shift; cmd_wipe "$@" ;;
 	finish) shift; cmd_finish "$@" ;;
-	*) die 'usage: delegate spawn|wait|list|close|ask|stats|sweep|wipe|finish ...' ;;
+	*) die 'usage: delegate spawn|wait|list|status|close|ask|stats|sweep|wipe|finish ...' ;;
 	esac
 fi
