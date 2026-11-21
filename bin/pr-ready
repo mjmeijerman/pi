@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # pr-ready — one answer to "is this pull request green", read from the rollup and never from prose.
 #
-#   pr-ready <pr-number> [--sha <sha>] [--min-checks N] [--wait [--interval SEC] [--max SEC] [--fail-fast]]
+#   pr-ready <pr-number> [--sha <sha>] [--min-checks N] [--wait [--interval SEC] [--max SEC] [--fail-fast] [--no-prose-review]]
 #
 # Why it exists: `gh pr checks | grep -c pending` matches the word "pending" and nothing else, so a
 # rollup of `IN_PROGRESS`, `QUEUED` or not-yet-registered checks reads as zero pending — a "green"
@@ -18,12 +18,16 @@
 #      CI green on an older commit is not a verdict on this one.
 #   5. the prose review has nothing left to answer. `prose-review` posts one comment on a PR that
 #      touches an instruction file (`agent/AGENTS.md`, `agent/prompts/**`, `agent/skills/**`), and
-#      that comment is green in CI whether it names five findings or five "no finding" lines. A PR
-#      green on 1-4 and holding a finding is still a PR someone has to edit, so it is not handed
-#      over: one line per finding, quoting the review's own words. A review this reads as
+#      that comment is green in CI whether it names five findings or five "no finding" lines. The
+#      rule enforced here is the one `AGENTS.md` states — *answer every finding in the diff or in a
+#      reply* — so a finding is answered when a later, non-bot comment names it. The **latest**
+#      marked comment is the review, so a newer clean one supersedes an older one that had findings.
+#      A PR green on 1-4 with a finding nobody answered is still a PR someone has to edit, so it is
+#      not handed over: one line per finding, quoting the review's own words. A review this reads as
 #      unreadable is not a pass either. No comment is nothing to answer — the review only speaks
 #      when instruction prose changed, and it cannot speak when it was refused or not configured,
-#      which a red on absence would block forever.
+#      which a red on absence would block forever. `--no-prose-review` skips rule 5 for a PR whose
+#      review cannot be answered, and says so by name in the run's own output.
 #
 # Exit 0 only when all five hold; otherwise one status line names the numbers and a `not ready:` line
 # per rule that broke, and the exit is non-zero. gh or jq missing is a FAIL, never a pass.
@@ -52,7 +56,7 @@ say() { printf '%s\n' "$*"; }
 
 usage() {
 	cat >&2 <<'EOF'
-usage: pr-ready <pr-number> [--sha <sha>] [--min-checks N] [--wait [--interval SEC] [--max SEC]] [--fail-fast]
+usage: pr-ready <pr-number> [--sha <sha>] [--min-checks N] [--wait [--interval SEC] [--max SEC]] [--fail-fast] [--no-prose-review]
 
 Exit 0 only when the rollup holds at least --min-checks checks, none is pending, none failed, the
 head is --sha when one was given, and the prose review on the PR has no finding left to answer.
@@ -60,7 +64,10 @@ head is --sha when one was given, and the prose review on the PR has no finding 
 --wait polls until every check has a conclusion (pending 0, checks above 0) or --max seconds run
 out, then judges once: a failure does not end the wait, and each newly-failed check is named as it
 appears. --fail-fast is the impatient mode: stop at the first failure and name only it. A prose
-finding does not wait at all: it is answered by a commit, and no amount of polling writes one.
+finding does not wait at all: it is answered by a commit or a reply naming it, and no amount of
+polling writes one.
+
+--no-prose-review skips rule 5 and says so; every other rule still has to hold.
 EOF
 }
 
@@ -100,61 +107,130 @@ read_rollup() {
 # comment is the review" rather than a person quoting one.
 PROSE_MARK='<!-- prose-review -->'
 
-# prose_body — the body of the one comment that owns the marker, or the empty string when the PR has
-# none. Returns 1 with the reason on stdout when gh could not answer or its JSON did not parse: a
-# review nobody could read is not a review that passed.
-prose_body() {
-	local json body
-	json=$("$gh_cmd" pr view "$pr" --json comments 2>&1) || {
-		printf 'gh could not read the comments on PR %s: %s\n' "$pr" "$(printf '%s' "$json" | tr '\n' ' ' | cut -c1-200)"
-		return 1
-	}
-	body=$(printf '%s' "$json" | jq -r --arg mark "$PROSE_MARK" \
-		'[.comments[]? | (.body // "") | select(startswith($mark))] | .[0] // ""' 2>&1) || {
-		printf 'gh returned comments that did not parse: %s\n' "$(printf '%s' "$body" | tr '\n' ' ' | cut -c1-200)"
-		return 1
-	}
-	printf '%s\n' "$body"
-}
+# The review and its answers, read by jq in one pass over the PR's comments. The field separator is
+# \x1f for the same reason the rollup uses \x01: a finding's own words hold anything a person typed.
+#
+#   line 1   <state>\x1f<questions>\x1f<authors>   state: none | unreadable | ok | open
+#   then      open\x1f<label>\x1f<text>            one per finding nobody has answered
+#             answered\x1f<label>\x1f<author>      one per finding a later reply names
+#
+# The review is the **latest** marked comment, so a newer clean one supersedes an older one that had
+# findings. A finding is answered when a comment posted after the review, from a person and not a
+# bot, names it: its number (`2`, `2.`, `#2`) together with one of finding/answer/rebutted/fixed, or
+# its exact label. That is the rule `AGENTS.md` states — answered in the diff *or in a reply* — and
+# it is what makes this passable at all: a review comment is posted by CI, so the only way to answer
+# one is a comment, and the gate that read only the review could never be satisfied.
+PROSE_JQ='
+def norm: if . == null then "" else . end;
+[ .comments[]? | {at: (.createdAt | norm), a: (.author.login | norm), b: (.body | norm)} ] as $all
+| ([ $all[] | select(.b | startswith($mark)) ] | sort_by(.at) | .[-1]) as $review
+| if $review == null then "none\u001f0\u001f"
+  else
+    [ $review.b | split("\n")[]
+      | capture("^(?<n>[1-9])\\. \\*\\*(?<label>[^*]+)\\*\\*(?<tail>.*)$")? ] as $questions
+    | if ($questions | length) == 0 then "unreadable\u001f0\u001f"
+      else
+        [ $all[] | select(.at > $review.at)
+          | select(.b | startswith($mark) | not)
+          | select(.a | endswith("[bot]") | not)
+          | select(.a != "github-actions") ] as $replies
+        | [ $questions[]
+            | .n as $n | .label as $label
+            | (.tail | sub("^[[:space:]]*[-\u2014][[:space:]]*"; "")) as $text
+            | select(($text | ascii_downcase | .[0:10]) != "no finding")
+            | {n: $n, label: $label,
+               text: (if $text == "" then "(the model left this answer blank)" else $text end)} ] as $findings
+        | [ $findings[]
+            | . as $f
+            | ( [ $replies[]
+                  | .b as $b
+                  | .a as $who
+                  | select(
+                      ( (($b | ascii_downcase | test("(^|[^0-9])#?" + ($f.n | tostring) + "\\.?([^0-9]|$)")))
+                        and ($b | ascii_downcase | test("finding|answer|rebutted|fixed")) )
+                      or ($b | ascii_downcase | contains($f.label | ascii_downcase)) )
+                  | $who ] | .[0] // null) as $by
+            | {n: $f.n, label: $f.label, text: $f.text, by: $by} ] as $judged
+        | ([ $judged[] | select(.by == null) ]) as $open
+        | ([ $judged[] | select(.by != null) ]) as $done
+        | [ (if ($open | length) == 0
+             then "ok\u001f\($questions | length)\u001f\([ $done[].by ] | unique | join(", "))"
+             else "open\u001f\($open | length)\u001f\([ $done[].by ] | unique | join(", "))" end),
+            ( $open[] | "open\u001f\(.label)\u001f\(.text)" ),
+            ( $done[] | "answered\u001f\(.label)\u001f\(.by)" ) ]
+        | join("\n")
+      end
+  end
+'
 
-# prose_findings — one line per question the review answered with something other than "no finding",
-# as `<question> — <the review's own words>`. The review writes one line per question —
-# `1. **contradiction** — no finding` — so a numbered line is the unit. A body with no numbered line
-# at all is a review this cannot read, which is not a review that passed: it prints one line saying
-# so, and the caller refuses on it.
-prose_findings() {
-	awk '
-		/^[1-9]\. \*\*/ {
-			n++
-			line = $0
-			sub(/^[1-9]\. \*\*/, "", line)
-			at = index(line, "**")
-			label = substr(line, 1, at - 1)
-			line = substr(line, at + 2)
-			sub(/^[[:space:]]*—[[:space:]]*/, "", line)
-			if (tolower(substr(line, 1, 10)) == "no finding") next
-			if (line == "") line = "(the model left this answer blank)"
-			printf "%s — %s\n", label, line
-		}
-		END { if (n == 0 && NR > 0) print "the prose review answered nothing this gate can read" }
-	'
-}
-
-# prose_ok — rule 5. Silent and 0 when there is nothing to answer; otherwise the lines a reader needs
-# and 1. Cheap by construction: it is only called once the rollup has already said green, so an
-# ordinary poll costs no second gh call and a PR that never touches instruction prose costs one.
+# prose_ok — rule 5. Prints one verdict line and returns 0 only when nothing is left to answer. The
+# verdicts are exactly: `prose review: none yet`, `prose review: clean (N checks)`,
+# `prose review: N finding(s) answered by <author>`, and `prose review: N finding(s) open — <the first
+# open finding's label>`, which is a refusal. A review this cannot read, and comments gh could not
+# answer, are refusals with the reason on the line. Cheap by construction: it is only called once the
+# rollup has already said green, so an ordinary poll costs no second gh call and a PR that never
+# touches instruction prose costs one.
 prose_ok() {
-	local body findings
-	if ! body=$(prose_body); then
-		printf '  not ready: %s\n' "$body"
-		return 1
+	local json out head state rest questions authors line kind label text open_n=0 ans_n=0 first=""
+	local detail=""
+	if [ "$prose_review" != 1 ]; then
+		say 'prose review: skipped (--no-prose-review)'
+		return 0
 	fi
-	[ -n "$body" ] || return 0
-	findings=$(printf '%s\n' "$body" | prose_findings)
-	[ -n "$findings" ] || return 0
-	printf '  not ready: the prose review has %d answer(s) to write into the diff\n' \
-		"$(printf '%s\n' "$findings" | wc -l | tr -d ' ')"
-	printf '%s\n' "$findings" | sed 's/^/    - /'
+	json=$("$gh_cmd" pr view "$pr" --json comments 2>&1) || {
+		printf '  not ready: gh could not read the comments on PR %s: %s\n' \
+			"$pr" "$(printf '%s' "$json" | tr '\n' ' ' | cut -c1-200)"
+		return 1
+	}
+	out=$(printf '%s' "$json" | jq -r --arg mark "$PROSE_MARK" "$PROSE_JQ" 2>&1) || {
+		printf '  not ready: gh returned comments that did not parse: %s\n' \
+			"$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+		return 1
+	}
+	head=${out%%$'\n'*}
+	state=${head%%$'\x1f'*}
+	rest=${head#*$'\x1f'}
+	questions=${rest%%$'\x1f'*}
+	authors=${rest#*$'\x1f'}
+	case $state in
+	none)
+		say 'prose review: none yet'
+		return 0
+		;;
+	unreadable)
+		say 'prose review: unreadable — it answered nothing this gate can read'
+		return 1
+		;;
+	esac
+	# The detail lines, walked one \x1f-separated field at a time with parameter expansion: no IFS
+	# assignment is needed to split them.
+	while read -r line; do
+		kind=${line%%$'\x1f'*}
+		[ "$kind" = open ] || [ "$kind" = answered ] || continue
+		label=${line#*$'\x1f'}
+		text=${label#*$'\x1f'}
+		label=${label%%$'\x1f'*}
+		if [ "$kind" = open ]; then
+			open_n=$((open_n + 1))
+			first=${first:-$label}
+			detail=$detail"    open: $label — $text"$'\n'
+		else
+			ans_n=$((ans_n + 1))
+			detail=$detail"    answered by $text: $label"$'\n'
+		fi
+	done <<<"${out#*$'\n'}"
+	# The verdict, then what it counted: a reader of a refusal needs the finding's own words, and a
+	# reader of a pass needs nothing.
+	if [ "$open_n" -eq 0 ] && [ "$ans_n" -eq 0 ]; then
+		printf 'prose review: clean (%s checks)\n' "$questions"
+		return 0
+	fi
+	if [ "$open_n" -eq 0 ]; then
+		printf 'prose review: %d finding(s) answered by %s\n' "$ans_n" "${authors:-a person}"
+		return 0
+	fi
+	printf 'prose review: %d finding(s) open — %s\n' "$open_n" "$first"
+	printf '%s' "$detail"
 	return 1
 }
 
@@ -226,6 +302,7 @@ report() {
 pr=""
 sha=""
 min_checks=12
+prose_review=1
 wait_for=0
 fail_fast=0
 interval=15
@@ -275,6 +352,10 @@ while [ "$#" -gt 0 ]; do
 	--fail-fast)
 		fail_fast=1
 		wait_for=1
+		shift
+		;;
+	--no-prose-review)
+		prose_review=0
 		shift
 		;;
 	-h | --help)

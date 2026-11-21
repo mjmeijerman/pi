@@ -7,11 +7,14 @@
 # file is one the prose could not answer, run against a `gh` stub on PATH that returns JSON
 # fixtures: the real gh is never called, so this test needs no network and no repository.
 #
+# PR_READY=<path> points the suite at another pr-ready, which is how a new rule is proved red on an
+# older one: PR_READY=/tmp/trunk-pr-ready bash scripts/tests/test-pr-ready.sh
+#
 # Run it directly, or through scripts/ci-offline.sh, which globs scripts/tests/test-*.sh.
 set -uo pipefail
 
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../bin" && pwd)"
-PR_READY="$BIN/pr-ready"
+PR_READY="${PR_READY:-$BIN/pr-ready}"
 [ -f "$PR_READY" ] || {
 	printf 'FATAL: %s is missing\n' "$PR_READY" >&2
 	exit 1
@@ -100,6 +103,23 @@ write_comments() {
 		[ "$first" = 1 ] || printf ',' >>"$file"
 		first=0
 		printf '{"body":%s}' "$(printf '%s' "$body" | jq -Rs .)" >>"$file"
+	done
+	printf ']}\n' >>"$file"
+}
+
+# write_thread <file> <login> <createdAt> <body> ... — the same comments with the two fields a reply
+# is judged by: who wrote it and when. gh returns both; a comment without them cannot be told from
+# the review it answers.
+write_thread() {
+	local file=$1 first=1
+	shift
+	printf '{"comments":[' >"$file"
+	while [ "$#" -ge 3 ]; do
+		[ "$first" = 1 ] || printf ',' >>"$file"
+		first=0
+		printf '{"author":{"login":%s},"createdAt":%s,"body":%s}' \
+			"$(printf '%s' "$1" | jq -Rs .)" "$(printf '%s' "$2" | jq -Rs .)" "$(printf '%s' "$3" | jq -Rs .)" >>"$file"
+		shift 3
 	done
 	printf ']}\n' >>"$file"
 }
@@ -362,9 +382,9 @@ run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
 COMMENTS_FIXTURE=""
 expect_rc "five green checks and a finding is refused" nonzero
 out_has "checks 12, pending 0, fail 0" "the status line keeps its shape"
-out_has "the prose review has 2 answer(s)" "the refusal counts the findings"
-out_has "contradiction — agent/AGENTS.md:16 makes --wait required" "the first finding is quoted in the review's own words"
-out_has "duplicated rule — agent/AGENTS.md:16 repeats" "every finding is named, not only the first"
+out_has "prose review: 2 finding(s) open — contradiction" "the verdict counts the findings and names the first"
+out_has "open: contradiction — agent/AGENTS.md:16 makes --wait required" "the first finding is quoted in the review's own words"
+out_has "open: duplicated rule — agent/AGENTS.md:16 repeats" "every finding is named, not only the first"
 out_lacks "missing command —" "a question answered 'no finding' is not printed as a finding"
 
 # ---------------------------------------------------------------------------
@@ -375,6 +395,7 @@ run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
 COMMENTS_FIXTURE=""
 expect_rc "a review with nothing to answer passes" 0
 out_lacks "not ready" "the pass says nothing about the review"
+out_has "prose review: clean (5 checks)" "the pass counts the questions the review answered"
 
 # ---------------------------------------------------------------------------
 case_start "no prose-review comment is nothing to answer"
@@ -383,6 +404,7 @@ COMMENTS_FIXTURE=$WORK/comments-chatter.json
 run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
 COMMENTS_FIXTURE=""
 expect_rc "an ordinary PR with no review comment passes" 0
+out_has "prose review: none yet" "the pass says there was no review to answer"
 
 # ---------------------------------------------------------------------------
 case_start "the marker is what makes a comment the review"
@@ -429,5 +451,70 @@ else fail "it waited $elapsed s on a finding no poll can answer"; fi
 
 
 # ---------------------------------------------------------------------------
-printf '\n%d passed, %d failed in %d cases\n' "$PASS_N" "$FAIL_N" "$CASE_N"
+# A finding a person can answer. AGENTS.md states the rule as "answer every finding in the diff or in
+# a reply", and the review comment is posted by a workflow, so a reply is the only way a person can
+# answer one. Measured on trunk: `bin/pr-ready 229 --sha d5ce1e4` refused with "the prose review has
+# 2 answer(s) to write into the diff" while a comment answering both findings sat on the PR two
+# minutes later — the gate took the first marked comment and only that one, and refused on any
+# finding at all, so a PR whose review found something could never be handed over.
+T1=2026-01-01T00:00:00Z
+T2=2026-01-01T00:10:00Z
+T3=2026-01-01T00:20:00Z
+
+case_start "a finding a person answered in a later reply is answered"
+write_thread "$WORK/thread-answered.json" \
+	github-actions "$T1" "$(prose_comment "agent/AGENTS.md:16 makes --wait required" "no finding" "no finding" "no finding" "no finding")" \
+	octocat "$T2" "Finding 1: fixed in cff5699, --wait is optional again."
+COMMENTS_FIXTURE=$WORK/thread-answered.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
+COMMENTS_FIXTURE=""
+expect_rc "a reply naming the finding is a pass" 0
+out_has "prose review: 1 finding(s) answered by octocat" "the verdict names who answered it"
+
+# ---------------------------------------------------------------------------
+case_start "a reply that names nothing answers nothing"
+write_thread "$WORK/thread-thanks.json" \
+	github-actions "$T1" "$(prose_comment "agent/AGENTS.md:16 makes --wait required" "no finding" "no finding" "no finding" "no finding")" \
+	octocat "$T2" "Thanks, looks good to me!"
+COMMENTS_FIXTURE=$WORK/thread-thanks.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
+COMMENTS_FIXTURE=""
+expect_rc "a plain thanks is not an answer" nonzero
+out_has "prose review: 1 finding(s) open — contradiction" "the finding is still open"
+
+# ---------------------------------------------------------------------------
+case_start "a reply from a bot answers nothing"
+# A CI comment that happens to quote a finding is not a person deciding it is handled.
+write_thread "$WORK/thread-bot.json" \
+	github-actions "$T1" "$(prose_comment "agent/AGENTS.md:16 makes --wait required" "no finding" "no finding" "no finding" "no finding")" \
+	"prose-review[bot]" "$T2" "finding 1: fixed (this is a bot quoting itself)"
+COMMENTS_FIXTURE=$WORK/thread-bot.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
+COMMENTS_FIXTURE=""
+expect_rc "a bot reply is not an answer" nonzero
+out_has "prose review: 1 finding(s) open — contradiction" "the finding stays open against a bot"
+
+# ---------------------------------------------------------------------------
+case_start "a newer clean review supersedes the one with findings"
+# The review is the latest marked comment: a re-run that finds nothing is the review that stands, and
+# an older one with findings must not keep the PR red forever.
+write_thread "$WORK/thread-superseded.json" \
+	github-actions "$T1" "$(prose_comment "agent/AGENTS.md:16 makes --wait required" "no finding" "no finding" "no finding" "no finding")" \
+	github-actions "$T3" "$(prose_comment "no finding" "no finding" "no finding" "no finding" "no finding")"
+COMMENTS_FIXTURE=$WORK/thread-superseded.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
+COMMENTS_FIXTURE=""
+expect_rc "the newest review is the one judged" 0
+out_has "prose review: clean (5 checks)" "the newer review's five clean answers are the verdict"
+
+# ---------------------------------------------------------------------------
+case_start "--no-prose-review skips rule 5 and says so"
+COMMENTS_FIXTURE=$WORK/thread-thanks.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL" --no-prose-review
+COMMENTS_FIXTURE=""
+expect_rc "a skipped review does not block a green rollup" 0
+out_has "prose review: skipped" "the run says the rule was skipped, not that it passed"
+
+# ---------------------------------------------------------------------------
+printf '\n%d passed, %d failed in %d cases\n'  "$PASS_N" "$FAIL_N" "$CASE_N"
 [ "$FAIL_N" -eq 0 ]

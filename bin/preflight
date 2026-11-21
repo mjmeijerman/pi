@@ -46,6 +46,14 @@
 #             checkout has the script: a project checkout has no harness-check.sh and says so
 #             instead of passing. The recipe is that script's exit code, never a summary parsed
 #             out of its text, and a run that hits its cap is a FAIL, not a pass
+#   offline   the checkout's own scripts/ci-offline.sh, which is the second step of that same job
+#             and the one preflight never ran: on #229 every check here was green while the PR was
+#             red on scripts/tests/test-preflight-semgrep.sh, a file only the offline suite runs.
+#             Applies when a changed file is under bin/ or scripts/ (the shapes its globs cover) and
+#             the checkout has the script. The verdict is its exit code; a FAIL prints the tail and
+#             then every failing case line it found. Its answer is kept in the shared ledger under
+#             the same `script:scripts/ci-offline.sh` name another gate would write, so a run that
+#             already answered it on this tree is a file read here
 #   semgrep   the changed files only, with every --config every workflow passes (a ruleset pinned by
 #             commit, `${SEMGREP_RULES}/bash`, is unpacked from its SEMGREP_RULES_SHA into
 #             ~/.cache/pi/semgrep-rules and handed over as a path), else p/default plus
@@ -324,12 +332,13 @@ pf_receipt_write() {
 
 # --- the checks, in the order they run ---------------------------------------------------------
 
-preflight_ids=(behind syntax suites harness semgrep scrub body mutation)
+preflight_ids=(behind syntax suites harness offline semgrep scrub body mutation)
 preflight_names=(
 	"behind (did a touched path also move on trunk?)"
 	"syntax (bash -n, node --check, shellcheck)"
 	"suites (the repo's own tests)"
 	"harness (scripts/harness-check.sh, as the harness-check job runs it)"
+	"offline (scripts/ci-offline.sh, the job's other step)"
 	"semgrep (the changed files)"
 	"scrub (env -i, the runner does not have your PATH)"
 	"body (docs budget and the body gate)"
@@ -418,6 +427,17 @@ pf_collect() {
 	return 0
 }
 
+# pf_offline_scope — true when a changed file is one the offline suite's own verdict can depend on:
+# a gate under bin/, or a test under scripts/. Deliberately not "any changed file": a docs edit moved
+# a review date once and went red on harness-check, which is the `harness` check's job, not this one.
+pf_offline_scope() {
+	local f
+	for f in "${PF_CHANGED[@]}"; do
+		case $f in bin/* | scripts/*) return 0 ;; esac
+	done
+	return 1
+}
+
 # pf_applies <id> — true when the check has something to look at.
 pf_applies() {
 	case $1 in
@@ -428,6 +448,10 @@ pf_applies() {
 	# test file builds a RegExp from a value — so this one is not narrowed by file type. A checkout
 	# with no harness-check.sh has no harness to check, and says so by name.
 	harness) [ -f "$PF_CWD/scripts/harness-check.sh" ] && [ "${#PF_CHANGED[@]}" -gt 0 ] ;;
+	# The other half of the harness-check job. Its suite is the gate tests under scripts/, and
+	# bin/ holds the gates those tests run, so a change to either is one its verdict depends on.
+	# A checkout without the script has no offline suite, and says so by name.
+	offline) [ -f "$PF_CWD/scripts/ci-offline.sh" ] && pf_offline_scope ;;
 	body) return 0 ;;
 	behind) return 0 ;;
 	# Opt-in, and then only where the diff holds a mutant host and the checkout holds a way to run
@@ -473,6 +497,13 @@ pf_skip_reason() {
 			printf 'no scripts/harness-check.sh in %s (a project checkout has no harness to check)' "$PF_CWD"
 		else
 			printf 'no changed file: there is no branch state for harness-check.sh to read'
+		fi
+		;;
+	offline)
+		if [ ! -f "$PF_CWD/scripts/ci-offline.sh" ]; then
+			printf 'no scripts/ci-offline.sh in %s (a checkout without the offline suite has none)' "$PF_CWD"
+		else
+			printf 'no changed file under bin/ or scripts/: the offline suite reads neither'
 		fi
 		;;
 	mutation)
@@ -959,6 +990,56 @@ pf_check_harness() {
 	grep -a '^FAIL ' "$out" 2>/dev/null | head -20
 	printf 'the full run: bash scripts/harness-check.sh (a violation that predates the branch belongs in scripts/harness-baseline.txt)
 '
+	return 1
+}
+
+# --- check: offline, the gate tests CI runs beside harness-check.sh -----------------------------
+
+# Why this exists. `.github/workflows/harness-check.yml` runs `bash scripts/harness-check.sh` and
+# `bash scripts/ci-offline.sh` as two separate steps, and this file ran only the first: on #229 every
+# check here was green while the pull request was red on scripts/tests/test-preflight-semgrep.sh,
+# which lives in the offline suite. A gate that cannot see the suite CI runs is a gate that hands
+# over a branch CI has already failed.
+#
+# The verdict is the script's exit code, never a summary parsed out of its text. Its transcript is
+# kept in the shared ledger under the same `script:scripts/ci-offline.sh` name `make offline-test`
+# and `scripts/ci-local.sh` would write, so a run already answered on this tree under these gates is
+# a file read here — and the answer reached here is not paid for again by them.
+pf_check_offline() {
+	local out unit started ended rc ms cases rest fail_lines
+	out=$PREFLIGHT_TMP/offline.log
+	# The ledger's handle, when the caller sourced this file instead of running it.
+	[ -n "${RECEIPT_TREE_ROOT:-}" ] || receipt_init "${PF_READ:-$PF_CWD}"
+	unit=$(receipt_unit_name "bash scripts/ci-offline.sh")
+	if receipt_lookup "$unit" "$out"; then
+		rc=$RECEIPT_RC
+		rest=" from a receipt $(pf_age_human "$RECEIPT_AGE") old"
+	else
+		rest=""
+		started=$(date +%s%N)
+		(cd "${PF_READ:-$PF_CWD}" && bash scripts/ci-offline.sh) >"$out" 2>&1
+		rc=$?
+		ended=$(date +%s%N)
+		ms=$(((ended - started) / 1000000))
+		receipt_write "$unit" "$rc" "$ms" "$out"
+	fi
+	if [ "$rc" -eq 0 ]; then
+		cases=$(grep -a -c -E '^ok( |$)' "$out" 2>/dev/null || true)
+		printf 'offline: %s case(s) green (bash scripts/ci-offline.sh%s)\n' "${cases:-0}" "$rest"
+		return 0
+	fi
+	# The tail, then the cases named: a reader of a red needs the last words of the run and the one
+	# line per failing case, not a 400-line transcript.
+	printf 'scripts/ci-offline.sh exited %s%s — CI runs this same suite and goes red on it\n' "$rc" "$rest"
+	tail -n 20 "$out" 2>/dev/null | sed 's/^/  /'
+	fail_lines=$(grep -a -E '^(FAIL |== ci-offline: FAILED )' "$out" 2>/dev/null || true)
+	if [ -n "$fail_lines" ]; then
+		printf 'failing case(s):\n'
+		printf '%s\n' "$fail_lines" | sed 's/^/  /'
+	else
+		printf 'failing case(s): none named — the run died before a case printed one\n'
+	fi
+	printf 'the full run: bash scripts/ci-offline.sh (transcript: %s)\n' "$out"
 	return 1
 }
 

@@ -9,13 +9,22 @@
 # $PF_CWD instead of dropped; and a file in neither tree is a FAIL naming the file and both trees,
 # with semgrep never run at all — a narrower scan is never a pass.
 #
+# The `offline` check is pinned here too: CI's harness-check job runs `scripts/harness-check.sh` and
+# `scripts/ci-offline.sh`, and preflight ran only the first, so #229 was green here and red on
+# scripts/tests/test-preflight-semgrep.sh — a file only the offline suite runs. A red offline suite
+# has to FAIL this check and name the failing case; a green one has to pass; and the answer has to
+# go into the shared ledger, so a second run reads the receipt instead of running the suite again.
+#
 # bin/preflight dispatches only when executed, so these source it and drive the functions directly.
 # No network: `semgrep` is a stub that records the directory it ran in and its argv, then exits 0.
+#
+# PREFLIGHT=<path> points the suite at another preflight, which is how a new check is proved red on
+# an older one: PREFLIGHT=/tmp/trunk-preflight bash scripts/tests/test-preflight-tree.sh
 #
 # Run it directly, or through scripts/ci-offline.sh, which globs scripts/tests/test-*.sh.
 set -uo pipefail
 
-PREFLIGHT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../bin" && pwd)/preflight"
+PREFLIGHT="${PREFLIGHT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../bin" && pwd)/preflight}"
 [ -f "$PREFLIGHT" ] || {
 	printf 'FATAL: %s is missing\n' "$PREFLIGHT" >&2
 	exit 1
@@ -102,6 +111,37 @@ run_semgrep() {
 	RC=$?
 }
 
+# run_offline <repo> [receipt-dir] — pf_check_offline over <repo>, with the shared ledger pinned to a
+# directory of its own so one case cannot answer another.
+run_offline() {
+	local repo=$1 ledger=${2:-}
+	[ -n "$ledger" ] || ledger=$(mktemp -d -p "$WORK" ledger.XXXXXX)
+	OUT=$(env -i PATH="$WORK/stub:/usr/bin:/bin" HOME="$WORK/home" TMPDIR="$WORK" \
+		bash -c '. "$1" >/dev/null 2>&1 || true
+			PF_CWD=$2 PF_READ=$2
+			PREFLIGHT_TMP=$4
+			mkdir -p "$PREFLIGHT_TMP"
+			PI_RECEIPT_DIR=$5
+			RECEIPT_TREE_ROOT=
+			pf_check_offline
+			exit $?' _ "$PREFLIGHT" "$repo" "" "$ledger/tmp" "$ledger" 2>&1)
+	RC=$?
+}
+
+# write_offline <repo> <exit> <line>... — the ci-offline.sh that repo would run, plus a counter every
+# run appends to, so a case can prove the suite was not started a second time.
+write_offline() {
+	local repo=$1 rc=$2 runs=$3 l
+	shift 3
+	mkdir -p "$repo/scripts"
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'printf x >> %q\n' "$runs"
+		for l in "$@"; do printf 'printf "%%s\\n" %q\n' "$l"; done
+		printf 'exit %s\n' "$rc"
+	} >"$repo/scripts/ci-offline.sh"
+}
+
 # ---------------------------------------------------------------------------
 case_start "a slug whose branch lives in a worktree reads the worktree"
 read_tree "$WORK/repo" feat s1
@@ -149,5 +189,45 @@ run_semgrep "$WORK/wt" changed.sh both.sh
 out_has "semgrep: 2 changed file(s) clean" "both changed files were scanned"
 
 # ---------------------------------------------------------------------------
-printf '\n%d passed, %d failed in %d cases\n' "$PASS_N" "$FAIL_N" "$CASE_N"
+# The offline suite. Measured on #229: every preflight check green, the pull request red on
+# scripts/tests/test-preflight-semgrep.sh, because harness-check.yml runs `bash
+# scripts/ci-offline.sh` as a second step and this file never ran it.
+case_start "a red offline suite FAILs and names the failing case"
+write_offline "$WORK/repo" 1 "$WORK/offline-runs-a" \
+	'ok   something else: it passes' \
+	'FAIL the-broken-case: expected 1, got 2' \
+	'== ci-offline: 2 suite(s), 1 failed'
+run_offline "$WORK/repo"
+[ "$RC" -ne 0 ] && pass "a red scripts/ci-offline.sh refuses" ||
+	fail "a red scripts/ci-offline.sh refuses" "exit 0, expected a refusal" "$OUT"
+out_has "scripts/ci-offline.sh exited 1" "the FAIL says the suite exited non-zero"
+out_has "FAIL the-broken-case: expected 1, got 2" "the FAIL names the failing case line"
+out_has "failing case(s)" "the FAIL has the section a reader looks for"
+
+case_start "a green offline suite passes and counts its cases"
+write_offline "$WORK/repo" 0 "$WORK/offline-runs-b" \
+	'ok   case one: it holds' \
+	'ok   case two: it holds too' \
+	'== ci-offline: 2 suite(s), 0 failed'
+run_offline "$WORK/repo"
+[ "$RC" -eq 0 ] && pass "a green scripts/ci-offline.sh passes" ||
+	fail "a green scripts/ci-offline.sh passes" "exit $RC" "$OUT"
+out_has "offline: 2 case(s) green" "the pass counts the cases the suite printed"
+
+case_start "the offline answer is kept in the ledger, so a second run does not start it again"
+run_offline "$WORK/repo" "$WORK/ledger-shared"
+first_runs=$(wc -c <"$WORK/offline-runs-b" | tr -d ' ')
+run_offline "$WORK/repo" "$WORK/ledger-shared"
+second_runs=$(wc -c <"$WORK/offline-runs-b" | tr -d ' ')
+[ "$RC" -eq 0 ] && pass "the receipt answers the second run" ||
+	fail "the receipt answers the second run" "exit $RC" "$OUT"
+out_has "offline: 2 case(s) green (bash scripts/ci-offline.sh from a receipt" "the pass says the answer came from the ledger"
+if [ "$first_runs" = "$second_runs" ]; then
+	pass "scripts/ci-offline.sh ran once for two runs ($first_runs byte(s) of marker)"
+else
+	fail "scripts/ci-offline.sh ran once for two runs" "marker grew from $first_runs to $second_runs"
+fi
+
+# ---------------------------------------------------------------------------
+printf '\n%d passed, %d failed in %d cases\n'  "$PASS_N" "$FAIL_N" "$CASE_N"
 [ "$FAIL_N" -eq 0 ]
