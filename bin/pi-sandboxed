@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Worker mode: sandboxed. The default.
+# Radar Vol. 35 blip 1 (agent sandboxing, Adopt).
+#
+# The worker's report has to get back to the boss agent, and its spec has to get in. In this tree
+# both live under ~/.pi, which pi-sandbox.sh binds read-write already; the two seeds below are for a
+# checkout that still keeps specs/ and reports/ at its root, and they are added only when they exist.
+#
+# Where pi and the sandbox runner are is resolved at runtime (bin/pi-resolve.sh, $HOME), never
+# carried in this file: one wrapper for every platform, and no path from this developer's laptop.
+#
+# Windows: native Windows has no bwrap and no pisandbox, so this mode refuses with the honest line
+# and a non-zero exit instead of silently running bare or dying on a missing path. The WSL2-backed
+# entry is the one marked place at the bottom.
+set -uo pipefail
+here=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)
+root=$(cd -- "$here/.." && pwd)
+# This script's own tree is the workspace: ~/.pi carries bin/, state/ and, in a checkout, specs/
+# and reports/. No PI_BOSS_ROOT / PI_MASTER_ROOT override here on purpose — a value left over from
+# the pre-space layout points the seeded trees at a directory that is being deleted, and a runner
+# on the startup path of every tab must not depend on a variable to know where it lives.
+# shellcheck source=bin/pi-resolve.sh
+. "$here/pi-resolve.sh"
+
+win=0
+pi_is_win && win=1
+
+# --- WSL2 wiring (follow-up worker) ------------------------------------------
+# The only sandbox native Windows can have is a Linux kernel, i.e. WSL2. When that lands it goes
+# here, and nowhere else: detect the distro, then hand this same file to it so the sandbox below is
+# exactly the Linux one —
+#   exec wsl.exe -e bash "$here/pi-sandboxed" "$@"
+# Until then the honest line is the whole of the Windows behaviour.
+if [ "$win" = 1 ]; then
+	printf 'pi-sandboxed: no sandbox on native Windows; run pi under WSL2 (docs/install.md#sandboxing-on-windows)\n' >&2
+	exit 1
+fi
+
+# The pi this session runs, and the directory the sandbox needs on PATH to find it again.
+pi_resolve || exit 127
+export PATH="${PATH:-/usr/local/bin:/usr/bin:/bin}:$PI_RESOLVED_DIR"
+
+# This session is the worker, not the boss: the boss-side write guard returns early for it.
+# The sandbox inherits the environment, so the marker survives into it.
+export PI_WORKER=1
+sandbox=${PI_BOSS_PISANDBOX:-${HOME:-}/.pi/scripts/pisandbox}
+if [ ! -x "$sandbox" ]; then
+	printf 'pi-sandboxed: no sandbox runner at %s (install the harness, or set PI_BOSS_PISANDBOX)\n' "$sandbox" >&2
+	exit 127
+fi
+seeds=()
+for d in "$root/specs" "$root/reports"; do
+	[ -d "$d" ] && seeds+=(--rw "$d")
+done
+exec "$sandbox" "${seeds[@]+"${seeds[@]}"}" -- "$@"
