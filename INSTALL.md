@@ -5,9 +5,9 @@ install their own prerequisites — Node 24, the major `.node-version` pins and
 `mise.toml` writes, and npm — through apt-get, dnf, pacman, brew, winget or mise,
 announcing each command before it runs, then hand over to the questions. `git` is
 the one thing you install by hand: nothing clones without it. `gh` is optional:
-the installer uses it to clone the delegation workspace when it is authenticated,
-and otherwise clones over https. SSH is the last resort and needs a key; both
-repos are public, so nothing here asks for one. `herdr-app` is downloaded by the
+the installer uses it when it is authenticated, and otherwise clones over https.
+SSH is the last resort and needs a key; the repo is public, so nothing here asks
+for one. `herdr-app` is downloaded by the
 installer unless you set `PI_SKIP_NETWORK=1`.
 
 ## 1. git, before the clone

@@ -457,7 +457,6 @@ async function preflight() {
 		paths: [
 			{ what: 'this pi repo', path: SOURCE_DIR },
 			{ what: 'the agent dir', path: AGENT_DIR },
-			{ what: 'PI_BOSS_DIR', path: process.env.PI_BOSS_DIR || path.join(HOME, 'big-boss-pi') },
 		],
 	}))
 		warn(w.message);

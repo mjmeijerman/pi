@@ -54,8 +54,10 @@ and `git`. On Windows, run them from Git Bash or PowerShell.
 global git hooks plus their `init.templateDir` layer, the global gitignore,
 `git-vuln-scan`, `pisandbox`, `pi-bare`, the Herdr "Pi (bare)" menu row, the
 managed `pi()` sandbox wrapper in `~/.bashrc`/`~/.zshrc`, `herdr-app` (vendor
-installer), the `big-boss-pi` clone with its `jev`/`delegate`/`local-run` bin
-entries, and the guard service. Its sections keep the old `install.sh` numbering
+installer), this checkout's own `bin/` tools on `PATH` (`space`, `delegate`,
+`guard`, `jev`, `local-run`, `pi-bare`, `pi-sandboxed`, `preflight`, `pr-ready`,
+`publish`), the `harness` space a fresh install comes up with, and the guard
+service. Its sections keep the old `install.sh` numbering
 0..5, so a reader can map one file onto the other.
 
 A second run writes nothing. It never replaces a file you may have edited in
@@ -169,9 +171,8 @@ not come back: a finished worker's tab stays closed, and only
 moved, a space whose project folder is gone is reported with
 `bin/space forget <slug>` and skipped, and a forgotten space is left alone.
 `bin/guard --once` is one pass, `--space <slug>` one space, `--dry-run` the plan
-with no call to the app. The pre-space `~/big-boss-pi/bin/guard` — the copy that
-knew the one hard-coded `big-boss-pi` space and restored nothing recorded — is
-retired: it is no longer installed, and the unit no longer points at it.
+with no call to the app. The installer makes the `harness` space itself; the
+guard is what repairs it — and the Boss tab its record names — after a reboot.
 
 ### Herdr window
 
@@ -371,10 +372,10 @@ Repo-local hooks are preserved: the global wrappers chain to your repo's own `.g
 - `git add -f .env` — force-stage a gitignored file (pre-commit still blocks it)
 - `SKIP_VULN_SCAN=1` — skip the agent vuln scan for one push
 - Repos that set their own `core.hooksPath` (e.g. husky) bypass the global wrappers
-- Installer env flags: `PI_SKIP_NETWORK=1` (no vendor download, no
-  `big-boss-pi` clone), `PI_SKIP_SYSTEMD=1` or its alias `PI_SKIP_SERVICES=1`
+- Installer env flags: `PI_SKIP_NETWORK=1` (no vendor download, no `herdr-app`
+  entry), `PI_SKIP_SYSTEMD=1` or its alias `PI_SKIP_SERVICES=1`
   (copy units, enable nothing, register no login entry — the guard is what
-  creates the `big-boss-pi` space, so this is the one way out of it),
+  repairs a space after a reboot, so this is the one way out of it),
   `PI_ENABLE_SERVICES=1` (accepted, no longer needed: the macOS/Windows login
   entry is the default),
   `PI_ALLOW_MISSING_PI=1` (skip pi on a box without it — CI only; the installer

@@ -140,15 +140,13 @@ if (fs.existsSync(agentsMd)) {
 	else fail('agent rules', 'AGENTS.md carries no bullet rules');
 }
 
-// Guard login entry: the guard is what creates and repairs the `big-boss-pi`
-// space, so it installs by default on all three systems — a unit on Linux, a
-// launchd plist on macOS, a Task Scheduler entry on Windows. Two reasons make a
-// row a named skip rather than a failure, and both are decisions the person made
-// at install time: PI_SKIP_SYSTEMD=1 (or its alias PI_SKIP_SERVICES=1) turns the
-// entry off, and PI_SKIP_NETWORK=1 means there is no clone for it to point at.
+// Guard login entry: the guard repairs every recorded space and its Boss tab, so
+// it installs by default on all three systems — a unit on Linux, a launchd plist
+// on macOS, a Task Scheduler entry on Windows. PI_SKIP_SYSTEMD=1 (or its alias
+// PI_SKIP_SERVICES=1) turns the entry off, and that is a named skip rather than a
+// failure because it is a decision the person made at install time.
 const guardSkip =
 	process.env.PI_SKIP_SYSTEMD === '1' ? 'PI_SKIP_SYSTEMD=1' : process.env.PI_SKIP_SERVICES === '1' ? 'PI_SKIP_SERVICES=1' : '';
-const noClone = process.env.PI_SKIP_NETWORK === '1';
 
 /** programArguments — the strings inside a plist's ProgramArguments array. */
 function programArguments(plist) {
@@ -159,10 +157,7 @@ function programArguments(plist) {
 
 if (PLAN.service === 'systemd') {
 	mustExist('guard unit', path.join(P.serviceDir, 'herdr-resume.service'));
-	// Named skip, not a silent pass: without the clone there is no bin/guard, and
-	// the engine says the same thing in its own transcript.
-	if (noClone) pass('big-boss-pi guard unit', 'not checked — PI_SKIP_NETWORK=1 skips the clone, so there is no bin/guard to point a unit at');
-	else mustExist('big-boss-pi guard unit', path.join(P.serviceDir, 'big-boss-pi-guard.service'));
+	mustExist('guard unit', path.join(P.serviceDir, 'big-boss-pi-guard.service'));
 	// A timer without the unit its `Unit=` names is the failure this row exists
 	// for: both files are copied by the same step, so nothing notices until the
 	// schedule fires weeks later. Read off the installed timers, not a list.
@@ -177,8 +172,7 @@ if (PLAN.service === 'systemd') {
 } else if (PLAN.service === 'launchd') {
 	const plist = path.join(P.serviceDir, 'dev.herdr.big-boss-pi-guard.plist');
 	if (guardSkip) pass('launchd login item', `not checked — ${guardSkip} turns the entry off`);
-	else if (noClone) pass('launchd login item', 'not checked — PI_SKIP_NETWORK=1 skips the clone the entry points at');
-	else if (!fs.existsSync(plist)) fail('launchd login item', `${plist} missing — the guard is what creates the big-boss-pi space`);
+	else if (!fs.existsSync(plist)) fail('launchd login item', `${plist} missing — nothing repairs a space after the next logon`);
 	else {
 		pass('launchd login item', plist);
 		// The plist is only a login item if its ProgramArguments name a program that
@@ -191,15 +185,13 @@ if (PLAN.service === 'systemd') {
 	assertGuardSpace();
 } else if (guardSkip) {
 	pass('scheduled task', `not checked — ${guardSkip} turns the entry off`);
-} else if (noClone) {
-	pass('scheduled task', 'not checked — PI_SKIP_NETWORK=1 skips the clone the entry points at');
 } else {
 	// Asked of Task Scheduler, not of a file: the registration lives in the task
 	// store, and "the .cmd is there" answers a different question.
 	const exe = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'schtasks.exe') : 'schtasks';
 	const query = spawnSync(exe, ['/Query', '/TN', 'big-boss-pi-guard', '/FO', 'LIST'], { encoding: 'utf8' });
 	if (query.error) pass('scheduled task', `not checked — no schtasks on this host (${query.error.code || 'unknown'})`);
-	else if (query.status !== 0) fail('scheduled task', `schtasks /Query /TN big-boss-pi-guard exited ${query.status} — not registered, and the guard is what creates the big-boss-pi space`);
+	else if (query.status !== 0) fail('scheduled task', `schtasks /Query /TN big-boss-pi-guard exited ${query.status} — not registered, and nothing repairs a space after the next logon`);
 	else {
 		pass('scheduled task', 'big-boss-pi-guard is registered');
 		// "Task To Run" is where the interpreter and the guard are, both quoted:
@@ -212,7 +204,7 @@ if (PLAN.service === 'systemd') {
 		// Scheduler reads Ready while the guard runs. The pid the launcher wrote is the
 		// process, so that is what is asked — and a pid that is not alive is a failure
 		// that names the command which starts it.
-		const pidFile = path.join(home, 'big-boss-pi', 'state', GUARD_PID_NAME);
+		const pidFile = path.join(P.piHome, 'state', GUARD_PID_NAME);
 		let pid = '';
 		try {
 			pid = (fs.readFileSync(pidFile, 'utf8') || '').trim();
@@ -253,7 +245,7 @@ if (PLAN.service === 'systemd') {
 					if (fs.existsSync(targets.bashPath)) pass('guard launcher interpreter', targets.bashPath);
 					else fail('guard launcher interpreter', `${targets.bashPath} does not exist — the task starts wscript, and the launcher starts nothing`);
 					if (fs.existsSync(targets.guardPath)) pass('guard launcher guard', targets.guardPath);
-					else fail('guard launcher guard', `${targets.guardPath} does not exist — the guard is what creates the big-boss-pi space`);
+					else fail('guard launcher guard', `${targets.guardPath} does not exist — nothing repairs a space after the next logon`);
 				}
 			}
 		}
@@ -262,29 +254,29 @@ if (PLAN.service === 'systemd') {
 }
 
 /**
- * assertGuardSpace — did the space the guard exists to create actually appear?
+ * assertGuardSpace — did the space a fresh install comes up with actually appear?
  *
- * The same question the installer now asks at the end of its own run, asked
- * again of a finished install: a green manifest over an empty Herdr window is
- * the bug this row exists for. `herdr-app` not answering is a named pass — CI has
- * no desktop app, and the guard creates the space when one starts. A running app
- * that shows no `big-boss-pi` space is a failure with the three commands that say
- * why, not a "check your setup".
+ * The same question the installer asks at the end of its own run, asked again of
+ * a finished install: a green manifest over an empty Herdr window is the bug this
+ * row exists for. `herdr-app` not answering is a named pass — CI has no desktop
+ * app, and the installer prints the `bin/space new` line that makes the space by
+ * hand. A running app that shows no `harness` space is a failure with the three
+ * commands that say why, not a "check your setup".
  */
 function assertGuardSpace() {
 	const ls = spawnSync('herdr-app', ['ls'], { encoding: 'utf8' });
 	if (ls.error || ls.status !== 0) {
-		pass('big-boss-pi space', `not checked — herdr-app is not running here (${ls.error?.code || `exit ${ls.status}`}); the guard creates the space when it starts`);
+		pass('harness space', `not checked — herdr-app is not running here (${ls.error?.code || `exit ${ls.status}`}); the install prints the bin/space new line that makes it`);
 		return;
 	}
 	const id = spaceIdIn(ls.stdout || '', GUARD_SPACE_NAME);
-	if (id) pass('big-boss-pi space', id);
+	if (id) pass('harness space', id);
 	else
 		fail(
-			'big-boss-pi space',
+			'harness space',
 			`herdr-app is running and has no ${GUARD_SPACE_NAME} space — ` +
 				`the entry: ${PLAN.platform === 'win32' ? 'schtasks /Query /TN big-boss-pi-guard /V /FO LIST' : `launchctl print gui/${typeof process.getuid === 'function' ? process.getuid() : 0}/${GUARD_LABEL}`}; ` +
-				`the guard log: ${path.join(home, 'big-boss-pi', 'state', 'guard.log')}; the app: herdr-app ls`,
+				`the guard log: ${path.join(P.piHome, 'state', 'guard.log')}; the app: herdr-app ls`,
 		);
 }
 
@@ -317,10 +309,9 @@ try {
 if (modCount > 0) pass('herdr mods', `${modCount} in ${herdrMods}`);
 else fail('herdr mods', `none in ${herdrMods} — a fresh install must write them before herdr-app runs`);
 
-// Deliberately skipped in CI: the vendor download, the private workspace.
+// Deliberately skipped in CI: the vendor download.
 if (process.env.PI_SKIP_NETWORK === '1') {
 	mustBeAbsent('herdr-app', path.join(P.binDir, PLAN.platform === 'win32' ? 'herdr-app.exe' : 'herdr-app'), 'PI_SKIP_NETWORK=1 skipped the vendor installer');
-	mustBeAbsent('big-boss-pi', path.join(home, 'big-boss-pi'), 'PI_SKIP_NETWORK=1 skips the private clone');
 }
 
 // Sandbox: Linux-only, and the pointer to it lives in AGENTS.md.

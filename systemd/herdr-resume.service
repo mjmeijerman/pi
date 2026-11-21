@@ -30,7 +30,7 @@ Wants=default.target
 Type=oneshot
 WorkingDirectory=%h/.pi
 Environment=HOME=%h
-Environment=PATH=%h/.local/bin:%h/.local/share/pnpm/bin:%h/big-boss-pi/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:%h/.local/share/pnpm/bin:%h/.pi/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.pi/scripts/herdr-resume.sh
 # Bounded: the core wait is up to 120 s, and after the dead entries are pruned
 # each terminal the core still knows gets 20 s for its recovered shell to
