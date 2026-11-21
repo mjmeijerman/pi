@@ -1057,6 +1057,86 @@ describe("wiring", () => {
 		}
 	});
 
+	test("the outcome row says the tab was closed, so a leftover tab is a fact and not a memory", async () => {
+		// The close used to be a branch of the `.then`: `died` and the outcome that
+		// finished with nothing walked past it, and nobody could tell from `runs.jsonl`
+		// whether a tab had been left behind. The row now carries `closed`.
+		const session = join(scratch, `learn-outcome-row-${process.pid}-${Date.now()}.json`);
+		await writeFile(session, "{}", "utf8");
+		const closed: string[] = [];
+		const { emit, ctx, started } = setup({
+			proposalExists: () => false,
+			confirm: async () => ({ ok: true, source: "session", detail: session }),
+			outcomePollMs: 5,
+			outcomeIdleMs: 10,
+			closeSpace: async (slug: string) => {
+				closed.push(slug);
+			},
+		});
+		try {
+			await trip(emit, ctx);
+			await settle();
+			const before = (await readRuns()).length;
+			await emit("session_compact", { reason: "threshold" }, ctx);
+			await waitFor(() => started.length === 1);
+			await waitFor(() => closed.length === 1);
+			const row = await waitForRun((entry, index) => index >= before && entry.kind === "outcome");
+			assert.equal(row.outcome, "died", "the learner stopped without a proposal");
+			assert.equal(row.closed, true, "and the record says the host closed its tab");
+			assert.equal(row.slug, started[0].env.PI_SELF_LEARN_SLUG, "named by the slug the learner ran under");
+		} finally {
+			await rm(session, { force: true });
+		}
+	});
+
+	test("a publish hand-off that throws is a warning, and the tab still closes", async (t) => {
+		// The hand-off used to be the last thing the watch did and its failure was swallowed
+		// by the outer catch: the branch was unpublished, the tab stayed open, and nothing
+		// said so. The row carries the failure and the person is told.
+		const { emit, ctx, notices, started } = setup({
+			publishRun: async () => {
+				throw new Error("learn-publish.sh exploded");
+			},
+			publishPollMs: 5,
+			publishWindowMs: 2000,
+		});
+		await trip(emit, ctx);
+		await settle();
+		const before = (await readRuns()).length;
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		await waitFor(() => started.length === 1);
+		const queueDir = join(scratch, "proposals", "queue");
+		await mkdir(queueDir, { recursive: true });
+		// The broker claims the file it publishes; a failed hand-off leaves the claim
+		// behind. Both spellings are cleared, because a later test reads the newest file
+		// in this shared directory and would otherwise read this one.
+		t.after(async () => {
+			for (const name of await readdir(queueDir).catch(() => [] as string[])) {
+				if (name.startsWith("learn-handoff")) await rm(join(queueDir, name), { force: true });
+			}
+		});
+		await writeFile(
+			join(queueDir, `learn-handoff-${process.pid}.publish.json`),
+			// The proposal must be a real file under the proposal directory: the broker
+			// refuses anything else, and a refusal is not the failure this case is about.
+			JSON.stringify({
+				slug: "learn-handoff",
+				branch: "learn/learn-handoff",
+				reason: "the fix",
+				proposal: join(scratch, "proposals", "2023-11-14-22-53-20-000Z.md"),
+			}),
+			"utf8",
+		);
+		const slug = started[0].env.PI_SELF_LEARN_SLUG;
+		const row = await waitForRun((entry) => entry.kind === "outcome" && entry.slug === slug);
+		assert.match(row.publishError, /learn-publish\.sh exploded/, "the row names the failure");
+		assert.equal(row.closed, true, "and the tab is closed all the same");
+		assert.ok(
+			notices.some((notice: any) => notice.level === "warning" && /the publish hand-off failed/.test(notice.message)),
+			"the person hears about it, at warning level",
+		);
+	});
+
 	test("a pane that echoed the prompt and no session is a spawn-failed, not a learner", async () => {
 		// `learn-10-14` (2026-11-20): `spawned`, confirmed "terminal", no session file in
 		// that cwd at any point. The row claimed a learner, the space stayed open, and the
@@ -1388,7 +1468,7 @@ describe("wiring", () => {
 		await waitFor(() => started.length === 1, 2000, "and enabling it again lets the next compaction teach");
 	});
 
-	test("one confirmed launch writes exactly one row", async () => {
+	test("one confirmed launch writes its spawned row and its outcome row, and nothing else", async () => {
 		const { emit, ctx, notices } = setup();
 		await trip(emit, ctx);
 		await settle();
@@ -1397,7 +1477,15 @@ describe("wiring", () => {
 		const spawned = await waitForRun((row, index) => index >= before && row.kind === "spawned");
 		await settle();
 		const written = (await readRuns()).slice(before);
-		assert.equal(written.length, 1, "one learner, one row");
+		// Two rows, one learner: the launch and what happened to its tab. The close used to
+		// be invisible here, so a leftover tab lived only in the person's memory.
+		assert.deepEqual(
+			written.map((row) => row.kind),
+			["spawned", "outcome"],
+			"one learner, one launch row and one outcome row",
+		);
+		assert.equal(written[1].outcome, "proposal", "it wrote its proposal, so it asked for a branch");
+		assert.equal(written[1].closed, true, "and the host closed the tab the host made");
 		assert.equal(spawned.launcher, "pane");
 		assert.equal(spawned.confirmed, "session");
 		assert.ok(
@@ -1406,7 +1494,7 @@ describe("wiring", () => {
 		);
 	});
 
-	test("the learner is told how to publish its branch and to close its own space", async () => {
+	test("the learner is told how to publish its branch, and that the host closes its tab", async () => {
 		const { emit, ctx } = setup();
 		await trip(emit, ctx);
 		await settle();
@@ -1426,7 +1514,16 @@ describe("wiring", () => {
 		);
 		assert.match(body, /Do not run/, "and says the script is not the learner's to run");
 		assert.match(body, /\.publish\.json/, "the suffix the broker scans for is in the file");
-		assert.match(body, /agent-pane\.sh close/, "the spec tells the learner to close its own space");
+		assert.match(
+			body,
+			/Close nothing\. The host closes your tab when the run ends/,
+			"the spec tells the learner the host closes its tab, not that it should: herdr-app is outside\n\t\t\tthe sandbox, so its own `agent-pane.sh close` closes the space and never a tab",
+		);
+		assert.doesNotMatch(
+			body,
+			/agent-pane\.sh close/,
+			"and never asks a sandboxed learner to run the close it cannot run",
+		);
 		assert.match(body, /learn-\d{2}-\d{2}/, "the slug it must close is in the file");
 		assert.match(body, /worktree add/, "the boss's checkout must not be switched");
 		assert.match(body, /big-boss-pi agent space/, "the agent that publishes runs on the host");
@@ -1510,7 +1607,20 @@ describe("wiring", () => {
 		assert.match(body, /- queue file to write: .+\.publish\.json\n\n1\. Cut a worktree: /);
 		assert.match(body, /2\. Apply your diff there, run the checks it names, commit on that branch\.\n/);
 		assert.match(body, /exactly these fields:\n\n```json\n.+\n```\n\n   Write that file/);
-		assert.match(body, /the row is on the host\.\n4\. Close your own space, whatever the outcome:/);
+		// The last step a learner reads is not "close your own space": a sandboxed learner
+		// cannot, and the host closes the tab the host made (self-learn.ts`finishOutcome`).
+		assert.match(body, /the row is on the host\.\n4\. Close nothing\. The host closes your tab when the run ends/);
+		// An emptied line still renders, and the learner is the reader of this paragraph:
+		// the four lines say who closes the tab and that nothing is written after the stop.
+		for (const line of [
+			"4. Close nothing. The host closes your tab when the run ends — a proposal, a",
+			"   death, or nothing written — so write everything you will write before you",
+			"   stop. Never run the pane script's close from here: it closes the space, not",
+			"   the tab.",
+			'A "nothing" proposal skips steps 1-3 and stops there, with the proposal file.',
+		]) {
+			assert.ok(body.includes(line), `the closing paragraph keeps this line: ${line}`);
+		}
 		const example = body.match(/```json\n(.+)\n```/);
 		assert.ok(example, "the example request is fenced in the queue file");
 		assert.equal(
@@ -4411,5 +4521,235 @@ describe("a launch handed to the host session", () => {
 				await rm(queueDir(), { recursive: true, force: true });
 			}
 		});
+	});
+});
+
+describe("the close path", () => {
+	// What happens to a learner's tab when the outcome watch ends: the host closes what
+	// the host made, for every outcome that is finished, and never for a learner that may
+	// still be working. The close used to be one branch of the `.then`, so `died` and the
+	// outcome that finished with nothing walked past it and the person closed those tabs
+	// by hand days later. `close`, the publish hand-off and the record are injected, so
+	// every case here is one call with three recorders: no herdr, no pi, no git.
+	//
+	// These live here and not in scripts/tests because stryker's command runner is
+	// `node --test "extensions/__tests__/*.test.ts"`: a case outside this folder cannot
+	// kill a mutant, and the close path scored 44.23 when its cases sat in scripts/tests.
+
+	/**
+	 * The launch time, ninety seconds ago: `elapsedMs` is a difference and a test that
+	 * only bounds it from below cannot tell it from a sum.
+	 */
+	const AT = Date.now() - 90_000;
+
+	/** The outcome the outcome watch reaches, and what the close path does with it. */
+	async function finish(outcome: string, options: Record<string, any> = {}) {
+		const calls: string[] = [];
+		const rows: Record<string, any>[] = [];
+		const error = await mod
+			.finishOutcome(outcome, {
+				slug: "learn-1000",
+				launcher: "pane",
+				queue: "/q/2026-11-21-10-00-00-000Z.md",
+				proposal: "/p/2026-11-21-10-00-00-000Z.md",
+				at: AT,
+				close: (slug: string) => {
+					calls.push(`close:${slug}`);
+				},
+				wait: () => {
+					calls.push("wait");
+				},
+				record: (row: Record<string, any>) => {
+					rows.push(row);
+				},
+				...options,
+			})
+			.then(
+				() => null,
+				(caught: unknown) => caught,
+			);
+		return { calls, rows, error };
+	}
+
+	test("a proposal awaits the publish window and then closes the tab once", async () => {
+		const { calls, rows } = await finish("proposal");
+		assert.deepEqual(calls, ["wait", "close:learn-1000"], "the hand-off comes first: the learner wrote a branch");
+		assert.equal(rows.length, 1, "one row per outcome");
+		assert.equal(rows[0].outcome, "proposal");
+		assert.equal(rows[0].closed, true, "the tab was closed, and the record says so");
+		assert.equal(rows[0].kind, "outcome");
+		assert.equal(rows[0].slug, "learn-1000");
+		assert.equal(rows[0].launcher, "pane");
+		assert.equal(rows[0].queue, "/q/2026-11-21-10-00-00-000Z.md");
+		assert.equal(rows[0].proposal, "/p/2026-11-21-10-00-00-000Z.md");
+		assert.equal(rows[0].ts, new Date(AT).toISOString());
+		assert.ok(
+			Math.abs(rows[0].elapsedMs - 90_000) < 10_000,
+			"elapsed is measured from the launch, not added to it or invented",
+		);
+		assert.equal(rows[0].publishError, undefined, "nothing failed, so the row carries no failure");
+	});
+
+	test("a learner that died is closed at once, with no publish wait", async () => {
+		const { calls, rows } = await finish("died");
+		assert.deepEqual(calls, ["close:learn-1000"], "a death has no request to wait for");
+		assert.equal(rows.length, 1);
+		assert.equal(rows[0].outcome, "died");
+		assert.equal(rows[0].closed, true, "the learner is gone, so its tab is the host's to close");
+	});
+
+	test("a learner that finished with nothing is closed at once, with no publish wait", async () => {
+		const { calls, rows } = await finish("nothing");
+		assert.deepEqual(calls, ["close:learn-1000"], "nothing was written, so nothing has to be published");
+		assert.equal(rows.length, 1);
+		assert.equal(rows[0].outcome, "nothing");
+		assert.equal(rows[0].closed, true);
+	});
+
+	test("a learner still working keeps its tab: zero closes, zero waits, no row", async () => {
+		const { calls, rows } = await finish("unknown");
+		assert.deepEqual(calls, [], "the tab is the run's proof of life: closing it here would kill the work");
+		assert.deepEqual(rows, [], "and an unfinished learner is not a finished one on the trail either");
+	});
+
+	test("a publish hand-off that throws still closes the tab, and the error is not swallowed", async () => {
+		const boom = new Error("learn-publish.sh exited 2");
+		const waited: string[] = [];
+		const { calls, rows, error } = await finish("proposal", {
+			wait: async () => {
+				waited.push("wait");
+				throw boom;
+			},
+		});
+		assert.deepEqual(waited, ["wait"], "the hand-off was attempted");
+		assert.deepEqual(calls, ["close:learn-1000"], "and the tab is closed whatever it did");
+		assert.equal(rows.length, 1, "the outcome is on the trail even when the hand-off failed");
+		assert.equal(rows[0].closed, true);
+		assert.match(rows[0].publishError, /learn-publish\.sh exited 2/, "the failure rides the row instead of vanishing");
+		assert.equal(error, boom, "rethrown, so the caller can tell the person");
+	});
+
+	test("a close that throws is a row saying the tab was not closed", async () => {
+		// `closed` is the whole point of the row: a close that failed must read as a tab
+		// the person still has, not as a close that happened.
+		const boom = new Error("agent-pane.sh close exited 1");
+		const { rows, error } = await finish("died", {
+			close: () => {
+				throw boom;
+			},
+		});
+		assert.equal(rows.length, 1, "the row is written even when the close fails");
+		assert.equal(rows[0].closed, false, "and it says the tab was left behind");
+		assert.equal(error, boom, "the failure reaches the caller");
+	});
+
+	test("a proposal with no publish hand-off to await still closes once", async () => {
+		// The hand-off is optional in the close path: a build with no broker must not
+		// leave the tab open, and must not throw on the way out.
+		const { calls, rows, error } = await finish("proposal", { wait: undefined });
+		assert.deepEqual(calls, ["close:learn-1000"]);
+		assert.equal(error, null, "no hand-off is not a failure");
+		assert.equal(rows[0].closed, true);
+	});
+
+	test("every finished outcome closes and only the unfinished one does not", async () => {
+		// The invariant, not a list of cases: an outcome added later inherits the close or
+		// fails here, instead of silently leaving a tab behind again.
+		for (const [outcome, policy] of Object.entries(mod.OUTCOME_POLICY)) {
+			assert.equal(policy.close, outcome !== "unknown", `${outcome}: closes unless it may still be working`);
+			assert.equal(policy.wait, outcome === "proposal", `${outcome}: waits for the publish window only when a branch exists`);
+		}
+	});
+
+	test("a clean exit with no proposal is the outcome 'nothing', not a death", async () => {
+		const rows: Record<string, any>[] = [];
+		const outcome = await watchOutcome({
+			slug: "learn-1000",
+			launcher: "pane",
+			queue: "/q/1.md",
+			proposal: "/p/1.md",
+			at: NOW,
+			exited: Promise.resolve(0),
+			exists: () => false,
+			onDied: (row: Record<string, any>) => void rows.push(row),
+			pollMs: 5,
+			timeoutMs: 200,
+		});
+		assert.equal(outcome, "nothing", "it finished; nothing went wrong and nothing was written");
+		assert.deepEqual(rows, [], "a clean finish is not a death row");
+	});
+
+	test("a proposal written in the same breath as the exit is a proposal, not a clean finish", async () => {
+		// The second look after the exit is the whole reason a clean finish is not
+		// `nothing`: a learner can write its file as it stops, and calling that a
+		// finished-with-nothing learner would skip the publish hand-off it asked for.
+		// Timed, not counted: the wait between the exit and the second look is the wait
+		// that lets a slow write land, and a look that is not actually a wait cannot.
+		// The file lands at 150ms, so the polling look at ~100ms misses it and only the
+		// look that comes after the exit's own wait can find it.
+		const start = Date.now();
+		const outcome = await watchOutcome({
+			slug: "learn-1000",
+			launcher: "pane",
+			queue: "/q/1.md",
+			proposal: "/p/1.md",
+			at: NOW,
+			exited: Promise.resolve(0),
+			exists: () => Date.now() - start >= 150,
+			onDied: () => undefined,
+			pollMs: 100,
+			timeoutMs: 2_000,
+		});
+		assert.equal(outcome, "proposal", "the file landed while the watch waited after the exit");
+	});
+
+	test("an exit status that is not a number is not the exit status zero", async () => {
+		// Only 0 means "finished and wrote nothing". A launcher that reports `true`, the
+		// string "0" or nothing at all has told us something we cannot read, and calling
+		// that a clean finish would close the tab as a success.
+		assert.equal(mod.exitStatusOf(0), 0, "zero is zero");
+		assert.equal(mod.exitStatusOf(3), 3, "a real status is kept");
+		assert.equal(mod.exitStatusOf(undefined), null);
+		assert.equal(mod.exitStatusOf(null), null);
+		assert.equal(mod.exitStatusOf("0"), null, "a string is not a status");
+		assert.equal(mod.exitStatusOf(true), null, "nor is a boolean");
+	});
+
+	test("a learner with no launcher exit to watch is judged by its session file", async () => {
+		// `exited` is optional on purpose: a visible pane never exits, so the watch must
+		// not read the absence as an exit or wait on a promise that will not come.
+		const outcome = await watchOutcome({
+			slug: "learn-1000",
+			launcher: "pane",
+			queue: "/q/1.md",
+			proposal: "/p/1.md",
+			at: NOW,
+			exists: () => true,
+			onDied: () => undefined,
+			pollMs: 5,
+			timeoutMs: 200,
+		});
+		assert.equal(outcome, "proposal", "the proposal is found without an exit to watch");
+	});
+
+	test("an exit status that is not a number is a death, not a clean finish", async () => {
+		// A launcher that rejects, or resolves with something that is not an exit status,
+		// has not told us the learner finished: the honest reading is the one that closes
+		// the tab and says so, not the one that calls it done.
+		const rows: Record<string, any>[] = [];
+		const outcome = await watchOutcome({
+			slug: "learn-1000",
+			launcher: "pane",
+			queue: "/q/1.md",
+			proposal: "/p/1.md",
+			at: NOW,
+			exited: Promise.reject(new Error("the launcher died")),
+			exists: () => false,
+			onDied: (row: Record<string, any>) => void rows.push(row),
+			pollMs: 5,
+			timeoutMs: 200,
+		});
+		assert.equal(outcome, "died");
+		assert.equal(rows.length, 1, "and it is recorded as a death");
 	});
 });
