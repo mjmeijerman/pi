@@ -169,7 +169,8 @@ resume entry, so the boss comes back with its conversation. Its worker tabs do
 not come back: a finished worker's tab stays closed, and only
 `delegate wait --forever` restarts a worker. Nothing is ever closed, renamed or
 moved, a space whose project folder is gone is reported with
-`bin/space forget <slug>` and skipped, and a forgotten space is left alone.
+`bin/space forget <slug>` and skipped, and a forgotten space is left alone. `forget` asks on a
+terminal and takes `--yes` from a script, because the record is what the guard reopens from.
 `bin/guard --once` is one pass, `--space <slug>` one space, `--dry-run` the plan
 with no call to the app. The installer makes the `harness` space itself; the
 guard is what repairs it — and the Boss tab its record names — after a reboot.

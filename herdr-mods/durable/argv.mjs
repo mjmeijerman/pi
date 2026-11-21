@@ -51,7 +51,8 @@ export function newArgv({ name, mode = "folder", path, noGit = false } = {}) {
 	return argv;
 }
 
-/** `space forget <slug>`: the record only. Nothing on disk is named here, so nothing can go. */
+/** `space forget <slug> --yes`: the record only, and the question the binary would ask is
+ * answered here, where nobody is looking at a terminal. Nothing on disk is named, so nothing can go. */
 export function forgetArgv({ name } = {}) {
-	return ["forget", checkedName(name)];
+	return ["forget", checkedName(name), "--yes"];
 }

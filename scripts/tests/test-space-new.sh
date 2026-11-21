@@ -215,7 +215,8 @@ case $OUT in
 *"project: $P"*"git: false"*) pass 'show prints the record' ;;
 *) fail 'show does not print project and git' "$OUT" ;;
 esac
-run "$SPACE" forget demo
+# `forget` asks on a terminal and takes `--yes` from a script; nothing here can answer a question.
+run "$SPACE" forget demo --yes
 if [ "$RC" -eq 0 ]; then pass 'forget succeeds'; else fail 'forget failed' "$OUT"; fi
 if [ -e "$(record demo)" ]; then fail 'the record survived forget'; else pass 'the record is gone'; fi
 run "$SPACE" list
@@ -228,7 +229,7 @@ if grep -q 'space.close' "$HERDR_LOG"; then fail 'forget closed the herdr space'
 if [ -d "$P" ] && [ -f "$P/AGENTS.md" ]; then pass 'the folder and its rules stay'; else fail 'forget touched the project'; fi
 
 new_case 'forget a space that is not there'
-run "$SPACE" forget never-was
+run "$SPACE" forget never-was --yes
 if [ "$RC" -ne 0 ]; then pass 'it is refused'; else fail 'forget invented a success'; fi
 
 printf '\n%d passed, %d failed\n' "$PASS_N" "$FAIL_N"

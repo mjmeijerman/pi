@@ -37,13 +37,25 @@ function expand(text) {
 	return text;
 }
 
-/** `bin/space list` pads five columns with spaces; the path may hold spaces, so anchor the rest. */
+/** `bin/space list` pads seven columns with spaces; the path may hold spaces, so anchor the rest.
+ * `live <id>` / `not in herdr-app` / `unknown` is whether the app has the space open right now. */
 function parseRows(text) {
 	const rows = [];
 	for (const line of text.split("\n")) {
-		const m = /^(\S+)\s+(.*?)\s+(git|no-git)\s+(\d+ tabs)\s+(\S+)\s*$/.exec(line);
+		const m = /^(\S+)\s+(\S+)\s+(.*?)\s+(git|no-git)\s+(\d+) tabs\s+(live \S+|not in herdr-app|unknown)\s+(.*?) tab\s*$/.exec(
+			line,
+		);
 		if (!m) continue;
-		rows.push({ name: m[1], project: m[2], git: m[3] === "git", tabs: Number(m[4].split(" ")[0]), state: m[5] });
+		rows.push({
+			name: m[1],
+			kind: m[2],
+			project: m[3],
+			git: m[4] === "git",
+			tabs: Number(m[5]),
+			live: m[6].startsWith("live ") ? m[6].slice(5) : "",
+			state: m[6],
+			boss: m[7],
+		});
 	}
 	return rows;
 }
