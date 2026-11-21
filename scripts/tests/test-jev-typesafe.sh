@@ -57,8 +57,12 @@ case_start() {
 # inherited PI_BOSS_ROOT, a home of this test's own.
 jev_run() {
 	local prog=$1
+	local -a extra=()
 	shift
-	OUT=$(env -i PATH="${JEV_PATH:-/usr/local/bin:/usr/bin:/bin}" HOME="$WORK/home" "$@" "$prog" ${JEV_ARGS:-} 2>"$WORK/stderr")
+	# JEV_ARGS is a space-separated string from the caller; splitting it into an array keeps the
+	# words it was meant to carry without an unquoted expansion in the command below.
+	[ -z "${JEV_ARGS:-}" ] || read -r -a extra <<<"$JEV_ARGS"
+	OUT=$(env -i PATH="${JEV_PATH:-/usr/local/bin:/usr/bin:/bin}" HOME="$WORK/home" "$@" "$prog" "${extra[@]}" 2>"$WORK/stderr")
 	RC=$?
 	ERR="$(cat "$WORK/stderr")"
 }
