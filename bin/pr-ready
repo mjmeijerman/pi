@@ -16,8 +16,16 @@
 #   3. nothing failed: no conclusion or state FAILURE
 #   4. the head is the commit that was asked about, when --sha is given — short or full, both match.
 #      CI green on an older commit is not a verdict on this one.
+#   5. the prose review has nothing left to answer. `prose-review` posts one comment on a PR that
+#      touches an instruction file (`agent/AGENTS.md`, `agent/prompts/**`, `agent/skills/**`), and
+#      that comment is green in CI whether it names five findings or five "no finding" lines. A PR
+#      green on 1-4 and holding a finding is still a PR someone has to edit, so it is not handed
+#      over: one line per finding, quoting the review's own words. A review this reads as
+#      unreadable is not a pass either. No comment is nothing to answer — the review only speaks
+#      when instruction prose changed, and it cannot speak when it was refused or not configured,
+#      which a red on absence would block forever.
 #
-# Exit 0 only when all four hold; otherwise one status line names the numbers and a `not ready:` line
+# Exit 0 only when all five hold; otherwise one status line names the numbers and a `not ready:` line
 # per rule that broke, and the exit is non-zero. gh or jq missing is a FAIL, never a pass.
 #
 # `--wait` polls the same rule every --interval seconds (default 15) and stops when EVERY check has
@@ -46,12 +54,13 @@ usage() {
 	cat >&2 <<'EOF'
 usage: pr-ready <pr-number> [--sha <sha>] [--min-checks N] [--wait [--interval SEC] [--max SEC]] [--fail-fast]
 
-Exit 0 only when the rollup holds at least --min-checks checks, none is pending, none failed, and
-the head is --sha when one was given.
+Exit 0 only when the rollup holds at least --min-checks checks, none is pending, none failed, the
+head is --sha when one was given, and the prose review on the PR has no finding left to answer.
 
 --wait polls until every check has a conclusion (pending 0, checks above 0) or --max seconds run
 out, then judges once: a failure does not end the wait, and each newly-failed check is named as it
-appears. --fail-fast is the impatient mode: stop at the first failure and name only it.
+appears. --fail-fast is the impatient mode: stop at the first failure and name only it. A prose
+finding does not wait at all: it is answered by a commit, and no amount of polling writes one.
 EOF
 }
 
@@ -84,6 +93,69 @@ read_rollup() {
 		return 1
 	}
 	printf '%s\n' "$out"
+}
+
+# The prose review's one comment starts with this marker. `.github/scripts/prose-review.mjs` writes
+# it, and the workflow finds the comment it owns by it, so it is the only thing here that says "this
+# comment is the review" rather than a person quoting one.
+PROSE_MARK='<!-- prose-review -->'
+
+# prose_body — the body of the one comment that owns the marker, or the empty string when the PR has
+# none. Returns 1 with the reason on stdout when gh could not answer or its JSON did not parse: a
+# review nobody could read is not a review that passed.
+prose_body() {
+	local json body
+	json=$("$gh_cmd" pr view "$pr" --json comments 2>&1) || {
+		printf 'gh could not read the comments on PR %s: %s\n' "$pr" "$(printf '%s' "$json" | tr '\n' ' ' | cut -c1-200)"
+		return 1
+	}
+	body=$(printf '%s' "$json" | jq -r --arg mark "$PROSE_MARK" \
+		'[.comments[]? | (.body // "") | select(startswith($mark))] | .[0] // ""' 2>&1) || {
+		printf 'gh returned comments that did not parse: %s\n' "$(printf '%s' "$body" | tr '\n' ' ' | cut -c1-200)"
+		return 1
+	}
+	printf '%s\n' "$body"
+}
+
+# prose_findings — one line per question the review answered with something other than "no finding",
+# as `<question> — <the review's own words>`. The review writes one line per question —
+# `1. **contradiction** — no finding` — so a numbered line is the unit. A body with no numbered line
+# at all is a review this cannot read, which is not a review that passed: it prints one line saying
+# so, and the caller refuses on it.
+prose_findings() {
+	awk '
+		/^[1-9]\. \*\*/ {
+			n++
+			line = $0
+			sub(/^[1-9]\. \*\*/, "", line)
+			at = index(line, "**")
+			label = substr(line, 1, at - 1)
+			line = substr(line, at + 2)
+			sub(/^[[:space:]]*—[[:space:]]*/, "", line)
+			if (tolower(substr(line, 1, 10)) == "no finding") next
+			if (line == "") line = "(the model left this answer blank)"
+			printf "%s — %s\n", label, line
+		}
+		END { if (n == 0 && NR > 0) print "the prose review answered nothing this gate can read" }
+	'
+}
+
+# prose_ok — rule 5. Silent and 0 when there is nothing to answer; otherwise the lines a reader needs
+# and 1. Cheap by construction: it is only called once the rollup has already said green, so an
+# ordinary poll costs no second gh call and a PR that never touches instruction prose costs one.
+prose_ok() {
+	local body findings
+	if ! body=$(prose_body); then
+		printf '  not ready: %s\n' "$body"
+		return 1
+	fi
+	[ -n "$body" ] || return 0
+	findings=$(printf '%s\n' "$body" | prose_findings)
+	[ -n "$findings" ] || return 0
+	printf '  not ready: the prose review has %d answer(s) to write into the diff\n' \
+		"$(printf '%s\n' "$findings" | wc -l | tr -d ' ')"
+	printf '%s\n' "$findings" | sed 's/^/    - /'
+	return 1
 }
 
 # head_matches <head> — the head equals --sha, short or full; no --sha is no constraint.
@@ -253,6 +325,10 @@ while :; do
 		[ "$wait_for" != 1 ] || finished=', finished'
 		printf 'pr %s: head %s, checks %d, pending %d, fail %d%s\n' \
 			"$pr" "${head:0:7}" "$total" "$pend" "$flr" "$finished"
+		if ! prose_ok; then
+			[ "$wait_for" != 1 ] || say '  stopping: a finding is answered by a commit, and waiting does not write one'
+			exit 1
+		fi
 		exit 0
 	fi
 	if [ "$wait_for" != 1 ]; then

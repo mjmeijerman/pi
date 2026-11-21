@@ -67,21 +67,55 @@ out_has_once() { # <why> <text> — exactly one line, so a per-poll announcement
 	fi
 }
 
-# A gh stub: `gh pr view <n> --json ...` prints $GH_FIXTURE. A numbered sibling ($GH_FIXTURE.1,
-# .2, ...) is used when it exists, so --wait can be given one fixture per poll.
+# A gh stub: `gh pr view <n> --json ...` prints the rollup fixture, or the comments fixture when the
+# --json list asks for comments. A numbered sibling ($GH_FIXTURE.1, .2, ...) is used when it exists,
+# so --wait can be given one fixture per poll.
 cat >"$WORK/stub/gh" <<'STUB'
 #!/usr/bin/env bash
 [ "$1" = pr ] && [ "$2" = view ] || {
 	printf 'gh stub: unexpected argv: %s\n' "$*" >&2
-	exit 64
+
+exit 64
 }
+f=$GH_FIXTURE
+for arg in "$@"; do
+	case $arg in
+	*comments*) f=$GH_COMMENTS ;;
+	*statusCheckRollup*) f=$GH_FIXTURE ;;
+	esac
+done
 n=$(( $(cat "$GH_COUNT" 2>/dev/null || printf 0) + 1 ))
 printf '%s\n' "$n" >"$GH_COUNT"
-f=$GH_FIXTURE
 [ -f "$f.$n" ] && f=$f.$n
 cat "$f"
 STUB
 chmod +x "$WORK/stub/gh"
+
+# write_comments <file> [body]... — the PR's comments, one comment per body, as gh returns them.
+write_comments() {
+	local file=$1 first=1 body
+	shift
+	printf '{"comments":[' >"$file"
+	for body in "$@"; do
+		[ "$first" = 1 ] || printf ',' >>"$file"
+		first=0
+		printf '{"body":%s}' "$(printf '%s' "$body" | jq -Rs .)" >>"$file"
+	done
+	printf ']}\n' >>"$file"
+}
+
+# A prose-review comment as .github/scripts/prose-review.mjs writes it: the marker, then one numbered
+# line per question, a citation or the literal words "no finding".
+prose_comment() { # <answer1> ... <answer5>
+	local -a q=(contradiction "missing command" "uncheckable rule" "duplicated rule" "older sentence now false")
+	local i=1 out="<!-- prose-review -->"
+	out=$out$'\n**prose-review** — five questions about the instruction prose in this diff (`stub`).\n'
+	for a in "$@"; do
+		out=$out$'\n'"$i. **${q[$((i - 1))]}** — $a"
+		i=$((i + 1))
+	done
+	printf '%s' "$out"
+}
 
 # write_rollup <file> <head> <spec>... — one statusCheckRollup.
 #   run:<status>:<conclusion|empty for null>   a CheckRun (status and conclusion, like gh)
@@ -133,11 +167,15 @@ run_pr_ready() { # <fixture> [args...]
 	local fixture=$1
 	shift
 	OUT=$(env -i PATH="$WORK/stub:/usr/bin:/bin" HOME="$WORK/home" TMPDIR="$WORK" \
-		GH_FIXTURE="$fixture" GH_COUNT="$WORK/count" \
+		GH_FIXTURE="$fixture" GH_COMMENTS="${COMMENTS_FIXTURE:-$WORK/comments-none.json}" \
+		GH_COUNT="$WORK/count" \
 		bash "$PR_READY" "$@" 2>&1)
 	RC=$?
 	rm -f "$WORK/count"
 }
+
+# The default: a pull request whose instructions nobody had to read, so nobody wrote a review.
+write_comments "$WORK/comments-none.json"
 
 # ---------------------------------------------------------------------------
 case_start "an empty rollup is not a green one"
@@ -307,6 +345,86 @@ OUT=$(env -i PATH="$WORK/stub:/usr/bin:/bin" HOME="$WORK/home" TMPDIR="$WORK" \
 RC=$?
 expect_rc "an unreadable PR is refused" nonzero
 out_has "not ready" "the refusal says it is not ready"
+
+# ---------------------------------------------------------------------------
+# The prose review. `prose-review` posts one comment on a PR that touches an instruction file, and
+# that comment is green in CI whether it holds five findings or five "no finding" lines: the check
+# says the review ran, never that there is nothing left to do. A finding is a change to the diff, so
+# a PR carrying one is not ready to hand over.
+case_start "a prose-review finding is not a green one"
+all_success "$WORK/prose-green.json" "$FULL"
+write_comments "$WORK/prose-found.json" \
+	"$(prose_comment "agent/AGENTS.md:16 makes --wait required, and agent/AGENTS.md:17 requires delegate wait" "no finding" "no finding" "agent/AGENTS.md:16 repeats 'not news'" "no finding")"
+COMMENTS_FIXTURE=$WORK/prose-found.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
+COMMENTS_FIXTURE=""
+expect_rc "five green checks and a finding is refused" nonzero
+out_has "checks 12, pending 0, fail 0" "the status line keeps its shape"
+out_has "the prose review has 2 answer(s)" "the refusal counts the findings"
+out_has "contradiction — agent/AGENTS.md:16 makes --wait required" "the first finding is quoted in the review's own words"
+out_has "duplicated rule — agent/AGENTS.md:16 repeats" "every finding is named, not only the first"
+out_lacks "missing command —" "a question answered 'no finding' is not printed as a finding"
+
+# ---------------------------------------------------------------------------
+case_start "five 'no finding' answers leave the PR ready"
+write_comments "$WORK/prose-clean.json" "$(prose_comment "no finding" "no finding" "no finding" "No finding." "no finding")"
+COMMENTS_FIXTURE=$WORK/prose-clean.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
+COMMENTS_FIXTURE=""
+expect_rc "a review with nothing to answer passes" 0
+out_lacks "not ready" "the pass says nothing about the review"
+
+# ---------------------------------------------------------------------------
+case_start "no prose-review comment is nothing to answer"
+write_comments "$WORK/comments-chatter.json" "looks good to me" "1. **contradiction** — a finding in a comment that is not the review"
+COMMENTS_FIXTURE=$WORK/comments-chatter.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
+COMMENTS_FIXTURE=""
+expect_rc "an ordinary PR with no review comment passes" 0
+
+# ---------------------------------------------------------------------------
+case_start "the marker is what makes a comment the review"
+write_comments "$WORK/prose-unmarked.json" \
+	"1. **contradiction** — agent/AGENTS.md:16 contradicts itself, and this comment is not the review"
+COMMENTS_FIXTURE=$WORK/prose-unmarked.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
+COMMENTS_FIXTURE=""
+expect_rc "a person quoting a finding is not a review" 0
+
+# ---------------------------------------------------------------------------
+case_start "a review this cannot read is not a pass"
+write_comments "$WORK/prose-garbled.json" "$(printf '<!-- prose-review -->\n**prose-review** — five questions (stub).\n\nI could not answer these.')"
+COMMENTS_FIXTURE=$WORK/prose-garbled.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
+COMMENTS_FIXTURE=""
+expect_rc "a marked comment with no numbered answer line is refused" nonzero
+out_has "answered nothing this gate can read" "the refusal says the review was unreadable, not clean"
+
+# ---------------------------------------------------------------------------
+case_start "comments gh cannot read are a FAIL, never a pass"
+printf 'not json at all\n' >"$WORK/comments-broken.json"
+COMMENTS_FIXTURE=$WORK/comments-broken.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
+COMMENTS_FIXTURE=""
+expect_rc "an unreadable comments payload is refused" nonzero
+out_has "did not parse" "the refusal names the parse failure"
+
+# ---------------------------------------------------------------------------
+case_start "--wait does not wait for a finding"
+# A finding is answered by a commit. Polling cannot write one, so a wait that kept polling would
+# burn --max minutes and end in the same refusal; it stops at once and names the finding.
+COMMENTS_FIXTURE=$WORK/prose-found.json
+start=$(date +%s)
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL" --wait --interval 5 --max 60
+COMMENTS_FIXTURE=""
+end=$(date +%s)
+expect_rc "a green rollup with a finding is not a pass" nonzero
+out_has "checks 12, pending 0, fail 0, finished" "the rollup is reported as finished, not as still running"
+out_has "waiting does not write one" "it says why waiting cannot help"
+elapsed=$((end - start))
+if [ "$elapsed" -lt 5 ]; then pass "it stopped before the next interval ($elapsed s)"
+else fail "it waited $elapsed s on a finding no poll can answer"; fi
+
 
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed in %d cases\n' "$PASS_N" "$FAIL_N" "$CASE_N"
