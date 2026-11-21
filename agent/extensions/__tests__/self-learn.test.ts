@@ -8,7 +8,7 @@
  * so it cannot spawn a learner of its own.
  */
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile, chmod, appendFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile, chmod, appendFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -329,21 +329,36 @@ describe("which space teaches a compaction", () => {
 		}
 	});
 
-	test("the records are sorted by name, so the order does not depend on the filesystem", async () => {
-		// `readdir` order is the filesystem's business. A tie between two spaces on one folder
-		// is decided by this order, so it must be a name order and not whichever inode came
-		// back first: created in reverse, read in order.
+	test("the records are sorted by name, in the order a person reads, not the disk's", async () => {
+		// `readdir` order is the filesystem's business: this one hands names back in byte order,
+		// which puts every capital before every lowercase letter. A tie between two spaces on
+		// one folder is decided by this list, so it is sorted by name as a person reads them —
+		// and the list below is one no filesystem would produce on its own.
 		const root = await mkdtemp(join(scratch, "spaces-order-"));
 		try {
-			for (const name of ["delta", "charlie", "bravo", "alpha"]) {
+			for (const name of ["Zed", "alpha", "_under", "Charlie", "beta"]) {
 				await mkdir(join(root, name), { recursive: true });
 				await writeFile(join(root, name, "space.json"), JSON.stringify({ name, project: `/${name}` }));
 			}
 			assert.deepEqual(
 				(await readSpaceRecords(root)).map((record) => record.slug),
-				["alpha", "bravo", "charlie", "delta"],
-				"the order a tie is decided in is the alphabet, not the disk",
+				["_under", "alpha", "beta", "Charlie", "Zed"],
+				"a name order, not the byte order the directory came back in",
 			);
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a symlink to a space is not a space", async () => {
+		// `bin/space` writes a directory. A link is somebody else's answer, and following it
+		// would let a folder outside `state/spaces` claim a project.
+		const root = await mkdtemp(join(scratch, "spaces-link-"));
+		try {
+			await mkdir(join(root, "real"), { recursive: true });
+			await writeFile(join(root, "real", "space.json"), JSON.stringify({ name: "real", project: "/real" }));
+			await symlink(join(root, "real"), join(root, "linked"), "dir");
+			assert.deepEqual((await readSpaceRecords(root)).map((record) => record.slug), ["real"]);
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
@@ -425,6 +440,7 @@ describe("what a learner of each kind may touch", () => {
 		assert.equal(learnerPathRefusal("harness", "  bin/agent-pane.sh  "), null);
 		assert.equal(learnerPathRefusal("project", "\tAGENTS.md\n"), null);
 		assert.match(learnerPathRefusal("project", "  ") ?? "", /no path is not a change/);
+		assert.match(learnerPathRefusal("harness", null as any) ?? "", /no path is not a change/, "no path at all is no change either");
 	});
 
 	test("a path is matched at the boundary, so a lookalike folder is not inside", () => {
@@ -1326,6 +1342,50 @@ describe("wiring", () => {
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
+	});
+
+	test("the /learn command judges now, and says why when it will not", async () => {
+		// The command is the person asking for one: it runs the same gate, and when the gate
+		// says no it says which no — a warning when a learner already ran, plain info when
+		// there was nothing worth learning.
+		let now = 0;
+		const { emit, ctx, commands, started, notices } = setup({ now: () => now });
+		// The clock starts after the newest row on the trail: a learner from an earlier test is
+		// not in this session's future, and the debounce is measured from it.
+		now = (await readRuns()).reduce((last, row) => Math.max(last, Date.parse(row.ts) || 0), NOW) + 11 * minutes(1);
+		await trip(emit, ctx);
+		const command = commands.get("learn");
+		await command.handler("", ctx);
+		await waitFor(() => started.length === 1, 2000, "a manual learn starts a learner");
+		const row = await waitForRun((entry) => entry.kind === "spawned" && entry.trigger === "manual");
+		assert.equal(row.trigger, "manual", "the row says the person asked, not that a compaction fired");
+
+		// Two learners is all one session gets, and the second has to clear the ten-minute gap.
+		now += 11 * minutes(1);
+		await trip(emit, ctx);
+		await command.handler("", ctx);
+		await waitFor(() => started.length === 2, 2000, "a second learner, after the gap");
+		now += 11 * minutes(1);
+		await trip(emit, ctx);
+		await command.handler("", ctx);
+		const warning = notices.find((notice) => notice.level === "warning");
+		assert.ok(warning, "a third learner in one session is refused out loud");
+		assert.equal(warning!.message, "learner not started: already started 2 learners this session", "in the gate's own words");
+		assert.equal(started.length, 2, "and nothing new starts");
+	});
+
+	test("a disabled extension watches the compaction and does nothing", async () => {
+		// `setDisabled` is what the guard uses to switch the whole extension off, so it has to
+		// set the flag rather than return it: a compaction on a disabled extension is silent.
+		const { emit, ctx, api, started } = setup();
+		await trip(emit, ctx);
+		api.setDisabled(true);
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		await settle();
+		assert.equal(started.length, 0, "disabled means no learner");
+		api.setDisabled(false);
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		await waitFor(() => started.length === 1, 2000, "and enabling it again lets the next compaction teach");
 	});
 
 	test("one confirmed launch writes exactly one row", async () => {

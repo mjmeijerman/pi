@@ -1842,6 +1842,8 @@ export function learnerSpace(records: readonly SpaceRecord[], cwd: string): Lear
 			// from this machine has a slug (the directory name) and a project, so a record that
 			// reached this line is non-null and its slug is never missing.
 			slug: String(record?.slug ?? ""),
+			// Stryker disable next-line OptionalChaining: unreachable, for the same reason as the
+			// slug above: a record with no project is skipped before this line.
 			kind: record?.kind === "harness" ? "harness" : "project",
 			project,
 		};
@@ -1866,6 +1868,10 @@ export function learnerPaths(kind: SpaceKind): string[] {
  * because the work it wants belongs in the project's own space.
  */
 export function learnerPathRefusal(kind: SpaceKind, path: string): string | null {
+	// Stryker disable next-line Regex: equivalent. Matching the first `./` anywhere instead of
+	// at the front only differs when one sits mid-path, and stripping it there leaves the text
+	// before it in place — which is neither `AGENTS.md` nor a `bin/` prefix, so both the
+	// anchored and the unanchored rule refuse the same paths.
 	const clean = String(path ?? "").trim().replace(/^\.\//, "");
 	if (!clean) return "no path is not a change";
 	for (const allowed of learnerPaths(kind)) {
@@ -1886,9 +1892,6 @@ export async function readSpaceRecords(root: string = spaceRoot()): Promise<Spac
 	}
 	const records: SpaceRecord[] = [];
 	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-		// Stryker disable next-line ConditionalExpression: equivalent. A file's `<name>/space.json`
-		// read fails with ENOTDIR and is swallowed by the read's own catch two lines below, so
-		// the entry is skipped whether the guard is read or not.
 		if (!entry.isDirectory()) continue;
 		let raw: string;
 		try {
@@ -1896,10 +1899,10 @@ export async function readSpaceRecords(root: string = spaceRoot()): Promise<Spac
 			// encoding" to node, which returns a Buffer, and `JSON.parse` coerces that Buffer
 			// with the same text: measured, `JSON.parse(readFileSync(p, ""))` is the object.
 			raw = await readFile(join(root, entry.name, "space.json"), "utf8");
-		} catch {
 			// Stryker disable next-line BlockStatement: equivalent. With the `continue` gone,
 			// `raw` is undefined and `JSON.parse(undefined)` throws into the parse catch below,
 			// which skips the same record for the same reason.
+		} catch {
 			continue;
 		}
 		let value: Record<string, unknown>;
@@ -2982,6 +2985,10 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			lastSpawnAnywhere(),
 			externalEvidence(at, ctx, newestProposal),
 		]);
+		// Stryker disable next-line MethodExpression,ConditionalExpression: equivalent. Dropping
+		// the filter leaves `null` in the list and `Math.max` reads it as 0, so a machine with no
+		// learner on it gives 0 where this gives null; the gate only asks whether `now` is within
+		// ten minutes of it, and every real `now` is decades past 1970 — `now - 0` is not.
 		const candidates = [lastSpawnAt, machineLast].filter((value): value is number => typeof value === "number");
 		const lastAnywhere = candidates.length ? Math.max(...candidates) : null;
 		const decision = decideLearner({
