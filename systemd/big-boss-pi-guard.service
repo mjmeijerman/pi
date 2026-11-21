@@ -1,0 +1,37 @@
+# big-boss-pi-guard.service — the space supervisor, started at login.
+#
+# `%h/.pi/bin/guard` reads the recorded spaces in `~/.pi/state/spaces/` and keeps
+# them alive: a space that is gone is rebuilt from its record, a Boss tab that is
+# gone is resumed from its session, and nothing is ever closed or renamed. It is
+# not one workspace's keeper any more — the old single-space copy that knew only
+# `big-boss-pi` is retired and is not installed (Radar Vol. 35 blip 20, stateful
+# guardrails: a promise that survives a restart beats one a person repeats).
+#
+# Copied into ~/.config/systemd/user/ and enabled by the pi installer, which
+# reads `systemd/` instead of a list. The installed copy has `%h` expanded, so
+# edit this file and reinstall — hand edits to the installed copy are lost.
+#
+# No DISPLAY, no uid: the guard runs under `env -i` with only HOME and PATH in
+# its own tests, because it talks to the app through `herdr-app`'s CLI, not to a
+# window. A machine whose app needs an X session should order this unit on
+# `graphical-session.target` itself rather than have a repo hard-code :1.
+[Unit]
+Description=pi space supervisor — keeps every recorded space and its Boss tab alive, opens them on login
+Documentation=file://%h/.pi/README.md
+After=default.target
+Wants=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.pi
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:%h/.local/share/pnpm/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.pi/bin/guard
+# A guard that exited is a space that is not being kept alive: bring it back,
+# every 5 s, on the login entry rather than in a loop of its own.
+Restart=always
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=default.target

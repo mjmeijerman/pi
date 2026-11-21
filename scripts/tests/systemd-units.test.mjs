@@ -66,6 +66,12 @@ test('timers are enabled --now, herdr-resume.service without --now, timer servic
 		} else if (name === 'herdr-resume.service') {
 			assert.equal(unit.enable, true, 'herdr-resume.service must be enabled');
 			assert.equal(unit.now, false, 'herdr-resume.service must not be started by the installer');
+		} else if (/guard\.service$/.test(name)) {
+			// The space supervisor: it has an [Install] section, so it is enabled at
+			// login, and stepSystemd's restart is what starts it now — `enable --now`
+			// is for the timers.
+			assert.equal(unit.enable, true, `${name} must be enabled`);
+			assert.equal(unit.now, false, `${name} must be started by the restart, not by enable --now`);
 		} else {
 			// A oneshot behind a timer: no [Install] section, so `systemctl
 			// enable` would fail with "no installation config" — the timer's
