@@ -41,16 +41,16 @@ import {
 const AGENTS = fs.readFileSync(new URL('../../agent/AGENTS.md', import.meta.url), 'utf8');
 const SECTIONS = ['Sandbox', 'Landing changes', 'Harness sources', 'Models', 'Harness feedback', 'Herdr', 'Machine / screens'];
 
-test('agent/AGENTS.md: 17 rules, each in a named section', () => {
+test('agent/AGENTS.md: 18 rules, each in a named section', () => {
 	const parsed = parseAgentsMd(AGENTS);
-	assert.equal(parsed.rules.length, 17, 'setup.mjs says "rule N of 17"; a new rule means a new number');
+	assert.equal(parsed.rules.length, 18, 'setup.mjs says "rule N of 18"; a new rule means a new number');
 	for (const section of SECTIONS) {
 		assert.ok(
 			parsed.rules.some((r) => r.section === section),
 			`no rule under "## ${section}" — setup would not offer it`,
 		);
 	}
-	assert.equal(new Set(ruleIds(parsed).map((r) => r.slug)).size, 17, 'every rule needs its own slug, or one answer covers two rules');
+	assert.equal(new Set(ruleIds(parsed).map((r) => r.slug)).size, 18, 'every rule needs its own slug, or one answer covers two rules');
 });
 
 test('keeping every rule reproduces AGENTS.md byte for byte', () => {
@@ -61,7 +61,7 @@ test('dropping a rule removes its bullet and keeps the others', () => {
 	const parsed = parseAgentsMd(AGENTS);
 	const target = parsed.rules[4]; // the second "Landing changes" rule
 	const filtered = filterAgentsMd(AGENTS, (rule) => rule.index !== target.index);
-	assert.equal(filtered.split('\n').filter((l) => /^- /.test(l)).length, 16);
+	assert.equal(filtered.split('\n').filter((l) => /^- /.test(l)).length, 17);
 	assert.ok(!filtered.includes(target.text.slice(0, 40)), 'the dropped rule is still there');
 	assert.ok(filtered.includes(parsed.rules[5].text.slice(0, 40)), 'a rule after it went missing');
 });

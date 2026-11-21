@@ -9,7 +9,7 @@
 //   1. the per-OS plan, as ONE table. A cross-platform installer fails when the
 //      `if (win32)` branches spread through the code, so the differences between
 //      Linux, macOS and Windows are data (OS_PLAN) and the engine reads a plan.
-//   2. the AGENTS.md rule parser, because "keep 12 of 17 rules" has to reproduce
+//   2. the AGENTS.md rule parser, because "keep 12 of 18 rules" has to reproduce
 //      the other 12 byte for byte, and that is a property, not a habit.
 //
 // Radar basis (Vol. 35): #1 agent sandboxing (Adopt) — the wrapper survives the

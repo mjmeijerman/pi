@@ -1,8 +1,8 @@
 # Global rules
 
 - Always respond in English, regardless of the language the user writes in.
-- Use codemode for 2+ tool calls: one script (`tools.read`, `tools.bash`, `Promise.allSettled` for independent calls) beats separate calls. Single calls go direct.
-- ADHD output mode is always on (`~/.pi/agent/i-have-adhd.json` → `alwaysOn`). Its rules apply to anything written for humans: commits, PR bodies, review comments, any file. Only the user turns it off: "stop adhd mode" or `/i-have-adhd off`.
+- Use codemode for 2+ tool calls: one script (`tools.read`, `tools.bash`, `Promise.allSettled` when independent) beats separate calls; single calls go direct.
+- ADHD output mode is always on (`~/.pi/agent/i-have-adhd.json` → `alwaysOn`). Its rules apply to anything written for humans: commits, PR bodies, review comments, any file. Only the user turns it off (`stop adhd mode`, `/i-have-adhd off`).
 
 ## Sandbox
 
@@ -10,31 +10,32 @@
 
 ## Landing changes
 
-- Never merge, push to trunk, or commit while on trunk without the user's explicit permission in this session. Ask, wait for a yes, then `/mergeguard allow` and run that one command. `merge-guard` blocks `gh pr merge`, the merge API, trunk pushes and commits; green CI is not permission.
-- Body gates: run `make pr-check BODY=<file>` before the PR goes out — seconds, same `pr-tier` verdict. The tier goes in the PR body (blips 17, 42): High = `agent/extensions/`, `agent/AGENTS.md`, `.github/`, `git-hooks/`, `sandbox/`, auth, secrets, money, deletion → read line by line, never auto-merged; Medium = application code, tests, migrations → diff read, tests green; Low = docs, comments, formatting → CI green, skim. A mission is a literal `Mission:` line (20+ chars), and a harness path in the diff is High whatever the body says.
+- Never merge, push to trunk, or commit on trunk without the user's explicit permission in this session. Ask, wait for a yes, then `/mergeguard allow` and run that one command. `merge-guard` blocks all of those; green CI is not permission.
+- A PR is green only when `bin/pr-ready <n> --sha <sha>` exits 0; `gh pr checks` prose is never evidence.
+- Body gates: run `make pr-check BODY=<file>` before the PR goes out — seconds, same `pr-tier` verdict; the tier goes in the body (blips 17, 42): High = `agent/extensions/`, `agent/AGENTS.md`, `.github/`, `git-hooks/`, `sandbox/`, auth, secrets, money, deletion → read line by line, never auto-merged; Medium = code, tests, migrations → diff read, tests green; Low = docs, comments, formatting → CI green, skim. A mission is a literal `Mission:` line (20+ chars); a harness path in the diff is High whatever the body says.
 - Vague request, more than one file, or a design choice → `/grill` first; no code before the answers (blip 13).
 
 ## Harness sources
 
-- Harness changes follow the Thoughtworks Radar — thoughtworks.com/radar, Vol. 35. Cite the blip number, prefer the Adopt ring, name the problem it fixes and how it is measured.
+- Harness changes follow the Thoughtworks Radar, Vol. 35 (thoughtworks.com/radar): cite the blip number, prefer the Adopt ring, name the problem it fixes and how it is measured.
 
 ## Models
 
-- `local_llm` runs summarize/classify/extract/tidy/translate on the local `qwen3.8:27b` (no API cost). Use it for text chores; `/local` checks the endpoint.
+- `local_llm` runs summarize/classify/extract/tidy/translate on the local `qwen3.8:27b` (no API cost); `/local` checks the endpoint.
 - `jev` decides instead of guessing (0 yes, 1 no, 3 unsure). TypeSafe's Jev over HTTPS — a key, network, a cost per call — not local.
 
 ## Harness feedback
 
-- When the harness itself gets in the way, run `/suggest <what went wrong>`. `/retro` aggregates the log into `~/.pi/agent/retro/`.
+- When the harness gets in the way, run `/suggest <what went wrong>`; `/retro` aggregates the log into `~/.pi/agent/retro/`.
 
 ## Herdr
 
-- Spawn delegated agents with `~/.pi/scripts/agent-pane.sh spawn <slug> <spec.md>`: hidden `hc`, no pane, focus stays. A `bin/delegate` worker is a tab of the space that asked for it; `close` closes that tab, never the space.
+- Spawn delegated agents with `~/.pi/scripts/agent-pane.sh spawn <slug> <spec.md>`: hidden `hc`, no pane, focus stays. A `bin/delegate` worker is a tab of the space that asked for it; `close` closes that tab, not the space.
 - `show <slug>` borrows your pane, `hide <slug>` puts it back, `close <slug>` ends it, `list` shows them.
 - `herdr-app shot /tmp/x.png` captures the window; check layout with it, never guess.
 
 ## Machine / screens
 
-- X11, DISPLAY `:1`, root window 9840x3840 (multi-monitor, scaled). Never grab the whole root.
-- Shotcut: right-hand screen. No hardcoded coordinates — run `xwininfo -root -tree`, pick the largest `Shotcut` window.
+- X11, DISPLAY `:1`, root window 9840x3840 (multi-monitor, scaled); never grab the whole root.
+- Shotcut: right-hand screen. No hardcoded coordinates: run `xwininfo -root -tree`, pick the largest `Shotcut` window.
 - Screenshot helper: `~/projects/bakmark/scripts/shotcut-window.py [out.png] [width]`.
