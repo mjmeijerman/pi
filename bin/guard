@@ -38,16 +38,23 @@ fi
 #      deletes someone's work, so `space.close`, `tab.close`, `space.move` and any rename are not
 #      words this program knows; `scripts/tests/test-guard-supervisor.sh` asserts it on the argv a
 #      stub `herdr-app` saw.
+#
+#      The Boss tab is recognised by the name the record keeps in `boss` — never by `uberboss_tab`,
+#      which is that tab's herdr id. Reading an id as a name put a tab literally named
+#      `tbe0cd445bff056584e86051e0c782ea74` in this space once, and a tab that is there is recorded
+#      rather than opened a second time.
 #   5. a space whose project folder is gone is reported by name and skipped: a space on a missing
 #      folder would put the boss in a folder `git` cannot resolve. The refusal carries the command
 #      that fixes it, `bin/space forget <slug>`.
 #   6. a forgotten space is left alone, and so is a space in Herdr with no record — it may be
 #      somebody's scratch space, and recreating what nobody recorded is how a program starts making
-#      spaces for people.
+#      spaces for people. Nothing is opened in such a space, not even a Boss tab: the record is the
+#      only thing that says a space is this program's to keep.
 #
 # The record gains one field, `tabs`: the Boss tab plus any extra tab the supervisor re-created,
 # each `{name, folder, argv}`. `bin/space` keeps writing only what it writes today; this is a plain
-# addition, and it is the only file the guard ever writes.
+# addition, and it is the only file the guard ever writes. `boss` and `boss_argv` are `bin/space`'s
+# own fields, written when the space is made; a record from before them reads as `Boss` and no argv.
 #
 # The app is asked once per pass (`herdr-app ls`), every action is one line, and `--once` runs
 # exactly one pass so a test costs a second. It runs under `env -i` with `PATH` and `HOME` because
@@ -136,7 +143,7 @@ boss_present() {
 			try { s = JSON.parse(d); } catch { process.stdout.write("unknown"); return; }
 			let r = {};
 			try { r = JSON.parse(fs.readFileSync(process.env.RECORD, "utf8")); } catch {}
-			const boss = String(r.uberboss_tab || "Boss");
+			const boss = String(r.boss || "Boss");
 			const ids = new Set((Array.isArray(r.terminals) ? r.terminals : []).map(String));
 			const tabs = Array.isArray(s.tabs) ? s.tabs : null;
 			if (tabs === null) { process.stdout.write("unknown"); return; }
@@ -151,7 +158,9 @@ boss_present() {
 				}
 				if (name || own.length) identifiable = true;
 				if (name && name === boss) { process.stdout.write("yes"); return; }
-				if (own.some((v) => ids.has(v))) { process.stdout.write("yes"); return; }
+				// A terminal id only answers for a tab the app gave no name: a named tab that is not
+				// the Boss is not the Boss, whatever id the record still remembers from last boot.
+				if (!name && own.some((v) => ids.has(v))) { process.stdout.write("yes"); return; }
 			}
 			process.stdout.write(identifiable ? "no" : "unknown");
 		});'
@@ -217,7 +226,7 @@ record_tabs_seed() {
 		let r = {};
 		try { r = JSON.parse(fs.readFileSync(process.env.RECORD, "utf8")); } catch { process.exit(0); }
 		if (Array.isArray(r.tabs) && r.tabs.length) process.exit(0);
-		r.tabs = [{ name: String(r.uberboss_tab || "Boss"), folder: String(r.project || ""), argv: [] }];
+		r.tabs = [{ name: String(r.boss || "Boss"), folder: String(r.project || ""), argv: [] }];
 		fs.writeFileSync(process.env.RECORD, JSON.stringify(r, null, 2) + "\n");
 	'
 }
@@ -236,21 +245,38 @@ boss_argv() {
 
 # record_boss_tab <slug> [argv-json] — remember the Boss tab the supervisor just opened, so the
 # next rebuild starts it the same way.
+#
+# The name comes from `boss` and never from `uberboss_tab`: that field is the tab's herdr **id**,
+# and reading it as a name is what put a tab literally named `tbe0cd445bff056584e86051e0c782ea74`
+# in this space once. An id, a bare number or the record's own id is not a tab name, so a record
+# that has one where the name should be falls back to `Boss` and no id is ever written down as
+# a tab. An empty argv keeps the argv already recorded for that tab instead of erasing it.
 record_boss_tab() {
 	RECORD=$(space_record "${1:-}") BOSS_ARGV=${2:-} node -e '
 		const fs = require("fs");
 		let r = {};
 		try { r = JSON.parse(fs.readFileSync(process.env.RECORD, "utf8")); } catch { process.exit(0); }
-		const name = String(r.uberboss_tab || "Boss");
+		const ids = new Set(
+			[String(r.uberboss_tab || ""), String(r.id || "")]
+				.concat(Array.isArray(r.terminals) ? r.terminals.map(String) : [])
+				.filter(Boolean),
+		);
+		const idish = (s) => !s || ids.has(s) || /^[0-9]+$/.test(s) || /^[a-z]{1,3}[0-9a-f]{6,}$/i.test(s);
+		const named = String(r.boss || "Boss");
+		const name = idish(named) ? "Boss" : named;
 		let argv = [];
 		try { argv = JSON.parse(process.env.BOSS_ARGV || "[]"); } catch {}
+		argv = Array.isArray(argv) ? argv : [];
 		const tabs = Array.isArray(r.tabs) ? r.tabs : [];
-		const entry = { name, folder: String(r.project || ""), argv: Array.isArray(argv) ? argv : [] };
 		const at = tabs.findIndex((t) => t && t.name === name);
+		if (!argv.length && at >= 0 && Array.isArray(tabs[at].argv)) argv = tabs[at].argv;
+		const entry = { name, folder: String(r.project || ""), argv };
 		if (at < 0) tabs.push(entry);
 		else tabs[at] = entry;
 		r.tabs = tabs;
-		fs.writeFileSync(process.env.RECORD, JSON.stringify(r, null, 2) + "\n");
+		const next = JSON.stringify(r, null, 2) + "\n";
+		const now = fs.readFileSync(process.env.RECORD, "utf8");
+		if (next !== now) fs.writeFileSync(process.env.RECORD, next);
 	'
 }
 
@@ -285,19 +311,29 @@ resume_sweep() {
 # rebuild_space <slug> <name> <boss> — the space itself is gone: make it again exactly as the
 # record says, then the tabs the record lists.
 rebuild_space() {
-	local slug=$1 name=$2 boss=$3 project out spaceid extras tname tfolder targv count
+	local slug=$1 name=$2 boss=$3 project out spaceid extras tname tfolder targv count bossargv
 	project=$(space_field "$slug" project)
 	extras=$(record_extras "$slug" "$boss")
 	count=1
 	[ -z "$extras" ] || count=$((1 + $(printf '%s\n' "$extras" | grep -c .)))
-	out=$("$HERDR_APP" do space.new --name "$name" --folder "$project" --tab "$boss" 2>&1) || {
-		say "harness: space.new failed for $name: $out"
-		return 0
-	}
+	# The Boss tab's own argv is passed on to `space.new`, the same way `bin/space new` does it: a
+	# rebuilt Boss tab that comes back as a bare shell is the thing this record exists to prevent.
+	bossargv=$(boss_argv "$slug" "$boss")
+	if [ -n "$bossargv" ]; then
+		out=$("$HERDR_APP" do space.new --name "$name" --folder "$project" --tab "$boss" --argv "$bossargv" 2>&1) || {
+			say "harness: space.new failed for $name: $out"
+			return 0
+		}
+	else
+		out=$("$HERDR_APP" do space.new --name "$name" --folder "$project" --tab "$boss" 2>&1) || {
+			say "harness: space.new failed for $name: $out"
+			return 0
+		}
+	fi
 	say "harness: space gone, recreating with $count tabs"
 	spaceid=$(printf '%s' "$out" | field_of space)
-	# The Boss tab `space.new` just opened runs the app's default, so an empty argv is the truth.
-	record_boss_tab "$slug" ""
+	# The argv the tab was opened with is what the record now keeps for it.
+	record_boss_tab "$slug" "$bossargv"
 	if [ -n "$extras" ]; then
 		while IFS=$'\t' read -r tname tfolder targv; do
 			[ -n "$tname" ] || continue
@@ -350,7 +386,7 @@ one_space() {
 	fi
 	name=$(space_field "$slug" name)
 	[ -n "$name" ] || name=$slug
-	boss=$(space_field "$slug" uberboss_tab)
+	boss=$(space_field "$slug" boss)
 	[ -n "$boss" ] || boss=Boss
 	project=$(space_field "$slug" project)
 	if [ -z "$project" ] || [ ! -d "$project" ]; then
@@ -358,7 +394,7 @@ one_space() {
 		return 0
 	fi
 	if [ "$DRY" = 1 ]; then
-		say "$name: dry-run: would keep space '$name' on $project with its recorded tabs"
+		say "$name: dry-run: would keep space '$name' on $project with its Boss tab '$boss' and its recorded tabs"
 		return 0
 	fi
 	record_tabs_seed "$slug"
@@ -369,7 +405,12 @@ one_space() {
 	fi
 	present=$(printf '%s' "$space" | boss_present "$slug")
 	case $present in
-	yes) return 0 ;;
+	yes)
+		# A Boss tab that is there is recorded, never opened again: the next pass must find the
+		# same tab by name, and an empty argv keeps whatever argv the record already has.
+		record_boss_tab "$slug" ""
+		return 0
+		;;
 	unknown)
 		say "$name: herdr-app listed no tab names or ids for it, left alone"
 		return 0

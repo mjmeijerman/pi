@@ -113,7 +113,7 @@ A **space is a project**. One Herdr space holds one project, one worker at a
 time, and the record that says so:
 
 ```bash
-bin/space new --name myproject --project ~/projects/myproject   # or --clone <url>, --no-git, --kind harness
+bin/space new --name myproject --project ~/projects/myproject   # or --clone <url>, --no-git, --kind harness, --tab-name Boss, --argv '["pi"]'
 bin/space list                                                  # slug, kind, project, git, tabs, open|closed
 bin/space show myproject
 ```
@@ -123,6 +123,12 @@ and puts a rules block between `<!-- pi-space:begin -->` and `<!-- pi-space:end 
 in the project's `AGENTS.md`: one project per space, one worker at a time, a new
 worker only after the previous pull request is merged, and the boss never edits
 files itself.
+
+The record keeps the Boss tab's **name** (`boss`) and the **argv** it was opened
+with (`boss_argv`, `["pi"]` unless `--argv` says otherwise); `uberboss_tab` is
+that tab's Herdr id and nothing else. The guard reopens the tab by that name and
+that argv, never by the id, and it opens nothing at all in a space no record
+describes.
 
 A space also has a **kind**, and the space decides it, not the session that
 compacted inside it: `--kind project` (the default, and what a record written
