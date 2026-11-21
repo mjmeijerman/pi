@@ -222,6 +222,18 @@ else
 	fail 'the recorded Boss tab lost its argv' "$(cat "$(record live)")"
 fi
 
+new_case 'a tabs[] entry with an empty argv does not erase boss_argv'
+make_record shadow shadow "$PROJ" '{"boss":"Boss","boss_argv":["pi"],"tabs":[{"name":"Boss","folder":"'"$PROJ"'","argv":[]}]}'
+spaces '{"spaces":[{"id":"sp-shadow","name":"shadow","tabs":[]}]}'
+clear_log
+run "$GUARD" --once --space shadow
+if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'the pass failed' "$OUT"; fi
+case $(herdr) in
+*"--argv [\"pi\"]"*) pass 'the Boss tab comes back with the argv space new opened it with' ;;
+*) fail 'the empty tabs[] argv shadowed boss_argv, so the tab came back bare' "$(herdr)" ;;
+esac
+if grep -qF -- '--focus false' "$HERDR_LOG"; then pass 'the tab it repairs is opened without taking the focus'; else fail 'tab.new would steal the focus' "$(herdr)"; fi
+
 new_case 'a space the guard has no record for gets no tab at all'
 spaces '{"spaces":[{"id":"sp2","name":"2","tabs":[]}]}'
 clear_log

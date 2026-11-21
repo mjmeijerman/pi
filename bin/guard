@@ -240,6 +240,9 @@ boss_argv() {
 		const want = process.argv[1];
 		const hit = (Array.isArray(r.tabs) ? r.tabs : []).find((t) => t && t.name === want);
 		if (hit && Array.isArray(hit.argv) && hit.argv.length) process.stdout.write(JSON.stringify(hit.argv));
+		// `boss_argv` is what `bin/space new` opened the tab with; a `tabs[]` entry can carry an empty
+		// argv and must not shadow it, or the rebuilt Boss tab comes back as a bare shell.
+		else if (Array.isArray(r.boss_argv) && r.boss_argv.length) process.stdout.write(JSON.stringify(r.boss_argv));
 	' "${2:-Boss}"
 }
 
@@ -284,10 +287,12 @@ record_boss_tab() {
 # of close, no rename, no move: the app is only ever asked to add.
 tab_new() {
 	local sid=${1:-} tname=${2:-} folder=${3:-} argv=${4:-}
+	# `--focus false` always: the supervisor runs on a timer, and a tab it opens for its own repair
+	# must never take the keyboard away from whoever is reading a pull request.
 	if [ -n "$argv" ]; then
-		"$HERDR_APP" do tab.new --name "$tname" --space "$sid" --folder "$folder" --argv "$argv"
+		"$HERDR_APP" do tab.new --name "$tname" --space "$sid" --folder "$folder" --argv "$argv" --focus false
 	else
-		"$HERDR_APP" do tab.new --name "$tname" --space "$sid" --folder "$folder"
+		"$HERDR_APP" do tab.new --name "$tname" --space "$sid" --folder "$folder" --focus false
 	fi
 }
 
@@ -320,12 +325,12 @@ rebuild_space() {
 	# rebuilt Boss tab that comes back as a bare shell is the thing this record exists to prevent.
 	bossargv=$(boss_argv "$slug" "$boss")
 	if [ -n "$bossargv" ]; then
-		out=$("$HERDR_APP" do space.new --name "$name" --folder "$project" --tab "$boss" --argv "$bossargv" 2>&1) || {
+		out=$("$HERDR_APP" do space.new --name "$name" --folder "$project" --tab "$boss" --argv "$bossargv" --focus false 2>&1) || {
 			say "harness: space.new failed for $name: $out"
 			return 0
 		}
 	else
-		out=$("$HERDR_APP" do space.new --name "$name" --folder "$project" --tab "$boss" 2>&1) || {
+		out=$("$HERDR_APP" do space.new --name "$name" --folder "$project" --tab "$boss" --focus false 2>&1) || {
 			say "harness: space.new failed for $name: $out"
 			return 0
 		}
