@@ -89,6 +89,8 @@ const {
 	judgedByCode,
 	agedOut,
 	supersededOut,
+	ghLiveBranches,
+	goneBranchOut,
 	ghCiSettled,
 	CI_FAILURE_WINDOW_MS,
 	SPAWN_FAILED_WINDOW_MS,
@@ -2202,7 +2204,7 @@ describe("repeated failing CI checks", () => {
 		const path = join(dir, "gh");
 		await writeFile(
 			path,
-			`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '${FAILED_RUNS}' ;;\n  view) ${view} ;;\nesac\n`,
+			`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '${FAILED_RUNS}' ;;\n  --paginate) printf '%s\\n' trunk ;;\n  view) ${view} ;;\nesac\n`,
 			"utf8",
 		);
 		await chmod(path, 0o755);
@@ -2450,7 +2452,7 @@ describe("repeated failing CI checks", () => {
 			const bin = await fakeGh(dir, "exit 1");
 			await writeFile(
 				bin,
-				`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '[]' ;;\n  view) exit 1 ;;\nesac\n`,
+				`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '[]' ;;\n  --paginate) printf '%s\\n' trunk ;;\n  view) exit 1 ;;\nesac\n`,
 				"utf8",
 			);
 			const result = await ghCiRuns(dir, bin);
@@ -2498,7 +2500,7 @@ describe("repeated failing CI checks", () => {
 			const bin = join(dir, "gh");
 			await writeFile(
 				bin,
-				`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '${runs}' ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;;\nesac\n`,
+				`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '${runs}' ;;\n  --paginate) printf '%s\\n' gone one two ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;;\nesac\n`,
 				"utf8",
 			);
 			await chmod(bin, 0o755);
@@ -2569,7 +2571,7 @@ describe("repeated failing CI checks", () => {
 			const bin = join(dir, "gh");
 			await writeFile(
 				bin,
-				`#!/usr/bin/env bash\ncase "$2$4" in\n  listsuccess) printf '%s' '${greens}' ;;\n  listfailure) printf '%s' '${failures}' ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;;\nesac\n`,
+				`#!/usr/bin/env bash\ncase "$2$4" in\n  listsuccess) printf '%s' '${greens}' ;;\n  listfailure) printf '%s' '${failures}' ;;\n  --paginate--jq) printf '%s\\n' fixed-yesterday still-red ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;;\nesac\n`,
 				"utf8",
 			);
 			await chmod(bin, 0o755);
@@ -2587,6 +2589,138 @@ describe("repeated failing CI checks", () => {
 		}
 	});
 
+	test("a deleted branch is not evidence, because no push can ever answer it", () => {
+		// 2026-11-21: `19x mutation on changed files (stryker)` across 19 branches,
+		// 18 of which were not in the checkout at all. The week-long window assumes a
+		// real failure re-fires on the next push, and a deleted branch never pushes.
+		const failures = [
+			{ name: "tests", headBranch: "still-here", conclusion: "failure", databaseId: 1 },
+			{ name: "tests", headBranch: "deleted", conclusion: "failure", databaseId: 2 },
+			{ name: "tests", headBranch: " padded ", conclusion: "failure", databaseId: 3 },
+			{ name: "tests", conclusion: "failure", databaseId: 4 },
+		];
+		const kept = goneBranchOut(failures, ["still-here", "padded", "unrelated"]);
+		assert.deepEqual(
+			kept.runs.map((run) => run.headBranch),
+			["still-here", " padded ", undefined],
+			"a live branch is kept however it is spelled, and a run with no branch is not looked up at all",
+		);
+		assert.equal(kept.gone, 1);
+		assert.deepEqual(
+			goneBranchOut(failures, null),
+			{ runs: failures, gone: 0 },
+			"an unreadable branch list drops nothing: doubt counts normally",
+		);
+		assert.deepEqual(goneBranchOut([], ["trunk"]), { runs: [], gone: 0 }, "no failures is nothing to drop");
+	});
+
+	test("the branch list is every page, and an unreadable list keeps every failure", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-branches-gh-"));
+		try {
+			const bin = join(dir, "gh");
+			const log = join(dir, "args.txt");
+			await writeFile(
+				bin,
+				`#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "${log}"\nprintf 'trunk\\n\\n feature-a \\n'\n`,
+				"utf8",
+			);
+			await chmod(bin, 0o755);
+			assert.deepEqual(
+				await ghLiveBranches(dir, bin),
+				{ names: ["trunk", "feature-a"], warning: null },
+				"one name per line, a blank line is not a branch, and a padded name is trimmed",
+			);
+			assert.equal(
+				(await readFile(log, "utf8")).trim(),
+				"api --paginate repos/{owner}/{repo}/branches?per_page=100 --jq .[].name",
+				"paginated: a repo with more than a page of branches must not lose the rest",
+			);
+			const shapes: [string, RegExp][] = [
+				["exit 1", /branches on the remote not read: gh exited 1/],
+				["exit 0", /branches on the remote not read: gh printed no branch name/],
+			];
+			for (const [answer, expected] of shapes) {
+				const other = join(dir, `gh-${expected.source.length}`);
+				await writeFile(other, `#!/usr/bin/env bash\n${answer}\n`, "utf8");
+				await chmod(other, 0o755);
+				const read = await ghLiveBranches(dir, other);
+				assert.deepEqual(read.names, null, `a list not read is null, never an empty set: ${answer}`);
+				assert.match(read.warning ?? "", expected, answer);
+			}
+			const killed = join(dir, "gh-killed");
+			await writeFile(killed, `#!/usr/bin/env bash\nkill -KILL $$\n`, "utf8");
+			await chmod(killed, 0o755);
+			assert.match((await ghLiveBranches(dir, killed)).warning ?? "", /gh exited with no status/);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a failure on a deleted branch leaves the table, and the count says so", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-gone-gh-"));
+		try {
+			const hour = 60 * 60 * 1000;
+			const clock = (hours: number) => new Date(Date.now() - hours * hour).toISOString();
+			const runs = JSON.stringify([
+				{ name: "tests", headBranch: "deleted", conclusion: "failure", databaseId: 1, createdAt: clock(2) },
+				{ name: "tests", headBranch: "deleted", conclusion: "failure", databaseId: 2, createdAt: clock(3) },
+				{ name: "tests", headBranch: "alive", conclusion: "failure", databaseId: 3, createdAt: clock(4) },
+			]);
+			const bin = join(dir, "gh");
+			await writeFile(
+				bin,
+				`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '${runs}' ;;\n  --paginate) printf '%s\\n' alive ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;;\nesac\n`,
+				"utf8",
+			);
+			await chmod(bin, 0o755);
+			const result = await ghCiRuns(dir, bin);
+			assert.deepEqual(result.runs.map((run) => run.headBranch), ["alive"], "the deleted branch's two reds are history");
+			assert.match(result.warning ?? "", /2 of 3 failing runs sit on a branch the remote no longer has/);
+			assert.doesNotMatch(result.warning ?? "", /not read/, "the list was read; only a deleted branch was dropped");
+			assert.equal(
+				ciFailuresFrom(result.runs).length,
+				0,
+				"one live branch is not a pattern, so nothing fires on evidence nobody can act on",
+			);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("a branch list that cannot be read is a note on the evidence file, not a silence", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-nobranches-gh-"));
+		try {
+			const runs = JSON.stringify([
+				{ name: "tests", headBranch: "alive", conclusion: "failure", databaseId: 1 },
+				{ name: "tests", headBranch: "also-alive", conclusion: "failure", databaseId: 2 },
+			]);
+			const bin = join(dir, "gh");
+			await writeFile(
+				bin,
+				`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '${runs}' ;;
+  --paginate) exit 1 ;;
+  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Run tests"}]}]}' ;;
+esac\n`,
+				"utf8",
+			);
+			await chmod(bin, 0o755);
+			const result = await ghCiRuns(dir, bin);
+			assert.deepEqual(
+				result.runs.map((run) => run.headBranch),
+				["alive", "also-alive"],
+				"an unreadable branch list drops nothing: doubt counts normally",
+			);
+			assert.match(
+				result.warning ?? "",
+				/branches on the remote not read: gh exited 1/,
+				"the note says the list could not be read, so a table kept whole is a measurement",
+			);
+			assert.equal(ciFailuresFrom(result.runs).length, 1, "both runs are on live-looking branches, so the check is still evidence");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("a green list that cannot be read is a note, and every failure is kept", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "self-learn-nogreen-gh-"));
 		try {
@@ -2599,7 +2733,7 @@ describe("repeated failing CI checks", () => {
 				const bin = join(dir, "gh");
 				await writeFile(
 					bin,
-					`#!/usr/bin/env bash\ncase "$2$4" in\n  listsuccess) ${green} ;;\n  listfailure) printf '%s' '${FAILED_RUNS}' ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;;\nesac\n`,
+					`#!/usr/bin/env bash\ncase "$2$4" in\n  listsuccess) ${green} ;;\n  listfailure) printf '%s' '${FAILED_RUNS}' ;;\n  --paginate--jq) printf '%s\\n' trunk ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;;\nesac\n`,
 					"utf8",
 				);
 				await chmod(bin, 0o755);
@@ -2656,7 +2790,7 @@ describe("repeated failing CI checks", () => {
 			const bin = join(dir, "gh");
 			await writeFile(
 				bin,
-				`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '${runs}' ;;\n  view) case "$3" in 1) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]}]}' ;; *) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;; esac ;;\nesac\n`,
+				`#!/usr/bin/env bash\ncase "$2" in\n  list) printf '%s' '${runs}' ;;\n  --paginate) printf '%s\\n' refused old one two ;;\n  view) case "$3" in 1) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[]}]}' ;; *) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;; esac ;;\nesac\n`,
 				"utf8",
 			);
 			await chmod(bin, 0o755);

@@ -1439,7 +1439,11 @@ export async function ghCiRuns(cwd = REPO, bin = "gh"): Promise<{ runs: CiRun[];
 	if (settled.warning) notes.push(settled.warning);
 	const live = supersededOut(parsed, settled.runs);
 	if (live.superseded > 0) notes.push(supersededWarning(live.superseded, parsed.length));
-	const judged = await judgedByCode(live.runs, cwd, bin);
+	const branches = await ghLiveBranches(cwd, bin);
+	if (branches.warning) notes.push(branches.warning);
+	const onBranch = goneBranchOut(live.runs, branches.names);
+	if (onBranch.gone > 0) notes.push(goneWarning(onBranch.gone, parsed.length));
+	const judged = await judgedByCode(onBranch.runs, cwd, bin);
 	if (judged.runs.length === 0 && judged.refused > 0) return { runs: [], warning: blockedWarning(judged.refused, parsed.length) };
 	const aged = agedOut(judged.runs, Date.now());
 	if (judged.refused > 0) notes.push(partialWarning(judged.refused, parsed.length));
@@ -1474,6 +1478,71 @@ export async function ghCiSettled(cwd: string, bin: string): Promise<{ runs: CiR
 	}
 	if (!Array.isArray(parsed)) return { runs: [], warning: "superseded CI failures not dropped: gh printed something that is not a list" };
 	return { runs: parsed, warning: null };
+}
+
+/**
+ * The branch names that still exist on the remote, or a warning explaining why
+ * they are missing.
+ *
+ * `--paginate` with `--jq` makes gh apply the filter per page and print one name
+ * per line, so a repo with more than a page of branches cannot truncate the set:
+ * a name missing from this list is read as a deleted branch and its run is
+ * dropped, so a short list would drop live evidence.
+ *
+ * Unreadable is `null`, never an empty list: no repo has zero branches, and a
+ * silent empty list would be read as "every branch is gone" — the one answer
+ * that throws the whole table away.
+ */
+export async function ghLiveBranches(cwd: string, bin: string): Promise<{ names: string[] | null; warning: string | null }> {
+	const argv = [bin, "api", "--paginate", "repos/{owner}/{repo}/branches?per_page=100", "--jq", ".[].name"];
+	const result = await runOnce(argv, cwd, 5_000);
+	if (result.status !== 0) {
+		const why = clipDetail(result.stderr) || `gh exited ${result.status === null ? "with no status" : result.status}`;
+		return { names: null, warning: `branches on the remote not read: ${why}` };
+	}
+	const names = result.stdout
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line !== "");
+	if (names.length === 0) return { names: null, warning: "branches on the remote not read: gh printed no branch name" };
+	return { names, warning: null };
+}
+
+/**
+ * Drop a failing run whose branch no longer exists on the remote.
+ *
+ * The week-long window rests on one sentence: a real failure re-fires on the next
+ * push. A deleted branch never pushes again, so its red run is the only thing
+ * that will ever be said about it and it stayed in the table for the full week —
+ * 2026-11-21 read `19x mutation on changed files (stryker)` across 19 branches,
+ * 18 of which were not in the checkout at all, so every learner started on that
+ * table could only re-derive that the branches were gone. The same table now
+ * reads `32x tests` and `11x harness-check` across 32 branches, every one of them
+ * merged and deleted, and `supersededOut` cannot answer them because no green run
+ * follows a branch that no longer exists.
+ *
+ * A run with no branch name (a tag, a detached push) cannot be looked up and
+ * counts normally, exactly as an unreadable date is kept rather than aged: doubt
+ * counts, and only a branch the remote positively does not have is dropped.
+ */
+export function goneBranchOut(failures: CiRun[], names: string[] | null): { runs: CiRun[]; gone: number } {
+	if (names === null) return { runs: failures, gone: 0 };
+	const live = new Set(names);
+	const keep: CiRun[] = [];
+	let gone = 0;
+	for (const run of failures) {
+		const branch = (run.headBranch ?? "").trim();
+		if (branch === "") {
+			keep.push(run);
+			continue;
+		}
+		if (!live.has(branch)) {
+			gone += 1;
+			continue;
+		}
+		keep.push(run);
+	}
+	return { runs: keep, gone };
 }
 
 /**
@@ -1647,6 +1716,17 @@ function blockedWarning(refused: number, total: number): string {
  */
 function supersededWarning(superseded: number, total: number): string {
 	return `CI failures not counted: ${superseded} of ${total} failing runs were followed by a newer run of the same check on the same branch that succeeded, so that failure is fixed`;
+}
+
+/**
+ * Some of the failing runs sit on a deleted branch: say how many, so the table
+ * shrinking is a measurement and not a silence.
+ *
+ * Not phrased as "not read": the list was read, and this counts what no push can
+ * answer any more.
+ */
+function goneWarning(gone: number, total: number): string {
+	return `CI failures on a deleted branch not counted: ${gone} of ${total} failing runs sit on a branch the remote no longer has, so no push can answer them and nobody can act on them`;
 }
 
 /** Some of the failing runs never started: count the rest, and say what was dropped. */
