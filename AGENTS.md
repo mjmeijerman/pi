@@ -12,7 +12,9 @@ the exact command to run there.
 ## One worker at a time
 
 Start one with `bin/delegate spawn <slug> --cwd <project> "<task>"`, then poll it with
-`bin/delegate wait <slug> --forever` until the report file exists. A worker that dies
+`bin/delegate wait <slug> --forever` until the report file exists — and never stop at the
+report: `bin/delegate finish <slug>` publishes it, then stay on that pull request until it
+is green and mergeable, measured as `agent/AGENTS.md` says. A worker that dies
 before it reports is restarted with the same spec, three times, then you write the
 report naming what you saw. `delegate spawn` refuses a second worker in this space on
 purpose, and it refuses the next one until the previous pull request is merged: when it
