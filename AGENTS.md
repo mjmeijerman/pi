@@ -12,7 +12,9 @@ the exact command to run there.
 ## One worker at a time
 
 Start one with `bin/delegate spawn <slug> --cwd <project> "<task>"`, then poll it with
-`bin/delegate wait <slug> --forever` until the report file exists. A worker that dies
+`bin/delegate wait <slug> --forever` until the report file exists — and never stop there:
+`bin/delegate finish <slug>` publishes it, then `bin/pr-ready <n> --sha <sha> --wait` and
+`gh pr view <n> --json mergeable` until it is green and mergeable. A worker that dies
 before it reports is restarted with the same spec, three times, then you write the
 report naming what you saw. `delegate spawn` refuses a second worker in this space on
 purpose, and it refuses the next one until the previous pull request is merged: when it
@@ -56,6 +58,12 @@ A red check is yours to fix or to hand to a worker with the failing line quoted.
 leave it for the person to discover. Green is `bin/pr-ready <n> --sha <sha>` exiting 0,
 and you quote its line; `--wait` stops at the first failure, and `gh pr checks` prose is
 never evidence.
+
+A green, mergeable PR is not yet the person's: read its prose review (`gh pr view <n>
+--comments`, the `<!-- prose-review -->` comment), answer every finding in the diff or
+in a reply, and judge each one. One review claimed `bin/pr-ready` did not exist in the
+tree; it does — a false finding is rebutted, not obeyed. A finding left open is not
+green.
 
 ## Proof, sized to the diff
 
