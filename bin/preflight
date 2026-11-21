@@ -37,8 +37,11 @@
 #             node suite cannot run twice (it used to: `node --test` and then a target that begins
 #             with it, 30 extra seconds on a five-file diff); a target that does more than those
 #             two globs is run whole, once, and a checkout with neither is named
-#   semgrep   the changed files only, the workflow's own --config when a repo pins one, else
-#             p/default plus scripts/semgrep-rules.yml; semgrep missing is a FAIL, never a pass
+#   semgrep   the changed files only, with every --config every workflow passes (a ruleset pinned by
+#             commit, `${SEMGREP_RULES}/bash`, is unpacked from its SEMGREP_RULES_SHA into
+#             ~/.cache/pi/semgrep-rules and handed over as a path), else p/default plus
+#             scripts/semgrep-rules.yml; semgrep missing is a FAIL, and so is a config that cannot be
+#             resolved — a scan narrower than CI is never a pass
 #   scrub     the changed test files under `env -i PATH=<empty stub>:/usr/bin:/bin HOME=<tmp>` —
 #             the runner does not have your PATH, and this is the check that catches it (pi#66)
 #   body      the AGENTS.md docs budget and the target repo's own body gate, run on the body
@@ -676,7 +679,7 @@ pf_check_syntax() {
 			printf 'shellcheck --severity=error: %d changed shell file(s) clean\n' "${#shells[@]}"
 		fi
 	fi
-	return $rc
+	return "$rc"
 }
 
 # --- check: the repo's own suites --------------------------------------------------------------
@@ -854,38 +857,180 @@ pf_check_suites() {
 
 # --- check: semgrep, on the changed files only --------------------------------------------------
 
-# pf_semgrep_configs <cwd> — the configs to hand semgrep, one per line. The repo's workflow wins
-# when it pins one (that is what CI would run); otherwise p/default. The harness's own pinned rules
-# ride along either way, so the rule that catches a `new RegExp(variable)` is present on a repo
-# whose workflow never mentions semgrep. PREFLIGHT_SEMGREP_CONFIG replaces the registry half, which
-# is the one that needs the network.
-pf_semgrep_configs() {
-	local cwd=$1 f c found=""
+# pf_semgrep_cache_dir — where a ruleset pinned by commit is unpacked, once per SHA. Overridable so
+# a test can point it at an empty directory and prove the offline path fails by name instead of
+# reaching the network.
+pf_semgrep_cache_dir() {
+	printf '%s\n' "${PI_SEMGREP_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/pi/semgrep-rules}"
+}
+
+# pf_semgrep_workflow_configs <cwd> — every --config every workflow passes, in file order, exactly
+# as written, with a `$VAR` left unexpanded (pf_semgrep_resolve owns that). Both spellings count,
+# `--config X` and `--config=X`, quoted or bare: .github/workflows/test.yml passes three — p/default,
+# p/typescript and "${SEMGREP_RULES}/bash" — and taking only the first one is what let PR #209 go
+# green here and red in CI: p/default has no shell rules at all, and the finding was
+# unquoted-variable-expansion-in-command in a test script.
+pf_semgrep_workflow_configs() {
+	local cwd=$1 f
 	for f in "$cwd"/.github/workflows/*.yml "$cwd"/.github/workflows/*.yaml; do
 		[ -f "$f" ] || continue
-		c=$(grep -oE -- '--config[= ][^ "]+' "$f" 2>/dev/null | head -n 1 | sed -E 's/^--config[= ]//')
-		[ -n "$c" ] && {
-			found=$c
-			break
+		grep -oE -- '--config[= ][^[:space:]]+' "$f" 2>/dev/null |
+			sed -E "s/^--config[= ]//; s/^[\"']//; s/[\"']\$//"
+	done
+	return 0
+}
+
+# pf_semgrep_pin <cwd> <var> — the commit a workflow pins for <var>, written as `<VAR>_SHA: <sha>`
+# beside the `--config` that names it (test.yml pins SEMGREP_RULES_SHA for `${SEMGREP_RULES}/bash`).
+pf_semgrep_pin() {
+	local cwd=$1 var=$2 f sha
+	for f in "$cwd"/.github/workflows/*.yml "$cwd"/.github/workflows/*.yaml; do
+		[ -f "$f" ] || continue
+		sha=$(sed -nE "s/^[[:space:]]*${var}_SHA:[[:space:]]*[\"']?([0-9a-f]{7,40})[\"']?[[:space:]]*\$/\\1/p" "$f" | head -n 1)
+		[ -n "$sha" ] && {
+			printf '%s' "$sha"
+			return 0
 		}
 	done
-	[ -n "$found" ] || found=${PREFLIGHT_SEMGREP_CONFIG:-p/default}
-	printf '%s\n' "$found"
-	# The pinned local rules ride along unless the repo already points at that same file, so the
-	# invocation reads once rather than twice.
-	if [ -f "$self_root/scripts/semgrep-rules.yml" ] && [ "$found" != "$self_root/scripts/semgrep-rules.yml" ]; then
-		printf '%s\n' "$self_root/scripts/semgrep-rules.yml"
+	return 1
+}
+
+# pf_semgrep_rules_fetch <sha> — the unpacked ruleset for that commit, downloaded into the cache
+# once. Echoes the directory; on failure echoes the reason and returns 1 so the caller can name the
+# config it could not resolve. No cache and no network is a FAIL: a narrower scan is never a pass.
+pf_semgrep_rules_fetch() {
+	local sha=$1 cache tmp url
+	cache=$(pf_semgrep_cache_dir)/$sha
+	if [ -d "$cache/bash" ]; then
+		printf '%s' "$cache"
+		return 0
 	fi
+	want_cmd curl || {
+		printf 'no ruleset cached at %s and curl is not installed' "$cache"
+		return 1
+	}
+	want_cmd tar || {
+		printf 'no ruleset cached at %s and tar is not installed' "$cache"
+		return 1
+	}
+	mkdir -p "$(pf_semgrep_cache_dir)" 2>/dev/null || {
+		printf 'cannot create %s' "$(pf_semgrep_cache_dir)"
+		return 1
+	}
+	tmp=$(mktemp -d "${TMPDIR:-/tmp}/semgrep-rules.XXXXXX") || {
+		printf 'cannot make a temporary directory'
+		return 1
+	}
+	url="https://github.com/semgrep/semgrep-rules/archive/$sha.tar.gz"
+	if ! curl -sSfL --max-time 120 -o "$tmp/rules.tar.gz" "$url" 2>"$tmp/err"; then
+		printf 'no cache at %s and %s did not download (%s)' "$cache" "$url" \
+			"$(tr '\n' ' ' <"$tmp/err" | cut -c1-200)"
+		rm -rf "$tmp"
+		return 1
+	fi
+	if ! tar -xzf "$tmp/rules.tar.gz" --strip-components=1 -C "$tmp" 2>"$tmp/tar.err"; then
+		printf '%s did not unpack (%s)' "$url" "$(tr '\n' ' ' <"$tmp/tar.err" | cut -c1-200)"
+		rm -rf "$tmp"
+		return 1
+	fi
+	rm -f "$tmp/rules.tar.gz" "$tmp/err" "$tmp/tar.err"
+	rm -rf "$cache"
+	if ! mv -- "$tmp" "$cache" 2>/dev/null; then
+		printf 'cannot move the unpacked ruleset into %s' "$cache"
+		rm -rf "$tmp"
+		return 1
+	fi
+	if [ ! -d "$cache/bash" ]; then
+		printf 'the archive for %s has no bash/ rules' "$sha"
+		return 1
+	fi
+	printf '%s' "$cache"
+	return 0
+}
+
+# pf_semgrep_resolve <cwd> <config> — the config semgrep should be handed. A registry pack
+# (`p/default`) or a literal path goes through as written. A `$VAR/...` path is expanded from the
+# environment when the variable is set, else from the ruleset the workflow pins via `<VAR>_SHA`,
+# downloaded once into the cache. Anything else FAILS and names itself: dropping a config makes the
+# scan narrower than CI, which is the bug this replaced.
+pf_semgrep_resolve() {
+	local cwd=$1 raw=$2 var val path sha dir
+	case $raw in
+	*'$'*) ;;
+	*)
+		printf '%s' "$raw"
+		return 0
+		;;
+	esac
+	var=$(printf '%s' "$raw" | sed -nE 's/.*\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?.*/\1/p' | head -n 1)
+	if [ -z "$var" ]; then
+		printf 'no variable name in it'
+		return 1
+	fi
+	val=${!var-}
+	if [ -n "$val" ]; then
+		path=${raw//'${'$var'}'/$val}
+		path=${path//'$'$var/$val}
+		if [ -e "$path" ]; then
+			printf '%s' "$path"
+			return 0
+		fi
+	fi
+	if sha=$(pf_semgrep_pin "$cwd" "$var"); then
+		if dir=$(pf_semgrep_rules_fetch "$sha"); then
+			path=${raw//'${'$var'}'/$dir}
+			path=${path//'$'$var/$dir}
+			if [ -e "$path" ]; then
+				printf '%s' "$path"
+				return 0
+			fi
+			printf 'the ruleset at %s (%s) has no %s' "$dir" "$sha" "${path#"$dir"/}"
+			return 1
+		fi
+		printf '%s' "$dir"
+		return 1
+	fi
+	if [ -n "$val" ]; then
+		printf '$%s is %s, which does not exist, and no workflow pins %s_SHA' "$var" "$val" "$var"
+	else
+		printf '$%s is not set and no workflow pins %s_SHA' "$var" "$var"
+	fi
+	return 1
+}
+
+# pf_semgrep_configs <cwd> — the configs to hand semgrep, one per line, unresolved: every --config
+# every workflow passes, in file order (that is what CI would run); a repo whose workflows never
+# mention semgrep gets PREFLIGHT_SEMGREP_CONFIG, else p/default. The harness's own pinned rules ride
+# along either way, so the rule that catches a `new RegExp(variable)` is present on a repo whose
+# workflow never mentions semgrep. PREFLIGHT_SEMGREP_CONFIG replaces the registry half, which is the
+# one that needs the network.
+pf_semgrep_configs() {
+	local cwd=$1 raw c seen=" "
+	local -a list=()
+	while IFS= read -r raw; do
+		[ -n "$raw" ] || continue
+		list+=("$raw")
+	done < <(pf_semgrep_workflow_configs "$cwd")
+	[ "${#list[@]}" -gt 0 ] || list=("${PREFLIGHT_SEMGREP_CONFIG:-p/default}")
+	# The pinned local rules ride along unless the list already points at that same file, so the
+	# invocation reads once rather than twice.
+	if [ -f "$self_root/scripts/semgrep-rules.yml" ]; then
+		list+=("$self_root/scripts/semgrep-rules.yml")
+	fi
+	for c in "${list[@]}"; do
+		case $seen in *" $c "*) continue ;; esac
+		seen="$seen$c "
+		printf '%s\n' "$c"
+	done
 	return 0
 }
 
 pf_check_semgrep() {
-	local configs=() f cfg rc=0 out files=()
+	local configs=() unresolved=() f cfg out files=() raw resolved rc=0
 	if ! want_cmd semgrep; then
 		printf 'semgrep is not installed here, so this check cannot pass — install it (pipx install semgrep) and run it again\n'
 		return 1
 	fi
-	mapfile -t configs < <(pf_semgrep_configs "$PF_CWD")
 	for f in "${PF_CODE[@]}"; do
 		[ -f "$PF_CWD/$f" ] || continue
 		files+=("$f")
@@ -894,6 +1039,23 @@ pf_check_semgrep() {
 		printf 'no changed code file\n'
 		return 0
 	}
+	# Every config is resolved before semgrep runs, because the one outcome this check may never
+	# report is a pass earned by scanning less than CI would: a config that cannot be resolved is a
+	# FAIL that names itself, and semgrep is not run at all.
+	while IFS= read -r raw; do
+		[ -n "$raw" ] || continue
+		if resolved=$(pf_semgrep_resolve "$PF_CWD" "$raw"); then
+			configs+=("$resolved")
+		else
+			unresolved+=("$raw — $resolved")
+		fi
+	done < <(pf_semgrep_configs "$PF_CWD")
+	if [ "${#unresolved[@]}" -gt 0 ]; then
+		printf 'semgrep: %d config(s) cannot be resolved, so this scan would be narrower than CI — not a pass:\n' "${#unresolved[@]}"
+		printf '  config: %s\n' "${unresolved[@]}"
+		printf '  reproduce: %s --only semgrep%s%s\n' "$PBIN/preflight" "${PF_SLUG:+ --slug $PF_SLUG}" "${PF_BRANCH:+ $PF_BRANCH}"
+		return 1
+	fi
 	local args=( --error --quiet --metrics=off --disable-version-check --no-git-ignore )
 	for cfg in "${configs[@]}"; do args+=( --config "$cfg" ); done
 	out=$(cd "$PF_CWD" && semgrep "${args[@]}" "${files[@]}" 2>&1)
@@ -938,7 +1100,7 @@ pf_check_scrub() {
 		fi
 	done
 	printf 'the runner does not have your PATH: %d changed test file(s) under env -i\n' "$n"
-	return $rc
+	return "$rc"
 }
 
 # --- check: the body, before it can reach GitHub ------------------------------------------------
@@ -1105,7 +1267,7 @@ run_body_gate() {
 		make -C "$dir" --no-print-directory pr-check "${gate_args[@]}" || rc=1
 		PF_GATE_DIR=$dir
 		pf_gate_checkout_cleanup
-		return $rc
+		return "$rc"
 	fi
 	if [ -x "$dir/scripts/pr-gate.sh" ]; then
 		BODY_GATE="scripts/pr-gate.sh"
@@ -1122,7 +1284,7 @@ run_body_gate() {
 		fi
 		PF_GATE_DIR=$dir
 		pf_gate_checkout_cleanup
-		return $rc
+		return "$rc"
 	fi
 	pf_gate_note "body gate skipped: $dir has no 'make pr-check' target and no scripts/pr-gate.sh"
 	pf_gate_checkout_cleanup
@@ -1131,12 +1293,14 @@ run_body_gate() {
 
 pf_check_body() {
 	local rc=0 body out
+	local -a space_args=()
+	[ -n "$PF_SPACE" ] && space_args=(--space "$PF_SPACE")
 	body=$PREFLIGHT_TMP/body.md
 	# The gate half first. It is the half a branch can fail, so the line the check is read by is a
 	# verdict about this body, never a budget this checkout does not have.
 	if [ -z "$PF_SLUG" ]; then
 		printf 'body gate: no --slug, so there is no report to build the body from and nothing to gate\n'
-	elif ! out=$("$PBIN/publish" --body-out "$body" --cwd "$PF_CWD" ${PF_SPACE:+--space "$PF_SPACE"} "$PF_SLUG" 2>&1); then
+	elif ! out=$("$PBIN/publish" --body-out "$body" --cwd "$PF_CWD" "${space_args[@]}" "$PF_SLUG" 2>&1); then
 		printf 'the body bin/publish would send cannot be built:\n%s\n' "$(printf '%s\n' "$out" | sed 's/^/  /')"
 		rc=1
 	elif ! pf_has_body_gate "$PF_CWD"; then
@@ -1152,7 +1316,7 @@ pf_check_body() {
 	# AGENTS.md over budget) and that failure stands; a checkout with no root AGENTS.md says so by
 	# name instead of reading as a failure the branch is supposed to fix.
 	pf_docs_budget "$PF_CWD" || rc=1
-	return $rc
+	return "$rc"
 }
 
 # --- check: union on the changed extensions lines (opt-in) ----------------------------------
@@ -1461,7 +1625,7 @@ preflight_main() {
 
 	for id in "${selected[@]}"; do
 		out=$PREFLIGHT_TMP/$id.out
-		if ! case $ran_list in *" $id "*) true ;; *) false ;; esac; then
+		if ! case "$ran_list" in *" $id "*) true ;; *) false ;; esac; then
 			printf 'skip  %-44s %4ss  %s\n' "$(name_of "$id")" 0 "$(pf_skip_reason "$id")"
 			continue
 		fi

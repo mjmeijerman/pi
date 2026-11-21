@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+# pr-ready — one answer to "is this pull request green", read from the rollup and never from prose.
+#
+#   pr-ready <pr-number> [--sha <sha>] [--min-checks N] [--wait [--interval SEC] [--max SEC]]
+#
+# Why it exists: `gh pr checks | grep -c pending` matches the word "pending" and nothing else, so a
+# rollup of `IN_PROGRESS`, `QUEUED` or not-yet-registered checks reads as zero pending — a "green"
+# on a pull request that was three minutes from going red, and it was told to the user as one. `gh
+# pr checks` prose is not evidence. This reads `gh pr view <n> --json headRefOid,statusCheckRollup`
+# and decides the four things that together mean green:
+#
+#   1. the rollup is non-empty and holds at least --min-checks (default 12) checks: two checks is a
+#      workflow that has not registered the rest yet, not a green PR
+#   2. nothing is pending: no empty conclusion, no status PENDING/IN_PROGRESS/QUEUED (a status
+#      context's EXPECTED/PENDING state counts the same)
+#   3. nothing failed: no conclusion or state FAILURE
+#   4. the head is the commit that was asked about, when --sha is given — short or full, both match.
+#      CI green on an older commit is not a verdict on this one.
+#
+# Exit 0 only when all four hold; otherwise one status line names the numbers and a `not ready:` line
+# per rule that broke, and the exit is non-zero. `--wait` polls the same rule every --interval
+# seconds (default 15) until it passes or --max seconds (default 900) run out, then exits with that
+# verdict: a wait that gives up is not a pass. gh or jq missing is a FAIL, never a pass.
+#
+#   bin/pr-ready 209 --sha 12a731d
+#   bin/pr-ready 209 --sha 12a731d --wait --max 600
+set -uo pipefail
+
+prog=pr-ready
+die() {
+	printf '%s: %s\n' "$prog" "$*" >&2
+	exit 2
+}
+say() { printf '%s\n' "$*"; }
+
+usage() {
+	cat >&2 <<'EOF'
+usage: pr-ready <pr-number> [--sha <sha>] [--min-checks N] [--wait [--interval SEC] [--max SEC]]
+
+Exit 0 only when the rollup holds at least --min-checks checks, none is pending, none failed, and
+the head is --sha when one was given. --wait polls until it passes or --max seconds run out.
+EOF
+}
+
+# The rollup, as four tab-separated fields: head, total, pending, fail. Every spelling gh uses for
+# "not a verdict yet" is one clause, because the bug that made this file necessary was a check that
+# could only see the word `pending`. `has("status")` is what keeps a StatusContext — which has a
+# `state` and no conclusion at all — from reading as "conclusion is empty, so pending".
+JQ_FILTER='def checks: (.statusCheckRollup // []);
+def pending: ((.status // "") | test("^(PENDING|IN_PROGRESS|QUEUED|WAITING|REQUESTED)$"))
+  or ((.state // "") | test("^(PENDING|EXPECTED|IN_PROGRESS|QUEUED)$"))
+  or (has("status") and ((.conclusion // "") == ""));
+def failed: ((.conclusion // "") == "FAILURE") or ((.state // "") == "FAILURE");
+[ (.headRefOid // ""),
+  (checks | length),
+  (checks | map(select(pending)) | length),
+  (checks | map(select(failed)) | length) ] | @tsv'
+
+# read_rollup — one gh call, the four fields on stdout. Returns 1 with the reason on stdout when gh
+# could not answer or its JSON did not parse: an unreadable PR is not a green one.
+read_rollup() {
+	local json out
+	json=$("$gh_cmd" pr view "$pr" --json headRefOid,statusCheckRollup 2>&1) || {
+		printf 'gh could not read PR %s: %s\n' "$pr" "$(printf '%s' "$json" | tr '\n' ' ' | cut -c1-200)"
+		return 1
+	}
+	out=$(printf '%s' "$json" | jq -r "$JQ_FILTER" 2>&1) || {
+		printf 'gh returned JSON that did not parse: %s\n' "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+		return 1
+	}
+	printf '%s\n' "$out"
+}
+
+# head_matches <head> — the head equals --sha, short or full; no --sha is no constraint.
+head_matches() {
+	local h=${1,,} s=${sha,,}
+	[ -n "$sha" ] || return 0
+	[ "$h" = "$s" ] && return 0
+	[ "${#s}" -lt "${#h}" ] && [ "${h:0:${#s}}" = "$s" ] && return 0
+	return 1
+}
+
+# judge <fields> — the four rules, silent.
+judge() {
+	local head total pend flr
+	IFS=$'\t' read -r head total pend flr <<<"$1"
+	[ "$total" -gt 0 ] || return 1
+	[ "$total" -ge "$min_checks" ] || return 1
+	[ "$pend" -eq 0 ] || return 1
+	[ "$flr" -eq 0 ] || return 1
+	head_matches "$head" || return 1
+	return 0
+}
+
+# report <fields> — the one status line, then a line per rule that broke. Always returns 1: it is
+# only called when the verdict is not green.
+report() {
+	local head total pend flr
+	IFS=$'\t' read -r head total pend flr <<<"$1"
+	printf 'pr %s: head %s, checks %d, pending %d, fail %d\n' "$pr" "${head:0:7}" "$total" "$pend" "$flr"
+	if [ "$total" -eq 0 ]; then
+		say '  not ready: no checks on the rollup yet — a PR nobody has reported on is not a green one'
+	elif [ "$total" -lt "$min_checks" ]; then
+		printf '  not ready: %d check(s) on the rollup, --min-checks is %d — workflows still registering are not green\n' \
+			"$total" "$min_checks"
+	fi
+	[ "$pend" -eq 0 ] ||
+		printf '  not ready: %d check(s) pending or without a conclusion yet (IN_PROGRESS, QUEUED, EXPECTED)\n' "$pend"
+	[ "$flr" -eq 0 ] || printf '  not ready: %d check(s) FAILED\n' "$flr"
+	if ! head_matches "$head"; then
+		printf '  not ready: head is %s, asked about %s — green on another commit is not green on this one\n' \
+			"${head:0:12}" "$sha"
+	fi
+	return 1
+}
+
+pr=""
+sha=""
+min_checks=12
+wait_for=0
+interval=15
+max_wait=900
+while [ "$#" -gt 0 ]; do
+	case $1 in
+	--sha)
+		[ "$#" -ge 2 ] || die "--sha needs a value"
+		sha=$2
+		shift 2
+		;;
+	--sha=*)
+		sha=${1#--sha=}
+		shift
+		;;
+	--min-checks)
+		[ "$#" -ge 2 ] || die "--min-checks needs a value"
+		min_checks=$2
+		shift 2
+		;;
+	--min-checks=*)
+		min_checks=${1#--min-checks=}
+		shift
+		;;
+	--interval)
+		[ "$#" -ge 2 ] || die "--interval needs a value"
+		interval=$2
+		shift 2
+		;;
+	--interval=*)
+		interval=${1#--interval=}
+		shift
+		;;
+	--max)
+		[ "$#" -ge 2 ] || die "--max needs a value"
+		max_wait=$2
+		shift 2
+		;;
+	--max=*)
+		max_wait=${1#--max=}
+		shift
+		;;
+	--wait)
+		wait_for=1
+		shift
+		;;
+	-h | --help)
+		usage
+		exit 0
+		;;
+	-*) die "unknown option $1" ;;
+	*)
+		[ -z "$pr" ] || die "one PR number, not two ($pr and $1)"
+		pr=$1
+		shift
+		;;
+	esac
+done
+
+[ -n "$pr" ] || {
+	usage
+	exit 2
+}
+case $pr in *[!0-9]*) die "not a PR number: $pr" ;; esac
+case $min_checks in '' | *[!0-9]*) die "--min-checks takes a number, not '$min_checks'" ;; esac
+case $interval in '' | *[!0-9]* | 0) die "--interval takes a positive number of seconds" ;; esac
+case $max_wait in '' | *[!0-9]*) die "--max takes a number of seconds" ;; esac
+
+# A missing tool is a FAIL: a gate that passes because it could not look is worse than no gate.
+gh_cmd=${PR_READY_GH:-gh}
+command -v "$gh_cmd" >/dev/null 2>&1 || {
+	printf 'pr %s: gh is not installed, so nothing here can be judged green\n' "$pr"
+	exit 1
+}
+command -v jq >/dev/null 2>&1 || {
+	printf 'pr %s: jq is not installed, so the rollup cannot be read and nothing is green\n' "$pr"
+	exit 1
+}
+
+deadline=$(( $(date +%s) + max_wait ))
+last=""
+while :; do
+	if ! last=$(read_rollup); then
+		printf 'pr %s: not ready: %s\n' "$pr" "$last"
+		exit 1
+	fi
+	judge "$last" && {
+		IFS=$'\t' read -r head total pend flr <<<"$last"
+		printf 'pr %s: head %s, checks %d, pending %d, fail %d\n' "$pr" "${head:0:7}" "$total" "$pend" "$flr"
+		exit 0
+	}
+	if [ "$wait_for" != 1 ]; then
+		report "$last"
+		exit 1
+	fi
+	IFS=$'\t' read -r _head _total _pend _flr <<<"$last"
+	if [ "${_flr:-0}" -gt 0 ]; then
+		# Waiting is for checks still running. A FAILED check stays failed until someone pushes,
+		# so a loop that keeps polling here is a loop that never ends and never helps.
+		report "$last" || true
+		printf '  stopping: %d check(s) failed — waiting cannot turn a failure green, a new commit has to\n' "$_flr"
+		exit 1
+	fi
+	left=$((deadline - $(date +%s)))
+	if [ "$left" -le 0 ]; then
+		report "$last" || true
+		printf '  gave up after --max %ss without a green rollup\n' "$max_wait"
+		exit 1
+	fi
+	sleep_s=$interval
+	[ "$left" -ge "$sleep_s" ] || sleep_s=$left
+	sleep "$sleep_s"
+done

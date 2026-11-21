@@ -336,6 +336,32 @@ out=$(verify_lock 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ]; then pass 'an empty pi home is a WARN, not a FAIL'; else fail 'an empty pi home failed the run' "$out"; fi
 
+# ------------------------- a hook's GIT_DIR does not decide the pin --
+# git exports GIT_DIR to every hook it runs, and `git -C <dir>` obeys GIT_DIR over
+# -C, so `installed_pin` read the *outer* repository's HEAD for every git package: a
+# clean tree FAILed its own commit. The second repository here is that outer one, and
+# it holds a different commit, so the two answers cannot be confused.
+new_root "a GIT_DIR in the environment"
+git_sha=$(install_git)
+install_npm 1.2.3
+write_lock >/dev/null
+outer="$WORK/case$CASE_N/outer"
+git init -q "$outer" >/dev/null 2>&1
+printf 'outer\n' >"$outer/x"
+git -C "$outer" add -A >/dev/null 2>&1
+git -C "$outer" -c commit.gpgsign=false commit -q -m outer >/dev/null 2>&1
+out=$(GIT_DIR="$outer/.git" verify_lock 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then
+	pass "the pin is the package's own commit ($git_sha), not the environment's"
+else
+	fail 'a GIT_DIR in the environment changed the verdict' "$out"
+fi
+case $out in
+*'match their locked pin'*) pass 'the verdict is still the installed pin matching the lock' ;;
+*) fail 'the pass line does not say the pin matched' "$out" ;;
+esac
+
 # ------------------------------------------------------------------- summary --
 printf '\n%d passed, %d failed\n' "$PASS_N" "$FAIL_N"
 [ "$FAIL_N" -eq 0 ]

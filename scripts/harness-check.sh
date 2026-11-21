@@ -462,7 +462,11 @@ installed_pin() { # source -> sha (git) or version (npm) installed here, empty i
 	case $(package_kind "$src") in
 	git)
 		[ -d "$dir/.git" ] || return 0
-		git -C "$dir" rev-parse HEAD 2>/dev/null | head -1
+		# GIT_DIR wins over -C, and git exports it to every hook it runs: a commit run
+		# through this checkout's hooks had every git package reported at the outer
+		# repository's HEAD, so a clean tree FAILed its own commit. The pin is the
+		# package's own repository, never the one that happens to be committing.
+		env -u GIT_DIR -u GIT_WORK_TREE git -C "$dir" rev-parse HEAD 2>/dev/null | head -1
 		;;
 	npm)
 		[ -f "$dir/package.json" ] || return 0
