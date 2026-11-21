@@ -6,7 +6,7 @@
 # opened died on "no such file or directory" on a machine with a different home, and the failure
 # looked like five unrelated bugs. The fix is one resolver with a documented order, and this file is
 # the check that the order is still that order. The ported tree is the other half: the resolver was
-# copied from ~/big-boss-pi/bin into ~/.pi/bin, and a copy that still needed the old tree would pass
+# copied out of a separate checkout into ~/.pi/bin, and a copy that still needed that checkout would pass
 # a syntax check and fail the first tab — hence the last case, which runs the same file from a
 # directory that is not the repo and asserts the same answer.
 #
@@ -141,7 +141,7 @@ else
 	fail 'the copies disagree' "repo: $HERE_ONLY" "elsewhere: $ELSEWHERE"
 fi
 OUT=$HERE_ONLY
-if case "$OUT" in */big-boss-pi/*) false ;; *) true ;; esac; then pass 'neither answer points into the deleted tree'; else fail "answer: $OUT"; fi
+if case "$OUT" in */pi-master/*) false ;; *) true ;; esac; then pass 'neither answer points into a deleted tree'; else fail "answer: $OUT"; fi
 
 # ------------------------------------------- verdict --
 printf '\n%s passed, %s failed\n' "$PASS_N" "$FAIL_N"

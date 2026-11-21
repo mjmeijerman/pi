@@ -10,7 +10,7 @@
 //
 //   2. the Task Scheduler entry registered `bin/guard` itself, and that file
 //      starts `#!/usr/bin/env bash`. Task Scheduler has no shebang: the task
-//      started nothing, so the `big-boss-pi` space never appeared on Windows.
+//      started nothing, so the `harness` space never appeared on Windows.
 //      `guardTaskCommand` is pure (argv in, argv out), so the exact `/TR` value
 //      — both paths quoted, the interpreter named — is pinned without Windows,
 //      and `gitBashCandidates` pins where that interpreter is looked for.
@@ -23,7 +23,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { gitBashCandidates, guardTaskCommand, hiddenLauncher, schtasksExe, spawnPlan } from '../install-lib.mjs';
+import { GUARD_TASK_NAME, gitBashCandidates, guardTaskCommand, hiddenLauncher, schtasksExe, spawnPlan } from '../install-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -42,7 +42,7 @@ test('guardTaskCommand runs the hidden launcher through wscript.exe, and quotes 
 		'/SC',
 		'ONLOGON',
 		'/TN',
-		'big-boss-pi-guard',
+		GUARD_TASK_NAME,
 		'/TR',
 		`"${wscriptPath}" "${launcherPath}"`,
 	]);
@@ -51,9 +51,9 @@ test('guardTaskCommand runs the hidden launcher through wscript.exe, and quotes 
 	// the inner quotes escaped the way MSVCRT expects — not doubled.
 	assert.equal(
 		task.registered,
-		'schtasks /Create /F /SC ONLOGON /TN big-boss-pi-guard /TR "\\"C:\\Windows\\System32\\wscript.exe\\" \\"C:\\Users\\mj\\.pi\\state\\guard-hidden.vbs\\""',
+		`schtasks /Create /F /SC ONLOGON /TN ${GUARD_TASK_NAME} /TR "\\"C:\\Windows\\System32\\wscript.exe\\" \\"C:\\Users\\mj\\.pi\\state\\guard-hidden.vbs\\""`,
 	);
-	assert.equal(task.remove, 'schtasks /Delete /TN big-boss-pi-guard /F');
+	assert.equal(task.remove, `schtasks /Delete /TN ${GUARD_TASK_NAME} /F`);
 	// Never bash.exe directly: bash is a console program, so a task naming it opened
 	// a console window at logon and again on the installer's `/Run`, and the guard
 	// loops — the window never closed. This is the whole change.
@@ -118,7 +118,7 @@ function envFor(home, extra = {}) {
 		PI_SKIP_SYSTEMD: '1',
 		PI_ALLOW_MISSING_PI: '1',
 		PI_SKIP_PREREQS: '1',
-		PI_BOSS_DIR: path.join(home, 'big-boss-pi'),
+
 		...extra,
 	};
 	// Either of these would decide the answer before the test does: the host's
@@ -196,13 +196,6 @@ test('--dry-run prints what it would write and writes nothing', (t) => {
 
 test('the guard task is registered with Git Bash, and the default is the entry itself', (t) => {
 	const home = tempHome(t);
-	// A workspace clone with the one file the step looks for; the guard is
-	// another repo's, and this test only needs the path to exist.
-	const guardDir = path.join(home, 'big-boss-pi', 'bin');
-	fs.mkdirSync(guardDir, { recursive: true });
-	const guard = path.join(guardDir, 'guard');
-	fs.writeFileSync(guard, '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-
 	// PI_GIT_BASH is the resolution's override, which is also the only way this
 	// runs on a host without Git for Windows.
 	// PI_SKIP_SYSTEMD is the opt-out on this branch; cleared, so the gate under
@@ -230,7 +223,7 @@ test('the guard task is registered with Git Bash, and the default is the entry i
 	const byDefault = install(home, ['--dry-run'], { PI_SKIP_SYSTEMD: '', PI_GIT_BASH: '/usr/bin/bash' });
 	assert.equal(byDefault.status, 0, byDefault.stderr);
 	assert.match(byDefault.stdout, /^== guard: registering a Task Scheduler entry at logon/m);
-	assert.match(byDefault.stdout, /^Disable: schtasks \/Delete \/TN big-boss-pi-guard \/F$/m);
+	assert.ok(byDefault.stdout.includes(`Disable: schtasks /Delete /TN ${GUARD_TASK_NAME} /F`), byDefault.stdout);
 	// Deleting the task is not stopping the guard: the process the launcher started
 	// is still running, with no window to close, so the disable block names the pid
 	// the launcher wrote.

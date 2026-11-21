@@ -165,7 +165,7 @@ in the session, no launch, no queue file. The kind of that space decides the res
 sandboxed or bare, harness paths or `AGENTS.md` — and the learner reads it from its
 queue file rather than deciding for itself.
 
-A durable space is supervised. `~/.pi/bin/guard` — this repo's `bin/guard`, installed as the systemd user unit `systemd/big-boss-pi-guard.service` (`ExecStart=%h/.pi/bin/guard`, enabled at login) — runs a pass every 20 seconds over the
+A durable space is supervised. `~/.pi/bin/guard` — this repo's `bin/guard`, installed as the systemd user unit `systemd/pi-guard.service` (`ExecStart=%h/.pi/bin/guard`, enabled at login) — runs a pass every 20 seconds over the
 records in `~/.pi/state/spaces/`: a space that is gone is rebuilt from its record
 (same name, same project folder, same Boss tab name, plus the tabs the record
 lists), and a space whose Boss tab is gone gets that one tab back — from its

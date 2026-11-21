@@ -5,7 +5,7 @@
 // every platform — setup.mjs writes `path.join(AGENT_DIR, 'deepseek.key')` — and
 // then pi ran `cat` on one laptop's home, got nothing, and said "api key auth
 // failed for provider deepseek". This is the half of that class that lives in
-// this repo (big-boss-pi #68 fixed the halves that did not).
+// this repo (#68 fixed the halves that did not).
 //
 // The mechanism is pi's own, from docs/models-configuration.md: the field takes a
 // literal, `$NAME` interpolation, or a leading `!command`. A `$NAME` needs the

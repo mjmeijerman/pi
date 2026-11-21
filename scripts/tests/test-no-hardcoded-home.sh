@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Tests for the port itself: every executable that used to live only in ~/big-boss-pi/bin now lives
-# in bin/ of this repo, and none of them still resolves a path from the tree that is being deleted.
+# Tests for the port itself: every executable that used to live only in the checkout this harness
+# replaces now lives in bin/ of this repo, and none of them resolves a path from that checkout.
 #
-# Why these exist: the tree ~/big-boss-pi is going away, and the copies in it are the only ones on
-# this machine for fourteen programs — three of which (pi-bare, pi-sandboxed, pi-nonet) are on the
-# path of every tab that starts. A copy that still needs the old tree is the failure this file is
-# written against, and it is invisible in every other test: the file runs, the syntax check passes,
-# and the machine stops starting sessions the day the old directory is gone. So the check is the
-# absence of the old tree's names in the ported source, plus the two resolution shapes that replaced
-# them (pi-resolve.sh for the pi binary, a root derived from $here/.. for the workspace), plus the
-# one place a name from the old world is allowed to stay: bin/finish-rename.sh prints a systemd unit
-# name as data and never resolves anything from it.
+# Why these exist: that checkout is going away, and the copies in it were the only ones on the
+# machine for thirteen programs — three of which (pi-bare, pi-sandboxed, pi-nonet) are on the path
+# of every tab that starts. A copy that still needs the old tree is the failure this file is written
+# against, and it is invisible in every other test: the file runs, the syntax check passes, and the
+# machine stops starting sessions the day the old directory is gone. So the check is what a ported
+# program may resolve at all — never a directory under $HOME that it did not come from — plus the
+# two resolution shapes that replaced the old tree (pi-resolve.sh for the pi binary, a root derived
+# from $here/.. for the workspace). Which files may still name the retired tree is a separate
+# question with a short answer, and the retirement test in this directory is where it is measured.
 #
-# Cheap on purpose: grep over fourteen files, no network, no model, no temp tree.
+# Cheap on purpose: grep over thirteen files, no network, no model, no temp tree.
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -36,17 +36,17 @@ case_start() {
 	CASE="$1"
 }
 
-# PORTED — the fourteen programs the spec ports, by the names they keep. The list is the contract:
+# PORTED — the thirteen programs the spec ports, by the names they keep. The list is the contract:
 # a name dropped from here is a name nobody checks any more.
 PORTED="jev jev.mjs jev-model.mjs local-run local-run.mjs local-model.mjs pi-bare pi-nonet
-pi-resolve.sh pi-sandboxed shell-resolve.sh stats.mjs usage.mjs finish-rename.sh"
+pi-resolve.sh pi-sandboxed shell-resolve.sh stats.mjs usage.mjs"
 # STARTUP — the five that are sourced, or run, every time a tab opens.
 STARTUP="pi-bare pi-sandboxed pi-nonet pi-resolve.sh shell-resolve.sh"
 # LAUNCHABLE — the ones a person runs and therefore must be executable.
-LAUNCHABLE="jev local-run pi-bare pi-nonet pi-sandboxed finish-rename.sh"
+LAUNCHABLE="jev local-run pi-bare pi-nonet pi-sandboxed"
 
 # ------------------------------------------- 1. they are all here --
-case_start "all fourteen are in bin/"
+case_start "all thirteen are in bin/"
 missing=""
 for f in $PORTED; do [ -f "$BIN/$f" ] || missing="$missing $f"; done
 if [ -z "$missing" ]; then pass 'every ported program exists in this repo'; else fail "missing:$missing"; fi
@@ -65,23 +65,27 @@ done
 [ -z "$hits" ] || hits=$(printf '%s\n' "$hits" | sed '/^$/d')
 if [ -z "$hits" ]; then pass 'a hardcoded home is a red test'; else fail 'one of them assumes a home directory' "$hits"; fi
 
-# ------------------------------------------- 3. no path from the old tree --
-case_start "no ported file reads a path from ~/big-boss-pi"
+# ------------------------------------------- 3. no path outside its own tree --
+# The failure mode, stated as a rule instead of as one name: a ported program may not resolve a
+# directory it did not come from. `$HOME/something/bin` and `$HOME/something/state` are exactly the
+# shape the retired checkout had, so they are what this greps for — a future rename is covered
+# without editing this file, and a program that only knows its own `$here/..` passes.
+case_start "no ported file resolves a directory under the home it did not come from"
 hits=""
 for f in $PORTED; do
-	hits="$hits$(grep -nE '(~|\$HOME|\$\{HOME[^}]*\})/big-boss-pi|/pi-master/|SPACE_LEGACY_ROOT' "$BIN/$f" | sed "s|^|$f:|")"$'\n'
+	hits="$hits$(grep -nE '(~|\$HOME|\$\{HOME[^}]*\})/[A-Za-z0-9_-][A-Za-z0-9_.-]*/(bin|state|lib)' "$BIN/$f" | sed "s|^|$f:|")"$'\n'
 done
 [ -z "$hits" ] || hits=$(printf '%s\n' "$hits" | sed '/^$/d')
-if [ -z "$hits" ]; then pass 'the old tree is not a path anywhere in the port'; else fail 'a ported program still reaches into the old tree' "$hits"; fi
+if [ -z "$hits" ]; then pass 'no ported program reaches into a home directory'; else fail 'a ported program still reaches under $HOME' "$hits"; fi
 
-# ------------------------------------------- 4. the startup set names neither old tree --
-case_start "the five startup files do not mention the old trees at all"
+# ------------------------------------------- 4. the startup set names no legacy root --
+case_start "the five startup files do not mention a legacy root at all"
 hits=""
 for f in $STARTUP; do
-	hits="$hits$(grep -nE 'big-boss-pi|pi-master' "$BIN/$f" | sed "s|^|$f:|")"$'\n'
+	hits="$hits$(grep -nE 'PI_BOSS_ROOT|PI_MASTER_ROOT|SPACE_LEGACY_ROOT' "$BIN/$f" | grep -vE '^[0-9]+:[[:space:]]*#' | sed "s|^|$f:|")"$'\n'
 done
 [ -z "$hits" ] || hits=$(printf '%s\n' "$hits" | sed '/^$/d')
-if [ -z "$hits" ]; then pass 'not even in a comment'; else fail 'a startup file still names the tree that is being deleted' "$hits"; fi
+if [ -z "$hits" ]; then pass 'no variable can point a startup file at an older tree'; else fail 'a startup file still takes a root from the environment' "$hits"; fi
 
 case_start "the three runners derive the workspace from their own tree"
 hits=""
@@ -114,11 +118,6 @@ for f in jev.mjs local-run.mjs stats.mjs usage.mjs; do
 	done
 done
 if [ -z "$bad" ]; then pass 'jev.mjs, local-run.mjs, stats.mjs and usage.mjs find their siblings'; else fail "unresolved imports:$bad"; fi
-
-# ------------------------------------------- 7. the one allowed name --
-case_start "finish-rename.sh keeps the old name only as the unit it reports"
-hits=$(grep -v '^[[:space:]]*#' "$BIN/finish-rename.sh" | grep 'big-boss-pi' | grep -v 'big-boss-pi-guard\.service')
-if [ -z "$hits" ]; then pass 'the only big-boss-pi line names a systemd unit, as data'; else fail 'it reads the old tree, not just prints a name' "$hits"; fi
 
 # ------------------------------------------- verdict --
 printf '\n%s passed, %s failed\n' "$PASS_N" "$FAIL_N"

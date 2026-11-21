@@ -406,7 +406,26 @@ export function deepseekKeyState({ keyFile = false, apiKey = null, resolves = fa
 }
 
 // --- the Windows guard task --------------------------------------------------
-export const GUARD_TASK_NAME = 'big-boss-pi-guard';
+export const GUARD_TASK_NAME = 'pi-guard';
+
+/** GUARD_UNIT_NAME — the systemd unit, named with the task and the label. */
+export const GUARD_UNIT_NAME = 'pi-guard.service';
+
+/**
+ * LEGACY_GUARD — the entry this one replaced, named once so the migration can find it.
+ *
+ * The guard's login entry used to be named after the workspace it was written in
+ * (`big-boss-pi-guard`). That workspace is retired, and the entry is now named after the program:
+ * `pi-guard`, `dev.herdr.pi-guard`. The old names are here and nowhere else, because they are the
+ * only thing that must still be spelled that way: an install that finds one removes it before it
+ * registers the new name. Two login entries running the same guard is not cosmetic — they race on
+ * the same records, and one rebuilds what the other is halfway through adopting.
+ */
+export const LEGACY_GUARD = {
+	unit: 'big-boss-pi-guard.service',
+	taskName: 'big-boss-pi-guard',
+	label: 'dev.herdr.big-boss-pi-guard',
+};
 
 /**
  * gitBashCandidates — where Git for Windows may have put `bash.exe`, best guess
@@ -761,7 +780,7 @@ export function guardTaskCommand({ launcherPath, pidPath = '', wscriptPath = wsc
 // "install finished" promised something the entry had not done yet. So the step
 // starts the entry once, then waits a bounded time for the space and says what
 // it saw — a green install that names the task, the log and the app.
-export const GUARD_LABEL = 'dev.herdr.big-boss-pi-guard';
+export const GUARD_LABEL = 'dev.herdr.pi-guard';
 export const GUARD_SPACE_NAME = 'harness';
 /** How long the step waits for the space before it says it did not appear. */
 export const GUARD_SPACE_WAIT_MS = 20000;

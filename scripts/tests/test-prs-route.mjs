@@ -84,7 +84,7 @@ test("no space and no clone: the message still names a folder to make the space 
 test("the mod never creates a space itself: no space.new, no BOSS_SPACE", () => {
 	assert.doesNotMatch(SOURCE, /space\.new/, "main.js calls space.new again");
 	assert.doesNotMatch(SOURCE, /BOSS_SPACE/, "main.js still carries the hardcoded boss space");
-	assert.doesNotMatch(SOURCE, /big-boss-pi/, "main.js still points at the one old space");
+	assert.doesNotMatch(SOURCE, /["']harness["']|boss_space/i, "main.js still points at one hardcoded space");
 	// And the route it does take is the pure module, not a second copy of the rule.
 	assert.match(SOURCE, /spaceForFolder/);
 	assert.match(SOURCE, /tab\.new/);

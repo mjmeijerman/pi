@@ -248,7 +248,7 @@ if grep -q '^publish .*--space sp' "$PORTED_LOG"; then
 else
 	fail 'the ported publish was not called with --space sp' "$(cat "$PORTED_LOG")"
 fi
-if [ ! -s "$LEGACY_LOG" ]; then pass 'the pre-space copies in ~/big-boss-pi/bin were never run'; else fail 'finish ran a pre-space copy' "$(cat "$LEGACY_LOG")"; fi
+if [ ! -s "$LEGACY_LOG" ]; then pass 'the pre-space copies were never run'; else fail 'finish ran a pre-space copy' "$(cat "$LEGACY_LOG")"; fi
 if [ ! -s "$PATH_LOG" ]; then pass 'no copy on PATH was run'; else fail 'finish ran a copy from PATH' "$(cat "$PATH_LOG")"; fi
 
 # ------------------------------------------- verdict --

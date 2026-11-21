@@ -31,8 +31,8 @@ exist inside a session at all — without it they are `command not found`, and e
 
 A `~/.local/bin` symlink that points outside those trees gets its resolved directory
 mounted read-only as well, so the link is not a dangling `command not found`: `jev` and
-`local-run` live in `~/big-boss-pi/bin`, and that one directory (never the repo, never
-read-write) is what makes the mandatory `jev route` check work inside the sandbox.
+`local-run` live in `~/.pi/bin`, which is bound whole, and a tool that resolves
+elsewhere gets that one directory (never the tree above it, never read-write).
 Directories the `too_broad` rule refuses — anything under `~/.local`, `~/.config`,
 `~/.ssh` — stay out, so `herdr-app` is still absent inside.
 

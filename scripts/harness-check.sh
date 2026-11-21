@@ -658,9 +658,9 @@ check_packages_lock() {
 # The module is read as well (comments dropped): the table's claim came from it,
 # so a transport that moves in code fails here the day it moves.
 DOC_FACTS_REL="scripts/doc-facts.txt"
-# Where bin/ modules live when they are not in this checkout: install.sh puts the
-# delegation workspace at ~/big-boss-pi by default (PI_BOSS_DIR).
-DOC_FACTS_BIN="${DOC_FACTS_BIN:-${PI_BOSS_DIR:-$HOME/big-boss-pi}/bin}"
+# Where bin/ modules live: this checkout's own bin/, and PI_BOSS_DIR still
+# redirects it for a caller that keeps its tools somewhere else.
+DOC_FACTS_BIN="${DOC_FACTS_BIN:-${PI_BOSS_DIR:-$(cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/bin}"
 
 doc_facts_word() { # subject -> the same pattern, whole word, not inside a path
 	# `agent/skills/jev/SKILL.md` names a file, not the decision model: a mention
