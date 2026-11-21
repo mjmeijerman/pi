@@ -6,7 +6,8 @@
 # takes the terminals away. That something is bin/guard, and every promise it makes is visible in
 # the argv a stub herdr-app saw and in the one log line per action — so that is what is checked
 # here: the space is rebuilt from the record (never from a new name or folder), a missing Boss tab
-# comes back from its resume entry, a Boss tab that is there is left alone, a worker's tab is never
+# comes back bare on the session its resume entry remembers (the entry supplies a session, never a
+# command), a Boss tab that is there is left alone, a worker's tab is never
 # rebuilt, a space whose folder is gone is refused with the command that fixes it, a forgotten space
 # is not recreated, --dry-run calls no app at all, --once exits, and nothing is ever closed or
 # renamed. No network, no desktop app, nothing written outside $WORK.
@@ -14,6 +15,9 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GUARD="$ROOT/bin/guard"
+# The Boss is bare: the argv a resumed Boss tab is opened with starts with this tree's `bin/pi-bare`
+# and never with an interpreter a resume entry remembers.
+BARE="$ROOT/bin/pi-bare"
 [ -x "$GUARD" ] || {
 	printf 'FATAL: %s is not executable\n' "$GUARD" >&2
 	exit 1
@@ -189,11 +193,18 @@ clear_log
 run "$GUARD" --once
 if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'the pass failed' "$OUT"; fi
 case $(herdr) in
-*"do tab.new --name Boss --space s-boss --folder $PROJ --argv [\"/bin/sh\",\"-lc\",\"pi\",\"--session\",\"$SESSION\"]"*)
-	pass 'the tab is started from the entry argv plus --session, in the recorded space id'
+*"do tab.new --name Boss --space s-boss --folder $PROJ --argv [\"$BARE\",\"--session\",\"$SESSION\"] --focus false"*)
+	pass 'the tab is started from this tree'"'"'s pi-bare plus the entry'"'"'s session, in the recorded space id'
 	;;
-*) fail 'the Boss tab was not respawned from its resume entry' "$(herdr)" ;;
+*) fail 'the Boss tab was not respawned bare from its resume entry'"'"'s session' "$(herdr)" ;;
 esac
+# The entry in this case carries `["/bin/sh","-lc","pi"]`: an interpreter that would sandbox the
+# Boss. It decides the session above and nothing else.
+if printf '%s\n' "$(herdr)" | grep -qF -- '-lc'; then
+	fail 'the entry argv reached the app: the entry decides the session, not the command' "$(herdr)"
+else
+	pass 'the entry argv never reaches the app'
+fi
 if printf '%s\n' "$OUT" | grep -qF "guard: harness: Boss tab resumed from session $SESSION"; then
 	pass 'the log names the session it resumed'
 else

@@ -204,10 +204,17 @@ spaces '{"spaces":[{"id":"sp-resume","name":"resume","folder":"'"$PROJ"'","tabs"
 clear_log
 run "$GUARD" --once --space resume
 if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'the pass failed' "$OUT"; fi
-if grep -qF "do tab.new --name Boss --space sp-resume --folder $PROJ --argv [\"sh\",\"-lc\",\"pi\",\"--session\",\"$NEWER\"]" "$HERDR_LOG"; then
-	pass 'the Boss tab is opened on the newest session of the record folder'
+if grep -qF "do tab.new --name Boss --space sp-resume --folder $PROJ --argv [\"$BARE\",\"--session\",\"$NEWER\"] --focus false" "$HERDR_LOG"; then
+	pass 'the Boss tab is opened bare on the newest session of the record folder'
 else
 	fail 'the newest session for the folder was not opened' "$(herdr)"
+fi
+# The entry's `["sh","-lc","pi"]` decided the session before this case existed; now it decides
+# nothing at all, so the sandboxed interpreter it remembers never reaches the app.
+if printf '%s\n' "$(herdr)" | grep -qF -- '-lc'; then
+	fail 'the entry argv reached the app: a resume entry never decides the command' "$(herdr)"
+else
+	pass 'the entry argv never reaches the app'
 fi
 if printf '%s\n' "$(herdr)" | grep -qF -- "$OLDER"; then
 	fail 'the entry terminal id chose the session instead of the folder'
