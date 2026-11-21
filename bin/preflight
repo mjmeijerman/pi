@@ -37,6 +37,15 @@
 #             node suite cannot run twice (it used to: `node --test` and then a target that begins
 #             with it, 30 extra seconds on a five-file diff); a target that does more than those
 #             two globs is run whole, once, and a checkout with neither is named
+#   harness   the checkout's own scripts/harness-check.sh, the same script the harness-check job
+#             runs — a blip cited that is not in docs/radar-blips.tsv, a doc whose review date went
+#             by, a test that builds a RegExp from a value: each was a red pull request, and each
+#             is a verdict this checkout reaches in eight seconds. Ten branches went red on this
+#             job between 2026-11-20 and 2026-11-21 (test-regex-literal ×4 on one branch alone),
+#             every one of them after the push. Applies when the branch changed a file and the
+#             checkout has the script: a project checkout has no harness-check.sh and says so
+#             instead of passing. The recipe is that script's exit code, never a summary parsed
+#             out of its text, and a run that hits its cap is a FAIL, not a pass
 #   semgrep   the changed files only, with every --config every workflow passes (a ruleset pinned by
 #             commit, `${SEMGREP_RULES}/bash`, is unpacked from its SEMGREP_RULES_SHA into
 #             ~/.cache/pi/semgrep-rules and handed over as a path), else p/default plus
@@ -76,7 +85,7 @@
 # Output is plain and meant to be pasted: one line per check, verdict, name, elapsed, detail; the
 # detail under a failing check; then a summary. No colour, no progress bars.
 #
-#   bin/preflight --list                      the seven check names, nothing run
+#   bin/preflight --list                      the eight check names, nothing run
 #   bin/preflight --only semgrep feat/x       one check, on that branch
 #   bin/preflight --only mutation feat/x      the CI job's changed-line stryker run, here
 #   bin/preflight --slug w1                   the branch and body of worker w1
@@ -312,11 +321,12 @@ pf_receipt_write() {
 
 # --- the checks, in the order they run ---------------------------------------------------------
 
-preflight_ids=(behind syntax suites semgrep scrub body mutation)
+preflight_ids=(behind syntax suites harness semgrep scrub body mutation)
 preflight_names=(
 	"behind (did a touched path also move on trunk?)"
 	"syntax (bash -n, node --check, shellcheck)"
 	"suites (the repo's own tests)"
+	"harness (scripts/harness-check.sh, as the harness-check job runs it)"
 	"semgrep (the changed files)"
 	"scrub (env -i, the runner does not have your PATH)"
 	"body (docs budget and the body gate)"
@@ -411,6 +421,10 @@ pf_applies() {
 	syntax | semgrep) [ "${#PF_CODE[@]}" -gt 0 ] ;;
 	scrub) [ "${#PF_TESTS[@]}" -gt 0 ] ;;
 	suites) [ "$PF_SHAPE" != none ] && [ "${#PF_CODE[@]}" -gt 0 ] ;;
+	# Any changed file can trip it — a docs edit moves a review date, a new file cites a blip, a
+	# test file builds a RegExp from a value — so this one is not narrowed by file type. A checkout
+	# with no harness-check.sh has no harness to check, and says so by name.
+	harness) [ -f "$PF_CWD/scripts/harness-check.sh" ] && [ "${#PF_CHANGED[@]}" -gt 0 ] ;;
 	body) return 0 ;;
 	behind) return 0 ;;
 	# Opt-in, and then only where the diff holds a mutant host and the checkout holds a way to run
@@ -449,6 +463,13 @@ pf_skip_reason() {
 			printf 'no suite found: no Makefile scripts-test target, no scripts/tests/*.test.mjs, no scripts/ci-local.sh in %s' "$PF_CWD"
 		else
 			printf 'docs-only diff: no code file changed, so the %s suite has nothing new to prove' "$PF_SHAPE_NAME"
+		fi
+		;;
+	harness)
+		if [ ! -f "$PF_CWD/scripts/harness-check.sh" ]; then
+			printf 'no scripts/harness-check.sh in %s (a project checkout has no harness to check)' "$PF_CWD"
+		else
+			printf 'no changed file: there is no branch state for harness-check.sh to read'
 		fi
 		;;
 	mutation)
@@ -853,6 +874,59 @@ pf_check_suites() {
 		return 1
 	fi
 	pf_run_units
+}
+
+# --- check: harness-check, the same script the harness-check job runs ----------------------------
+
+# Why this exists. The suites check runs the repo's tests; harness-check.sh is not a test suite, it
+# is the rule check over the whole tree — the docs budget, the radar-blip table, the review dates,
+# the skills lock, the test-regex rule — and it ran in CI and nowhere else a branch has to pass.
+# Measured on 2026-11-21: ten branches came back red on that job, one of them on four
+# test-regex-literal FAILs in a single test file, and a full local run of the same script takes
+# 8.4s in this checkout. A verdict that cheap belongs on this side of the push, like the mutation
+# gate before it (git-hooks/scan-mutation.sh).
+#
+# The verdict is the script's exit code, never a summary parsed out of its text: harness-check.sh
+# exits nonzero on any FAIL, and a gate that reads a line of prose instead goes green on a run whose
+# exit said otherwise. Warnings are not failures — the script's own exit decides.
+#
+# The cap is wall clock, and a capped run is a FAIL for the same reason the mutation gate refuses
+# one: an undecided rule is not a pass.
+pf_check_harness() {
+	local out rc fails summary
+	if [ ! -f "$PF_CWD/scripts/harness-check.sh" ]; then
+		printf 'no scripts/harness-check.sh in %s\n' "$PF_CWD"
+		return 1
+	fi
+	out=$PREFLIGHT_TMP/harness-check.log
+	if command -v timeout >/dev/null 2>&1; then
+		( cd "$PF_CWD" && timeout -k 10 "${PREFLIGHT_HARNESS_CAP:-300}" bash scripts/harness-check.sh ) >"$out" 2>&1
+		rc=$?
+	else
+		( cd "$PF_CWD" && bash scripts/harness-check.sh ) >"$out" 2>&1
+		rc=$?
+	fi
+	if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+		printf 'scripts/harness-check.sh hit its %ss cap — an undecided rule is not a pass\n' "${PREFLIGHT_HARNESS_CAP:-300}"
+		tail -5 "$out" 2>/dev/null
+		return 1
+	fi
+	summary=$(grep -a -E '^[0-9]+ passed,' "$out" 2>/dev/null | tail -1)
+	if [ "$rc" -eq 0 ]; then
+		if command -v timeout >/dev/null 2>&1; then
+			printf '%s\n' "${summary:-scripts/harness-check.sh exited 0}"
+		else
+			printf '%s (no cap: timeout is not on PATH)\n' "${summary:-scripts/harness-check.sh exited 0}"
+		fi
+		return 0
+	fi
+	fails=$(grep -a -c '^FAIL ' "$out" 2>/dev/null || true)
+	printf 'scripts/harness-check.sh exited %s — %s (CI runs this same script and goes red on them)\n' \
+		"$rc" "${fails:-?} FAIL line(s)"
+	grep -a '^FAIL ' "$out" 2>/dev/null | head -20
+	printf 'the full run: bash scripts/harness-check.sh (a violation that predates the branch belongs in scripts/harness-baseline.txt)
+'
+	return 1
 }
 
 # --- check: semgrep, on the changed files only --------------------------------------------------
@@ -1346,7 +1420,7 @@ pf_check_body() {
 
 # --- check: union on the changed extensions lines (opt-in) ----------------------------------
 
-# The seventh check, and the only slow one, so it costs nothing unless asked for. The scope is not
+# The eighth check, and the only slow one, so it costs nothing unless asked for. The scope is not
 # invented here: `scripts/mutate-changed.sh` derives the added line ranges of
 # agent/extensions/**/*.ts from the branch's diff and runs stryker on exactly those, which is what
 # the CI job `mutation on changed files (stryker)` does. The verdict is that script's exit code,
