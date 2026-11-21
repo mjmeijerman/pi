@@ -18,6 +18,11 @@ report naming what you saw. `delegate spawn` refuses a second worker in this spa
 purpose, and it refuses the next one until the previous pull request is merged: when it
 names the PR, the next action is asking the person to merge, never spawning again.
 
+A worker is done when `bin/delegate list` says `reported` or `bin/delegate wait <slug>`
+returns — never by grepping its report for a field: a report's prose is the worker's own
+wording, and ``Commit: `e8d8358` `` is not `Commit: e8d8358`. Quote `bin/delegate status
+<slug>`'s one word when you report.
+
 A worker is a tab in this space, opened `--focus false` so nobody is moved off what they
 were reading. A finished worker's tab is closed and never reopened. Nothing closes the
 Boss tab but the person.
