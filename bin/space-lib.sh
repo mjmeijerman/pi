@@ -65,6 +65,18 @@ space_set_field() {
 	' "$(space_record "${1:-}")" "${2:-}" "${3:-}"
 }
 
+# space_kind <slug> — what learning in this space may change: `harness` or `project`.
+#
+# The space decides the kind and the session that compacted never does, so this is read from the
+# record and nowhere else — not from the folder the project happens to sit in, and not from a
+# flag a caller could pass. A record written before the field existed is a `project` space.
+space_kind() {
+	case $(space_field "${1:-}" kind) in
+	harness) printf 'harness' ;;
+	*) printf 'project' ;;
+	esac
+}
+
 # space_id_ensure <slug> — herdr's id for a space, from its record.
 #
 # A record written before this field existed holds the name only, and the name is the person's

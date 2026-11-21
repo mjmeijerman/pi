@@ -113,8 +113,8 @@ A **space is a project**. One Herdr space holds one project, one worker at a
 time, and the record that says so:
 
 ```bash
-bin/space new --name myproject --project ~/projects/myproject   # or --clone <url>, --no-git
-bin/space list                                                  # slug, project, git, tabs, open|closed
+bin/space new --name myproject --project ~/projects/myproject   # or --clone <url>, --no-git, --kind harness
+bin/space list                                                  # slug, kind, project, git, tabs, open|closed
 bin/space show myproject
 ```
 
@@ -123,6 +123,16 @@ and puts a rules block between `<!-- pi-space:begin -->` and `<!-- pi-space:end 
 in the project's `AGENTS.md`: one project per space, one worker at a time, a new
 worker only after the previous pull request is merged, and the boss never edits
 files itself.
+
+A space also has a **kind**, and the space decides it, not the session that
+compacted inside it: `--kind project` (the default, and what a record written
+before the field existed reads as) or `--kind harness` for this pi checkout. The
+kind is what a learner in that space may change — a harness learner edits `bin/`,
+`agent/`, `scripts/`, `git-hooks/`, `docs/`, `README.md`, `install.mjs`, runs bare
+and publishes its own branch; a project learner writes that project's `AGENTS.md`
+and nothing else, sandboxed, through the publish broker. Docs say one harness space
+per machine; nothing enforces it, because a second one is a second copy of the
+harness to disagree with the first.
 
 `bin/delegate` reads the space from where it is run: it takes the longest project
 path that contains the cwd, so `cd ~/projects/myproject && bin/delegate spawn …`
@@ -135,6 +145,13 @@ A worker is a tab in the space that asked for it, not a space of its own: `spawn
 opens `herdr-app do tab.new --space <id> --focus false`, so the person stays on the
 tab they were reading, and `close` closes that tab rather than the space — a
 finished worker cannot take the boss's desk with it.
+
+A learner is a tab too, in the space whose project compacted — found by the longest
+space project that contains the session's cwd (`agent/extensions/self-learn.ts`,
+`learnerSpace`). No space owns the cwd and the compaction teaches nothing: one line
+in the session, no launch, no queue file. The kind of that space decides the rest —
+sandboxed or bare, harness paths or `AGENTS.md` — and the learner reads it from its
+queue file rather than deciding for itself.
 
 A durable space is supervised. `bin/guard` runs a pass every 20 seconds over the
 records in `~/.pi/state/spaces/`: a space that is gone is rebuilt from its record

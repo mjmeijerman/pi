@@ -14,20 +14,23 @@
 #                                   This is the delegation path (learn-publish.sh): the
 #                                   person asked for that work, they do not want the view
 #                                   taken away from them.
-#   spawn SLUG SPEC --visible       its own space and tab in the agents pane, which the
-#                                   person can find in `list`, watch with `show` and end
-#                                   with `close`, while focus goes back to the tab they
-#                                   were reading. The self-learn learner uses this: an
-#                                   agent nobody can see is an agent nobody can stop.
+#   spawn SLUG SPEC --space SLUG    a tab in that space, added last and never focused: the
+#                                   worker sits beside the work it is about, and the person
+#                                   stays on the tab they were reading. self-learn uses
+#                                   this — a learner is a tab in the space whose project
+#                                   compacted, never a space of its own.
+#   spawn SLUG SPEC --visible       its own space and tab (legacy: `bin/space new` is how a
+#                                   space is made now), which the person can find in `list`,
+#                                   watch with `show` and end with `close`.
 #
 # `--sandbox` runs the pi inside through scripts/pisandbox (no ssh keys, no cloud creds,
 # network on) with the working directory readable and writable. The host creates the
 # space, the sandbox runs the work — the same split bin/delegate uses, where the space
 # is made by the unsandboxed host and bin/pi-sandboxed runs the worker. A sandboxed
-# process cannot make a space (herdr-app lives outside every sandbox mount), so the
+# process cannot make a tab (herdr-app lives outside every sandbox mount), so the
 # creation half must stay here, on the host.
 #
-#   agent-pane.sh spawn <slug> <spec.md> [--cwd DIR] [--visible] [--sandbox] [--env K=V]...
+#   agent-pane.sh spawn <slug> <spec.md> [--cwd DIR] [--space SLUG] [--visible] [--sandbox] [--env K=V]...
 #   agent-pane.sh show <slug|terminal>
 #   agent-pane.sh hide <slug|terminal>
 #   agent-pane.sh close <slug|terminal> [--pane]
@@ -45,6 +48,19 @@ PI_BIN=${PI_BIN:-$HOME/.local/share/pnpm/bin/pi}
 PISANDBOX=${PISANDBOX:-$HOME/.pi/scripts/pisandbox}
 STATE=${STATE:-$HOME/.pi/scripts/.agent-panes.json}
 PROG=${0##*/}
+
+# The space record: `--space <slug>` resolves that space's herdr id from
+# `state/spaces/<slug>/space.json` — the same file `bin/delegate` reads, so a tab opened here and
+# a tab opened there cannot disagree about which space it is. Sourced lazily, and only when
+# `--space` is used: the hidden and own-space paths do not read space records, and a machine
+# without them can still start a worker.
+space_lib() {
+	local dir
+	dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/../bin" 2>/dev/null && pwd) || return 1
+	[ -r "$dir/space-lib.sh" ] || return 1
+	# shellcheck source=/dev/null
+	. "$dir/space-lib.sh"
+}
 
 die() { printf '%s: error: %s\n' "$PROG" "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 not found in PATH"; }
@@ -125,18 +141,23 @@ runner_line() {
 cmd_spawn() {
 	mkdir -p "$(dirname "$STATE")"
 	local slug=${1:?usage: spawn <slug> <spec.md>}; local spec=${2:?usage: spawn <slug> <spec.md>}
-	local workdir="" visible=0 sandboxed=0
+	local workdir="" visible=0 sandboxed=0 space_slug=""
 	envs=()
 	shift 2
 	while [ "$#" -gt 0 ]; do
 		case $1 in
 		--cwd) workdir=${2:?}; shift 2 ;;
+		--space) space_slug=${2:?--space needs a space name}; shift 2 ;;
 		--visible) visible=1; shift ;;
 		--sandbox) sandboxed=1; shift ;;
 		--env) envs+=("${2:?--env needs KEY=VAL}"); shift 2 ;;
 		*) die "unknown option $1" ;;
 		esac
 	done
+	[ -z "$space_slug" ] || space_lib || die "--space needs bin/space-lib.sh, and it is not beside this script"
+	[ -z "$space_slug" ] || space_valid_slug "$space_slug" || die "--space takes a space name: '$space_slug'"
+	[ -z "$space_slug" ] || [ "$visible" = 0 ] || die "--space and --visible answer the same question: a tab in that space, or a space of its own"
+	[ -z "$space_slug" ] || [ -f "$(space_record "$space_slug")" ] || die "no such space: $space_slug — bin/space list"
 	[ -f "$spec" ] || die "spec not found: $spec"
 	need hc
 	# herdr-app is the host's own app, and it is the one thing a sandbox does not mount.
@@ -152,8 +173,26 @@ cmd_spawn() {
 	local name
 	name=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-' | cut -c1-32)
 
-	local out terminal="" space=""
-	if [ "$visible" = 1 ]; then
+	local out terminal="" space="" tab=""
+	if [ -n "$space_slug" ]; then
+		# A tab in the space that asked for it. `tab.new` takes the space's herdr id, which a
+		# record written before that field existed gets from `space_id_ensure` (one read of
+		# `herdr-app ls`, written back once). `--focus false` adds the tab last and keeps the
+		# shown space and its selected tab, so nobody loses their place.
+		local argv space_id
+		space_id=$(space_id_ensure "$space_slug")
+		[ -n "$space_id" ] || die "space $space_slug has no herdr id — is it open? bin/space show $space_slug"
+		argv=$(node -e 'process.stdout.write(JSON.stringify(["sh","-lc",process.argv[1]]))' \
+			"$(runner_line "$spawn_dir" "$sandboxed")")
+		out=$(herdr-app do tab.new --name "$name" --space "$space_id" --folder "$spawn_dir" \
+			--argv "$argv" --task "Read $spec and do it" --focus false 2>&1) \
+			|| die "tab.new failed for $name in space $space_slug ($space_id): $out"
+		tab=$(printf '%s' "$out" | json_get tab)
+		space=$space_id
+		terminal=$(printf '%s' "$out" | json_get terminal)
+		[ -n "$terminal" ] || terminal=$(printf '%s' "$out" | json_get result.terminal)
+		[ -n "$terminal" ] || die "tab.new made no terminal in space $space_slug: $out"
+	elif [ "$visible" = 1 ]; then
 		# Visible on purpose: a real space and tab, so the person finds the worker in the
 		# agents pane, can watch it and can end it. space.new has no hidden mode, so this
 		# is the path that cannot lie about existing.
@@ -207,7 +246,11 @@ cmd_spawn() {
 		[ -n "$why" ] || why=$(printf '%s\n' "$seen" | grep -m1 -v '^[[:space:]]*$' || true)
 		[ -n "$why" ] || why="no output from $terminal"
 		why=$(printf '%s' "$why" | cut -c1-300)
-		if [ -n "$space" ] && command -v herdr-app >/dev/null 2>&1; then
+		if [ -n "$tab" ]; then
+			# A tab, never the space: closing the space here would take the person's own desk
+			# down with the worker that finished.
+			command -v herdr-app >/dev/null 2>&1 && herdr-app do tab.close --id "$tab" --confirmed true >/dev/null 2>&1 || true
+		elif [ -n "$space" ] && command -v herdr-app >/dev/null 2>&1; then
 			# Best effort: a space that will not close must not hide the reason pi failed.
 			herdr-app do space.close --id "$space" --confirmed true >/dev/null 2>&1 || true
 		fi
@@ -219,13 +262,17 @@ cmd_spawn() {
 
 	state_write "$(node -e '
 		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
-		j[process.argv[2]]={terminal:process.argv[3],space:process.argv[4]||null,spec:process.argv[5],
+		j[process.argv[2]]={terminal:process.argv[3],space:process.argv[4]||null,tab:process.argv[8]||null,
+			spaceSlug:process.argv[9]||null,spec:process.argv[5],
 			hidden:process.argv[6]!=="1",sandboxed:process.argv[7]==="1",ts:new Date().toISOString()};
-		process.stdout.write(JSON.stringify(j,null,2));' "$STATE" "$slug" "$terminal" "$space" "$spec" "$visible" "$sandboxed")"
+		process.stdout.write(JSON.stringify(j,null,2));' "$STATE" "$slug" "$terminal" "$space" "$spec" "$visible" "$sandboxed" "$tab" "$space_slug")"
 
 	# One JSON line, read by callers as the proof a worker exists: the terminal and the
-	# space are named, and `hidden` says which of the two paths made it.
-	if [ "$visible" = 1 ]; then
+	# space are named, and `hidden` says which of the paths made it.
+	if [ -n "$space_slug" ]; then
+		printf '{"slug":"%s","terminal":"%s","tab":"%s","space":"%s","spec":"%s","hidden":false,"sandboxed":%s}\n' \
+			"$slug" "$terminal" "$tab" "$space_slug" "$spec" "$([ "$sandboxed" = 1 ] && echo true || echo false)"
+	elif [ "$visible" = 1 ]; then
 		printf '{"slug":"%s","terminal":"%s","space":"%s","spec":"%s","hidden":false,"sandboxed":%s}\n' \
 			"$slug" "$terminal" "$space" "$spec" "$([ "$sandboxed" = 1 ] && echo true || echo false)"
 	else
@@ -294,7 +341,7 @@ cmd_close() {
 		const e=j[process.argv[2]]||{};process.stdout.write(e.pane||"");' "$STATE" "$target" 2>/dev/null || true)
 
 	# If the worker is on screen in a borrowed pane, put the pane back first.
-	local borrowed space
+	local borrowed space tab
 	borrowed=${resolved#* }
 	if [ -n "$borrowed" ]; then herdr-app do terminal.show --pane "$borrowed" >/dev/null 2>&1 || true; fi
 	if [ "$want_pane" = 1 ] && [ -n "$pane" ]; then herdr-app do pane.close --pane "$pane" >/dev/null 2>&1 || true; fi
@@ -309,8 +356,25 @@ cmd_close() {
 	space=$(node -e '
 		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
 		const e=j[process.argv[2]]||{};process.stdout.write(e.space||"");' "$STATE" "$target" 2>/dev/null || true)
+	tab=$(node -e '
+		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+		const e=j[process.argv[2]]||{};process.stdout.write(e.tab||"");' "$STATE" "$target" 2>/dev/null || true)
 	local space_closed=1 space_note="" close_out=""
-	if [ -n "$space" ]; then
+	if [ -n "$tab" ]; then
+		# A tab-kind worker closes its tab and never the space: the space is the person's,
+		# and a finished worker must not take the desk it was working on with it.
+		if ! command -v herdr-app >/dev/null 2>&1; then
+			space_closed=0
+			space_note="tab $tab is still open: herdr-app is not in PATH here, so close it on the host with '$PROG close $target'"
+		elif close_out=$(herdr-app do tab.close --id "$tab" --confirmed true 2>&1); then
+			:
+		elif printf '%s' "$close_out" | grep -Fq "no tab" && printf '%s' "$close_out" | grep -Fq "$tab"; then
+			: # already gone: the same answer space.close gives for a space that is not there
+		else
+			space_closed=0
+			space_note="tab $tab is still open: tab.close said '$close_out'"
+		fi
+	elif [ -n "$space" ]; then
 		if ! command -v herdr-app >/dev/null 2>&1; then
 			space_closed=0
 			space_note="space $space is still open: herdr-app is not in PATH here, so close it on the host with '$PROG close $target'"

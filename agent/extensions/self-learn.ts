@@ -66,6 +66,13 @@ const SESSIONS = join(DIR, "sessions");
 const SPEC = join(REPO, "agent", "prompts", "learn.md");
 const PANE_SCRIPT = join(REPO, "scripts", "agent-pane.sh");
 /**
+ * The durable spaces: one record per space at `state/spaces/<slug>/space.json`, the file
+ * `bin/space` writes and `bin/delegate` reads. A learner is a tab in the space whose
+ * project the compacted session was working in, so this extension reads the records here
+ * rather than guessing from the repo it happens to run in.
+ */
+const spaceRoot = (): string => join(process.env.PI_SPACE_ROOT ?? REPO, "state", "spaces");
+/**
  * The hand-off. The learner runs sandboxed and has no `gh` login and no git
  * credential, so it cannot publish and neither can a bare `pi` it starts. This
  * script spawns a big-boss-pi agent space on the host, where the key lives, and
@@ -552,6 +559,14 @@ export interface SpawnRequest {
 	/** When the request was written: the learner's `at`, and what ages it out. */
 	at: number;
 	judged: string[];
+	/**
+	 * The project the learning is about, already resolved by the writing session.
+	 *
+	 * The host resolves the space from this path again (a record can change under it), so
+	 * the request names a project and never a kind: which kind a space is, is the space's
+	 * to say, and the request is only a courier.
+	 */
+	cwd: string;
 }
 
 export type SpawnParse = { ok: true; request: SpawnRequest } | { ok: false; why: string; stale?: true };
@@ -594,7 +609,16 @@ export function parseSpawnRequest(raw: string, options: { now: number; ttlMs?: n
 	const age = options.now - at;
 	if (age > ttl) return { ok: false, stale: true, why: `request is ${Math.round(age / 60000)} min old (limit ${Math.round(ttl / 60000)})` };
 	const judged = Array.isArray(object.judged) ? object.judged.filter((entry): entry is string => typeof entry === "string") : [];
-	return { ok: true, request: { slug, trigger, queue, proposal, reason, evidence, at, judged } };
+	// Absolute, because an unresolved path is a cwd this side cannot match a space against:
+	// a relative one would be read against the host session's own directory, which is not
+	// the directory the compaction happened in.
+	// Stryker disable next-line StringLiteral: equivalent. If `object.cwd` is not a string the
+	// fallback is not a path either way, so `startsWith("/")` refuses it, and the refusal
+	// quotes `object.cwd` and never this default: "" and any replacement return the same
+	// object, byte for byte.
+	const cwd = typeof object.cwd === "string" ? object.cwd.trim() : "";
+	if (!cwd.startsWith("/")) return { ok: false, why: `cwd is not an absolute path: ${JSON.stringify(object.cwd ?? null)}` };
+	return { ok: true, request: { slug, trigger, queue, proposal, reason, evidence, at, judged, cwd } };
 }
 
 /** Launch requests waiting for the host, by name. A `.claimed` file is nobody's. */
@@ -1743,17 +1767,177 @@ export async function readTranscript(path: string): Promise<string | null> {
 	}
 }
 
-/** How the learner is started. There is one way: a visible, sandboxed space. */
+/**
+ * The two kinds of learning, and the space decides which one it is.
+ *
+ * `harness` is this pi checkout: the learner may edit the harness and publish its own
+ * branch. `project` is every other space: its product is that project's `AGENTS.md`,
+ * sandboxed like every other worker. Nothing about the session that compacted decides it.
+ */
+export type SpaceKind = "harness" | "project";
+
+/** One `state/spaces/<slug>/space.json`, as much of it as teaching needs. */
+export interface SpaceRecord {
+	/** The folder name under `state/spaces/`: the slug everything else names. */
+	slug: string;
+	/** The project the space is about, absolute, as `bin/space new` recorded it. */
+	project: string;
+	/** `harness` or `project`. A record written before the field existed reads as `project`. */
+	kind?: string;
+}
+
+/** The space a compaction teaches, and what kind of teaching that is. */
+export interface LearnerSpace {
+	slug: string;
+	kind: SpaceKind;
+	project: string;
+}
+
+/** What a harness learner may touch: the harness itself, and nothing else. */
+export const HARNESS_PATHS = [
+	"bin/",
+	"agent/",
+	"herdr-mods/",
+	"git-hooks/",
+	"scripts/",
+	"docs/",
+	"README.md",
+	"install.mjs",
+] as const;
+
+/** What a project learner may write: its rules block, and nothing else. */
+export const PROJECT_PATHS = ["AGENTS.md"] as const;
+
+/** The half-sentence a harness refusal ends on, so both faces of the rule say one thing. */
+export const OUTSIDE_HARNESS = "that belongs to a project space";
+
+const trimSlashes = (path: string): string => (path.length > 1 ? path.replace(/\/+$/, "") : path);
+
+/**
+ * The space that owns `cwd`: the record whose `project` is `cwd` or its nearest ancestor,
+ * longest match first. Pure, so the boundary is testable without a filesystem, and it
+ * answers `null` instead of guessing — a cwd no space claims teaches nothing at all.
+ */
+export function learnerSpace(records: readonly SpaceRecord[], cwd: string): LearnerSpace | null {
+	// Stryker disable next-line StringLiteral: equivalent. `cwd` is typed string, so the default
+	// only runs for a caller that passes undefined or null; the replacement text is a non-empty
+	// string, and nothing in a record list matches it — `readSpaceRecords` only yields absolute
+	// projects, a record without a project is skipped below, and a `/` project requires a leading
+	// slash the replacement lacks. Every such caller reaches the same `null` either way.
+	const here = trimSlashes(String(cwd ?? "").trim());
+	// Stryker disable next-line ConditionalExpression: equivalent. An empty `here` matches no
+	// record — a project that trims to empty is skipped two lines below — so falling through
+	// this guard returns null at the end of the loop anyway.
+	if (!here) return null;
+	let best: LearnerSpace | null = null;
+	let bestLength = -1;
+	for (const record of records) {
+		// Stryker disable next-line StringLiteral: unreachable. `readSpaceRecords` never returns
+		// a record without a project, and a projectless record in a hand-built array is skipped
+		// by the `!project` guard below with either text: the replacement is not a path.
+		const project = trimSlashes(String(record?.project ?? "").trim());
+		if (!project) continue;
+		if (here !== project && !here.startsWith(project === "/" ? "/" : `${project}/`)) continue;
+		// Two spaces on one folder cannot both be right: the longer project path wins, and a
+		// tie keeps the first record, which is the order `state/spaces` lists them in.
+		if (project.length <= bestLength) continue;
+		bestLength = project.length;
+		best = {
+			// Stryker disable next-line OptionalChaining,StringLiteral: unreachable. Every record
+			// from this machine has a slug (the directory name) and a project, so a record that
+			// reached this line is non-null and its slug is never missing.
+			slug: String(record?.slug ?? ""),
+			// Stryker disable next-line OptionalChaining: unreachable, for the same reason as the
+			// slug above: a record with no project is skipped before this line.
+			kind: record?.kind === "harness" ? "harness" : "project",
+			project,
+		};
+	}
+	return best;
+}
+
+/**
+ * The paths a learner of this kind may touch, as one line for the queue file.
+ *
+ * The prompt says the same rule in words (`agent/prompts/learn.md`); this is the same rule
+ * somewhere a test can read it, so the two cannot drift apart silently.
+ */
+export function learnerPaths(kind: SpaceKind): string[] {
+	return kind === "harness" ? [...HARNESS_PATHS] : [...PROJECT_PATHS];
+}
+
+/**
+ * May a learner of this kind write that path? `null` is yes, and a sentence is the refusal.
+ *
+ * A project learner outside `AGENTS.md` is told whose file it is instead of being told no,
+ * because the work it wants belongs in the project's own space.
+ */
+export function learnerPathRefusal(kind: SpaceKind, path: string): string | null {
+	// Stryker disable next-line Regex: equivalent. Matching the first `./` anywhere instead of
+	// at the front only differs when one sits mid-path, and stripping it there leaves the text
+	// before it in place — which is neither `AGENTS.md` nor a `bin/` prefix, so both the
+	// anchored and the unanchored rule refuse the same paths.
+	const clean = String(path ?? "").trim().replace(/^\.\//, "");
+	if (!clean) return "no path is not a change";
+	for (const allowed of learnerPaths(kind)) {
+		if (allowed.endsWith("/") ? clean.startsWith(allowed) : clean === allowed) return null;
+	}
+	return kind === "harness"
+		? `${clean} is outside the harness — ${OUTSIDE_HARNESS}`
+		: `${clean} is not this project's rules file — a project learner writes AGENTS.md and nothing else`;
+}
+
+/** Every space record on this machine; a broken or projectless record is skipped. */
+export async function readSpaceRecords(root: string = spaceRoot()): Promise<SpaceRecord[]> {
+	let entries;
+	try {
+		entries = await readdir(root, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	const records: SpaceRecord[] = [];
+	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+		if (!entry.isDirectory()) continue;
+		let raw: string;
+		// Stryker disable BlockStatement: equivalent. With the `continue` gone, `raw` is
+		// undefined and `JSON.parse(undefined)` throws into the parse catch below, which skips
+		// the same record for the same reason. (A directive inside the `try` is not seen: it
+		// hangs off the try statement, so the region starts above it.)
+		try {
+			// Stryker disable next-line StringLiteral: equivalent. An empty encoding is "no
+			// encoding" to node, which returns a Buffer, and `JSON.parse` coerces that Buffer
+			// with the same text: measured, `JSON.parse(readFileSync(p, ""))` is the object.
+			raw = await readFile(join(root, entry.name, "space.json"), "utf8");
+		} catch {
+			continue;
+		}
+		let value: Record<string, unknown>;
+		// Stryker restore BlockStatement
+		try {
+			value = JSON.parse(raw) as Record<string, unknown>;
+		} catch {
+			continue;
+		}
+		const project = typeof value.project === "string" ? value.project.trim() : "";
+		if (!project) continue;
+		records.push({ slug: entry.name, project, kind: typeof value.kind === "string" ? value.kind : undefined });
+	}
+	return records;
+}
+
+/** How the learner is started. There is one way: a tab in the space that asked for it. */
 export interface Launcher {
 	argv: string[];
-	/** Always "pane": a Herdr space the person can see, watch and close. */
+	/** Always "pane": a Herdr tab in the space's agents pane, which the person can watch and close. */
 	kind: "pane";
 	/**
-	 * Where the learner starts. Always the repo: the queue directory made the one
-	 * learner that ever ran work in `~/.pi/agent/proposals/queue` and never reach
-	 * the code it was meant to judge.
+	 * Where the learner starts: the space's project. Not the session's cwd (a session in a
+	 * subfolder still teaches the project) and not the queue directory, which made the one
+	 * learner that ever ran work somewhere the code it judged was not.
 	 */
 	cwd: string;
+	/** The space the learner is a tab in, and which kind of teaching it does. */
+	space?: LearnerSpace;
 	/**
 	 * What this machine is missing, when it cannot start a visible learner. Set
 	 * instead of an argv: the caller records it as a launch failure. A hidden or
@@ -1785,44 +1969,44 @@ export function sandboxBlocksSpawn(env: NodeJS.ProcessEnv = process.env): string
 }
 
 /**
- * A visible, sandboxed learner, or a named reason why this machine cannot start
- * one.
+ * The learner's launch, or a named reason why this machine cannot start one.
  *
- * Visible: `agent-pane.sh spawn … --visible` makes a real Herdr space and tab, so
- * the learner is in the agents pane, `agent-pane.sh list` shows it, `show`
- * borrows a pane to watch it and `close` ends it. Nothing about it is hidden.
- * Sandboxed: the host session creates the space (a sandbox cannot, herdr-app is
- * outside every mount), and the pi inside it runs through `scripts/pisandbox`
- * with `--rw` on the repo it must read and write.
+ * A tab, not a space: `agent-pane.sh spawn … --space <slug>` calls `tab.new` inside the
+ * space that owns the project, so the learner sits beside the work it is learning from and
+ * `space.new` is never reached from here. Sandboxed when the space is a project (the wall
+ * every worker runs behind); bare when it is the harness, because a harness learner is the
+ * one worker that may push its own branch and open its own PR.
  *
- * `cwd` is passed explicitly (`--cwd`) because agent-pane.sh otherwise spawns in
- * the spec's directory — the queue, not the repo.
+ * `cwd` is the space's project, passed explicitly (`--cwd`) because agent-pane.sh otherwise
+ * spawns in the spec's directory — the queue, not the project.
  */
 export function pickLauncher(
 	has: (cmd: string) => boolean,
 	slug: string,
 	specPath: string,
-	exists: (path: string) => boolean = existsSync,
-	cwd: string = REPO,
+	exists: (path: string) => boolean,
+	space: LearnerSpace,
 	env: Record<string, string | undefined> = {},
 ): Launcher {
+	const cwd = space.project;
 	const missing = !has("hc")
-		? "herdr (hc) is not on PATH, so no space can be made — a learner you cannot see is not started here"
+		? "herdr (hc) is not on PATH, so no tab can be made — a learner you cannot see is not started here"
 		: !has("herdr-app")
-			? "herdr-app is not on PATH, so no visible space can be made — a learner you cannot see is not started here"
+			? "herdr-app is not on PATH, so no tab can be made — a learner you cannot see is not started here"
 			: !exists(PANE_SCRIPT)
-				? `${PANE_SCRIPT} is missing, so no visible space can be made`
+				? `${PANE_SCRIPT} is missing, so no tab can be made`
 				: undefined;
-	if (missing) return { argv: [], kind: "pane", cwd, missing };
-	const argv = [PANE_SCRIPT, "spawn", slug, specPath, "--cwd", cwd, "--visible", "--sandbox"];
-	// herdr starts the space from the app's environment, not from this process's, so
+	if (missing) return { argv: [], kind: "pane", cwd, space, missing };
+	const argv = [PANE_SCRIPT, "spawn", slug, specPath, "--cwd", cwd, "--space", space.slug];
+	if (space.kind === "project") argv.push("--sandbox");
+	// herdr starts the tab from the app's environment, not from this process's, so
 	// the markers are handed over explicitly. Without PI_SELF_LEARN the learner would
 	// be free to start a learner of its own.
 	for (const key of LEARNER_ENV_KEYS) {
 		const value = env[key] ?? process.env[key];
 		if (value) argv.push("--env", `${key}=${value}`);
 	}
-	return { argv, kind: "pane", cwd };
+	return { argv, kind: "pane", cwd, space };
 }
 
 /** What a launch attempt actually produced. `ok: false` is the interesting case. */
@@ -2547,9 +2731,9 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 	};
 
 	/**
-	 * Start the learner in its own visible space, prove it took the turn, and log the
-	 * launcher that really ran. Runs after `learn()` has returned: agent-pane.sh
-	 * waits up to 40 s for pi's banner, the turn takes as long again, and the
+	 * Start the learner as a tab in the space that owns the project, prove it took the turn,
+	 * and log the launcher that really ran. Runs after `learn()` has returned:
+	 * agent-pane.sh waits up to 40 s for pi's banner, the turn takes as long again, and the
 	 * session that just compacted must not.
 	 *
 	 * The old check asked whether a space existed. Six of seven launches on
@@ -2563,6 +2747,8 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		slug: string;
 		queuePath: string;
 		proposalPath: string;
+		/** The space this learner is a tab in: the project and the kind of teaching. */
+		space: LearnerSpace;
 		/** Why this learner, and the deaths the reason named: not the verdict, which
 		 * the caller has already taken. */
 		decision: { reason: string; judged?: string[] };
@@ -2621,7 +2807,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		// person cannot see is one they cannot stop, and a detached `pi -p` looked
 		// like a sub-agent of this session for seven launches in a row.
 		let ran = await attempt(
-			pickLauncher(has, plan.slug, plan.queuePath, fileExists, REPO, {
+			pickLauncher(has, plan.slug, plan.queuePath, fileExists, plan.space, {
 				PI_SELF_LEARN: env.PI_SELF_LEARN,
 				PI_SELF_LEARN_SLUG: env.PI_SELF_LEARN_SLUG,
 				PI_SELF_LEARN_PROPOSAL: env.PI_SELF_LEARN_PROPOSAL,
@@ -2686,10 +2872,17 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			judged: plan.decision.judged ?? [],
 			/** How the turn was confirmed: a session file or the pane's screen. */
 			confirmed: ran.turn?.source ?? "unknown",
+			/** The space this learner is a tab in, and the kind of teaching it did. */
+			space: plan.space.slug,
+			spaceKind: plan.space.kind,
 			/** The learner ran through scripts/pisandbox, not as the host's own process. */
-			sandboxed: true,
+			sandboxed: plan.space.kind === "project",
 		});
-		notify(plan.ctx, `learner started in a visible sandboxed space (${ran.launcher.kind}): ${plan.decision.reason}`, "info");
+		notify(
+			plan.ctx,
+			`learner started as a tab in space ${plan.space.slug} (${plan.space.kind}): ${plan.decision.reason}`,
+			"info",
+		);
 
 		// A confirmed turn is not a finished learner: watch for the proposal, and
 		// write a `died` row when the process is gone and the file never appears.
@@ -2799,6 +2992,10 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			lastSpawnAnywhere(),
 			externalEvidence(at, ctx, newestProposal),
 		]);
+		// Stryker disable next-line MethodExpression,ConditionalExpression: equivalent. Dropping
+		// the filter leaves `null` in the list and `Math.max` reads it as 0, so a machine with no
+		// learner on it gives 0 where this gives null; the gate only asks whether `now` is within
+		// ten minutes of it, and every real `now` is decades past 1970 — `now - 0` is not.
 		const candidates = [lastSpawnAt, machineLast].filter((value): value is number => typeof value === "number");
 		const lastAnywhere = candidates.length ? Math.max(...candidates) : null;
 		const decision = decideLearner({
@@ -2811,11 +3008,24 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		});
 		if (!decision.spawn) return decision;
 
+		// Which space teaches this compaction is the space's to say, by cwd, never the
+		// session's: a compaction in a subfolder still teaches the project it sits in, and a
+		// cwd no space claims teaches nothing at all. `null` is said out loud and stops here,
+		// with no queue file behind it — a spec nothing will read is the garbage this avoids.
+		const sessionCwd = typeof ctx?.cwd === "string" && ctx.cwd.trim() ? ctx.cwd.trim() : process.cwd();
+		const space = learnerSpace(await readSpaceRecords(), sessionCwd);
+		if (!space) {
+			const line = `no space owns ${sessionCwd}, so this compaction teaches nothing`;
+			notify(ctx, line, "info");
+			await record({ ts: new Date(at).toISOString(), kind: "spawn-skipped", reason: line, stderr: line });
+			return { spawn: false, reason: line };
+		}
+
 		const stamp = runStamp(at);
 		const slug = `learn-${stamp.slice(11, 16)}`;
 		const { queue: queuePath, proposal: proposalPath } = runPaths(at);
 		await mkdir(QUEUE_DIR, { recursive: true });
-		const evidence = evidenceMarkdown({ trigger, decision, errors, notes, at, proposalPath, slug, external });
+		const evidence = evidenceMarkdown({ trigger, decision, errors, notes, at, proposalPath, slug, external, space });
 
 		// Reserve the slot before the launch is verified: two compactions a second
 		// apart must not both spawn while the first is still being checked.
@@ -2844,6 +3054,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 						evidence,
 						ts: new Date(at).toISOString(),
 						judged: decision.judged ?? [],
+						cwd: space.project,
 					})}\n`,
 					"utf8",
 				);
@@ -2863,7 +3074,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		}
 
 		await writeFile(queuePath, evidence, "utf8");
-		void launchLearner({ at, trigger, decision, slug, queuePath, proposalPath, ctx }).catch(() => {
+		void launchLearner({ at, trigger, decision, slug, queuePath, proposalPath, space, ctx }).catch(() => {
 			// A launch that fails in a way not foreseen above is still not allowed to
 			// reach the host session.
 		});
@@ -2978,6 +3189,21 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 					stderr: clipDetail(`the evidence file could not be written at ${request.queue}`),
 				});
 			} else {
+				// Which kind of learning this is, is the space's answer and not the request's:
+				// the request carries the project and this side reads the record. A project no
+				// space claims any more is refused in words, not launched into a guess.
+				const space = learnerSpace(await readSpaceRecords(), request.cwd);
+				if (!space) {
+					await record({
+						ts: new Date().toISOString(),
+						kind: "spawn-refused",
+						slug: request.slug,
+						request: file,
+						status: null,
+						stderr: clipDetail(`no space owns ${request.cwd}, so this compaction teaches nothing`),
+					});
+					return;
+				}
 				void launchLearner({
 					at: request.at,
 					trigger: request.trigger,
@@ -2985,6 +3211,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 					slug: request.slug,
 					queuePath: request.queue,
 					proposalPath: request.proposal,
+					space,
 					ctx,
 				}).catch(() => {
 					// A launch that fails is recorded by launchLearner itself.
@@ -3049,14 +3276,21 @@ function evidenceMarkdown(input: {
 	proposalPath: string;
 	slug: string;
 	external: ExternalEvidence;
+	/** The space that owns the compacted session's project, and the kind it teaches. */
+	space: LearnerSpace;
 }): string {
-	const { trigger, decision, errors, notes, at, proposalPath, slug, external } = input;
+	const { trigger, decision, errors, notes, at, proposalPath, slug, external, space } = input;
 	const lines: string[] = [
 		`# Self-learn evidence ${new Date(at).toISOString()}`,
 		"",
 		`Trigger: ${trigger}. Gate: ${decision.reason}.`,
 		`Write your proposal to: \`${proposalPath}\``,
 		`Spec: \`${SPEC}\`.`,
+		// Which kind of learning this is, comes from the space and not from the session:
+		// the same compaction in the same folder teaches the harness in a harness space
+		// and the project's rules in a project space. The learner reads it here.
+		`Space: ${space.slug} (\`${space.project}\`), kind: ${space.kind}. Your cwd is \`${space.project}\`.`,
+		`Paths you may touch: ${learnerPaths(space.kind).join(", ")} — anything else is refused.`,
 		"",
 		"## Failed tool calls since the last compaction",
 		"",
