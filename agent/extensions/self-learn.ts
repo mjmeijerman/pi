@@ -470,6 +470,18 @@ export type PublishParse = { ok: true; request: PublishRequest } | { ok: false; 
 const SLUG_SHAPE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 /** Read one queue file's JSON, or say why it is not a publish request. */
+/**
+ * The exit status a launcher gave us, or null when it is not a status at all.
+ *
+ * Only a number is a verdict. `true`, `"1"` and a crash object are all "we cannot
+ * read this", and none of them is the 0 that means "finished and wrote nothing";
+ * reading them as an exit code would turn a launcher that died on its way into a
+ * learner that finished, and its tab would be closed as a success.
+ */
+export function exitStatusOf(value: unknown): number | null {
+	return typeof value === "number" ? value : null;
+}
+
 export function parsePublishRequest(raw: string): PublishParse {
 	let value: unknown;
 	try {
@@ -2450,6 +2462,102 @@ function closeSpace(slug: string): Promise<void> {
 	});
 }
 
+/** Every way the outcome watch can end. */
+export type LearnerOutcome = "proposal" | "died" | "nothing" | "unknown";
+
+/** What the host does about the learner's tab when one outcome is reached. */
+export interface OutcomePolicy {
+	/** Await the publish hand-off first: the proposal asked for a branch. */
+	wait: boolean;
+	/** Close the learner's tab. False only while the learner may still be working. */
+	close: boolean;
+}
+
+/**
+ * One table, so no outcome can skip the close by falling through an `if`.
+ *
+ * `proposal` waits for the publish window and then closes (the close a sandboxed
+ * learner cannot do); `died` and `nothing` are finished and close at once;
+ * `unknown` is a learner that may still be working — its tab is the proof of
+ * life, and closing it here would kill the work. A close that lived in one branch
+ * of the outcome is what left tabs behind: an outcome that was not a proposal
+ * walked past it and the person closed their tab by hand days later, which is why
+ * the table is the invariant and not three explicit branches.
+ */
+export const OUTCOME_POLICY: Record<LearnerOutcome, OutcomePolicy> = {
+	proposal: { wait: true, close: true },
+	died: { wait: false, close: true },
+	nothing: { wait: false, close: true },
+	unknown: { wait: false, close: false },
+};
+
+export interface FinishOutcomeDeps {
+	slug: string;
+	launcher: string;
+	queue: string;
+	proposal: string;
+	/** The launch time, in ms: elapsed is measured from here. */
+	at: number;
+	/** Close the learner's tab on the host. Never the sandbox's own close. */
+	close: (slug: string) => Promise<void> | void;
+	/** The publish hand-off, awaited before the close when the outcome wants it. */
+	wait?: () => Promise<unknown>;
+	/** Append the row that says what happened to the tab. */
+	record: (row: Record<string, unknown>) => Promise<void> | void;
+}
+
+/**
+ * Close the tab a finished learner no longer needs, and say so in the run log.
+ *
+ * The host closes what the host made. `agent/prompts/learn.md` asks the learner
+ * never to close its own tab, and a sandboxed learner could not anyway: herdr-app
+ * is outside every sandbox mount, so `agent-pane.sh close` keeps the entry and
+ * reports `space_closed:false` — the tab the person still finds open after the
+ * run. This is the one path every finished outcome takes, and it reads
+ * OUTCOME_POLICY instead of asking each branch to remember, so an outcome added
+ * later inherits the close rather than silently skipping it.
+ *
+ * The row is written whatever the hand-off did, and it carries `closed`: a tab
+ * that was left behind is then a fact in `runs.jsonl` instead of a memory. A
+ * failing hand-off is not swallowed — it goes into the row and is rethrown, so
+ * the caller can tell the person without the session dying.
+ */
+export async function finishOutcome(outcome: LearnerOutcome, deps: FinishOutcomeDeps): Promise<void> {
+	const policy = OUTCOME_POLICY[outcome];
+	// A learner that is still working is not a finished one: its space is its proof
+	// of life, and closing it here would kill the work.
+	if (!policy.close) return;
+	let failed: unknown = null;
+	let closed = false;
+	try {
+		// The proposal is the learner's product; the publish request is the next write
+		// it makes. Waiting for that here is what closes the loop the sandbox broke: the
+		// branch reaches a PR without the learner needing herdr-app or a git credential.
+		if (policy.wait) await deps.wait?.();
+	} catch (error) {
+		failed = error;
+	}
+	try {
+		await deps.close(deps.slug);
+		closed = true;
+	} finally {
+		await deps.record({
+			ts: new Date(deps.at).toISOString(),
+			kind: "outcome",
+			slug: deps.slug,
+			launcher: deps.launcher,
+			queue: deps.queue,
+			proposal: deps.proposal,
+			outcome,
+			/** Did the host close the learner's tab? `false` is the tab the person still sees. */
+			closed,
+			elapsedMs: Date.now() - deps.at,
+			...(failed === null ? {} : { publishError: clipDetail(String(failed)) }),
+		});
+	}
+	if (failed !== null) throw failed;
+}
+
 /**
  * Watch a confirmed learner until it either writes its proposal or stops.
  *
@@ -2472,7 +2580,7 @@ export async function watchOutcome(input: {
 	proposal: string;
 	/** Launch time, in ms: elapsed is measured from here. */
 	at: number;
-	/** Resolves when the launched process exits; null when the launcher gave none. */
+	/** Resolves with the launched process's exit status; null when the launcher gave none. */
 	exited?: Promise<unknown> | null;
 	/** The learner's session file, when the turn was confirmed by one. */
 	session?: string | null;
@@ -2481,21 +2589,22 @@ export async function watchOutcome(input: {
 	pollMs?: number;
 	timeoutMs?: number;
 	idleMs?: number;
-}): Promise<"proposal" | "died" | "unknown"> {
+}): Promise<LearnerOutcome> {
 	const pollMs = input.pollMs ?? OUTCOME_POLL_MS;
 	const timeoutMs = input.timeoutMs ?? OUTCOME_TIMEOUT_MS;
 	const idleMs = input.idleMs ?? OUTCOME_IDLE_MS;
 	const deadline = Date.now() + timeoutMs;
-	let exited = false;
+	/** null while the learner may still be running; its exit status once it is gone. */
+	// Did the launcher stop? A visible pane never exits, so this stays false there and the
+	// session file is the only witness; a launcher we hold an exit for answers directly.
+	let left = false;
+	let exitStatus: number | null = null;
 	if (input.exited) {
-		void input.exited.then(
-			() => {
-				exited = true;
-			},
-			() => {
-				exited = true;
-			},
-		);
+		const stopped = (value: unknown) => {
+			left = true;
+			exitStatus = exitStatusOf(value);
+		};
+		void input.exited.then(stopped, () => stopped(null));
 	}
 	let lastMtime = 0;
 	let lastChange = Date.now();
@@ -2514,10 +2623,13 @@ export async function watchOutcome(input: {
 	const sleep = () => new Promise<void>((resolve) => setTimeout(resolve, pollMs));
 	for (;;) {
 		if (input.exists(input.proposal)) return "proposal";
-		if (exited) {
+		if (left) {
 			// A learner can write its file in the same breath as it exits: look once more.
 			await sleep();
-			return input.exists(input.proposal) ? "proposal" : died();
+			if (input.exists(input.proposal)) return "proposal";
+			// Exit 0 is a learner that finished and wrote nothing; any other status is a
+			// learner that stopped on its way. Both are finished, and both close its tab.
+			return exitStatus === 0 ? "nothing" : died();
 		}
 		if (input.session) {
 			const mtime = await stat(input.session)
@@ -2902,34 +3014,29 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 			timeoutMs: deps.outcomeTimeoutMs,
 			idleMs: deps.outcomeIdleMs,
 		})
-			.then(async (outcome) => {
-				// A learner that is still working is not a finished one: its space is its
-				// proof of life, and closing it here would kill the work.
-				if (outcome === "unknown") return;
-				try {
-					if (outcome !== "proposal") return;
-					// The proposal is the learner's product; the publish request is the next
-					// write it makes. Waiting for that here is what closes the loop the
-					// sandbox broke: the branch reaches a PR without the learner needing
-					// herdr-app or a git credential.
-					await watchPublish({
-						record,
-						run: deps.publishRun,
-						pollMs: deps.publishPollMs,
-						windowMs: deps.publishWindowMs,
-					});
-				} finally {
-					// The host closes what the host made. `agent/prompts/learn.md` asks the
-					// learner to close its own space, and a sandboxed learner cannot: herdr-app
-					// is outside every sandbox mount, so `agent-pane.sh close` keeps the entry and
-					// reports `space_closed:false` — the tab the person still sees after the run.
-					// Closing here, once the learner has written everything it will write, is the
-					// only close that reaches the host.
-					await close(plan.slug);
-				}
-			})
-			.catch(() => {
-				// The watch is bookkeeping; it may never reach the host session.
+			.then((outcome) =>
+				finishOutcome(outcome, {
+					slug: plan.slug,
+					launcher: ran.launcher.kind,
+					queue: plan.queuePath,
+					proposal: plan.proposalPath,
+					at: plan.at,
+					close,
+					record,
+					wait: () =>
+						watchPublish({
+							record,
+							run: deps.publishRun,
+							pollMs: deps.publishPollMs,
+							windowMs: deps.publishWindowMs,
+						}),
+				}),
+			)
+			.catch((error: unknown) => {
+				// The watch is bookkeeping; it may never reach the host session. A failed
+				// hand-off is not swallowed on the way out: `finishOutcome` writes it into the
+				// outcome row and rethrows, and this is where the person hears about it.
+				notify(plan.ctx, `learner ${plan.slug}: the publish hand-off failed: ${clipDetail(String(error))}`, "warning");
 			});
 	}
 
@@ -3431,13 +3538,12 @@ function evidenceMarkdown(input: {
 		"   no PR) or `unverified` (gh could not be asked). Do not run the script yourself,",
 		"   do not push, and do not wait for the outcome: your branch and sha are in the",
 		"   proposal, and the row is on the host.",
-		"4. Close your own space, whatever the outcome:",
+		"4. Close nothing. The host closes your tab when the run ends — a proposal, a",
+		"   death, or nothing written — so write everything you will write before you",
+		"   stop. Never run the pane script's close from here: it closes the space, not",
+		"   the tab.",
 		"",
-		"```sh",
-		`${PANE_SCRIPT} close ${slug} || true`,
-		"```",
-		"",
-		"A \"nothing\" proposal skips steps 1-3 and still closes its space.",
+		"A \"nothing\" proposal skips steps 1-3 and stops there, with the proposal file.",
 	);
 	return `${redact(lines.join("\n"))}\n`;
 }

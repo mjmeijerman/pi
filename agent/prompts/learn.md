@@ -136,9 +136,11 @@ do not guess.
    If you wrote the wrong thing in the file, the broker records a `publish:
    "refused"` row with the reason and moves on. It never publishes trunk, and it
    never publishes a branch that is not `learn/<slug>`.
-4. **Close nothing.** Your space is the person's: the host closes the tab you
-   were in when you exit, and a sandboxed learner cannot reach `herdr-app` anyway.
-   Running `agent-pane.sh close` from here closes the space — never do that.
+4. **Close nothing.** Your space is the person's, and a sandboxed learner cannot
+   reach `herdr-app` anyway: running `agent-pane.sh close` from here closes the
+   space, never the tab. The host closes the tab you were in when the run ends —
+   a proposal, a death, or nothing written — so write everything you will write
+   before you stop.
 
 If your verdict is "nothing", skip 1-3 and stop.
 
