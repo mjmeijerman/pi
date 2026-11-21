@@ -40,6 +40,9 @@ let caseId = 0;
  *   "always"      — a PR exists before anything runs
  *   "none"        — gh answers, and there is no PR, ever
  *   "after"       — the PR appears once the pane script has run
+ *   "merged"      — only a MERGED PR for this head, from an earlier run of the same
+ *                   `learn/<slug>` name: gh answers it for `--state all`, nothing for
+ *                   `--state open`
  *   "unaskable"   — gh cannot answer (exit 4, "hosts.yml missing"), like the sandbox
  */
 function fixture(prState) {
@@ -69,11 +72,20 @@ function fixture(prState) {
 	writeFileSync(
 		gh,
 		`#!/usr/bin/env bash
-# stub gh: only "pr list --head BRANCH --state all --json ..." is expected.
+# stub gh: only "pr list --head BRANCH --state <state> --json ..." is expected.
+# What it answers for --state all is what GitHub keeps forever: a merged PR whose
+# head branch was this same name. Only --state open means "someone can review it".
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
 	if [ "${prState}" = "unaskable" ]; then
 		echo "You are not logged into any GitHub hosts. Run gh auth login (hosts.yml missing)" >&2
 		exit 4
+	fi
+	if [ "${prState}" = "merged" ]; then
+		case " $* " in
+			*" --state open "*) echo '[]' ;;
+			*) echo '[{"number":135,"url":"https://example.invalid/pull/135","state":"MERGED"}]' ;;
+		esac
+		exit 0
 	fi
 	if [ "${prState}" = "always" ] || [ -f "${marker}" ]; then
 		echo '[{"number":42,"url":"https://example.invalid/pull/42","state":"OPEN"}]'
@@ -185,6 +197,31 @@ test("--check exits 1 when gh answers and there is no PR", () => {
 	const r = run(f, ["test-slug", "--check"]);
 	assert.equal(r.status, 1);
 	assert.match(r.stdout, /no PR for learn\/test-slug/);
+});
+
+test("a merged PR from an earlier run of the same slug is not a PR for this branch", () => {
+	// `learn/<slug>` is `learn-<HH>-<MM>`, so 2026-11-18's learn-10-10 and 2026-11-21's
+	// are the same branch name, and `gh pr list --head … --state all` answers with the
+	// merged PR the earlier run left behind. A merged PR is nobody's to review: on
+	// 2026-11-21 10:19 the broker read PR #135 as "published" for commit a258e80, which
+	// `git ls-remote` says never reached the remote. The lesson died unlanded.
+	const f = fixture("merged");
+	const r = run(f, ["test-slug", "--check"]);
+	assert.equal(r.status, 1, "a merged PR is not a PR anyone can review");
+	assert.match(r.stdout, /no PR for learn\/test-slug/);
+	assert.doesNotMatch(r.stdout, /published/);
+});
+
+test("a publish that finds only that merged PR records no PR, instead of claiming a publish", () => {
+	const f = fixture("merged");
+	const proposal = join(f.dir, "agent", "proposals", "x.md");
+	writeFileSync(proposal, "# x\n\n**Verdict:** change\n**Risk tier:** High (`agent/extensions/`)\n");
+	const r = run(f, ["test-slug", "--proposal", proposal], { LEARN_PUBLISH_WAIT: "0" });
+	assert.equal(r.status, 1, "the branch is still unpublished, so the run failed");
+	assert.match(r.stderr, /FAIL/);
+	assert.doesNotMatch(r.stdout, /PR #135 exists for/, "a merged PR must not be reported as this branch's publication");
+	const entry = JSON.parse(readFileSync(f.log, "utf8").trim().split("\n").at(-1));
+	assert.equal(entry.pr, null, "no PR number: #135's head branch was another run's");
 });
 
 test("--check exits 2, not 1, when gh cannot be asked from here", () => {
