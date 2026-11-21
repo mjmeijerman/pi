@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # space — the durable project spaces, and the only command the UI calls.
 #
-#   bin/space new --name <slug> [--project PATH | --clone URL] [--kind harness|project] [--no-git] [--tab-name Boss]
+#   bin/space new --name <slug> [--project PATH | --clone URL] [--kind harness|project] [--no-git] [--tab-name Boss] [--argv JSON]
 #   bin/space list
 #   bin/space show <slug>
 #   bin/space forget <slug>
@@ -38,7 +38,9 @@ need() { command -v "$1" >/dev/null 2>&1 || die "$1 is not on PATH"; }
 
 usage() {
 	cat >&2 <<'EOF'
-usage: bin/space new --name <slug> [--project PATH | --clone URL] [--kind harness|project] [--no-git] [--tab-name Boss]
+usage: bin/space new --name <slug> [--project PATH | --clone URL] [--kind harness|project] [--no-git] [--tab-name Boss] [--argv JSON]
+       --argv is the Boss tab's command as a JSON array (default ["pi"]); it is opened with it
+       and the record keeps it, so the guard reopens the same command
        bin/space list
        bin/space show <slug>
        bin/space forget <slug>
@@ -51,7 +53,7 @@ json_field() {
 }
 
 cmd_new() {
-	local name="" project="" clone="" no_git=0 tabname="Boss" kind="project"
+	local name="" project="" clone="" no_git=0 tabname="Boss" kind="project" boss_argv=""
 	[ "$#" -ge 1 ] || usage
 	while [ "$#" -gt 0 ]; do
 		case $1 in
@@ -61,6 +63,7 @@ cmd_new() {
 		--kind) kind=${2:-}; shift 2 ;;
 		--no-git) no_git=1; shift ;;
 		--tab-name) tabname=${2:-Boss}; shift 2 ;;
+		--argv) boss_argv=${2:-}; shift 2 ;;
 		-h | --help) usage ;;
 		*) die "unknown option $1" ;;
 		esac
@@ -80,6 +83,18 @@ cmd_new() {
 
 	need node
 	need herdr-app
+	# The Boss tab's argv is opened and recorded, and the record is what the guard reopens the tab
+	# with after a reboot: a broken one is refused here, not written down and replayed later.
+	if [ -z "$boss_argv" ]; then
+		boss_argv='["pi"]'
+	else
+		boss_argv=$(node -e '
+			let a;
+			try { a = JSON.parse(process.argv[1]); } catch { process.exit(2); }
+			if (!Array.isArray(a) || !a.length || a.some((v) => typeof v !== "string" || !v)) process.exit(2);
+			process.stdout.write(JSON.stringify(a));
+		' "$boss_argv") || die "--argv takes a JSON array of strings, like --argv '[\"pi\"]' — got '$boss_argv'"
+	fi
 	# No `need hc`: `space new` opens the space through herdr-app and never talks to
 	# herdr-core itself. Demanding hc refused every offline test and every runner.
 
@@ -108,7 +123,7 @@ cmd_new() {
 
 	mkdir -p "$(space_specs "$name")" "$(space_reports "$name")"
 	local out space tab terminal
-	out=$(herdr-app do space.new --name "$name" --folder "$project" --tab "$tabname" 2>&1) ||
+	out=$(herdr-app do space.new --name "$name" --folder "$project" --tab "$tabname" --argv "$boss_argv" 2>&1) ||
 		die "space.new failed for $name: $out"
 	space=$(json_field space <<<"$out")
 	[ -n "$space" ] || space=$(json_field id <<<"$out")
@@ -116,7 +131,8 @@ cmd_new() {
 	terminal=$(json_field terminal <<<"$out")
 	[ -n "$space" ] || die "could not read the new space id from: $out"
 
-	NAME=$name PROJECT=$project GIT=$git REMOTE=$remote TAB=$tab TERMINAL=$terminal ID=$space KIND=$kind node -e '
+	NAME=$name PROJECT=$project GIT=$git REMOTE=$remote TAB=$tab TERMINAL=$terminal ID=$space KIND=$kind \
+		BOSS=$tabname BOSS_ARGV=$boss_argv node -e '
 		const fs = require("fs");
 		const rec = {
 			name: process.env.NAME,
@@ -128,6 +144,12 @@ cmd_new() {
 			git: process.env.GIT === "true",
 			remote: process.env.REMOTE || "",
 			created: new Date().toISOString(),
+			// The Boss tab by name and by the argv it was opened with. `uberboss_tab` below is the
+			// herdr id of that tab and nothing else: a reader that wants the name reads `boss`.
+			boss: process.env.BOSS || "Boss",
+			boss_argv: (() => {
+				try { const a = JSON.parse(process.env.BOSS_ARGV || "[]"); return Array.isArray(a) ? a : []; } catch { return []; }
+			})(),
 			uberboss_tab: process.env.TAB || "",
 			terminals: process.env.TERMINAL ? [process.env.TERMINAL] : [],
 		};
@@ -139,7 +161,7 @@ cmd_new() {
 			"$prog" "$name" "$project/AGENTS.md" "$SPACE_RULES_TEMPLATE" >&2
 	fi
 
-	say "space $name: $project ($( [ "$git" = true ] && echo git || echo no-git ), kind $kind), ${tabname} tab opened"
+	say "space $name: $project ($( [ "$git" = true ] && echo git || echo no-git ), kind $kind), ${tabname} tab opened with $boss_argv"
 	say "next: cd $project && bin/delegate spawn <worker> --cwd $project \"<task>\""
 }
 
@@ -182,7 +204,7 @@ cmd_show() {
 	node -e '
 		const fs=require("fs");
 		const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-		const order=["name","id","project","git","remote","created","uberboss_tab","terminals"];
+		const order=["name","id","project","git","remote","created","boss","boss_argv","uberboss_tab","terminals"];
 		for (const k of order) if (k in j) {
 			const v=j[k];
 			console.log(k+": "+(Array.isArray(v)?(v.length?v.join(", "):"(none)"):(v===true?"true":v===false?"false":(v||"-"))));
