@@ -60,7 +60,7 @@ def failed: ((.conclusion // "") == "FAILURE") or ((.state // "") == "FAILURE");
 # could not answer or its JSON did not parse: an unreadable PR is not a green one.
 read_rollup() {
 	local json out
-	json=$(gh pr view "$pr" --json headRefOid,statusCheckRollup 2>&1) || {
+	json=$("$gh_cmd" pr view "$pr" --json headRefOid,statusCheckRollup 2>&1) || {
 		printf 'gh could not read PR %s: %s\n' "$pr" "$(printf '%s' "$json" | tr '\n' ' ' | cut -c1-200)"
 		return 1
 	}
@@ -185,7 +185,8 @@ case $interval in '' | *[!0-9]* | 0) die "--interval takes a positive number of 
 case $max_wait in '' | *[!0-9]*) die "--max takes a number of seconds" ;; esac
 
 # A missing tool is a FAIL: a gate that passes because it could not look is worse than no gate.
-command -v gh >/dev/null 2>&1 || {
+gh_cmd=${PR_READY_GH:-gh}
+command -v "$gh_cmd" >/dev/null 2>&1 || {
 	printf 'pr %s: gh is not installed, so nothing here can be judged green\n' "$pr"
 	exit 1
 }
@@ -208,6 +209,14 @@ while :; do
 	}
 	if [ "$wait_for" != 1 ]; then
 		report "$last"
+		exit 1
+	fi
+	IFS=$'\t' read -r _head _total _pend _flr <<<"$last"
+	if [ "${_flr:-0}" -gt 0 ]; then
+		# Waiting is for checks still running. A FAILED check stays failed until someone pushes,
+		# so a loop that keeps polling here is a loop that never ends and never helps.
+		report "$last" || true
+		printf '  stopping: %d check(s) failed — waiting cannot turn a failure green, a new commit has to\n' "$_flr"
 		exit 1
 	fi
 	left=$((deadline - $(date +%s)))

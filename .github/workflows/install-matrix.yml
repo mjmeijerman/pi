@@ -115,11 +115,16 @@ jobs:
           PI_AGENT_DIR: ${{ runner.temp }}/home/.pi/agent
         run: |
           set -euo pipefail
+          # The baseline is read from the rules file the installer ships, never hardcoded: a rule
+          # added to agent/AGENTS.md turned this step red once, for the rule count alone.
+          before=$(grep -c '^- ' agent/AGENTS.md || true)
+          echo "rules in the shipped file: $before"
+          test "$before" -gt 0
           node setup.mjs -y --no-keys --no-apt --no-verify --rules=drop:1 >/dev/null
-          rules=$(grep -c '^- ' "$PI_AGENT_DIR/AGENTS.md")
+          rules=$(grep -c '^- ' "$PI_AGENT_DIR/AGENTS.md" || true)
           echo "rules after --rules=drop:1: $rules"
-          test "$rules" -eq 16
+          test "$rules" -eq $((before - 1))
           node setup.mjs -y --no-keys --no-apt --no-verify >/dev/null
-          rules=$(grep -c '^- ' "$PI_AGENT_DIR/AGENTS.md")
+          rules=$(grep -c '^- ' "$PI_AGENT_DIR/AGENTS.md" || true)
           echo "rules after a plain re-run: $rules"
-          test "$rules" -eq 16
+          test "$rules" -eq "$before"

@@ -219,10 +219,29 @@ out_has "gave up" "the refusal says the wait ran out"
 # ---------------------------------------------------------------------------
 case_start "gh missing is a FAIL, never a pass"
 OUT=$(env -i PATH="$WORK/nogh:/usr/bin:/bin" HOME="$WORK/home" TMPDIR="$WORK" \
-	bash "$PR_READY" 209 --sha "$FULL" 2>&1)
+	PR_READY_GH="$WORK/no-such-gh" bash "$PR_READY" 209 --sha "$FULL" 2>&1)
 RC=$?
 expect_rc "no gh, no green" nonzero
 out_has "gh is not installed" "the refusal names the missing tool"
+
+# ---------------------------------------------------------------------------
+case_start "a failed check stops the wait"
+# A gate that keeps polling after a failure never ends and never helps: --wait must return on the
+# first failed run, not after --max.
+write_rollup "$WORK/wait-fail.json" "$FULL" "$(repeat_spec run:COMPLETED:SUCCESS 11)" run:COMPLETED:IN_PROGRESS
+write_rollup "$WORK/wait-fail-2.json" "$FULL" "$(repeat_spec run:COMPLETED:SUCCESS 11)" run:COMPLETED:FAILURE
+start=$(date +%s)
+OUT=$(env -i PATH="$WORK/stub:/usr/bin:/bin" HOME="$WORK/home" TMPDIR="$WORK" \
+	GH_FIXTURE="$WORK/wait-fail-2.json" GH_COUNT="$WORK/count" \
+	bash "$PR_READY" 209 --sha "$FULL" --wait --interval 5 --max 60 2>&1)
+RC=$?
+rm -f "$WORK/count"
+end=$(date +%s)
+expect_rc "a failure ends the wait" nonzero
+out_has "waiting cannot turn a failure green" "it says why it stopped"
+elapsed=$((end - start))
+if [ "$elapsed" -lt 5 ]; then pass "it stopped before the next interval ($elapsed s)"
+else fail "it waited $elapsed s with a failure on the board"; fi
 
 # ---------------------------------------------------------------------------
 case_start "a PR gh cannot read is a FAIL, never a pass"
