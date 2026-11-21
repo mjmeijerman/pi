@@ -1,0 +1,983 @@
+#!/usr/bin/env bash
+# publish — one command from a finished worker to an open pull request.
+# bash is resolved at runtime, before anything else runs: see bin/shell-resolve.sh. It re-execs this
+# script under a bash it finds when the shell that started it is not bash (cmd.exe, PowerShell, or a
+# minimal Git Bash with only sh.exe), and says so when there is none. A copy a Windows shim starts is
+# already bash and needs no resolver beside it; a shell that is not bash and has none is stopped here.
+# shellcheck source=bin/shell-resolve.sh
+shell_dir=$(dirname -- "$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")")
+if [ -f "$shell_dir/shell-resolve.sh" ]; then
+	. "$shell_dir/shell-resolve.sh"
+elif [ -z "${BASH_VERSION:-}" ]; then
+	printf '%s: no shell-resolve.sh next to %s — it is what finds bash: set PI_GIT_BASH or run this under bash\n' "${0##*/}" "$0" >&2
+	exit 127
+fi
+
+#
+#   bin/publish <slug> [--cwd DIR]
+#
+# The boss used to do this by hand every time: push the worker's branch, retype the mission and
+# the review tier into `gh pr create`, and hope it remembered the evidence block. The retyping is
+# where the tier got lost, so this command builds the body out of the report itself and refuses
+# when the report cannot supply it. One command, and the tier cannot be omitted.
+#
+# What it reads: state/delegations.json for the slug's cwd, branch and report. A slug that a wipe
+# and a close already removed from that file still publishes: closing drops the delegation entry,
+# and the boss's next step after that is this one, so removing the entry would otherwise make the
+# report unpublishable exactly when it is due. For such a slug the repo is `--cwd DIR` (default:
+# the git repository containing the current directory) and the branch is found there by its
+# `Agent-Slug: <slug>` trailer — the same one-match rule as a recorded trunk branch. The report is
+# still reports/<slug>.md in the space, so the tier and evidence checks never depend on the
+# delegation entry existing.
+#
+# Where that state is: the worker's space. `--space <slug>` names it, else it is the space whose
+# project contains --cwd (or the current directory), and a folder no space claims keeps the
+# pre-space layout — the rule bin/delegate uses. The report, the delegations record and the
+# decisions file follow the space (state/spaces/<slug>/); the repo a branch is on still comes from
+# --cwd or the record, because git lives in the project. Without this, a publish inside a space
+# looked for the report under the pre-space root and refused a report that was right there
+# ("does not exist, so there is no report to publish"), which is why #205 and #206 went by hand.
+#
+# What it refuses, each with the reason named and a nonzero exit:
+#   - a slug the workspace does not know, when no branch in the repo carries its trailer either
+#     (never a guess about a typo);
+#   - a report that is missing, or has no Evidence block — the same check `delegate close`
+#     uses, sourced from there so the two commands cannot drift apart;
+#   - a report with no line starting `Review tier:`, or one whose value is not High, Medium or
+#     Low (the tier is the one thing the PR body must carry, so a publish with no tier is not a
+#     publish). A report is markdown, so the label may be bolded, italicised or indented
+#     (`**Review tier:** Medium`, `__Review tier:__ high`) and the value may arrive bolded,
+#     backticked, quoted or with a trailing period or a reason after it; the body carries the bare
+#     word, never the decoration. A line that nearly says it — `Review tier = High`, `- Review
+#     tier: High`, `Review-tier: High` — is refused with the report path and the line number, so
+#     the next person sees which line to change;
+#   - a branch with no commit carrying the `Agent-Slug:` trailer (nothing ties the branch to the
+#     worker that wrote the report);
+#   - a branch other than the one the delegation record names, unless the `Agent-Slug: <slug>`
+#     trailer is what found it. Both names are printed and nothing is pushed: #188 was gated and
+#     rebuilt over a sibling branch and stayed at 1b6af4e while the commit sat on the other one;
+#   - `gh` not on PATH, and a tree that is not a git repo;
+#   - a push whose result the remote does not confirm. The sha being pushed is read before the
+#     push and origin's head for the branch is read back afterwards with `git ls-remote`; a
+#     different sha, a missing branch or an unreadable answer is a refusal with both shas named,
+#     because a push that cannot be proved is not a publish (twice it printed a URL and exited 0
+#     while `git ls-remote` still showed the old head).
+#
+# What it does, in order: the target repo's own body gate (`make pr-check BODY=<file>`, else
+# `scripts/pr-gate.sh --body <file>`, else skipped with a line saying so) — a red gate stops the
+# publish before anything leaves the machine; then the branch's existing pull requests, asked once
+# across all states, so a branch that is already merged or already open never becomes a second PR;
+# then the branch is pushed to origin, the remote head is read back and has to be the commit that
+# was just pushed, and the PR is opened against trunk.
+#
+# An OPEN PR for the branch is the destination, not a stop sign. A second worker on a branch that
+# already has one used to be stranded here: the guard stopped before the push, the new commit sat
+# on the local branch only, and `delegate finish` printed `published` over a body that still
+# described the first worker (mjmeijerman/pi#183, where the body kept the first worker's
+# `Review tier: Medium` over a `sandbox/` diff). So an open PR gets the push and a body refresh
+# from this worker's report, and the line it prints says what happened — `updated #N (pushed <sha>,
+# body from reports/<slug>.md)` — never `published`. A merged PR with no work outside trunk, or one
+# the guard cannot read, keeps the old answer: it prints what origin holds for the branch and
+# refuses when that is not the branch, because nothing was pushed there and a URL on its own would
+# read as a publish.
+#
+# And the pull request is read back, not assumed. The last line of a publish is the answer to "what
+# does GitHub now say #N is?" — `published <slug>: #<n> now at <sha> (<state>, <mergeable>)`, from
+# `gh pr view --json headRefOid,state,mergeable` — and a head sha that is still the old one after a
+# few seconds of re-read fails the publish, naming both. #188 printed `published` after a push that
+# left it CONFLICTING at 1b6af4e, and nothing had ever asked. A branch origin already holds at the
+# worker's head says `nothing new to push: #<n> is already at <sha>` instead, and `delegate finish`
+# then says `already published` — a verdict over an unmoved branch is not a publish.
+#
+# What it carries from the report into the body: the Mission line (its label reduced to the bare
+# `Mission:` a body gate greps for, the text untouched), the `Now possible:` sentence when the report
+# has one, the bare review tier, the Evidence block, the Thrown away section when there is one, and
+# the worker's own `Test change:` line when the report has one (a target repo may require a reason
+# for a test changed beside its source; the worker knows it, so it is carried verbatim and never
+# invented).
+#
+# The `Now possible:` line is Beck's readability gate: an unreadable change is worse than a readable
+# one, and the reviewer's five minutes start with "what does this do". So the worker answers it in
+# one sentence and the body carries it above the diff, at Medium and High tier — the tiers where a
+# person has to understand the change rather than skim it. A report written before the line existed
+# has none, and that is not a reason to fail a publish: the line is omitted with one note, so an
+# older report still publishes exactly as it did.
+#
+# The branch: the gate reads the changed files from the checkout it runs in, and most publishes are
+# from a tree that is not on the branch — the boss's tree sits on trunk while the worker committed
+# in its own worktree, so a gate diffing the checkout alone sees trunk against trunk and answers
+# `unverifiable: no changed files`, refusing every publish. So the branch is named to the gate when
+# the checkout is not on it: `make pr-check BRANCH=<branch>`, or `scripts/pr-gate.sh --body
+# <file> --branch <branch>`. Whether the target takes it is detected once, before it is called: a
+# dry run for `make` (a sentinel branch is offered and the recipe make would run is read back — if
+# the sentinel is in it, the target expands BRANCH and gets the real branch), a grep of the
+# script's own argument parsing for the fallback flag. A target that never mentions the branch is
+# called exactly as before, so a gate that would choke on it keeps working. Naming the branch is
+# another way to see the diff, never a way to skip it: an empty diff still refuses.
+#
+# What it never does: merge, push trunk, force-push without proof, or touch the worker's files.
+# Pushing a branch is not landing it — the merge stays the person's.
+#
+# A rewritten branch is the shape the `behind` check creates: preflight tells a worker to rebase onto
+# origin/trunk, the rebase gives every commit a new sha, and origin still holds the branch's old tip.
+# A plain push then fails `non-fast-forward` and the work is stranded behind a command that refuses
+# to move (mjmeijerman/pi#69: rebased, 5/5 preflight green, publish refused, a person force-pushed by
+# hand). So a push git rejects `non-fast-forward` is decided rather than reported, and the decision
+# is never "force": `--force-with-lease=<branch>:<the exactly read remote sha>` is passed only when origin's
+# tip is this branch's own previous head (the branch reflog recorded it here, so a commit somebody
+# else pushed and this tree fetched is not in it) *and* every commit origin carries that the local
+# branch does not is the same change under a new sha (`git cherry` marks a rewritten commit `-`; a
+# `+` commit — a rebase that resolved a conflict changes the patch — is accepted when the local
+# branch has a commit with the same subject). Anything else is a refusal that names the commits a
+# push would delete. Neither `--force` nor a blanket `--force-with-lease` is ever passed.
+#
+# Trunk is read the way `delegate close` reads it: origin's HEAD, else origin/trunk|main|master.
+# A tree with none of those falls back to `main` with a printed note, so a fresh clone with no
+# fetched refs still publishes instead of guessing silently.
+set -euo pipefail
+
+self_root=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
+BIN=$self_root/bin
+ROOT=${PI_BOSS_ROOT:-${PI_MASTER_ROOT:-$self_root}}
+STATE=$ROOT/state
+DELEGATIONS=$STATE/delegations.json
+prog=publish
+
+# report_has_evidence and fresh_trunk_branch come from bin/delegate: the evidence check is the
+# close's own check, and sourcing keeps one definition of "proved it runs". Sourcing only defines
+# functions (delegate dispatches on BASH_SOURCE), so nothing here starts a worker.
+# shellcheck source=bin/delegate
+. "$BIN/delegate"
+# run_body_gate (the target repo's body gate) is the preflight's own function: `bin/preflight` runs
+# it on the body a publish would send, and this command runs it on the body it is about to send, so
+# there is one definition of what a body gate is and no way for the two to drift. Preflight itself
+# runs without `set -e` (it reports every check); a publish must stop at the first refusal, so -e
+# goes back on here.
+# shellcheck source=bin/preflight
+. "$self_root/bin/preflight"
+set -euo pipefail
+prog=publish
+
+die() {
+	printf '%s: refusing to publish%s: %s\n' "$prog" "${slug:+ $slug}" "$*" >&2
+	exit 1
+}
+note() { printf '%s: %s\n' "$prog" "$*" >&2; }
+
+# The push has to be proved by the remote, not believed from git's exit code. Twice this command
+# printed a URL and exited 0 while `git ls-remote origin <branch>` still showed the old head, and
+# pushing the same branch by hand worked immediately: the remote, the auth and the branch were all
+# fine, the publish had simply never confirmed that the commit it named was the commit origin has.
+# So the head is read back, in both places a publish can end: after the push, and on the guard's
+# answers — an "already open" or "already merged" publish pushed nothing, so what it prints as the
+# result must not read as one.
+local_head() { # <cwd> <branch> — the sha the branch is at here, empty when git cannot say
+	git -C "$1" rev-parse --verify --quiet "refs/heads/$2" 2>/dev/null || true
+}
+remote_head() { # <cwd> <branch> — the sha origin holds (empty: none); nonzero when the question failed
+	local out
+	out=$(git -C "$1" ls-remote origin "refs/heads/$2" 2>/dev/null) || return 3
+	printf '%s' "$out" | awk 'NR==1 { print $1 }'
+	return 0
+}
+
+# The pull request's own state, asked of GitHub instead of assumed from what the push said. The head
+# sha, the state and whether GitHub can merge it are the three things a person checks by hand before
+# believing a publish, so they are read back in one call; a silent gh (no answer at all) is a
+# non-zero here, never an empty "fine".
+pr_view() { # <cwd> <number> — "sha<TAB>state<TAB>mergeable"; nonzero when gh cannot answer
+	local out
+	out=$(cd "$1" && gh pr view "$2" --json headRefOid,state,mergeable \
+		--jq '[.headRefOid, .state, .mergeable] | @tsv' 2>/dev/null) || return 3
+	printf '%s' "$out"
+}
+
+# read_back_pr <cwd> <number> <sha> — what GitHub says #<number> points at, asked a bounded number
+# of times. The push lands before the API serves it, so one read can still show the previous head;
+# #188 printed `published` while GitHub reported 1b6af4e and nothing ever asked. A few seconds of
+# re-read is the difference between a race and a lie. Sets pr_sha, pr_state and pr_mergeable; an
+# empty pr_sha means gh never answered. PUBLISH_READBACK_TRIES/PUBLISH_READBACK_SLEEP exist for the
+# tests, which must not spend seconds proving a re-read they already know the answer to.
+read_back_pr() {
+	local cwd=$1 n=$2 want=$3 try=0 tries=${PUBLISH_READBACK_TRIES:-3} pause=${PUBLISH_READBACK_SLEEP:-1} answer
+	pr_sha=""
+	pr_state=""
+	pr_mergeable=""
+	while :; do
+		try=$((try + 1))
+		answer=$(pr_view "$cwd" "$n" 2>/dev/null || true)
+		pr_sha=${answer%%$'\t'*}
+		pr_state=$(printf '%s\n' "$answer" | cut -f2)
+		pr_mergeable=$(printf '%s\n' "$answer" | cut -f3)
+		[ -n "$pr_sha" ] && [ "$pr_sha" != "$want" ] || break
+		[ "$try" -lt "$tries" ] || break
+		[ "$pause" = 0 ] || sleep "$pause"
+	done
+}
+
+# verify_pr <cwd> <number> <sha> — the pull request has to point at this publish's commit before
+# anything else is done in its name. Sets pr_sha, pr_state, pr_mergeable; a head sha that is still
+# another commit after the bounded re-read is a refusal naming both, because a push that did not land
+# is not a publish. gh answering nothing at all is a note and no claim about the state: the push's
+# own probe already proved the branch moved, and inventing `OPEN` would be the same lie in a nicer
+# font.
+verify_pr() {
+	local want=$3
+	read_back_pr "$1" "$2" "$want"
+	if [ -z "$pr_sha" ]; then
+		note "gh pr view gave no answer for #$2, so this verdict carries no state or mergeable value"
+	fi
+	if [ -n "$pr_sha" ] && [ "$pr_sha" != "$want" ]; then
+		die "#$2 still reports $pr_sha after the push that was meant to put $want there (read ${PUBLISH_READBACK_TRIES:-3} time(s)), so nothing was published: the pull request does not carry this work"
+	fi
+}
+
+# verdict <number> <sha> — the one line a publish always prints, and the only one it stands behind:
+# what GitHub now says the pull request points at, its state, and whether it is mergeable. A branch
+# that was already at origin's head is `nothing new to push`, never `published`: a verdict over an
+# unmoved branch is not a publish, and `delegate finish` reads that line to say `already published`.
+verdict() {
+	if [ -n "$push_needed" ]; then
+		printf 'published %s: #%s now at %s (%s, %s)\n' "$slug" "$1" "${2:0:7}" \
+			"${pr_state:-state unread}" "${pr_mergeable:-mergeable unread}"
+	else
+		printf 'nothing new to push: #%s is already at %s\n' "$1" "${2:0:7}"
+	fi
+}
+
+# own_tip <cwd> <branch> <sha> — was <sha> ever this branch's head in this repo? A rebase, an amend
+# and a reset write the old tip into the branch's own reflog; a fetch of somebody else's push does
+# not, which is exactly the difference between "my rewrite" and "their commit". A publish that
+# recorded the head it pushed is the same evidence for a repo whose reflog has been pruned; the
+# field is optional, so a delegation record without it changes nothing.
+own_tip() {
+	local log
+	# the reflog is read whole, and grep reads a here-string: a `git | grep -q` pipeline ends the
+	# git side early, and `pipefail` then reports the SIGPIPE as "no match" — the same false
+	# negative that made the rewrite test below miss every conflict-resolved rebase
+	log=$(git -C "$1" reflog show --format=%H "refs/heads/$2" 2>/dev/null || true)
+	grep -qxF -- "$3" <<<"$log" && return 0
+	[ -n "$no_entry" ] && return 1
+	[ "$(field head 2>/dev/null || true)" = "$3" ] && return 0
+	[ "$(field pushed 2>/dev/null || true)" = "$3" ] && return 0
+	return 1
+}
+
+# have_ref <cwd> <ref> — does this repo know that ref? A tree that never fetched trunk still has
+# to publish, so a missing ref means "ask the other way", never a refusal on its own.
+have_ref() {
+	git -C "$1" rev-parse --verify --quiet "$2" >/dev/null 2>&1
+}
+
+# rebase_base <cwd> <local> <remote> — this branch's merge-base with trunk: the base a rebase rebuilt
+# the branch on. Origin's trunk is the answer when it is fetched; a tree without it falls back to the
+# merge-base with the remote tip, which is the same commit for a branch rebased onto that trunk.
+rebase_base() {
+	local cwd=$1 local_sha=$2 remote_sha=$3 base=""
+	if [ -n "$trunk" ] && have_ref "$cwd" "refs/remotes/origin/$trunk"; then
+		base=$(git -C "$cwd" merge-base "$local_sha" "refs/remotes/origin/$trunk" 2>/dev/null || true)
+	fi
+	[ -n "$base" ] || base=$(git -C "$cwd" merge-base "$local_sha" "$remote_sha" 2>/dev/null || true)
+	printf '%s' "$base"
+}
+
+# on_own_base <cwd> <base> <sha> — is <sha> part of this branch's own divergence, built on this
+# branch's base, rather than trunk's work or a commit from somewhere else? That is the difference
+# between "the commit I rewrote" and "a commit that happens to read the same".
+on_own_base() {
+	local cwd=$1 base=$2 sha=$3
+	[ -n "$base" ] || return 1
+	git -C "$cwd" merge-base --is-ancestor "$base" "$sha" 2>/dev/null || return 1
+	if [ -n "$trunk" ] && have_ref "$cwd" "refs/remotes/origin/$trunk"; then
+		if git -C "$cwd" merge-base --is-ancestor "$sha" "refs/remotes/origin/$trunk" 2>/dev/null; then
+			return 1
+		fi
+	fi
+	return 0
+}
+
+# rewritten_only <cwd> <local> <remote> — every commit origin has and the local branch does not is
+# accounted for on the local branch, by one of two proofs:
+#
+#   * patch-id, the fast path — `git cherry` says `-`: the same patch is already in the local history
+#     under another sha, which is a clean rebase or amend;
+#   * subject + author + base, the second path — a rebase that resolved a conflict changes the patch,
+#     so its patch-id cannot match and `git cherry` says `+` (mjmeijerman/pi#69: rebasing onto a
+#     moved trunk resolved a conflict, and the publish then refused its own rewrite forever). The
+#     local commit with the same subject and the same author, on this branch and above this branch's
+#     merge-base with trunk, is that commit rewritten; nothing else can produce it.
+#
+# A merge commit on the remote tip is nobody's rewrite — a rebase does not create one — and a commit
+# whose subject or author appears nowhere locally is work a push would delete. Both refuse, and
+# `rewrite_detail` says which of them fired so the refusal names the case rather than the symptom.
+rewrite_detail=""
+rewrite_notes=""
+rewritten_only() {
+	local cwd=$1 local_sha=$2 remote_sha=$3 out mark sha base local_log meta
+	local subject author_name author_email cand name email cand_subject won
+	local merge_sha
+	out=$(git -C "$cwd" cherry "$local_sha" "$remote_sha" 2>/dev/null) || return 1
+	[ -n "$out" ] || return 1
+	merge_sha=$(git -C "$cwd" rev-list --merges --max-count=1 "$local_sha..$remote_sha" 2>/dev/null || true)
+	if [ -n "$merge_sha" ]; then
+		rewrite_detail="origin/$branch carries merge commit ${merge_sha:0:7}, and a rebase does not make merge commits"
+		return 1
+	fi
+	base=$(rebase_base "$cwd" "$local_sha" "$remote_sha")
+	# the local branch's commits, read once: every lookup below is a field compare against this, so
+	# no `git log | grep -q` pipeline can stop the log early and be read as a mismatch
+	local_log=$(git -C "$cwd" log --format='%H%x1f%an%x1f%ae%x1f%s' "$local_sha" 2>/dev/null || true)
+	while read -r mark sha; do
+		[ "$mark" = '+' ] || continue
+		meta=$(git -C "$cwd" log -1 --format='%an%x1f%ae%x1f%s' "$sha" 2>/dev/null || true)
+		subject="" author_name="" author_email=""
+		IFS=$'\x1f' read -r author_name author_email subject <<<"$meta"
+		if [ -z "$subject" ]; then
+			rewrite_detail="git cannot name commit ${sha:0:7} on origin/$branch, so a push cannot be proved safe"
+			return 1
+		fi
+		won=""
+		while IFS=$'\x1f' read -r cand name email cand_subject; do
+			[ "$cand_subject" = "$subject" ] || continue
+			[ "$name" = "$author_name" ] || continue
+			[ "$email" = "$author_email" ] || continue
+			on_own_base "$cwd" "$base" "$cand" || continue
+			won=$cand
+			break
+		done <<<"$local_log"
+		if [ -z "$won" ]; then
+			case $local_log in
+			*"$subject"*)
+				rewrite_detail="commit ${sha:0:7} \"$subject\" on origin/$branch is by $author_name <$author_email>, and no commit on this branch with that subject is by that author"
+				;;
+			*)
+				rewrite_detail="commit ${sha:0:7} \"$subject\" is on origin/$branch and no commit on this branch carries that subject"
+				;;
+			esac
+			return 1
+		fi
+		rewrite_notes="$rewrite_notes
+forced $branch: rewrote ${sha:0:7} → ${won:0:7} \"$subject\" (subject+author match, patch-id differs after conflict resolution)"
+	done <<<"$out"
+	return 0
+}
+
+# A rejected push is decided here, not failed blindly and never forced blindly. A `non-fast-forward`
+# rejection means one of two things, and only these proofs tell them apart:
+#
+#   * this tree rewrote the branch — the shape `bin/preflight`'s `behind` check creates when it asks
+#     for `git rebase origin/trunk`: every local commit is new, origin still holds the old tip
+#     (mjmeijerman/pi#69: rebased, 5/5 preflight green, publish refused, a person force-pushed by
+#     hand). The retry is `--force-with-lease=<branch>:<origin's sha>`, never a bare force;
+#   * somebody else pushed a commit this branch does not carry, and a force would delete it.
+#
+# own_tip (origin's tip is a head this branch's own reflog recorded, so a fetched foreign push is not
+# one) and rewritten_only (every commit origin has is the same change under a new sha) are both
+# required; either missing is a refusal that names what a push would replace.
+rewrite_refusal=""
+rewrite_lease() { # <cwd> <branch> <local sha> — true when the rejection is this tree's rewrite
+	local cwd=$1 branch=$2 local_sha=$3 remote_sha lost_range lost
+	rewrite_detail=""
+	rewrite_notes=""
+	if ! remote_sha=$(remote_head "$cwd" "$branch"); then
+		rewrite_refusal="the push was rejected and origin's head for $branch could not be read (git ls-remote failed), so a rewrite cannot be proved"
+		return 1
+	fi
+	if [ -z "$remote_sha" ]; then
+		rewrite_refusal="the push was rejected and origin lists no $branch, so the rejection was not a rewritten branch"
+		return 1
+	fi
+	# Name what a push would replace before judging it: somebody else's commit is normally the one
+	# this tree never fetched, so the branch's remote-tracking ref is brought up to date here —
+	# quietly, only on this path, and never before the push was refused. A tree with no network keeps
+	# the sha and gets the command that shows the commits.
+	lost_range=$local_sha..$remote_sha
+	if git -C "$cwd" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null &&
+		git -C "$cwd" rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
+		lost_range=$local_sha..refs/remotes/origin/$branch
+	fi
+	lost=$(git -C "$cwd" log --format='  %h %s' "$lost_range" 2>/dev/null || true)
+	[ -n "$lost" ] || lost="  (git cannot name them here: origin/$branch is $remote_sha, the branch is $local_sha — git fetch origin $branch && git log --oneline $local_sha..origin/$branch)"
+	if git -C "$cwd" merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+		rewrite_refusal="the push was rejected but origin/$branch at ${remote_sha:0:7} is already in this branch's history, so the rejection was not a rewrite (a hook, auth or network refusal)"
+		return 1
+	fi
+	if ! own_tip "$cwd" "$branch" "$remote_sha"; then
+		rewrite_refusal="the push was rejected and origin/$branch is at $remote_sha, a head this branch never had, so it is not this tree's rewrite — forcing would replace:
+$lost"
+		return 1
+	fi
+	if ! rewritten_only "$cwd" "$local_sha" "$remote_sha"; then
+		rewrite_refusal="the push was rejected and origin/$branch carries commit(s) this branch does not have and did not rewrite — forcing would delete:
+$lost
+  ${rewrite_detail:-no commit on this branch accounts for them}"
+		return 1
+	fi
+	lease="--force-with-lease=$branch:$remote_sha"
+	lease_from=$remote_sha
+	return 0
+}
+
+# stopped_unpushed <why the publish stopped> — the guard answered, so nothing was pushed. When the
+# remote and the branch disagree, that answer is not a publish: the PR exists, the branch carries
+# commits the PR does not show, and closing the worker over it would throw the work away quietly.
+# Exit nonzero and name both shas, so `delegate finish` stops at step 1 instead of printing
+# `published`.
+stopped_unpushed() {
+	local here there ahead
+	here=$(local_head "$cwd" "$branch")
+	[ -n "$here" ] || return 0
+	if ! there=$(remote_head "$cwd" "$branch"); then
+		die "$1, and origin's head for $branch could not be read, so this publish is not confirmed"
+	fi
+	if [ -z "$there" ]; then
+		die "$1, and origin has no $branch at all, so the pull request's code is not this branch — push it and run this again"
+	fi
+	if [ "$there" = "$here" ]; then
+		return 0
+	fi
+	ahead=$(git -C "$cwd" rev-list --count "$there..$here" 2>/dev/null || printf '?')
+	note "not published: origin/$branch is at ${there:0:7}, the branch is at ${here:0:7} — $ahead commit(s) the pull request does not show"
+	die "$1, but origin/$branch is at ${there:0:7} and the branch is at ${here:0:7}, so the pull request does not carry this work — push the branch and run this again"
+}
+
+usage() {
+	printf 'usage: %s <slug> [--cwd DIR] [--space SLUG] [--body-out FILE]\n' "$prog"
+	printf '  --body-out FILE: write the body this publish would send and stop — no body gate, no push. bin/preflight gates that file.\n' 
+	printf '  body gate: make pr-check BODY=<report body> [BRANCH=<worker branch>] — BRANCH is passed only when a dry run shows the recipe expands it, because a gate that diffs a named branch cannot verify a checkout sitting on trunk otherwise.\n'
+	printf '  duplicate guard: gh pr list --state all for the branch before anything is pushed — an open PR gets the push and its body refreshed from the report, an already-merged one stops the publish, closed is named.\n'
+}
+slug=""
+lookup_cwd=""
+space=""
+body_out=""
+while [ "$#" -gt 0 ]; do
+	case $1 in
+	-h | --help | help)
+		usage
+		exit 0
+		;;
+	--body-out)
+		[ "$#" -ge 2 ] && [ -n "$2" ] || die "--body-out needs a file to write the body to"
+		body_out=$2
+		shift 2
+		;;
+	--body-out=*)
+		body_out=${1#--body-out=}
+		[ -n "$body_out" ] || die "--body-out needs a file to write the body to"
+		shift
+		;;
+	--cwd)
+		[ "$#" -ge 2 ] && [ -n "$2" ] || die "--cwd needs a directory"
+		lookup_cwd=$2
+		shift 2
+		;;
+	--cwd=*)
+		lookup_cwd=${1#--cwd=}
+		[ -n "$lookup_cwd" ] || die "--cwd needs a directory"
+		shift
+		;;
+	--space)
+		[ "$#" -ge 2 ] && [ -n "$2" ] || die "--space needs a space name"
+		space=$2
+		shift 2
+		;;
+	--space=*)
+		space=${1#--space=}
+		[ -n "$space" ] || die "--space needs a space name"
+		shift
+		;;
+	-*) die "unknown option $1" ;;
+	*)
+		[ -z "$slug" ] || die "one slug at a time: got '$slug' and '$1'"
+		slug=$1
+		shift
+		;;
+	esac
+done
+if [ -z "$slug" ]; then
+	usage
+	exit 2
+fi
+
+# 1. The slug has to be one this workspace started. A typo is refused, not guessed at.
+if ! valid_slug "$slug"; then
+	die "not a worker slug (lowercase letters, digits and dashes)"
+fi
+# The space before the record: its delegations file is where this worker's cwd, branch and report
+# are, and its reports/ folder is where the report lives when the record has no path for it. The
+# repo a branch is on still comes from the record's cwd or --cwd — state in the space, git in the
+# project. space_settle is the preflight's own definition, which is bin/delegate's rule.
+space_rc=0
+space_settle "$space" "${lookup_cwd:-$PWD}" "$slug" || space_rc=$?
+[ "$space_rc" -ne 2 ] || exit 2
+[ -f "$DELEGATIONS" ] || die "no delegations.json at $DELEGATIONS, so no worker is tracked"
+field() {
+	node -e '
+		const fs = require("fs");
+		let j = {};
+		try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
+		const r = j[process.argv[2]];
+		if (!r) process.exit(3);
+		process.stdout.write(String(r[process.argv[3]] || ""));' "$DELEGATIONS" "$slug" "$1"
+}
+no_entry=""
+if cwd=$(field cwd 2>/dev/null); then
+	[ -z "$lookup_cwd" ] || note "--cwd is read only for a slug with no delegation entry; $slug is in state/delegations.json, so its recorded cwd is used"
+	branch=$(field branch)
+	report=$(field report)
+	[ -n "$report" ] || report=$REPORTS/$slug.md
+else
+	# Wiped and closed: the delegation entry is gone, the branch and the report are not. Refusing
+	# here is what forced a hand-run publish, so the branch is looked up by its trailer instead.
+	no_entry=1
+	branch=""
+	report=$REPORTS/$slug.md
+	if [ -n "$lookup_cwd" ]; then
+		cwd=$(cd -- "$lookup_cwd" 2>/dev/null && pwd) || die "--cwd $lookup_cwd is not a directory"
+	else
+		cwd=$(git -C . rev-parse --show-toplevel 2>/dev/null || true)
+		[ -n "$cwd" ] || cwd=$PWD
+	fi
+	note "unknown worker slug (not in state/delegations.json); looking for a branch with 'Agent-Slug: $slug' in $cwd"
+fi
+
+# 2. The report is the PR body, so it has to exist and prove it ran. Same check as the close.
+[ -f "$report" ] || die "$report does not exist, so there is no report to publish"
+if ! report_has_evidence "$report"; then
+	die "$report has no Evidence block, so the PR body would claim more than the report proves"
+fi
+# ...and the evidence that counts here is the gate's own run: a report that claims green without
+# having run the checks CI would run is exactly what the gate exists to stop. One recorded
+# `--skip-preflight` reason stands in for it, because a check that is genuinely broken on this
+# machine is the one case where the run cannot happen.
+if ! report_has_preflight_evidence "$report" "$slug"; then
+	die "$report names no 'bin/preflight' run under ## Evidence, so nothing shows the checks CI would run were run here. Paste the run: \`bin/preflight --slug $slug\` and its last lines, under ## Evidence — or record why the gate does not apply: delegate finish $slug --skip-preflight \"<reason>\""
+fi
+[ -n "$cwd" ] || die "state/delegations.json records no cwd for this worker"
+
+# 3. The review tier is the one line the update cannot do without. The value is read out of the
+# markdown around it — `**Medium**`, `` `low` ``, `"High".`, `High — one script` — because a
+# report is markdown and a worker should not have to write a bare word to be published. The label
+# wears markdown too: `**Review tier:** Medium` was refused twice with the work finished and correct
+# because the pattern wanted the bare label at column 0, so emphasis before or around the label is
+# read as decoration like the value's. The body carries the bare word so a body gate never has to
+# parse decoration to find the tier. A line that nearly says it is refused with its line number, so
+# the next person changes one line instead of guessing which one.
+tier_line=$(grep -m1 -iE '^[[:space:]]*[*_]*[[:space:]]*review[[:space:]]+tier[*_]*:[[:space:]]*[*_]*' "$report" || true)
+if [ -z "$tier_line" ]; then
+	near=$(grep -niE 'review[[:space:]_*-]*tier' "$report" | head -n 1 || true)
+	if [ -n "$near" ]; then
+		die "$report line ${near%%:*} comes close to the tier but the gate cannot read it: $(printf '%s' "${near#*:}" | sed -e 's/^[[:space:]]*//'). It needs a line starting 'Review tier:' — plain, or '**Review tier:**' — with High, Medium or Low as the first word"
+	fi
+	die "$report has no line starting 'Review tier:', so the PR body would omit the tier"
+fi
+tier_raw=${tier_line#*:}                      # everything after the first colon is the value
+tier_raw=$(printf '%s' "$tier_raw" | sed -e 's/^[[:space:]*_]*//') # blanks, bold, italics
+tier_raw=${tier_raw%%[[:space:]]*}            # the first word is the tier
+# The word may be wrapped in bold/code/quotes and end in a period; the tier itself has none of
+# those characters, so deleting them from the word leaves it intact.
+tier_word=$(printf '%s' "$tier_raw" | tr -d "\`*_\".'" | tr '[:upper:]' '[:lower:]')
+case $tier_word in
+high) tier=High ;;
+medium) tier=Medium ;;
+low) tier=Low ;;
+*) die "$report's 'Review tier:' line reads '$tier_raw', which is not High, Medium or Low, so the PR body would carry no tier" ;;
+esac
+
+# 4. The branch has to carry a commit that names this worker.
+if ! command -v git >/dev/null 2>&1; then
+	die "git is not on PATH"
+fi
+if ! git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
+	die "$cwd is not a git repository"
+fi
+if [ -z "$no_entry" ] && [ -z "$branch" ]; then
+	die "state/delegations.json records no branch for this worker (branch '$branch')"
+fi
+
+trunk=$(fresh_trunk_branch "$cwd")
+if [ -z "$trunk" ]; then
+	trunk=main
+	note "no origin/HEAD, origin/trunk, origin/main or origin/master in $cwd; publishing against main"
+fi
+# The recorded branch is the boss checkout's branch, and a worker cuts its own: delegations.json
+# therefore says `trunk`/`main` for most workers. A trunk branch is never published, so the
+# branch is looked up by the thing that identifies it — a commit carrying `Agent-Slug: <slug>`.
+# One match is the worker's branch; none or several are refused rather than guessed.
+# A slug with no delegation entry has no recorded branch to fall back on, so the lookup does not
+# wait for a trunk value here: the trailer is the only thing that identifies its branch.
+lookup=""
+recorded=$branch
+trailer_found=""
+if [ -n "$no_entry" ]; then
+	lookup=1
+else
+	case $branch in
+	"$trunk" | trunk | main | master) lookup=1 ;;
+	*)
+		# A recorded branch that is not in this tree is not a reason to refuse: the worker's commit
+		# may have been moved onto a sibling branch (that is what a rebase onto another base leaves
+		# behind). It is a reason to ask the trailer, and only the trailer, which branch is this
+		# worker's — never to take a branch at random.
+		if ! git -C "$cwd" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
+			lookup=1
+			note "state/delegations.json names $branch, which is not a local branch in $cwd — asking the 'Agent-Slug: $slug' trailer which branch carries this work"
+		fi
+		;;
+	esac
+fi
+if [ -n "$lookup" ]; then
+	found=""
+	for candidate in $(git -C "$cwd" for-each-ref --format='%(refname:short)' refs/heads/); do
+		if git -C "$cwd" log --format=%B "refs/remotes/origin/$trunk..$candidate" 2>/dev/null |
+			grep -qE "^Agent-Slug:[[:space:]]*${slug}[[:space:]]*$"; then
+			found="$found$candidate"$'\n'
+		fi
+	done
+	found=$(printf '%s' "$found" | grep -E . || true)
+	case $(printf '%s' "$found" | grep -cE . || true) in
+	1)
+		branch=$found
+		trailer_found=1
+		if [ -n "$no_entry" ]; then
+			note "$slug is not in state/delegations.json (wiped and closed); publishing $branch, found by its Agent-Slug trailer in $cwd"
+		else
+			note "delegations.json records $recorded for this worker; publishing $branch, found by its Agent-Slug trailer"
+		fi
+		;;
+	0)
+		# A worker with no branch is not necessarily a worker that did nothing. prune-refs deletes a
+		# branch whose pull request merged, and a close deletes the delegation entry, so the second
+		# `delegate finish` on a merged worker finds neither — only the report, and trunk itself. The
+		# report's own `Commit:` line is then the only thing naming the work, and when that change is
+		# already in origin/<trunk> the question is answered: there is nothing left to publish. The
+		# verdict is commit_in_trunk's, the same one the merged-PR guard above trusts, so this cannot
+		# call a commit landed that the close would refuse — and it needs no `gh`, so an offline tree
+		# still answers it.
+		worker_sha=$(report_commit_sha "$report")
+		if [ -n "$worker_sha" ] && commit_in_trunk "$cwd" "$trunk" "$worker_sha" >/dev/null; then
+			note "no local branch in $cwd carries 'Agent-Slug: $slug' any more; prune-refs deletes a merged worker's branch and a close drops its delegation entry"
+			note "$report names commit $worker_sha, and that change is already in origin/$trunk — nothing to publish"
+			exit 0
+		fi
+		die "$(if [ -n "$no_entry" ]; then printf 'no branch in %s carries' "$cwd"; else printf 'state/delegations.json names %s for %s, and no branch in %s carries' "$recorded" "$slug" "$cwd"; fi) a commit with 'Agent-Slug: $slug', so nothing ties this worker to a branch — nothing was pushed. Local branches: $(git -C "$cwd" for-each-ref --format='%(refname:short)' refs/heads/ | tr '\n' ' ')"
+		;;
+	*)
+		die "several branches in $cwd carry 'Agent-Slug: $slug' ($(printf '%s' "$found" | tr '\n' ' ')) — publish one by name rather than guessing"
+		;;
+	esac
+fi
+
+# The branch has to exist locally: that is the thing worth pushing. A branch that only exists as
+# a remote-tracking ref would make "no Agent-Slug trailer" the message for a tree that is simply
+# missing the branch, which names the wrong problem.
+if ! git -C "$cwd" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
+	die "branch $branch is not a local branch in $cwd, so there is nothing to push"
+fi
+# Never a branch this worker did not commit to. Reading a sibling branch is how #188 was gated and
+# rebuilt at 1b6af4e while the rebased commit d4c2d26 sat on `guard-hidden-rebase`: every check ran,
+# the PR did not move, and the verdict said `published`. The delegation record is the authority; the
+# only way a different branch may be pushed is the report's own `Agent-Slug: <slug>` trailer, which
+# is the worker saying where its work is. Otherwise this stops and names both, before any push.
+if [ -z "$no_entry" ] && [ -n "$recorded" ] && [ "$branch" != "$recorded" ] && [ -z "$trailer_found" ]; then
+	die "state/delegations.json names $recorded for $slug, and $branch is not it and carries no commit with 'Agent-Slug: $slug', so $branch is not this worker's branch — nothing was pushed"
+fi
+slugs=$(git -C "$cwd" log --format=%B "refs/remotes/origin/$trunk..$branch" 2>/dev/null || true)
+if [ -z "$slugs" ]; then
+	slugs=$(git -C "$cwd" log --format=%B "$branch" -n 50 2>/dev/null || true)
+fi
+if ! printf '%s\n' "$slugs" | grep -qE '^Agent-Slug:[[:space:]]*[^[:space:]]'; then
+	die "no commit on $branch carries an Agent-Slug trailer, so nothing ties the branch to a worker"
+fi
+
+# The PR body, built from the report: mission verbatim, the tier, the evidence, and the thrown-away
+# section when the worker wrote one. The body gate and gh both read this file. The mission label is
+# reduced to the bare `Mission:` a body gate greps for, the same way the tier's value is: the text
+# after it is the worker's and is carried untouched.
+mission=$(grep -m1 -iE '^[[:space:]]*[*_]*[[:space:]]*mission[*_]*:[[:space:]]*[*_]*' "$report" || true)
+if [ -n "$mission" ]; then
+	mission=$(printf '%s' "$mission" |
+		sed -e 's/^[[:space:]]*[*_]*[[:space:]]*[Mm][Ii][Ss][Ss][Ii][Oo][Nn][*_]*:[[:space:]]*[*_]*[[:space:]]*//')
+	mission="Mission: $mission"
+fi
+[ -n "$mission" ] || mission='Mission: (the report names no Mission line)'
+section_body() { # <report> <heading text>
+	awk -v want="$2" '
+		{
+			line = $0
+			t = line
+			gsub(/[#*]/, "", t)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+			if (!inblock) {
+				if (tolower(t) == tolower(want)) { inblock = 1 }
+				next
+			}
+			if (line ~ /^##[[:space:]]/) exit
+			print
+		}' "$1"
+}
+evidence=$(section_body "$report" "Evidence")
+thrown=$(section_body "$report" "Thrown away")
+# A target repo may ask why a test changed beside its source (this repo's own test-change gate does).
+# The worker is the only one who knows, so the report's line is carried into the body verbatim,
+# label and all, and only when the report has one: a body with no line is a body the gate refuses,
+# which is the right answer for a report that never said why. `**Test change:**`, a bullet's
+# emphasis and a trailing period are the markdown the worker wrote; the label is reduced to the bare
+# form the gate reads, and the reason after it is carried untouched.
+test_change=$(grep -m1 -iE '^[[:space:]]*[*_]*[[:space:]]*test[[:space:]]+change[*_]*:[[:space:]]*[*_]*' "$report" || true)
+if [ -n "$test_change" ]; then
+	test_change=$(printf '%s' "$test_change" | sed -e 's/^[[:space:]]*[*_]*[[:space:]]*[Tt][Ee][Ss][Tt][[:space:]]\+[Cc][Hh][Aa][Nn][Gg][Ee][*_]*:[[:space:]]*[*_]*[[:space:]]*//')
+	test_change="Test change: $test_change"
+fi
+
+# Beck's readability gate, in the worker's own words: one sentence on what a person can do now that
+# they could not before. It rides directly under the Mission, above the tier and the diff, because
+# that is the order a reviewer reads in. No LOC, no PR count — those are effort, and effort is cost.
+# The same markdown tolerance as the tier and the test-change line: `**Now possible:**`, a bullet's
+# emphasis, a trailing period. A report that predates the line has none, and none is not a refusal.
+now_possible=$(grep -m1 -iE '^[[:space:]]*[*_]*[[:space:]]*now[[:space:]]+possible[*_]*:[[:space:]]*[*_]*' "$report" || true)
+if [ -n "$now_possible" ]; then
+	now_possible=$(printf '%s' "$now_possible" | sed -e 's/^[[:space:]]*[*_]*[[:space:]]*[Nn][Oo][Ww][[:space:]]\+[Pp][Oo][Ss][Ss][Ii][Bb][Ll][Ee][*_]*:[[:space:]]*[*_]*[[:space:]]*//')
+	now_possible="Now possible: $now_possible"
+fi
+case $tier in
+Low) ;; # Low is docs, comments, formatting: a reviewer skims it and the sentence adds nothing.
+*)
+	[ -n "$now_possible" ] ||
+		note "$report has no 'Now possible:' line, so the body carries none — the report predates the rule, and that is not a reason to refuse a publish"
+	;;
+esac
+
+body=$(mktemp "${TMPDIR:-/tmp}/publish-body.XXXXXX")
+trap 'rm -f "$body"' EXIT
+{
+	printf '%s\n\n' "$mission"
+	if [ -n "$now_possible" ]; then
+		printf '%s\n\n' "$now_possible"
+	fi
+	printf 'Review tier: %s\n\n' "$tier"
+	if [ -n "$test_change" ]; then
+		printf '%s\n\n' "$test_change"
+	fi
+	printf '## Evidence\n\n%s\n' "$evidence"
+	if [ -n "$thrown" ]; then
+		printf '\n## Thrown away\n\n%s\n' "$thrown"
+	fi
+} >"$body"
+
+# The body is the thing the gate and gh both read, so it is also the thing a preflight wants to
+# look at first: --body-out writes exactly the body above and stops, before the body gate, before
+# gh, before anything is pushed. `bin/preflight` runs this and gates the file, which is why a body
+# it proved is a body a publish would send byte for byte.
+if [ -n "$body_out" ]; then
+	cp "$body" "$body_out" || die "cannot write the body to $body_out"
+	printf '%s\n' "$body_out"
+	exit 0
+fi
+
+# 5. gh has to be there before anything is pushed: a push that cannot be followed by a PR leaves
+# the branch uploaded and the person with a loose end. The duplicate guard needs gh too, so it is
+# skipped by name rather than quietly: a publish that never had a guard should say so.
+if ! command -v gh >/dev/null 2>&1; then
+	note "gh unavailable, duplicate guard skipped — gh is not on PATH"
+	die "gh is not on PATH, so the branch would be pushed with no PR to follow it"
+fi
+
+# 6. The target repo's own body gate, before anything leaves the machine. The gate and how its
+# branch argument is probed live in run_body_gate (bin/preflight), sourced at the top: the preflight
+# runs the same function on the same body, so a body it passed is not a body this refuses. A gate
+# that diffs the checkout it sits in cannot see a worker's branch, so the branch is named to it when
+# the checkout is not on it, and only when the target is shown to expand it.
+if ! run_body_gate "$cwd" "$branch" "$body"; then
+	die "the body gate (${BODY_GATE:-make pr-check}) failed, so nothing was pushed"
+fi
+
+# How many of the branch's commits are not already in trunk. The answer is `commit_in_trunk`'s, per
+# commit — the one implementation of that question, shared with `delegate close`'s merged check,
+# which used to answer it separately and disagree. It is ancestry first, then `git cherry`, which
+# marks a commit `-` when its patch is already upstream under another sha. That second half is not
+# decoration — this repo squash-merges, so a merged branch's own commit is never an ancestor of
+# trunk and a plain commit count reads every merged branch as new work. `unknown` when git cannot
+# say, and the caller then publishes exactly as it did before.
+new_commits() { # <cwd> <trunk> <branch>
+	local cwd=$1 trunk=$2 branch=$3 sha n=0 set verdict
+	set=$(git -C "$cwd" rev-list "refs/remotes/origin/$trunk..$branch" 2>/dev/null) || {
+		printf 'unknown'
+		return 0
+	}
+	while read -r sha; do
+		[ -n "$sha" ] || continue
+		if verdict=$(commit_in_trunk "$cwd" "$trunk" "$sha"); then
+			continue
+		fi
+		case $verdict in
+		notin | reverted*) n=$((n + 1)) ;;
+		*)
+			printf 'unknown'
+			return 0
+			;;
+		esac
+	done <<<"$set"
+	printf '%s' "$n"
+}
+
+# 7. One PR per branch, asked once and before anything is pushed. An existing PR is an answer,
+# whatever state it is in: a proof run on a branch that was already merged opened a second PR that
+# a person had to close, so the branch is now asked about across all states.
+#   open            → print it, stop, nothing pushed;
+#   merged          → stop, unless the branch has commits the trunk does not: then this is a
+#                     re-publish of further work and it says so and carries on;
+#   closed unmerged → carry on, naming the old number so nobody reads the new PR as the first.
+# gh failing to answer is not "no PR exists": it is usually a missing login, and pushing first
+# would leave the branch uploaded with no PR behind it. That refusal is kept — the guard is the
+# only reason the branch is not pushed blind, so it is never the reason a publish fails.
+repo_slug=$(cd "$cwd" && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)
+guard_args=(pr list --head "$branch" --state all --json number,state,url)
+[ -z "$repo_slug" ] || guard_args+=(--repo "$repo_slug")
+if ! pr_list=$(cd "$cwd" && gh "${guard_args[@]}" 2>&1); then
+	note "$pr_list"
+	die "gh could not list pull requests for $branch (is it authenticated?), so nothing was pushed"
+fi
+# The newest PR that matters: an open one beats a merged one beats a closed one, then the highest
+# number, so a re-published branch reads its latest attempt.
+pr_line=$(printf '%s' "$pr_list" | node -e '
+	const fs = require("fs");
+	let a = [];
+	try { a = JSON.parse(fs.readFileSync(0, "utf8") || "[]"); } catch { a = []; }
+	const rank = { OPEN: 0, MERGED: 1, CLOSED: 2 };
+	a = a.filter(p => p && p.number);
+	a.sort((x, y) => ((rank[x.state] ?? 3) - (rank[y.state] ?? 3)) || (y.number - x.number));
+	if (a[0]) process.stdout.write(`${a[0].number}\t${a[0].state}\t${a[0].url}`);')
+open_pr=""
+if [ -n "$pr_line" ]; then
+	IFS=$'\t' read -r pr_number pr_state pr_url <<<"$pr_line"
+	case $pr_state in
+	OPEN)
+		# The destination, not a stop sign: this branch already has the place its commits go, so
+		# the push below is what reaches it and the body is refreshed from this worker's report.
+		note "#$pr_number is already open for $branch: $pr_url — updating it instead of opening a second PR"
+		open_pr=$pr_number
+		;;
+	MERGED)
+		ahead=$(new_commits "$cwd" "$trunk" "$branch")
+		case $ahead in
+		0)
+			note "$branch is already merged as #$pr_number — nothing to publish"
+			stopped_unpushed "$branch is already merged as #$pr_number"
+			exit 0
+			;;
+		unknown)
+			note "$branch was merged as #$pr_number, and git cannot tell whether it carries work that is not in origin/$trunk; publishing it as a new pull request"
+			;;
+		*)
+			note "$branch was merged as #$pr_number; it carries $ahead commit(s) whose change is not in origin/$trunk, so they are published as a new pull request"
+			;;
+		esac
+		;;
+	CLOSED)
+		note "$branch's earlier pull request #$pr_number was closed without merge; opening a new one"
+		;;
+	esac
+fi
+
+# 8. Push the branch only. Never trunk, never a blind force — and never on the push's own word: the
+# sha being pushed is read first, origin is asked for the branch's head afterwards, and a mismatch is
+# a refusal, not a warning. A push that cannot be confirmed must not end in a PR URL.
+# A branch origin already holds at exactly the commit the tree is at has nothing to send, in either
+# destination: finishing twice must not push a second time and a branch whose PR is being opened for
+# the first time has nothing to upload either. That is said in those words — `nothing new to push` —
+# because the case this replaces printed a verdict over a branch that had not moved (#188 stayed
+# CONFLICTING at 1b6af4e while `finish` said `published`). The body edit is harmless when the file
+# did not change, so the second run still refreshes the description and still exits 0.
+pushed=$(local_head "$cwd" "$branch")
+[ -n "$pushed" ] || die "git cannot read the head of $branch in $cwd, so there is nothing to prove was pushed"
+push_needed=1
+if [ -n "$open_pr" ]; then
+	if ! there=$(remote_head "$cwd" "$branch"); then
+		die "#$open_pr is open for $branch, but origin's head for it could not be read (git ls-remote failed), so this publish cannot tell whether the branch needs the push"
+	fi
+	if [ "$there" = "$pushed" ]; then
+		push_needed=""
+		note "origin/$branch is already at ${pushed:0:7}: nothing to push"
+		note "refreshing #$open_pr's description from reports/$slug.md"
+	else
+		note "pushing $branch to origin, into #$open_pr"
+	fi
+else
+	note "pushing $branch to origin"
+fi
+lease=""
+lease_from=""
+if [ -n "$push_needed" ]; then
+	if ! git -C "$cwd" push -u origin "$branch"; then
+		# The rejection is either the rebase this command's own `behind` check asks for, or somebody
+		# else's commit. rewrite_lease decides, and a decision it cannot prove is a refusal.
+		if ! rewrite_lease "$cwd" "$branch" "$pushed"; then
+			die "$rewrite_refusal
+Nothing was pushed. Rebase onto origin/$branch so their commit is carried, or publish the branch this work became."
+		fi
+		note "origin/$branch is at ${lease_from:0:7}, which this branch rewrote; re-pushing ${pushed:0:7} under a lease that expects ${lease_from:0:7}"
+		if ! git -C "$cwd" push -u "$lease" origin "$branch"; then
+			die "the leased re-push of $branch failed: origin did not stay at ${lease_from:0:7}, or the push was rejected — nothing was published"
+		fi
+	fi
+	if ! there=$(remote_head "$cwd" "$branch"); then
+		die "$branch was pushed but its head could not be read back from origin (git ls-remote failed), so the push is unconfirmed — nothing was published"
+	fi
+	if [ -z "$there" ]; then
+		die "$branch was pushed but origin lists no branch of that name, so the push did not land — nothing was published"
+	fi
+	if [ "$there" != "$pushed" ]; then
+		die "the push reported success but origin/$branch is at ${there:0:7}, not ${pushed:0:7} (the commit just pushed), so nothing was published — the remote is not where this publish thinks it is"
+	fi
+	if [ -n "$lease" ]; then
+		note "forced the rewrite of origin/$branch deliberately: $lease_from was the previous head, $pushed is the rewritten one, and ${lease#--force-with-lease=} was the lease"
+		# Which proof the lease rests on: a patch-id match is a clean rebase, and a commit name pair
+		# here is the conflict-resolved rebase, named one line per rewritten commit.
+		while IFS= read -r line; do
+			[ -n "$line" ] && note "$line"
+		done <<<"$rewrite_notes"
+	fi
+	note "origin/$branch is at ${there:0:7}, the commit just pushed"
+fi
+
+# An open PR is refreshed, not duplicated: the body is built above by the same path a new PR's is,
+# so a report with no tier line was refused before this point and a body gate refused here before
+# the push. The order is deliberate — the pull request is asked what it points at first, and the
+# body is only touched once it answers with this publish's commit; a stale head stops the run with
+# the description untouched. What is printed says what happened, and the last line is the verdict.
+if [ -n "$open_pr" ]; then
+	verify_pr "$cwd" "$open_pr" "$pushed"
+	if ! out=$(cd "$cwd" && gh pr edit "$open_pr" --body-file "$body" 2>&1); then
+		printf '%s\n' "$out" >&2
+		die "the branch reached origin/$branch but #$open_pr's description could not be refreshed (gh pr edit failed), so the pull request does not carry this report yet"
+	fi
+	if [ -n "$push_needed" ]; then
+		printf 'updated #%s (pushed %s, body from reports/%s.md)\n' "$open_pr" "${pushed:0:7}" "$slug"
+	else
+		printf 'updated #%s (no new commits, body from reports/%s.md)\n' "$open_pr" "$slug"
+	fi
+	verdict "$open_pr" "$pushed"
+	printf '%s\n' "$pr_url"
+	exit 0
+fi
+
+title=$(git -C "$cwd" log -1 --format=%s "$branch" 2>/dev/null || true)
+[ -n "$title" ] || title="Worker $slug"
+note "opening a pull request against $trunk"
+out=$(cd "$cwd" && gh pr create --base "$trunk" --head "$branch" --title "$title" --body-file "$body" 2>&1) || {
+	printf '%s\n' "$out" >&2
+	die "gh pr create failed"
+}
+url=$(printf '%s\n' "$out" | grep -oE 'https?://[^[:space:]]+' | tail -n 1 || true)
+[ -n "$url" ] || url=$out
+# The new pull request's number, so its head sha can be read back like an existing one's: a URL with
+# no number is not a pull request this command can verify, and verifying it is the entire point.
+new_pr=${url##*/}
+case $new_pr in
+'' | *[!0-9]*) die "gh pr create printed '$url', which carries no pull request number, so the head sha of the pull request it opened cannot be read back" ;;
+esac
+verify_pr "$cwd" "$new_pr" "$pushed"
+verdict "$new_pr" "$pushed"
+printf '%s\n' "$url"

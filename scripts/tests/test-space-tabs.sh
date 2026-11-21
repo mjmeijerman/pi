@@ -76,6 +76,11 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$PI_SPACE_ROOT/bin/pi-bare"
 # A non-git space publishes nothing, but `finish` still asks whether publish could run before it
 # takes that branch, so the program is here and never called.
 printf '#!/usr/bin/env bash\nexit 0\n' >"$PI_SPACE_ROOT/bin/publish"
+# `finish` runs the programs in the tree it lives in (bin/preflight, bin/publish), never whichever
+# copies PATH happens to hold, so the harness under test is a copy of that tree beside the stubs —
+# the layout a real install has, where $PI_BOSS_ROOT/bin is the delegate's own bin.
+cp "$ROOT/bin/delegate" "$ROOT/bin/space-lib.sh" "$PI_SPACE_ROOT/bin/"
+DELEGATE="$PI_SPACE_ROOT/bin/delegate"
 chmod +x "$WORK/stub/"* "$PI_SPACE_ROOT/bin/"*
 
 PASS_N=0
