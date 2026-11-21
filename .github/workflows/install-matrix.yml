@@ -126,5 +126,7 @@ jobs:
           test "$rules" -eq $((before - 1))
           node setup.mjs -y --no-keys --no-apt --no-verify >/dev/null
           rules=$(grep -c '^- ' "$PI_AGENT_DIR/AGENTS.md" || true)
+          # A drop is a decision, not a transient flag: a plain re-run keeps it dropped. That is
+          # what the step's name promises, and it is why the baseline has to be read, not assumed.
           echo "rules after a plain re-run: $rules"
-          test "$rules" -eq "$before"
+          test "$rules" -eq $((before - 1))
