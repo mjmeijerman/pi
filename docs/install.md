@@ -230,11 +230,10 @@ variable one of the two engines or `scripts/install-lib.mjs` reads.
 | Variable | Read by | What it changes |
 |---|---|---|
 | `PI_AGENT_DIR` | both | The agent config directory, default `~/.pi/agent`. Everything else (`~/.pi`, hooks, state file) is derived from it |
-| `PI_BOSS_DIR` | install | Where the delegation workspace clone lives, default `~/big-boss-pi` |
-| `BOSS_REPO` | install | Which repo that clone comes from, default `mjmeijerman/big-boss-pi` |
-| `PI_SKIP_NETWORK=1` | both | No vendor download, no workspace clone, no package reconciliation |
+| `PI_SPACE_ROOT` | install | Where the space records go, default `~/.pi/state` — `bin/space` and `bin/delegate` read the same variable |
+| `PI_SKIP_NETWORK=1` | both | No vendor download, no package reconciliation |
 | `PI_SKIP_PREREQS=1` | both | No package manager is called: the prerequisites step prints skip lines. What CI uses, since a runner has no package manager to install for |
-| `PI_SKIP_SYSTEMD=1` | install | The one way out of the service step: copy the systemd units without enabling them, and register no launchd plist and no scheduled task. The guard is what creates the `big-boss-pi` space, so off Linux this is what leaves Herdr with no space |
+| `PI_SKIP_SYSTEMD=1` | install | The one way out of the service step: copy the systemd units without enabling them, and register no launchd plist and no scheduled task. The install itself makes the `harness` space; the guard only repairs it after a reboot, so off Linux this is what leaves a reboot unrepaired |
 | `PI_SKIP_SERVICES=1` | install | The same switch under a name that is honest on all three systems. Same effect, and the skip line names whichever variable you set |
 | `PI_ENABLE_SERVICES=1` | install | Accepted, and no longer needed: the macOS launchd plist and the Windows scheduled task install by default. Kept so a script written against the old opt-in flag keeps working — it changes nothing |
 | `PI_GIT_BASH` | install | The `bash.exe` the hidden Windows launcher runs `bin/guard` with, and the one every `.cmd` shim in `%USERPROFILE%\.local\bin` starts, when the search does not find Git for Windows. Replaces the whole candidate list, so a wrong value is reported instead of silently ignored |
@@ -258,12 +257,12 @@ variable one of the two engines or `scripts/install-lib.mjs` reads.
 | answer record | `~/.pi/state/setup.json` |
 | global git hooks | `~/.pi/git-hooks/`, plus `core.hooksPath` pointing at it and an `init.templateDir` layer at `~/.git-templates` |
 | global gitignore | `~/.pi/gitignore_global`, plus `core.excludesFile` pointing at it |
-| bin entries | `~/.local/bin/` — `git-vuln-scan` (copied), `pisandbox` and `pi-bare` (linked; copied on Windows), `herdr-app`, and `jev`, `delegate`, `local-run` from the workspace clone; on Windows each bash wrapper also gets a `<name>.cmd` beside it |
+| bin entries | `~/.local/bin/` — `git-vuln-scan` (copied), `herdr-app`, and this checkout's own tools `pisandbox`, `pi-bare`, `pi-nonet`, `jev`, `delegate`, `guard`, `local-run`, `preflight`, `pr-ready`, `publish`, `space` (linked; copied on Windows); on Windows each bash wrapper also gets a `<name>.cmd` beside it |
 | `pi` itself, sandboxed | a `pi()` wrapper block, marked `# >>> pi sandbox >>>`, in `~/.bashrc` and `~/.zshrc` (Linux and macOS only) |
 | Herdr mods and menu row | `~/.config/herdr-app/mods/`, `~/.config/herdr-app/programs.json` — the config directory is created when herdr-app has not run yet, so a fresh install gets its mods and menu row before the app's first launch; an existing `programs.json` is left alone and the line says what to add by hand |
 | `herdr-app` | Linux and macOS `~/.local/share/herdr-app/herdr-app` (`$XDG_DATA_HOME` when set), Windows `%LOCALAPPDATA%\Programs\herdr-app\herdr-app.exe` — then a bin entry |
-| the delegation workspace | `~/big-boss-pi` (`gh repo clone` when `gh` is authenticated, then `git clone https://github.com/mjmeijerman/big-boss-pi.git`; the SSH remote `git@github.com:mjmeijerman/big-boss-pi.git` is the last resort and needs a key) |
-| services | Linux `~/.config/systemd/user/`, macOS `~/Library/LaunchAgents/`, Windows a Task Scheduler entry — installed and started on all three by default, so the `big-boss-pi` space is there when the install ends (the guard creates it; this is not the app's job). `PI_SKIP_SYSTEMD=1` is the one way out |
+| the harness space | `~/.pi/state/spaces/harness/space.json` — `bin/space new --name harness --project ~/.pi --kind harness`, once: a record that is already there is left byte for byte, and without `herdr-app` on PATH the step prints the command to run by hand |
+| services | Linux `~/.config/systemd/user/`, macOS `~/Library/LaunchAgents/`, Windows a Task Scheduler entry — installed and started on all three by default, so a space a reboot forgets is repaired. `PI_SKIP_SYSTEMD=1` is the one way out |
 
 Nothing here touches `~/.pi/agent/auth.json`, sessions, `models-store.json`, or a
 file you may have edited in place.
@@ -318,7 +317,7 @@ cd ~/.pi
 ./setup.sh
 ```
 
-Keep the repo, `~/.pi` and `PI_BOSS_DIR` under the **Linux** home (`~/`), never
+Keep the repo, `~/.pi` and `PI_SPACE_ROOT` under the **Linux** home (`~/`), never
 under `/mnt/c/`. That mount is 9p: Unix mode bits do not survive it (every file
 reads as 0777, so a hook script is "executable" whatever it says), symlinks need
 Developer Mode on the Windows side, and every write pays for a 9p round trip. The installer warns and names the offending path when it sees one; the fix
@@ -424,7 +423,7 @@ launchctl unload -w ~/Library/LaunchAgents/*.plist   # every pi login item
 rem Windows: the delete stops the next logon, the second line stops the guard that
 rem is running now — its pid is in the file the hidden launcher wrote
 schtasks /Delete /TN big-boss-pi-guard /F
-for /f "usebackq" %p in ("%USERPROFILE%\big-boss-pi\state\guard.pid") do taskkill /F /PID %p
+for /f "usebackq" %p in ("%USERPROFILE%\.pi\state\guard.pid") do taskkill /F /PID %p
 ```
 
 The Windows entry shows no window, at logon or at install time. It used to
@@ -444,14 +443,14 @@ answer, the pid file is:
 
 ```cmd
 schtasks /Query /TN big-boss-pi-guard /FO LIST          rem the entry exists (On Logon)
-type "%USERPROFILE%\big-boss-pi\state\guard.pid"        rem the guard's process id
+type "%USERPROFILE%\.pi\state\guard.pid"               rem the guard's process id
 tasklist /FI "PID eq <that id>"                         rem and that process is alive
-tail -n 20 ~/big-boss-pi/state/guard.log                rem what it did (Git Bash)
+tail -n 20 ~/.pi/state/guard.log                        rem what it did (Git Bash)
 ```
 
 The interpreter is still resolved, not assumed, because Task Scheduler has no
 shebang: `bin/guard` starts `#!/usr/bin/env bash`, and a task pointing at the file
-itself started nothing at all — which is why the `big-boss-pi` space never
+itself started nothing at all — which is why the space never
 appeared on the first real Windows install. The launcher and the `.cmd` shims use
 that one answer: `PI_GIT_BASH` when set, otherwise `bash.exe` as `PATH` has it
 (skipping `%SystemRoot%\System32`, which is the WSL `bash.exe` and not Git Bash),
@@ -468,10 +467,11 @@ the systemd unit does on Linux, and `PI_SKIP_SYSTEMD=1` is the one way out.
 Registering alone was not enough: `/SC ONLOGON` waits for the next logon, so the
 installer now runs `schtasks /Run` (or `launchctl kickstart -k`) and then waits up
 to twenty seconds for the space (`PI_GUARD_SPACE_WAIT_MS` changes the budget),
-printing `the big-boss-pi space is there` or the three commands to look at. It is not cosmetics: the guard is what creates and
-repairs the `big-boss-pi` space, and an install that registered nothing opened
-Herdr with no space in it. See
-[Herdr opens with no `big-boss-pi` space](#herdr-opens-with-no-big-boss-pi-space).
+printing `the harness space is there` or the three commands to look at. The space
+itself is the installer's, not the guard's: `bin/space new --name harness` runs
+before the service step, so it is there on a machine where no login entry was
+registered, and the guard's job is to repair it after a reboot. See
+[Herdr opens with no `harness` space](#herdr-opens-with-no-harness-space).
 
 The systemd step copies every unit in this repo's `systemd/` directory, because it
 reads that directory instead of a list: the guard's
@@ -483,7 +483,7 @@ without `--now` (it runs at the next login), and the two timer services are
 copied but not enabled — they carry no `[Install]` section, and their timer's
 `Unit=` line is what starts them. The guard unit is enabled at login and
 restarted by the install, so the supervisor in `~/.pi/bin/guard` is what runs
-next; the retired `~/big-boss-pi/bin/guard` is not installed any more. Nothing is left for you to run by hand after an
+next. Nothing is left for you to run by hand after an
 install: `systemctl --user list-timers` shows both timers with a next run.
 
 Removing an install without touching sessions or keys:
@@ -614,34 +614,37 @@ copied but nothing is enabled, and the installer prints
 Fix: after logging into a real user session, run exactly those lines. The five unit
 files are already in `~/.config/systemd/user/`, so nothing else has to be copied.
 
-**Herdr opens with no `big-boss-pi` space.** The space is not the app's to create:
-`bin/guard` creates and repairs it, and the guard runs from a login entry — a
-systemd user unit on Linux, a launchd plist on macOS, a Task Scheduler task on
-Windows that the installer starts before it finishes. So the space is there
-within seconds of the install ending, and if Herdr was not running yet it is
-there when Herdr starts. When it is not, the install says
-`== guard: registered and started, but no big-boss-pi space appeared` and prints
-these three commands — they are the whole diagnosis:
+**Herdr opens with no `harness` space.** The space is not the app's to create:
+the install makes it with `bin/space new --name harness --project ~/.pi --kind
+harness`, and `bin/guard` only repairs it — from a systemd user unit on Linux, a
+launchd plist on macOS, or a Task Scheduler task on Windows that the installer
+starts before it finishes. The record is the proof:
+`~/.pi/state/spaces/harness/space.json`, with `"kind": "harness"` and `project`
+`~/.pi`. When the installer could not open it — no `herdr-app` on `PATH`, or the
+app refused — the transcript prints the `bin/space new` line to run by hand, and
+that is the fix. When the record is there and the window is not, the installer
+says `== guard: registered and started, but no harness space appeared` and these
+commands are the whole diagnosis:
 
 ```bash
 schtasks /Query /TN big-boss-pi-guard /V /FO LIST     # Windows: is the entry registered (and its Task To Run)
-type "%USERPROFILE%\big-boss-pi\state\guard.pid"       # Windows: the pid the launcher started
+type "%USERPROFILE%\.pi\state\guard.pid"               # Windows: the pid the launcher started
 launchctl print gui/$(id -u)/dev.herdr.big-boss-pi-guard   # macOS: is the login item loaded?
-tail -n 20 ~/big-boss-pi/state/guard.log              # what the guard itself did
+tail -n 20 ~/.pi/state/guard.log                      # what the guard itself did
 herdr-app ls                                          # does the app show the space?
 ```
 
 Three causes come before that, in the order they happen; each prints its own
 line in the install transcript:
 
-1. **The service step was turned off.** `PI_SKIP_SYSTEMD=1` (or
+1. **The space was never made.** No `herdr-app` on `PATH` during the install (a
+   headless run, or Windows and macOS before the app is there). The transcript
+   says `== space harness: herdr-app is not on PATH — no space opened` and gives
+   the command: `~/.pi/bin/space new --name harness --project ~/.pi --kind harness`.
+2. **The service step was turned off.** `PI_SKIP_SYSTEMD=1` (or
    `PI_SKIP_SERVICES=1`) was in the environment, and the transcript says
    `== guard service (launchd / Task Scheduler): PI_SKIP_SYSTEMD=1 — no login entry registered`.
-   Re-run without it.
-2. **`bin/guard` is missing because the workspace was not cloned** —
-   `PI_SKIP_NETWORK=1`, or no `git` and no network at clone time. The transcript
-   says `!! guard service: ~/big-boss-pi/bin/guard missing — nothing to register`.
-   Re-run without `PI_SKIP_NETWORK=1`.
+   Re-run without it. The space is still there; nothing repairs it after a reboot.
 3. **No Git Bash on Windows.** The guard is a bash script and Task Scheduler runs
    a command line, never a shebang, so with no `bash.exe` to name the step says
    `!! no Git Bash found` and registers nothing. Install Git for Windows, or set
@@ -652,16 +655,16 @@ polls, so give it its own terminal:
 
 ```bash
 # Linux, macOS, Git Bash
-"$HOME/big-boss-pi/bin/guard"
+"$HOME/.pi/bin/guard"
 ```
 
 ```powershell
 # Windows: the guard is bash, so it is started through Git Bash
-& "C:\Program Files\Git\bin\bash.exe" "$env:USERPROFILE\big-boss-pi\bin\guard"
+& "C:\Program Files\Git\bin\bash.exe" "$env:USERPROFILE\.pi\bin\guard"
 ```
 
-Once it runs, the space appears in Herdr within one poll, and
-`~/big-boss-pi/state/guard.log` has one line per action it took.
+Once it runs, the space comes back within one poll, and
+`~/.pi/state/guard.log` has one line per action it took.
 
 ## Secrets
 

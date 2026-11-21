@@ -1,5 +1,5 @@
-// "Install finished" has to mean the `big-boss-pi` space exists — or the install
-// has to say why not.
+// "Install finished" has to mean the `harness` space exists — or the install has
+// to say why not.
 //
 // The Windows run that made this a task: the installer registered the Task
 // Scheduler entry with `/SC ONLOGON` and never `/Run`, so the guard started at
@@ -28,7 +28,7 @@ import {
 const SNAPSHOT = JSON.stringify({
 	spaces: [
 		{ id: 'space-1', name: 'other' },
-		{ id: 'space-9', name: 'big-boss-pi' },
+		{ id: 'space-9', name: GUARD_SPACE_NAME },
 	],
 });
 
@@ -117,7 +117,7 @@ test('a start that fails does not abort, and prints the door', async () => {
 	const r = recorder();
 	const verdict = await startAndVerifyGuard({
 		platform: 'win32',
-		bossDir: 'C:\\Users\\mj\\big-boss-pi',
+		piHome: 'C:\\Users\\mj\\.pi',
 		run: () => 1,
 		probe: () => ({ running: true, id: null }),
 		out: r.out,
@@ -127,7 +127,7 @@ test('a start that fails does not abort, and prints the door', async () => {
 		r.lines.some((l) => /^== guard: registered, but starting it failed \(exit 1\)/.test(l)),
 		'a failed /Run has to be loud: ' + JSON.stringify(r.lines),
 	);
-	for (const line of guardDoor({ platform: 'win32', bossDir: 'C:\\Users\\mj\\big-boss-pi' })) {
+	for (const line of guardDoor({ platform: 'win32', piHome: 'C:\\Users\\mj\\.pi' })) {
 		assert.ok(r.lines.includes(line), `missing door line: ${line}`);
 	}
 	// The point of the door: the task, the guard's own log, the app.
@@ -140,7 +140,7 @@ test('an app that is not running passes with the "when Herdr starts" line', asyn
 	const r = recorder();
 	const verdict = await startAndVerifyGuard({
 		platform: 'darwin',
-		bossDir: '/Users/mj/big-boss-pi',
+		piHome: '/Users/mj/.pi',
 		uid: 501,
 		run: r.run,
 		probe: () => ({ running: false, id: null }),
@@ -162,7 +162,7 @@ test('a running app without the space prints the loud line and the door', async 
 	let clock1000 = 0;
 	const verdict = await startAndVerifyGuard({
 		platform: 'win32',
-		bossDir: 'C:\\Users\\mj\\big-boss-pi',
+		piHome: 'C:\\Users\\mj\\.pi',
 		run: r.run,
 		probe: () => ({ running: true, id: null }),
 		timeoutMs: 1000,
@@ -182,19 +182,19 @@ test('a space that appears is said in one line, and nothing is called loud', asy
 	const r = recorder();
 	const verdict = await startAndVerifyGuard({
 		platform: 'win32',
-		bossDir: 'C:\\Users\\mj\\big-boss-pi',
+		piHome: 'C:\\Users\\mj\\.pi',
 		run: r.run,
 		probe: () => ({ running: true, id: spaceIdIn(SNAPSHOT, GUARD_SPACE_NAME) }),
 		out: r.out,
 	});
 	assert.equal(verdict.state, 'found');
-	assert.ok(r.lines.some((l) => l.includes('the big-boss-pi space is there (space-9)')));
+	assert.ok(r.lines.some((l) => l.includes('the harness space is there (space-9)')));
 	assert.ok(!r.lines.some((l) => l.startsWith('==')));
 });
 
 test('a dry run plans the start and starts nothing', async () => {
 	const r = recorder();
-	const verdict = await startAndVerifyGuard({ platform: 'win32', bossDir: 'C:\\b', dry: true, run: r.run, probe: () => ({ running: true, id: null }), out: r.out });
+	const verdict = await startAndVerifyGuard({ platform: 'win32', piHome: 'C:\\b', dry: true, run: r.run, probe: () => ({ running: true, id: null }), out: r.out });
 	assert.equal(verdict.state, 'dry');
 	assert.deepEqual(r.calls, []);
 	assert.ok(r.lines.includes('   start: schtasks /Run /TN big-boss-pi-guard'));

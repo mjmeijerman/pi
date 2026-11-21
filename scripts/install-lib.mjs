@@ -503,6 +503,31 @@ export const POSIX_WRAPPERS = [
 ];
 
 /**
+ * HARNESS_TOOLS — every other program in `bin/`, under the name a spec types.
+ *
+ * POSIX_WRAPPERS is the pair that has to be a bash program on every platform;
+ * this is the rest of the harness's own tooling, and the install links all of it
+ * into the bin directory on PATH so `space`, `guard`, `preflight`, `pr-ready` or
+ * `publish` work in a shell, in a Herdr menu row and in a spec without a path.
+ * One list, exported: the `.cmd` shims and the tests both read it, so a tool
+ * added here cannot arrive as a file Windows cannot start.
+ */
+export const HARNESS_TOOLS = [
+	'delegate',
+	'guard',
+	'jev',
+	'local-run',
+	// `pi-bare` is not here: scripts/ carries it, POSIX_WRAPPERS links it, and a
+	// second source for one name relinked the same file on every run.
+	'pi-nonet',
+	'pi-sandboxed',
+	'preflight',
+	'pr-ready',
+	'publish',
+	'space',
+];
+
+/**
  * cmdShim — the `.cmd` a person (and Herdr) actually runs on Windows.
  *
  * Windows has no shebang: the POSIX wrapper copied onto PATH does nothing when
@@ -582,10 +607,10 @@ export function guardLauncherPath({ piHome }) {
 	return path.join(piHome, 'state', GUARD_LAUNCHER_NAME);
 }
 
-/** guardPidPath — `~/big-boss-pi/state/guard.pid`, beside the guard's own log. */
-export function guardPidPath({ bossDir }) {
-	if (!bossDir) throw new Error('guardPidPath needs the delegation workspace');
-	return path.join(bossDir, 'state', GUARD_PID_NAME);
+/** guardPidPath — `~/.pi/state/guard.pid`, beside the guard's own log. */
+export function guardPidPath({ piHome }) {
+	if (!piHome) throw new Error('guardPidPath needs ~/.pi');
+	return path.join(piHome, 'state', GUARD_PID_NAME);
 }
 
 /**
@@ -737,7 +762,7 @@ export function guardTaskCommand({ launcherPath, pidPath = '', wscriptPath = wsc
 // starts the entry once, then waits a bounded time for the space and says what
 // it saw — a green install that names the task, the log and the app.
 export const GUARD_LABEL = 'dev.herdr.big-boss-pi-guard';
-export const GUARD_SPACE_NAME = 'big-boss-pi';
+export const GUARD_SPACE_NAME = 'harness';
 /** How long the step waits for the space before it says it did not appear. */
 export const GUARD_SPACE_WAIT_MS = 20000;
 
@@ -791,8 +816,8 @@ export function spaceIdIn(lsText, name = GUARD_SPACE_NAME) {
  * "not there yet" is not "broken".
  *
  * `probe` answers `{ running, id }`: a herdr-app that is not up yet is not a
- * failure (the guard creates the space when the app starts), so the first
- * not-running answer ends the wait as `app-down` instead of burning the budget.
+ * failure (the installer makes the space, and the guard repairs it when the app
+ * starts), so the first not-running answer ends the wait as `app-down` instead of burning the budget.
  * `now`/`sleep` are parameters so a test drives twenty seconds in a few calls.
  */
 export async function waitForSpace({
@@ -820,11 +845,11 @@ export async function waitForSpace({
  * finished, Herdr is empty" and no next move. A failure that names where to look
  * costs one line at install time and saves the person a support thread.
  */
-export function guardDoor({ platform, bossDir, label = GUARD_LABEL, uid = 0, taskName = GUARD_TASK_NAME }) {
+export function guardDoor({ platform, piHome, label = GUARD_LABEL, uid = 0, taskName = GUARD_TASK_NAME }) {
 	const how = platform === 'win32' ? `schtasks /Query /TN ${taskName} /V /FO LIST` : `launchctl print gui/${uid}/${label}`;
 	// The platform's own join, not the host's: a Windows line has to read
 	// `...\state\guard.log` even when the test that prints it runs on Linux.
-	const log = (platform === 'win32' ? path.win32 : path).join(bossDir, 'state', 'guard.log');
+	const log = (platform === 'win32' ? path.win32 : path).join(piHome, 'state', 'guard.log');
 	return [
 		`   the entry: ${how}`,
 		`   the guard log: ${log}   (tail -n 20 it)`,
@@ -848,7 +873,7 @@ export function guardDoor({ platform, bossDir, label = GUARD_LABEL, uid = 0, tas
  */
 export async function startAndVerifyGuard({
 	platform,
-	bossDir,
+	piHome,
 	taskName = GUARD_TASK_NAME,
 	label = GUARD_LABEL,
 	uid = 0,
@@ -876,7 +901,7 @@ export async function startAndVerifyGuard({
 	const exit = run ? run(start.exe, start.args) : 0;
 	if (exit !== 0) {
 		say(`== guard: registered, but starting it failed (exit ${exit ?? 'n/a'}) — the entry is there, so the next logon still gets a try`);
-		for (const line of guardDoor({ platform, bossDir, label, uid, taskName })) say(line);
+		for (const line of guardDoor({ platform, piHome, label, uid, taskName })) say(line);
 		return { started: false, state: 'start-failed' };
 	}
 	note(`guard: started the ${platform === 'win32' ? 'scheduled task' : 'login item'} — waiting up to ${Math.round(timeoutMs / 1000)}s for the ${name} space`);
@@ -888,43 +913,12 @@ export async function startAndVerifyGuard({
 	if (answer.state === 'found') {
 		note(`guard: the ${name} space is there (${answer.id})`);
 	} else if (answer.state === 'app-down') {
-		note(`guard: registered and started — Herdr is not running yet, so the guard creates the ${name} space when it starts`);
+		note(`guard: registered and started — Herdr is not running yet, so the ${name} space it recorded is repaired when the app starts`);
 	} else {
 		say(`== guard: registered and started, but no ${name} space appeared`);
-		for (const line of guardDoor({ platform, bossDir, label, uid, taskName })) say(line);
+		for (const line of guardDoor({ platform, piHome, label, uid, taskName })) say(line);
 	}
 	return { started: true, state: answer.state };
-}
-
-// --- the delegation workspace clone ------------------------------------------
-export const BOSS_REPO_DEFAULT = 'mjmeijerman/big-boss-pi';
-
-/**
- * bossClonePlan — the clone transports for the delegation workspace, in order.
- *
- * Both repos are public, so the first step on a bare machine must not need a
- * key: `https://` clones without one, and it is the attempt that carries no
- * precondition beyond the network. `gh` still goes first when it is
- * authenticated (it is the account people already have), SSH is last because it
- * is the only transport that fails for want of a key — and when it was the only
- * fallback, the workspace silently did not arrive and the top of stepBoss read
- * the missing directory as "fine".
- *
- * `hasNetwork: false` is PI_SKIP_NETWORK=1: no attempts at all, which is what
- * the engine prints as skipped instead of cloning into an air-gapped box.
- */
-export function bossClonePlan({
-	ghAuthed = false,
-	hasNetwork = true,
-	repo = BOSS_REPO_DEFAULT,
-	dir = 'big-boss-pi',
-} = {}) {
-	if (!hasNetwork) return [];
-	const attempts = [];
-	if (ghAuthed) attempts.push({ transport: 'gh', cmd: 'gh', args: ['repo', 'clone', repo, dir] });
-	attempts.push({ transport: 'https', cmd: 'git', args: ['clone', `https://github.com/${repo}.git`, dir] });
-	attempts.push({ transport: 'ssh', cmd: 'git', args: ['clone', `git@github.com:${repo}.git`, dir] });
-	return attempts;
 }
 
 // --- AGENTS.md rules --------------------------------------------------------

@@ -92,7 +92,7 @@ test('a path with a space survives the round trip, through the task and the pid'
 	assert.equal(argument, launcherPath);
 	assert.equal(task.args[task.args.length - 1], task.tr, 'the argv carries the same /TR value');
 	assert.equal(launcherPath.endsWith(GUARD_LAUNCHER_NAME), true, 'next to the installer state, no new top-level dir');
-	assert.equal(path.basename(guardPidPath({ bossDir: 'C:\\Users\\John Smith\\big-boss-pi' })), GUARD_PID_NAME);
+	assert.equal(path.basename(guardPidPath({ piHome: 'C:\\Users\\John Smith\\.pi' })), GUARD_PID_NAME);
 });
 
 test('the disable line can stop the process the task delete does not reach', () => {
@@ -125,10 +125,10 @@ function fakeWindowsTree(home) {
 		fs.mkdirSync(path.dirname(path.join(home, file)), { recursive: true });
 		fs.writeFileSync(path.join(home, file), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
 	}
-	const guard = path.join(home, 'big-boss-pi', 'bin', 'guard');
-	fs.mkdirSync(path.dirname(guard), { recursive: true });
-	fs.writeFileSync(guard, '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-	return { bash: files[0], guard };
+	// The guard the install registers is this checkout's own `bin/guard`: a run
+	// from a clone that is not `~/.pi` has no installed copy yet, and naming a
+	// path that is not there is the silent skip these tests exist to prevent.
+	return { bash: files[0], guard: path.join(ROOT, 'bin', 'guard') };
 }
 
 function envFor(home, extra = {}) {
@@ -174,7 +174,7 @@ test('a Windows install writes the launcher with the bash it resolved and the gu
 	assert.deepEqual(launcherTargets(fs.readFileSync(launcher, 'utf8')), {
 		bashPath: fake.bash,
 		guardPath: fake.guard,
-		pidPath: path.join(home, 'big-boss-pi', 'state', GUARD_PID_NAME),
+		pidPath: path.join(home, '.pi', 'state', GUARD_PID_NAME),
 	});
 	assert.match(out.stdout, /^== guard launcher \(hidden, no console window\) -> .*guard-hidden\.vbs$/m);
 
@@ -234,7 +234,7 @@ test('the macOS plist is byte-identical to the golden', (t) => {
         <string>dev.herdr.big-boss-pi-guard</string>
         <key>ProgramArguments</key>
         <array>
-        <string>~/big-boss-pi/bin/guard</string>
+        <string>${path.join(ROOT, 'bin', 'guard').split(home).join('~')}</string>
         </array>
         <key>RunAtLoad</key>
         <true/>

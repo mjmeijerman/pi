@@ -22,11 +22,14 @@
 //   4  git-vuln-scan, pisandbox, pi-bare (+ their .cmd shims), herdr menu
 //      entry, the pi wrapper
 //   5  herdr-app (vendor installer) per OS
-//   5b big-boss-pi workspace clone, 5c its bin links
+//   5b this checkout's own `bin/` tools, on PATH under their bare names
+//   5c the harness space: `bin/space new --name harness --project <this checkout>
+//      --kind harness` when no record is there, and not one byte when one is. A
+//      fresh install comes up with a space and a Boss tab, on every OS
 //   5d the guard service: systemd on Linux, launchd on macOS, Task Scheduler on
 //      Windows — installed by default on all three, because `bin/guard` is what
-//      creates and repairs the `big-boss-pi` space: an install that registers no
-//      login entry opens Herdr with no space in it. Plus the weekly timers, which
+//      repairs a recorded space and its Boss tab after a reboot: an install that
+//      registers no login entry opens Herdr with no space in it. Plus the weekly timers, which
 //      need systemd and say so. The task runs a hidden `.vbs` launcher through
 //      `wscript.exe` (no console) that starts `bin/guard` with the Git for
 //      Windows `bash.exe` it resolved: Task Scheduler runs a command line, never
@@ -38,10 +41,11 @@
 // have edited in place (herdr mods, herdr programs.json, the wrapper block
 // outside its markers, an existing AGENTS.md rule set).
 //
-// Env: PI_AGENT_DIR, PI_SKILLS, PI_EXTENSIONS, PI_BOSS_DIR, BOSS_REPO,
+// Env: PI_AGENT_DIR, PI_SKILLS, PI_EXTENSIONS, PI_SPACE_ROOT (where the space
+//      records go; defaults to this checkout's `state/`),
 //      PI_SKIP_SYSTEMD=1 (copy units on Linux, register no login entry anywhere)
-//      and its alias PI_SKIP_SERVICES=1, PI_SKIP_NETWORK=1 (no vendor downloads,
-//      no clone), PI_SKIP_PREREQS=1 (never call a package manager), PI_GIT_BASH
+//      and its alias PI_SKIP_SERVICES=1, PI_SKIP_NETWORK=1 (no vendor downloads),
+//      PI_SKIP_PREREQS=1 (never call a package manager), PI_GIT_BASH
 //      (the bash.exe a Windows scheduled task and every .cmd shim run the bash
 //      wrappers with), HERDR_MODS. PI_ENABLE_SERVICES=1 is still accepted and
 //      changes nothing: the login entry is the default now.
@@ -65,11 +69,11 @@ import {
 	GUARD_LABEL,
 	GUARD_SPACE_NAME,
 	GUARD_SPACE_WAIT_MS,
+	HARNESS_TOOLS,
 	PI_WRAPPER_BEGIN,
 	PI_WRAPPER_BLOCK,
 	PI_WRAPPER_END,
 	POSIX_WRAPPERS,
-	bossClonePlan,
 	cmdShim,
 	deepseekApiKey,
 	deepseekKeyState,
@@ -108,8 +112,12 @@ const AGENT_DIR = process.env.PI_AGENT_DIR || path.join(HOME, '.pi', 'agent');
 // and the tests both use it); a real install reads the platform it runs on.
 const PLAN = planFor(process.env.PI_PLATFORM || process.platform, process.env);
 const P = homePaths({ home: HOME, agentDir: AGENT_DIR, plan: PLAN });
-const BOSS_REPO = process.env.BOSS_REPO || 'mjmeijerman/big-boss-pi';
-const BOSS_DIR = process.env.PI_BOSS_DIR || path.join(HOME, 'big-boss-pi');
+// The one space a fresh install must have, and the state root its record lives in —
+// the same root `bin/space` and `bin/delegate` read (space-lib.sh).
+const HARNESS_SPACE = 'harness';
+const STATE_DIR =
+	process.env.SPACE_STATE ||
+	(process.env.PI_SPACE_ROOT ? path.join(process.env.PI_SPACE_ROOT, 'state') : path.join(P.piHome, 'state'));
 const HERDR_MODS = process.env.HERDR_MODS || path.join(P.herdrConfigDir, 'mods');
 let DRY = process.env.PI_DRY_RUN === '1';
 const SKIP_NETWORK = process.env.PI_SKIP_NETWORK === '1';
@@ -255,7 +263,7 @@ function hasCmd(name) {
 	return spawnSync('sh', ['-c', `command -v ${name} >/dev/null 2>&1`], { stdio: 'ignore' }).status === 0;
 }
 
-function run(cmd, args, { quiet = false, allowFail = false } = {}) {
+function run(cmd, args, { quiet = false, allowFail = false, env } = {}) {
 	if (DRY) {
 		say(`   [dry-run] ${cmd} ${args.join(' ')}`);
 		return 0;
@@ -264,7 +272,7 @@ function run(cmd, args, { quiet = false, allowFail = false } = {}) {
 	const r = spawnSync(spec.file, spec.args, {
 		stdio: quiet ? 'ignore' : 'inherit',
 		windowsVerbatimArguments: spec.windowsVerbatimArguments,
-		env: process.env,
+		env: env ? { ...process.env, ...env } : process.env,
 	});
 	if (r.status !== 0 && !allowFail) warn(`${cmd} ${args.join(' ')} failed (exit ${r.status ?? 'n/a'})`);
 	return r.status ?? 1;
@@ -757,67 +765,27 @@ async function stepHerdrApp() {
 	note(`herdr-app -> ${dest} (${how})`);
 }
 
-// --- 5b/5c. the delegation workspace ---------------------------------------
+// --- 5b. this checkout's own bin tools, on PATH by their bare names ---------
 /**
- * ghAuthed — is `gh` here AND logged in? A gh that exists but is not authed
- * cannot clone, and asking it to is how the first attempt used to die quietly.
- */
-function ghAuthed() {
-	return hasCmd('gh') && spawnSync('gh', ['auth', 'status'], { stdio: 'ignore' }).status === 0;
-}
-
-/**
- * cloneBoss — try the transports in the order scripts/install-lib.mjs gives,
- * checking each exit status here rather than through run()'s warn path.
+ * stepBinsOnPath — `bin/`'s own tools on PATH, by the bare name a spec types.
  *
- * The order is the fix: https needs no key, so a public repo arrives on a bare
- * machine; SSH is last and says why it is last. Two details keep it honest —
- * the status is read for each attempt instead of the loop moving on regardless,
- * and a failed clone's half-made directory is removed before the next attempt,
- * because the check at the top of stepBoss reads "exists" as "already present"
- * and a leftover directory would make every future run report success.
- * Returns the transport that landed, or null.
+ * This repo is the home of the harness, so its `bin/` is what `space`,
+ * `delegate`, `guard`, `preflight`, `pr-ready` and `publish` are: the install
+ * links them into the bin directory on PATH and, on win32, writes the `.cmd` a
+ * PowerShell prompt or a Herdr menu row actually starts.
  */
-function cloneBoss() {
-	for (const attempt of bossClonePlan({ ghAuthed: ghAuthed(), hasNetwork: true, repo: BOSS_REPO, dir: BOSS_DIR })) {
-		note(`cloning ${BOSS_REPO} via ${attempt.transport} -> ${BOSS_DIR}`);
-		if (attempt.transport === 'ssh') {
-			warn(`${BOSS_REPO} over SSH needs a GitHub key — ${BOSS_REPO} is public, so check the network before the key`);
-		}
-		const status = run(attempt.cmd, attempt.args, { allowFail: true });
-		if (status === 0) return attempt.transport;
-		if (exists(BOSS_DIR)) fs.rmSync(BOSS_DIR, { recursive: true, force: true });
-	}
-	return null;
-}
 
-function stepBoss() {
-	if (exists(BOSS_DIR)) {
-		note(`big-boss-pi workspace already present -> ${BOSS_DIR}`);
-	} else if (SKIP_NETWORK) {
-		skipped('big-boss-pi', 'PI_SKIP_NETWORK=1 — not cloned');
-	} else {
-		const landed = cloneBoss();
-		if (landed) note(`big-boss-pi cloned via ${landed} -> ${BOSS_DIR}`);
-		else warn(`big-boss-pi did not arrive — clone ${BOSS_REPO} by hand into ${BOSS_DIR}`);
-	}
-
-	// The workspace's own bin/ scripts, on PATH under their bare names: AGENTS.md
-	// and every spec call them as `jev`, `delegate` and `local-run`. Same list as
-	// above, so the `.cmd` shims cannot be forgotten for one of them.
-	const binDir = path.join(BOSS_DIR, 'bin');
-	const wrappers = POSIX_WRAPPERS.filter((w) => w.from === 'bin');
-	if (!exists(binDir)) {
-		skipped(wrappers.map((w) => w.name).join('/'), `${binDir} missing`);
-		return;
-	}
-	for (const wrapper of wrappers) {
-		const name = wrapper.name;
-		const src = path.join(binDir, name);
+function stepBinsOnPath() {
+	for (const name of HARNESS_TOOLS) {
+		// The installed copy is what a real run links; `--dry-run` on a fresh HOME
+		// has none, because the step that copies it is dry too, so this checkout's
+		// own copy is the honest answer to "what would land here".
+		const src = harnessBin(name);
 		if (!exists(src)) {
-			warn(`${src} missing — skipped its bin entry`);
+			warn(`bin/${name} not found — skipped its bin entry`);
 			continue;
 		}
+		if (!DRY) fs.chmodSync(src, 0o755);
 		const dest = path.join(P.binDir, name);
 		const how = linkOrCopy(src, dest);
 		note(`${name} -> ${dest} (${how})`);
@@ -825,12 +793,81 @@ function stepBoss() {
 	}
 }
 
+// --- 5c. the harness space --------------------------------------------------
+/**
+ * harnessBin — one of this checkout's tools, preferring the installed copy.
+ *
+ * A real install runs from `~/.pi`, so both spellings are the same file; a run
+ * from a clone elsewhere (`PI_AGENT_DIR` pointed at a temp home, or a worker's
+ * worktree) has no installed copy yet, and the checkout's own is the honest one.
+ */
+function harnessBin(name) {
+	const installed = path.join(P.piHome, 'bin', name);
+	return exists(installed) ? installed : path.join(SOURCE_DIR, 'bin', name);
+}
+
+/** spaceByHand — the one command that makes the space when this run cannot. */
+function spaceByHand() {
+	return `"${harnessBin('space')}" new --name ${HARNESS_SPACE} --project "${P.piHome}" --kind harness`;
+}
+
+/** recordProject — the project a space record names, '' when it does not parse. */
+function recordProject(record) {
+	try {
+		return JSON.parse(read(record)).project || '';
+	} catch {
+		return '';
+	}
+}
+
+/**
+ * stepSpace — the space a fresh install comes up with.
+ *
+ * Creating it used to be the guard's job, which is why a macOS or Windows box
+ * where the guard never ran opened Herdr with no space in it and no error to
+ * read. The install makes the space itself now, on every OS, and the guard only
+ * repairs what is recorded.
+ *
+ * A record that is already there is left byte for byte, whatever project it
+ * names: it holds reports and delegations, and repointing it would hand them to
+ * a different project. `herdr-app` missing (Windows or macOS without it, or a
+ * headless run) does not fail the install — the step prints the exact command to
+ * run by hand, the way the guard registration already does.
+ */
+function stepSpace() {
+	const record = path.join(STATE_DIR, 'spaces', HARNESS_SPACE, 'space.json');
+	if (exists(record)) {
+		note(`space ${HARNESS_SPACE}: recorded for ${recordProject(record) || 'a project'} -> ${record}, left as it is`);
+		return;
+	}
+	if (DRY) {
+		say(`   [dry-run] ${spaceByHand()}`);
+		return;
+	}
+	if (!hasCmd('herdr-app')) {
+		skipped(
+			`space ${HARNESS_SPACE}`,
+			`herdr-app is not on PATH — no space opened, the rest of the install is unaffected; make it by hand: ${spaceByHand()}`,
+		);
+		return;
+	}
+	const status = run(harnessBin('space'), ['new', '--name', HARNESS_SPACE, '--project', P.piHome, '--kind', 'harness'], {
+		allowFail: true,
+		// The record's root, said out loud: `bin/space` defaults to the tree it lives
+		// in, which is this checkout — the same place on a real install, and the
+		// only way a run from a clone elsewhere writes where `bin/delegate` reads.
+		env: { SPACE_STATE: STATE_DIR },
+	});
+	if (status === 0) note(`space ${HARNESS_SPACE}: ${P.piHome}, with a Boss tab -> ${record}`);
+	else warn(`space ${HARNESS_SPACE} was not created — make it by hand: ${spaceByHand()}`);
+}
+
 // --- 5d. the guard service, per init system ---------------------------------
-// The same default on all three systems: `bin/guard` is what creates and
-// repairs the `big-boss-pi` space, so a macOS or Windows install that registers
-// no login entry opens Herdr with no space in it and no error to read. It used
-// to be opt-in there while systemd on Linux needed no flag, which made the
-// documented one-liner install everything except the thing that is visible.
+// The same default on all three systems: `bin/guard` repairs every recorded
+// space and its Boss tab after a reboot, so a macOS or Windows install that
+// registers no login entry opens Herdr after the next logon with nothing in it.
+// It used to be opt-in there while systemd on Linux needed no flag, which made
+// the documented one-liner install everything except the thing that is visible.
 // PI_SKIP_SYSTEMD=1 (or PI_SKIP_SERVICES=1) is the one way out.
 function skipServicesVar() {
 	if (SKIP_SYSTEMD) return 'PI_SKIP_SYSTEMD';
@@ -840,7 +877,7 @@ function skipServicesVar() {
 
 /** guardByHand — the line that starts the guard once, for the OS at hand. */
 function guardByHand() {
-	const guard = path.join(BOSS_DIR, 'bin', 'guard');
+	const guard = harnessBin('guard');
 	if (PLAN.platform !== 'win32') return `"${guard}" &`;
 	const bash = resolveGitBash();
 	return bash ? `"${bash}" "${guard}"` : `"<git-bash>\\bin\\bash.exe" "${guard}"`;
@@ -852,18 +889,19 @@ function stepServices() {
 	if (ENABLE_SERVICES) note('guard service: PI_ENABLE_SERVICES=1 is accepted — the login entry is the default now, so it changes nothing');
 	const skipVar = skipServicesVar();
 	if (skipVar) {
-		skipped(
+			skipped(
 			'guard service (launchd / Task Scheduler)',
-			`${skipVar}=1 — no login entry registered, and the guard is what creates the big-boss-pi space; start it by hand: ${guardByHand()}`,
+			`${skipVar}=1 — no login entry registered, so a space a reboot loses is repaired by hand; start it by hand: ${guardByHand()}`,
 		);
 		return;
 	}
-	const guard = path.join(BOSS_DIR, 'bin', 'guard');
+	const guard = harnessBin('guard');
 	if (!exists(guard)) {
-		// A skip that names itself is not a silent skip: no clone (PI_SKIP_NETWORK=1)
-		// means no guard, and registering a task that points nowhere is worse.
-		warn(`guard service: ${guard} missing — nothing to register, so no big-boss-pi space at logon`);
-		say('   fix: the delegation workspace is not cloned — re-run without PI_SKIP_NETWORK=1 (or point PI_BOSS_DIR at the clone)');
+		// A skip that names itself is not a silent skip: a checkout with no bin/guard
+		// would have a task registering nothing, and registering a task that points
+		// nowhere is worse than saying so.
+		warn(`guard service: ${guard} missing — nothing to register, so nothing repairs a space after a reboot`);
+		say('   fix: re-run the install from the pi checkout (bin/guard is part of it), then register the entry');
 		return;
 	}
 	if (PLAN.service === 'launchd') {
@@ -877,7 +915,7 @@ function stepServices() {
 	}
 	// The guard is bash (`#!/usr/bin/env bash`), and Task Scheduler runs a command
 	// line, not a shebang: registering the file itself started nothing, which is
-	// why the `big-boss-pi` space never appeared on Windows. Git for Windows is
+	// why the space never appeared on Windows. Git for Windows is
 	// already the one prerequisite this platform has (INSTALL.md), so its bash is
 	// the interpreter — resolved, never assumed, because `C:\Program Files` is not
 	// where a per-user Git for Windows lands and a task gets no useful PATH.
@@ -893,11 +931,11 @@ function stepServices() {
 	// the same bash command line with window style 0 and records the pid, so the
 	// Disable line can stop the process the task delete does not reach.
 	const launcher = guardLauncherPath({ piHome: P.piHome });
-	const pidFile = guardPidPath({ bossDir: BOSS_DIR });
+	const pidFile = guardPidPath({ piHome: P.piHome });
 	if (writeText(launcher, hiddenLauncher({ bashPath: bash, guardPath: guard, pidPath: pidFile })))
 		note(`guard launcher (hidden, no console window) -> ${launcher}`);
 	const task = guardTaskCommand({ launcherPath: launcher, pidPath: pidFile });
-	note('guard: registering a Task Scheduler entry at logon (this is what creates the big-boss-pi space)');
+	note('guard: registering a Task Scheduler entry at logon (this is what repairs a space and its Boss tab)');
 	note(`interpreter: ${bash}   # run hidden by ${launcher}`);
 	say(`   command: ${task.registered}`);
 	// Printed above as the pasteable line, so run()'s own `[dry-run] cmd args`
@@ -917,17 +955,17 @@ function stepServices() {
  * space appeared.
  *
  * `/SC ONLOGON` is a promise about the *next* logon, and that is exactly what
- * the Windows box reported: install finished, Herdr opened, no `big-boss-pi`
- * space, no error. So the install starts the entry once and waits a bounded time
- * for the space, and a failure names the task, the guard's log and the app
- * instead of leaving a green transcript over an empty window. A failing start
- * does not abort the install: the entry is registered, the next logon gets a try.
+ * the Windows box reported: install finished, Herdr opened, no space, no error.
+ * So the install starts the entry once and waits a bounded time for the space,
+ * and a failure names the task, the guard's log and the app instead of leaving a
+ * green transcript over an empty window. A failing start does not abort the
+ * install: the entry is registered, the next logon gets a try.
  */
 function startGuardNow() {
 	const waitMs = Number(process.env.PI_GUARD_SPACE_WAIT_MS ?? GUARD_SPACE_WAIT_MS);
 	return startAndVerifyGuard({
 		platform: PLAN.platform,
-		bossDir: BOSS_DIR,
+		piHome: P.piHome,
 		uid: typeof process.getuid === 'function' ? process.getuid() : 0,
 		dry: DRY,
 		timeoutMs: Number.isFinite(waitMs) ? waitMs : GUARD_SPACE_WAIT_MS,
@@ -937,7 +975,7 @@ function startGuardNow() {
 	});
 }
 
-/** probeSpace — what `herdr-app ls` says about the big-boss-pi space right now.
+/** probeSpace — what `herdr-app ls` says about the harness space right now.
  * A herdr-app that is not installed or not answering yet is `running: false`,
  * which the wait reads as "not a failure yet" rather than as a missing space. */
 function probeSpace() {
@@ -1091,7 +1129,8 @@ function summary() {
 		say(sandbox.ok ? `   ${sandbox.message} --help   # sandbox` : `   sandbox: ${sandbox.message}`);
 	} else say(`   sandbox: ${sandboxSummary(PLAN).message}`);
 	say('   herdr-app --version                             # desktop app');
-	say('   jev count "split this task"                     # delegation workspace on PATH (needs the clone)');
+	say('   jev count "split this task"                     # the tools bin/ puts on PATH');
+	say('   bin/space list                                  # the spaces this machine records');
 	if (PLAN.service === 'systemd' && systemdInstalled.length > 0) {
 		say('Disable:');
 		for (const unit of systemdInstalled.filter((u) => u.enable)) {
@@ -1103,14 +1142,14 @@ function summary() {
 			say(`   # ${unit.name}: started by its timer — nothing to disable`);
 		}
 	} else if (PLAN.service === 'launchd') {
-		if (!guardService) say('Guard login item: not registered — the line above says why, and Herdr will open with no big-boss-pi space');
+		if (!guardService) say('Guard login item: not registered — the line above says why, and nothing repairs a space after the next logon');
 		else {
 			say(`${DRY ? 'Would install' : 'Installed'}: ${guardService.label}`);
 			say(`Disable: ${guardService.remove}`);
 			say('Disable: launchctl unload -w ~/Library/LaunchAgents/*.plist   # every pi login item');
 		}
 	} else {
-		if (!guardService) say('Guard task: not registered — the line above says why, and Herdr will open with no big-boss-pi space');
+		if (!guardService) say('Guard task: not registered — the line above says why, and nothing repairs a space after the next logon');
 		else {
 			say(`${DRY ? 'Would install' : 'Installed'}: ${guardService.label}`);
 			say(`Disable: ${guardService.remove}`);
@@ -1145,13 +1184,13 @@ async function main() {
 	// WSL: the plan is Linux and the sandbox is the Linux one, so nothing below
 	// changes — but a path on a Windows drive loses the mode bits the hooks need,
 	// and the fix is one move. Named path, named fix, once. It has to run after
-	// the preflight: only then are SOURCE_DIR, AGENT_DIR and BOSS_DIR known.
+	// the preflight: only then are SOURCE_DIR, AGENT_DIR and STATE_DIR known.
 	for (const w of wslMountWarnings({
 		wsl: PLAN.wsl,
 		paths: [
 			{ what: 'this pi repo', path: SOURCE_DIR },
 			{ what: 'the agent dir', path: AGENT_DIR },
-			{ what: 'PI_BOSS_DIR', path: BOSS_DIR },
+			{ what: 'the space state', path: STATE_DIR },
 		],
 	}))
 		warn(w.message);
@@ -1162,7 +1201,8 @@ async function main() {
 	stepGitignore();
 	stepBins();
 	await stepHerdrApp();
-	stepBoss();
+	stepBinsOnPath();
+	stepSpace();
 	await stepServices();
 	summary();
 }

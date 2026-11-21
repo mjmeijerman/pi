@@ -1,21 +1,24 @@
 // The guard login entry is the visible half of the install on macOS and Windows.
 //
 // What it costs to get this wrong is not a warning line: the documented one-liner
-// finished on a clean Windows 11 box, Herdr opened, and there was no
-// `big-boss-pi` space — because the step that creates it (`bin/guard`) was
-// opt-in there while systemd on Linux needed no flag. So these tests hold the
-// four claims the fix makes, on the plans rather than on the host:
+// finished on a clean Windows 11 box, Herdr opened, and there was no `harness`
+// space — because the step that repairs it (`bin/guard`) was opt-in there while
+// systemd on Linux needed no flag. So these tests hold the four claims the fix
+// makes, on the plans rather than on the host:
 //
 //   1. a default run registers the entry on all three systems;
 //   2. PI_SKIP_SYSTEMD=1 — and its alias PI_SKIP_SERVICES=1 — registers nothing
 //      and says which variable did it;
 //   3. PI_ENABLE_SERVICES=1 is still accepted, so a script written against the
 //      old flag keeps working;
-//   4. the two honest failures (no clone, no Git Bash) name what is missing and
-//      what to set, instead of skipping in silence.
+//   4. the honest failure (no Git Bash) names what is missing and what to set,
+//      instead of skipping in silence.
 //
-// Everything runs in a throwaway HOME with a stand-in `bin/guard`, and the
-// macOS plist is read off the disk: "it printed the line" is not the claim.
+// Everything runs in a throwaway HOME where `~/.pi` is not this checkout, which
+// is also the case that used to be a silent skip: the entry has to name the
+// guard that exists (`bin/guard` of the checkout that is installing), not a path
+// under `~/.pi` that a clone elsewhere never wrote. The macOS plist is read off
+// the disk: "it printed the line" is not the claim.
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -33,22 +36,8 @@ function tempHome(t) {
 	return home;
 }
 
-/** cloneWithGuard — the two files these steps look for, as the real clone has them. */
-function cloneWithGuard(home) {
-	const boss = path.join(home, 'big-boss-pi');
-	const guard = path.join(boss, 'bin', 'guard');
-	fs.mkdirSync(path.dirname(guard), { recursive: true });
-	fs.writeFileSync(guard, '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-	// A stand-in clone with its own systemd/ copy of the old pre-space guard unit:
-	// the install must now take the guard unit from this repo instead, so the
-	// Linux test below can prove the clone's copy does not win.
-	fs.mkdirSync(path.join(boss, 'systemd'), { recursive: true });
-	fs.writeFileSync(
-		path.join(boss, 'systemd', 'big-boss-pi-guard.service'),
-		'[Unit]\nDescription=big-boss-pi guard\n\n[Service]\nExecStart=%h/big-boss-pi/bin/guard\n\n[Install]\nWantedBy=default.target\n',
-	);
-	return { boss, guard };
-}
+/** theGuard — the `bin/guard` these steps register: this checkout's own. */
+const theGuard = path.join(ROOT, 'bin', 'guard');
 
 function install(home, platform, args = [], extra = {}) {
 	const env = {
@@ -58,7 +47,6 @@ function install(home, platform, args = [], extra = {}) {
 		PI_SKIP_NETWORK: '1',
 		PI_SKIP_PREREQS: '1',
 		PI_ALLOW_MISSING_PI: '1',
-		PI_BOSS_DIR: path.join(home, 'big-boss-pi'),
 		// The step waits up to 20s for the space; a test does not. The wait itself
 		// is driven with a fake clock in scripts/tests/guard-start.test.mjs.
 		PI_GUARD_SPACE_WAIT_MS: '0',
@@ -66,7 +54,7 @@ function install(home, platform, args = [], extra = {}) {
 	};
 	// Any of these would decide the answer before the test does: the host's
 	// platform, a real workspace, the gates under test.
-	for (const name of ['USERPROFILE', 'PI_DRY_RUN', 'PI_AGENT_DIR', 'PI_ENABLE_SERVICES', 'PI_SKIP_SYSTEMD', 'PI_SKIP_SERVICES', 'PI_GIT_BASH']) delete env[name];
+	for (const name of ['USERPROFILE', 'PI_DRY_RUN', 'PI_AGENT_DIR', 'PI_ENABLE_SERVICES', 'PI_SKIP_SYSTEMD', 'PI_SKIP_SERVICES', 'PI_GIT_BASH', 'PI_BOSS_DIR']) delete env[name];
 	return spawnSync(process.execPath, [path.join(ROOT, 'install.mjs'), ...args], {
 		env: { ...env, ...extra },
 		encoding: 'utf8',
@@ -78,7 +66,6 @@ const plistPath = (home) => path.join(home, 'Library', 'LaunchAgents', 'dev.herd
 
 test('macOS: a default run writes the launchd plist, pointed at bin/guard', (t) => {
 	const home = tempHome(t);
-	const { guard } = cloneWithGuard(home);
 
 	const out = install(home, 'darwin');
 	assert.equal(out.status, 0, out.stderr);
@@ -89,7 +76,7 @@ test('macOS: a default run writes the launchd plist, pointed at bin/guard', (t) 
 	// The entry is only an entry if ProgramArguments names the guard itself.
 	const text = fs.readFileSync(plist, 'utf8');
 	assert.match(text, /<key>ProgramArguments<\/key>/);
-	assert.ok(text.includes(`<string>${guard}</string>`), 'the plist does not name bin/guard');
+	assert.ok(text.includes(`<string>${theGuard}</string>`), `the plist does not name ${theGuard}`);
 	assert.match(text, /<key>RunAtLoad<\/key>\s*<true\/>/);
 	// And the summary says what was installed and how to undo it.
 	assert.match(out.stdout, /^Installed: launchd login item .*dev\.herdr\.big-boss-pi-guard\.plist$/m);
@@ -98,13 +85,12 @@ test('macOS: a default run writes the launchd plist, pointed at bin/guard', (t) 
 
 test('Windows: a default run registers the Task Scheduler entry', (t) => {
 	const home = tempHome(t);
-	cloneWithGuard(home);
 
 	// PI_GIT_BASH is the resolution's override and the only way this runs on a host
 	// without Git for Windows; --dry-run keeps a Linux host from asking schtasks.
 	const out = install(home, 'win32', ['--dry-run'], { PI_GIT_BASH: '/usr/bin/bash' });
 	assert.equal(out.status, 0, out.stderr);
-	assert.match(out.stdout, /^== guard: registering a Task Scheduler entry at logon \(this is what creates the big-boss-pi space\)$/m);
+	assert.match(out.stdout, /^== guard: registering a Task Scheduler entry at logon \(this is what repairs a space and its Boss tab\)$/m);
 	const registered = out.stdout.match(/^   command: (schtasks .*)$/m);
 	assert.ok(registered, 'no registered command line');
 	// wscript.exe and the generated launcher, never bash.exe: bash is a console
@@ -123,7 +109,6 @@ test('Windows: a default run registers the Task Scheduler entry', (t) => {
 // nothing was registered, because there is nothing to start.
 test('Windows: the entry is started after it is registered, in that order', (t) => {
 	const home = tempHome(t);
-	cloneWithGuard(home);
 
 	const out = install(home, 'win32', ['--dry-run'], { PI_GIT_BASH: '/usr/bin/bash' });
 	assert.equal(out.status, 0, out.stderr);
@@ -137,7 +122,6 @@ test('Windows: the entry is started after it is registered, in that order', (t) 
 
 test('nothing is started when no entry was registered', (t) => {
 	const home = tempHome(t);
-	cloneWithGuard(home);
 
 	// Skipped on purpose, and the honest failure (no Git Bash): neither
 	// registered an entry, so neither may claim to have started one.
@@ -153,7 +137,6 @@ test('nothing is started when no entry was registered', (t) => {
 
 test('Linux: a default run copies the guard unit out of this repo, pointed at the supervisor', (t) => {
 	const home = tempHome(t);
-	cloneWithGuard(home);
 
 	const out = install(home, 'linux');
 	assert.equal(out.status, 0, out.stderr);
@@ -164,23 +147,18 @@ test('Linux: a default run copies the guard unit out of this repo, pointed at th
 	// recorded space — not the clone's pre-space copy that knew one workspace.
 	const text = fs.readFileSync(unit, 'utf8');
 	assert.ok(text.includes(`ExecStart=${path.join(home, '.pi', 'bin', 'guard')}`), text);
-	assert.ok(
-		!text.includes(path.join(home, 'big-boss-pi', 'bin', 'guard')),
-		"the clone's pre-space guard is still what the unit starts",
-	);
 	assert.match(out.stdout, /^== big-boss-pi-guard\.service -> /m);
 });
 
 test('PI_SKIP_SYSTEMD=1 registers nothing and names the variable', (t) => {
 	const home = tempHome(t);
-	const { guard } = cloneWithGuard(home);
 
 	const mac = install(home, 'darwin', [], { PI_SKIP_SYSTEMD: '1' });
 	assert.equal(mac.status, 0, mac.stderr);
 	assert.equal(fs.existsSync(plistPath(home)), false, 'PI_SKIP_SYSTEMD=1 still wrote a login item');
 	assert.match(mac.stdout, /^== guard service \(launchd \/ Task Scheduler\): PI_SKIP_SYSTEMD=1 — no login entry registered/m);
 	// The skip is only useful if it says how to start the guard once, by hand.
-	assert.ok(mac.stdout.includes(guard), 'the skip line does not name bin/guard');
+	assert.ok(mac.stdout.includes(theGuard), 'the skip line does not name the guard to start');
 	assert.match(mac.stdout, /start it by hand: ".*bin\/guard" &/);
 	assert.match(mac.stdout, /^Guard login item: not registered/m);
 
@@ -191,7 +169,6 @@ test('PI_SKIP_SYSTEMD=1 registers nothing and names the variable', (t) => {
 
 test('PI_SKIP_SERVICES=1 is the same way out, spelled honestly on all three platforms', (t) => {
 	const home = tempHome(t);
-	cloneWithGuard(home);
 
 	const mac = install(home, 'darwin', [], { PI_SKIP_SERVICES: '1' });
 	assert.match(mac.stdout, /^== guard service \(launchd \/ Task Scheduler\): PI_SKIP_SERVICES=1 — no login entry registered/m);
@@ -208,7 +185,6 @@ test('PI_SKIP_SERVICES=1 is the same way out, spelled honestly on all three plat
 
 test('PI_ENABLE_SERVICES=1 is still accepted, and changes nothing', (t) => {
 	const home = tempHome(t);
-	cloneWithGuard(home);
 
 	const out = install(home, 'win32', ['--dry-run'], { PI_ENABLE_SERVICES: '1', PI_GIT_BASH: '/usr/bin/bash' });
 	assert.equal(out.status, 0, out.stderr);
@@ -218,7 +194,6 @@ test('PI_ENABLE_SERVICES=1 is still accepted, and changes nothing', (t) => {
 
 test('Windows with no Git Bash prints the PI_GIT_BASH line and registers nothing', (t) => {
 	const home = tempHome(t);
-	cloneWithGuard(home);
 
 	const out = install(home, 'win32', ['--dry-run'], { PI_GIT_BASH: path.join(home, 'no-such-bash.exe') });
 	assert.equal(out.status, 0, out.stderr);
@@ -228,15 +203,16 @@ test('Windows with no Git Bash prints the PI_GIT_BASH line and registers nothing
 	assert.match(out.stdout, /^Guard task: not registered/m);
 });
 
-test('a missing bin/guard is named, with what to set — never a silent skip', (t) => {
+test('a checkout that is not ~/.pi registers the guard it can actually run', (t) => {
 	const home = tempHome(t);
-	// No clone at all: PI_SKIP_NETWORK=1 and nothing on disk, which is the state the
-	// first Windows install was in when the space did not appear.
+	// `~/.pi` here is a throwaway home, not this checkout, so `~/.pi/bin/guard` was
+	// never written. Naming that path anyway is the silent skip this file exists to
+	// prevent: the entry would exist and start nothing, and the truncated path is
+	// what the first real Windows install left behind.
 	const out = install(home, 'darwin');
 
 	assert.equal(out.status, 0, out.stderr);
-	assert.ok(out.stderr.includes(path.join(home, 'big-boss-pi', 'bin', 'guard')), out.stderr);
-	assert.match(out.stderr, /missing — nothing to register/);
-	assert.match(out.stdout, /   fix: the delegation workspace is not cloned — re-run without PI_SKIP_NETWORK=1/);
-	assert.equal(fs.existsSync(plistPath(home)), false);
+	assert.equal(fs.existsSync(path.join(home, '.pi', 'bin', 'guard')), false);
+	assert.ok(fs.readFileSync(plistPath(home), 'utf8').includes(`<string>${theGuard}</string>`), 'the entry does not name a guard that exists');
+	assert.doesNotMatch(out.stderr, /missing — nothing to register/);
 });

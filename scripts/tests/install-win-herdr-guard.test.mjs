@@ -210,7 +210,7 @@ test('the guard task is registered with Git Bash, and the default is the entry i
 	const on = { PI_ENABLE_SERVICES: '1', PI_GIT_BASH: '/usr/bin/bash', PI_SKIP_SYSTEMD: '' };
 	const out = install(home, ['--dry-run'], on);
 	assert.equal(out.status, 0, out.stderr);
-	assert.match(out.stdout, /^== guard: registering a Task Scheduler entry at logon \(this is what creates the big-boss-pi space\)$/m);
+	assert.match(out.stdout, /^== guard: registering a Task Scheduler entry at logon \(this is what repairs a space and its Boss tab\)$/m);
 	const registered = out.stdout.match(/^   command: (schtasks .*)$/m);
 	assert.ok(registered, 'no registered command line');
 	// The `/TR` names wscript.exe and the hidden launcher, never bash.exe directly.
@@ -226,7 +226,7 @@ test('the guard task is registered with Git Bash, and the default is the entry i
 	assert.match(none.stdout, /   fix: install Git for Windows, or set PI_GIT_BASH/);
 
 	// A default run registers it: PI_ENABLE_SERVICES getting in the way was the bug,
-	// because the guard is what creates the big-boss-pi space. No flag here at all.
+	// because the guard is what repairs a space after a reboot. No flag here at all.
 	const byDefault = install(home, ['--dry-run'], { PI_SKIP_SYSTEMD: '', PI_GIT_BASH: '/usr/bin/bash' });
 	assert.equal(byDefault.status, 0, byDefault.stderr);
 	assert.match(byDefault.stdout, /^== guard: registering a Task Scheduler entry at logon/m);
@@ -243,6 +243,6 @@ test('the guard task is registered with Git Bash, and the default is the entry i
 	// The one way out names the variable that did it, and the line that starts the
 	// guard once by hand.
 	const gated = install(home, ['--dry-run'], { PI_SKIP_SYSTEMD: '1', PI_GIT_BASH: '/usr/bin/bash' });
-	assert.match(gated.stdout, /guard service \(launchd \/ Task Scheduler\): PI_SKIP_SYSTEMD=1 — no login entry registered, and the guard is what creates the big-boss-pi space/);
+	assert.match(gated.stdout, /guard service \(launchd \/ Task Scheduler\): PI_SKIP_SYSTEMD=1 — no login entry registered/);
 	assert.doesNotMatch(gated.stdout, /guard: registering a Task Scheduler entry/);
 });

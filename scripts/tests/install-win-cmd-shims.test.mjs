@@ -21,7 +21,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { cmdShim, POSIX_WRAPPERS, resolveGitBash } from '../install-lib.mjs';
+import { HARNESS_TOOLS, cmdShim, POSIX_WRAPPERS, resolveGitBash } from '../install-lib.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -131,14 +131,19 @@ function install(home, args = [], extra = {}) {
 	});
 }
 
-/** fakeBoss — a workspace clone with the three wrappers stepBoss puts on PATH. */
-function fakeBoss(home) {
-	const bin = path.join(home, 'big-boss-pi', 'bin');
-	fs.mkdirSync(bin, { recursive: true });
-	for (const wrapper of POSIX_WRAPPERS.filter((w) => w.from === 'bin')) {
-		fs.writeFileSync(path.join(bin, wrapper.name), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-	}
-	return bin;
+/**
+ * everyWrapper — the two lists that end up on PATH, as { name, source }.
+ *
+ * POSIX_WRAPPERS says where the bash pair comes from; HARNESS_TOOLS is the rest
+ * of `bin/`. Both are read from the engine, so a tool added to either is checked
+ * here without touching this file — the thing that made the old hardcoded five
+ * go stale the moment a sixth arrived.
+ */
+function everyWrapper() {
+	const seen = new Map();
+	for (const wrapper of POSIX_WRAPPERS) seen.set(wrapper.name, path.join(ROOT, wrapper.from, wrapper.name));
+	for (const name of HARNESS_TOOLS) if (!seen.has(name)) seen.set(name, path.join(ROOT, 'bin', name));
+	return [...seen].map(([name, source]) => ({ name, source }));
 }
 
 const bashPath = (home) => path.join(home, 'git', 'bin', 'bash.exe');
@@ -162,18 +167,17 @@ const cmdFiles = (dir) => {
 test('every wrapper the installer puts on PATH gets a .cmd built from the resolved bash', (t) => {
 	const home = tempHome(t);
 	const bash = fakeBash(home);
-	fakeBoss(home);
 
 	const out = install(home, [], { PI_GIT_BASH: bash });
 	assert.equal(out.status, 0, out.stderr);
 
 	const binDir = path.join(home, '.local', 'bin');
-	// Driven off the engine's list, not a second copy of it: a sixth wrapper added
-	// to POSIX_WRAPPERS is checked here without touching this test.
-	for (const wrapper of POSIX_WRAPPERS) {
+	// Driven off the engine's lists, not a second copy of them: a seventh wrapper
+	// added to either is checked here without touching this test.
+	for (const wrapper of everyWrapper()) {
 		// The source is a bash program in this repo, which is why it needs a shim
 		// at all; a wrapper that was not would be a wrong entry in the list.
-		const source = path.join(wrapper.from === 'scripts' ? path.join(ROOT, 'scripts') : path.join(home, 'big-boss-pi', 'bin'), wrapper.name);
+		const source = wrapper.source;
 		assert.ok(fs.existsSync(source), `${wrapper.name}: no source at ${source}`);
 		assert.match(fs.readFileSync(source, 'utf8').split('\n')[0], /^#!\/usr\/bin\/env bash$/, `${wrapper.name} is not a bash program`);
 
@@ -194,7 +198,7 @@ test('every wrapper the installer puts on PATH gets a .cmd built from the resolv
 		// that one, and #182's `.pi/scripts` copy is not a substitute.
 		assert.ok(fs.existsSync(path.join(binDir, wrapper.name)), `${wrapper.name} itself was removed`);
 	}
-	assert.deepEqual(cmdFiles(binDir), POSIX_WRAPPERS.map((w) => `${w.name}.cmd`).sort());
+	assert.deepEqual(cmdFiles(binDir), everyWrapper().map((w) => `${w.name}.cmd`).sort());
 });
 
 test('the Herdr menu row runs the .cmd that was actually written', (t) => {
@@ -248,7 +252,6 @@ test('on Linux the menu row names the pi-bare under this HOME, not the source tr
 
 test('no bash: one message naming PI_GIT_BASH, and not a single .cmd written', (t) => {
 	const home = tempHome(t);
-	fakeBoss(home);
 	// No PI_GIT_BASH, and a PATH with no bash.exe on it: this Linux host has none
 	// under any of the Git for Windows directories either.
 	const out = install(home, [], { PI_GIT_BASH: '', PATH: path.join(home, 'empty-path') });
@@ -275,7 +278,7 @@ test('a second run writes no .cmd again, and one that did is byte-identical', (t
 		const file = path.join(binDir, name);
 		return { name, text: fs.readFileSync(file, 'utf8'), mtime: fs.statSync(file).mtimeMs };
 	});
-	assert.equal(before.length, POSIX_WRAPPERS.filter((w) => w.from === 'scripts').length);
+	assert.equal(before.length, everyWrapper().length);
 
 	const second = install(home, [], { PI_GIT_BASH: bash });
 	assert.equal(second.status, 0, second.stderr);
@@ -298,7 +301,7 @@ test('--dry-run prints the shim lines and writes nothing', (t) => {
 
 	const out = install(home, ['--dry-run'], { PI_GIT_BASH: bash });
 	assert.equal(out.status, 0, out.stderr);
-	for (const wrapper of POSIX_WRAPPERS.filter((w) => w.from === 'scripts')) {
+	for (const wrapper of everyWrapper()) {
 		assert.ok(out.stdout.includes(`== ${wrapper.name}.cmd -> `), out.stdout);
 	}
 	assert.deepEqual(cmdFiles(binDir), [], 'a dry run wrote a shim');
