@@ -22,15 +22,25 @@ fi
 #
 # Every pass, for every recorded space:
 #
+#   0. identity first: a live space is this record's when its **name** matches, or, with no name
+#      match, when its **folder** matches and no other record claims that folder. Herdr's id is the
+#      last hint and never evidence on its own. A match is adopted — `id`, `uberboss_tab` and
+#      `terminals` are rewritten from the live space — and nothing is opened. Only when nothing
+#      matches is a space created, and never a second one: a live space already on this record's
+#      folder, under another name, is named in the log instead of being cloned.
 #   1. the space is gone from `herdr-app ls` → rebuild it with the record's own name, project
 #      folder and Boss tab name, then a `tab.new` for every other tab the record lists. Never a new
 #      space name, never a new project folder: the record is what the person wrote down.
-#   2. the space is there but its Boss tab is not → respawn that tab. If a resume entry names a
-#      session for the terminal it used to have (`~/.pi/agent/herdr-resume/<terminal>.json`),
-#      the tab is started with `<entry argv> --session <path>`: the same conversation, the same
-#      entry `scripts/herdr-resume.mjs` reads, and the guard types nothing into a terminal itself.
-#      A tab that is there is left alone — that is the "never type twice in one boot" rule, kept
-#      by not typing at all.
+#   1b. the Boss is bare. An argv that is a sandboxing wrapper (`pi`, `pisandbox`, `pi-sandboxed`),
+#      or that points into the retired `~/big-boss-pi` checkout, is rewritten to this tree's
+#      `bin/pi-bare` on the pass that reads it, and said once.
+#   1c. a Boss is never resumed into an empty session: the tab is opened with the newest session
+#      whose own `cwd` is the record's project, found by folder, not by the terminal id an entry
+#      still remembers from before a reboot.
+#   2. the space is there but its Boss tab is not → respawn that tab with `--session <the newest
+#      session for the record's project>` whenever one exists: the same conversation, and the guard
+#      types nothing into a terminal itself. A tab that is there is left alone — that is the "never
+#      type twice in one boot" rule, kept by not typing at all.
 #   3. a worker's tab is not the guard's business: a slug in the space's `delegations.json` is
 #      resurrected only by `delegate wait --forever`, so a finished worker's tab stays closed and a
 #      recorded tab carrying a worker's name is never opened here.
@@ -72,6 +82,14 @@ INTERVAL=${PI_GUARD_INTERVAL:-20}
 HERDR_APP=${PI_GUARD_HERDR_APP:-herdr-app}
 RESUME_DIR=${PI_HERDR_RESUME_DIR:-${HOME:-}/.pi/agent/herdr-resume}
 RESUME_SCRIPT=${PI_GUARD_RESUME_SCRIPT:-${HOME:-}/.pi/scripts/herdr-resume.mjs}
+# The Boss is bare: `bin/pi-bare` in this tree, never a sandboxed wrapper and never the retired
+# `~/big-boss-pi` checkout. A record that names either is rewritten on the pass that reads it.
+PI_HOME=${PI_HOME:-$(cd -- "$here/.." && pwd)}
+PI_BARE=${PI_GUARD_PI_BARE:-$PI_HOME/bin/pi-bare}
+LEGACY_ROOT=${SPACE_LEGACY_ROOT:-${PI_LEGACY_BOSS_ROOT:-${HOME:-}/big-boss-pi}}
+# Where a session's own folder is written down: the first line of every `*.jsonl` carries `cwd`,
+# so the newest session for a project is found by reading it, not by guessing at the slug.
+SESSIONS_DIR=${PI_SESSIONS_DIR:-${HOME:-}/.pi/agent/sessions}
 ONCE=0
 DRY=0
 ONLY=""
@@ -106,27 +124,202 @@ field_of() {
 	node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{let j={};try{j=JSON.parse(d)}catch{};const v=j[process.argv[1]];if(v!==undefined&&v!==null&&typeof v!=="object")process.stdout.write(String(v))})' "${1:-}"
 }
 
-# space_state <name> [id] — this pass's snapshot entry for that space: `none` when Herdr does not list
-# it, else `{"id":...,"tabs":[...]}` (tabs is null when the app answered without a tab list, which
-# is "cannot tell", not "no tabs").
+# space_match <slug> — how this pass's snapshot answers for that record, as one JSON object:
 #
-# The name is the record's handle and the id is herdr's, so both are tried: a person who renames the
-# space in the app still has a record naming that id, and rebuilding on the old name would leave two
-# spaces for one project — which is the one thing a space exists to prevent.
-space_state() {
-	printf '%s' "$SNAP" | HERDR_SPACE_NAME=${1:-} HERDR_SPACE_ID=${2:-} node -e '
+#   {"match":"name"|"folder"|"id"|"none", "id":..., "tabs":[...]|null,
+#    "live":"<the live space's name>", "other":"<a live space already on our folder>"}
+#
+# The name is the record's handle, so it is tried first. When no name matches, the folder decides —
+# but only when no other record claims that folder: two records on one folder are told apart by
+# name, and matching both of them by folder would hand one record the other's space. Herdr's id is
+# the last hint, and a hint only: a live space whose name or folder another record claims is not
+# adopted, however familiar the id looks.
+#
+# `other` is what makes "never a second space for one folder" a fact rather than an intention: a
+# live space already sitting on our project, and not ours by name, is named in the log instead of
+# being cloned. Nothing here writes or opens anything — the caller decides.
+space_match() {
+	printf '%s' "$SNAP" | RECORD=$(space_record "${1:-}") SPACES_DIR=$SPACES_DIR SLUG=${1:-} node -e '
+		const fs = require("fs"), path = require("path");
 		let d = "";
 		process.stdin.on("data", (c) => (d += c)).on("end", () => {
+			const out = { match: "none", id: "", tabs: null, live: "", other: "" };
+			let rec = {};
+			try { rec = JSON.parse(fs.readFileSync(process.env.RECORD, "utf8")); } catch { process.stdout.write(JSON.stringify(out)); return; }
+			const name = String(rec.name || ""), project = String(rec.project || ""), id = String(rec.id || "");
+			const byName = new Map(), byFolder = new Map();
+			let names = [];
+			try { names = fs.readdirSync(process.env.SPACES_DIR); } catch {}
+			for (const n of names) {
+				let r = {};
+				try { r = JSON.parse(fs.readFileSync(path.join(process.env.SPACES_DIR, n, "space.json"), "utf8")); } catch { continue; }
+				const rn = String(r.name || ""), rp = String(r.project || "");
+				if (rn && !byName.has(rn)) byName.set(rn, n);
+				if (rp) byFolder.set(rp, (byFolder.get(rp) || []).concat(n));
+			}
 			let j = {};
-			try { j = JSON.parse(d); } catch { process.stdout.write("none"); return; }
-			const spaces = Array.isArray(j.spaces) ? j.spaces : [];
-			const id = process.env.HERDR_SPACE_ID || "";
-			const hit =
-				spaces.find((s) => s && s.name === process.env.HERDR_SPACE_NAME) ||
-				(id ? spaces.find((s) => s && String(s.id ?? "") === id) : undefined);
-			if (!hit) { process.stdout.write("none"); return; }
-			process.stdout.write(JSON.stringify({ id: String(hit.id ?? ""), tabs: Array.isArray(hit.tabs) ? hit.tabs : null }));
+			try { j = JSON.parse(d); } catch { process.stdout.write(JSON.stringify(out)); return; }
+			const spaces = (Array.isArray(j.spaces) ? j.spaces : []).filter((s) => s && typeof s === "object");
+			const mine = process.env.SLUG || "";
+			let hit = spaces.find((s) => String(s.name || "") === name);
+			if (hit) out.match = "name";
+			if (!hit && project) {
+				const otherRecords = (byFolder.get(project) || []).filter((n) => n !== mine);
+				if (otherRecords.length === 0) {
+					hit = spaces.find((s) => String(s.folder || "") === project);
+					if (hit) out.match = "folder";
+				}
+			}
+			if (!hit && id) {
+				const cand = spaces.find((s) => String(s.id || "") === id);
+				if (cand) {
+					const cn = String(cand.name || ""), cf = String(cand.folder || "");
+					const claimed =
+						(cn && byName.has(cn) && byName.get(cn) !== mine) ||
+						(cf && (byFolder.get(cf) || []).some((n) => n !== mine));
+					if (!claimed) { hit = cand; out.match = "id"; }
+				}
+			}
+			if (hit) {
+				out.id = String(hit.id || "");
+				out.tabs = Array.isArray(hit.tabs) ? hit.tabs : null;
+				out.live = String(hit.name || "");
+			} else if (project) {
+				const squat = spaces.find((s) => String(s.folder || "") === project);
+				if (squat) out.other = String(squat.name || "") || String(squat.id || "") || "(unnamed)";
+			}
+			process.stdout.write(JSON.stringify(out));
 		});'
+}
+
+# adopt_space <slug> <match-json> — the live space is this record's, so herdr's own ids are what
+# the record learns: `id`, the Boss tab's id and the terminals that tab holds. Printed is what
+# changed, in words, or nothing when the record already agreed (a pass that finds agreement writes
+# nothing, so the file is not rewritten every 20 seconds).
+adopt_space() {
+	RECORD=$(space_record "${1:-}") MATCH=${2:-} node -e '
+		const fs = require("fs");
+		let m = {};
+		try { m = JSON.parse(process.env.MATCH || "{}"); } catch { process.exit(0); }
+		let r = {};
+		try { r = JSON.parse(fs.readFileSync(process.env.RECORD, "utf8")); } catch { process.exit(0); }
+		const said = [];
+		if (m.id && String(r.id || "") !== String(m.id)) {
+			said.push("id " + (r.id ? String(r.id) : "(none)") + " -> " + String(m.id));
+			r.id = String(m.id);
+		}
+		const boss = String(r.boss || "Boss");
+		const tab = (Array.isArray(m.tabs) ? m.tabs : []).find(
+			(t) => t && typeof t === "object" && String(t.name ?? t.title ?? "") === boss,
+		);
+		if (tab) {
+			const tid = String(tab.id ?? tab.tab ?? "");
+			if (tid && String(r.uberboss_tab || "") !== tid) {
+				said.push("uberboss_tab -> " + tid);
+				r.uberboss_tab = tid;
+			}
+			// Only a tab list that says who is in the tab is written down: an app that answered
+			// without `terminals` is "cannot tell", and erasing a terminal id there would lose the
+			// resume entry that names it.
+			if (Array.isArray(tab.terminals)) {
+				const terms = tab.terminals
+					.map((t) => (typeof t === "string" ? t : String(t?.terminal ?? t?.id ?? "")))
+					.filter(Boolean);
+				if (JSON.stringify(terms) !== JSON.stringify(Array.isArray(r.terminals) ? r.terminals : [])) {
+					said.push("terminals -> " + (terms.length ? terms.join(",") : "(none)"));
+					r.terminals = terms;
+				}
+			}
+		}
+		if (!said.length) process.exit(0);
+		fs.writeFileSync(process.env.RECORD, JSON.stringify(r, null, 2) + "\n");
+		process.stdout.write(said.join("; "));
+	'
+}
+
+# normalise_boss_argv <slug> — a record that would bring the Boss back sandboxed is rewritten to
+# `bin/pi-bare`, and what was rewritten is printed once (one line for the whole record). Two shapes
+# count: a sandboxing wrapper first (`pi`, `pisandbox`, `pi-sandboxed` — `pi` on PATH is install.sh's
+# sandboxing entry point), and any argument pointing into the retired `~/big-boss-pi` checkout, whose
+# `bin/pi-bare` will not exist after that repo goes.
+normalise_boss_argv() {
+	RECORD=$(space_record "${1:-}") BARE=$PI_BARE LEGACY=$LEGACY_ROOT node -e '
+		const fs = require("fs");
+		let r = {};
+		try { r = JSON.parse(fs.readFileSync(process.env.RECORD, "utf8")); } catch { process.exit(0); }
+		const bare = process.env.BARE || "";
+		const legacy = (process.env.LEGACY || "").replace(/\/+$/, "");
+		if (!bare) process.exit(0);
+		const sandboxed = (a) => {
+			if (!Array.isArray(a) || !a.length) return false;
+			const first = String(a[0] || "");
+			if (["pi", "pisandbox", "pi-sandboxed"].includes(first.split("/").pop())) return true;
+			return Boolean(legacy) && a.some((x) => typeof x === "string" && (x === legacy || x.startsWith(legacy + "/")));
+		};
+		const said = [];
+		if (sandboxed(r.boss_argv)) { said.push("boss_argv"); r.boss_argv = [bare]; }
+		for (const t of Array.isArray(r.tabs) ? r.tabs : []) {
+			if (t && typeof t === "object" && sandboxed(t.argv)) {
+				said.push("tab " + String(t.name || "(unnamed)"));
+				t.argv = [bare];
+			}
+		}
+		if (!said.length) process.exit(0);
+		fs.writeFileSync(process.env.RECORD, JSON.stringify(r, null, 2) + "\n");
+		process.stdout.write(said.join(", "));
+	'
+}
+
+# newest_session <project> — the newest session whose own `cwd` is that project, by file time. Found
+# by folder, never by terminal id: the resume entry that carries a dead terminal's id is exactly
+# what made a Boss come back as an empty `pi` (the session was never opened). Nothing found is an
+# empty answer, and the caller then falls back to the resume entry.
+newest_session() {
+	local project=${1:-}
+	[ -n "$project" ] || return 0
+	command -v node >/dev/null 2>&1 || return 0
+	PI_SESSIONS_DIR=$SESSIONS_DIR SESSION_PROJECT=$project node -e '
+		const fs = require("fs"), path = require("path");
+		const dir = process.env.PI_SESSIONS_DIR || "", want = process.env.SESSION_PROJECT || "";
+		if (!dir || !want) process.exit(0);
+		let folders = [];
+		try { folders = fs.readdirSync(dir); } catch { process.exit(0); }
+		let best = null;
+		for (const folder of folders) {
+			let files = [];
+			try { files = fs.readdirSync(path.join(dir, folder)).filter((f) => f.endsWith(".jsonl")); } catch { continue; }
+			for (const f of files) {
+				const p = path.join(dir, folder, f);
+				let cwd = "";
+				try {
+					const fd = fs.openSync(p, "r");
+					const buf = Buffer.alloc(8192);
+					const n = fs.readSync(fd, buf, 0, 8192, 0);
+					fs.closeSync(fd);
+					const head = buf.subarray(0, n).toString("utf8").split("\n")[0];
+					cwd = String(JSON.parse(head).cwd || "");
+				} catch { continue; }
+				if (cwd !== want) continue;
+				let st;
+				try { st = fs.statSync(p); } catch { continue; }
+				if (!best || st.mtimeMs >= best.at) best = { at: st.mtimeMs, p };
+			}
+		}
+		if (best) process.stdout.write(best.p);
+	'
+}
+
+# boss_argv_json <slug> <boss> — the argv the Boss tab is opened with, as JSON: the record's own, or
+# `bin/pi-bare` when the record keeps none, because a Boss that comes back as a bare shell (or as a
+# sandboxed `pi`) is the thing this record exists to prevent.
+boss_argv_json() {
+	local argv
+	argv=$(boss_argv "${1:-}" "${2:-Boss}")
+	if [ -n "$argv" ]; then
+		printf '%s' "$argv"
+		return 0
+	fi
+	BARE=$PI_BARE node -e 'process.stdout.write(JSON.stringify(process.env.BARE ? [process.env.BARE] : []))'
 }
 
 # boss_present <slug> — is the record's Boss tab in this space? stdin is `space_state`'s answer.
@@ -322,8 +515,9 @@ rebuild_space() {
 	count=1
 	[ -z "$extras" ] || count=$((1 + $(printf '%s\n' "$extras" | grep -c .)))
 	# The Boss tab's own argv is passed on to `space.new`, the same way `bin/space new` does it: a
-	# rebuilt Boss tab that comes back as a bare shell is the thing this record exists to prevent.
-	bossargv=$(boss_argv "$slug" "$boss")
+	# rebuilt Boss tab that comes back as a bare shell is the thing this record exists to prevent,
+	# and a record that keeps none is opened bare rather than sandboxed.
+	bossargv=$(boss_argv_json "$slug" "$boss")
 	if [ -n "$bossargv" ]; then
 		out=$("$HERDR_APP" do space.new --name "$name" --folder "$project" --tab "$boss" --argv "$bossargv" --focus false 2>&1) || {
 			say "harness: space.new failed for $name: $out"
@@ -355,27 +549,43 @@ rebuild_space() {
 
 # restore_boss <slug> <name> <boss> <space> — the space is there and its Boss tab is not.
 restore_boss() {
-	local slug=$1 name=$2 boss=$3 space="$4" project spaceid entry argv sessionpath
+	local slug=$1 name=$2 boss=$3 space="$4" project spaceid entry base session argv
 	project=$(space_field "$slug" project)
 	spaceid=$(printf '%s' "$space" | field_of id)
 	entry=$(resume_entry "$slug")
-	if [ -n "$entry" ]; then
-		argv=$(printf '%s' "$entry" | RESUME_ENTRY=$entry node -e '
-			const e = JSON.parse(process.env.RESUME_ENTRY);
-			process.stdout.write(JSON.stringify([...e.argv, "--session", e.session_path]));')
-		sessionpath=$(printf '%s' "$entry" | field_of session_path)
-		if tab_new "$spaceid" "$boss" "$project" "$argv" >/dev/null 2>&1; then
-			say "harness: Boss tab resumed from session $sessionpath"
-			record_boss_tab "$slug" "$argv"
-			return 0
-		fi
-		say "harness: tab.new failed for the Boss tab of $name"
-		return 0
+	# The session is found by the record's project folder, not by the terminal an entry happens to
+	# name: after a reboot the parked tab carries the dead terminal's id, and a stale id is not a
+	# reason to hand the Boss an empty session when the real conversation is on disk.
+	session=$(newest_session "$project")
+	if [ -z "$session" ] && [ -n "$entry" ]; then
+		session=$(printf '%s' "$entry" | field_of session_path)
 	fi
-	# No session to put back: open the tab with the argv the record kept for it.
-	argv=$(boss_argv "$slug" "$boss")
+	base=""
+	if [ -n "$entry" ]; then
+		base=$(printf '%s' "$entry" | RESUME_ENTRY=$entry node -e '
+			const e = JSON.parse(process.env.RESUME_ENTRY);
+			process.stdout.write(JSON.stringify(Array.isArray(e.argv) ? e.argv : []));')
+	fi
+	[ -n "$base" ] || base=$(boss_argv_json "$slug" "$boss")
+	# One `--session`, and the newest one: an argv that already carried one is not given a second.
+	argv=$(BASE=$base BARE=$PI_BARE SESSION=$session node -e '
+		let a = [];
+		try { a = JSON.parse(process.env.BASE || "[]"); } catch {}
+		if (!Array.isArray(a) || !a.length) a = process.env.BARE ? [process.env.BARE] : [];
+		const out = [];
+		for (let i = 0; i < a.length; i++) {
+			if (a[i] === "--session") { i++; continue; }
+			out.push(a[i]);
+		}
+		const s = process.env.SESSION || "";
+		if (s) out.push("--session", s);
+		process.stdout.write(JSON.stringify(out));')
 	if tab_new "$spaceid" "$boss" "$project" "$argv" >/dev/null 2>&1; then
-		say "harness: Boss tab recreated in $name, no session to resume"
+		if [ -n "$session" ]; then
+			say "harness: Boss tab resumed from session $session"
+		else
+			say "harness: Boss tab recreated in $name, no session to resume"
+		fi
 		record_boss_tab "$slug" "$argv"
 	else
 		say "harness: tab.new failed for the Boss tab of $name"
@@ -384,7 +594,7 @@ restore_boss() {
 
 # one_space <slug> — everything one pass does about one space.
 one_space() {
-	local slug=$1 name project boss space present
+	local slug=$1 name project boss match mid other present chg
 	if ! space_exists "$slug"; then
 		say "$slug: no record, left alone — bin/space list"
 		return 0
@@ -399,16 +609,38 @@ one_space() {
 		return 0
 	fi
 	if [ "$DRY" = 1 ]; then
-		say "$name: dry-run: would keep space '$name' on $project with its Boss tab '$boss' and its recorded tabs"
+		match=$(space_match "$slug")
+		mid=$(printf '%s' "$match" | field_of id)
+		other=$(printf '%s' "$match" | field_of other)
+		if [ -n "$other" ]; then
+			say "$name: dry-run: the space '$other' is already open on $project, so no space.new"
+		elif [ -n "$mid" ]; then
+			say "$name: dry-run: keeps herdr's space $mid with its Boss tab '$boss' on $project, no space.new"
+		else
+			say "$name: dry-run: would keep space '$name' on $project with its Boss tab '$boss' and its recorded tabs"
+		fi
 		return 0
 	fi
+	# A Boss that would come back sandboxed, or from the retired `~/big-boss-pi` checkout, is
+	# rewritten before anything is opened: the record is what a reboot replays.
+	chg=$(normalise_boss_argv "$slug")
+	[ -z "$chg" ] || say "$name: Boss argv was not bare ($chg), recorded $PI_BARE"
 	record_tabs_seed "$slug"
-	space=$(space_state "$name" "$(space_field "$slug" id)")
-	if [ "$space" = none ]; then
+	match=$(space_match "$slug")
+	mid=$(printf '%s' "$match" | field_of id)
+	if [ -z "$mid" ]; then
+		other=$(printf '%s' "$match" | field_of other)
+		if [ -n "$other" ]; then
+			say "$name: a space on $project is already open as '$other' — not cloning it (bin/space forget $slug if this record is stale)"
+			return 0
+		fi
 		rebuild_space "$slug" "$name" "$boss"
 		return 0
 	fi
-	present=$(printf '%s' "$space" | boss_present "$slug")
+	# The live space is this record's: herdr's ids are adopted into the record and nothing opens.
+	chg=$(adopt_space "$slug" "$match")
+	[ -z "$chg" ] || say "$name: adopted herdr's space $mid: $chg"
+	present=$(printf '%s' "$match" | boss_present "$slug")
 	case $present in
 	yes)
 		# A Boss tab that is there is recorded, never opened again: the next pass must find the
@@ -421,7 +653,7 @@ one_space() {
 		return 0
 		;;
 	esac
-	restore_boss "$slug" "$name" "$boss" "$space"
+	restore_boss "$slug" "$name" "$boss" "$match"
 }
 
 # pass — one sweep over the records, with the app asked once.

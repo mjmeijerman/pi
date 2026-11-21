@@ -31,6 +31,11 @@ if [ -f "$here/shell-resolve.sh" ]; then . "$here/shell-resolve.sh"; fi
 # shellcheck source=bin/space-lib.sh
 . "$here/space-lib.sh"
 
+# The Boss is bare: `bin/pi-bare` in this tree, never a sandboxed wrapper. Workers are sandboxed,
+# the Boss is not, and a record that says otherwise brings a sandboxed Boss back after every reboot.
+pi_home=$(cd -- "$here/.." && pwd)
+pi_bare=$pi_home/bin/pi-bare
+
 prog=space
 die() { printf '%s: error: %s\n' "$prog" "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
@@ -39,8 +44,9 @@ need() { command -v "$1" >/dev/null 2>&1 || die "$1 is not on PATH"; }
 usage() {
 	cat >&2 <<'EOF'
 usage: bin/space new --name <slug> [--project PATH | --clone URL] [--kind harness|project] [--no-git] [--tab-name Boss] [--argv JSON]
-       --argv is the Boss tab's command as a JSON array (default ["pi"]); it is opened with it
-       and the record keeps it, so the guard reopens the same command
+       --argv is the Boss tab's command as a JSON array (default ["<pi home>/bin/pi-bare"]); it is
+       opened with it and the record keeps it, so the guard reopens the same command. The Boss is
+       bare: an --argv naming pi, pisandbox or pi-sandboxed is refused.
        bin/space list
        bin/space show <slug>
        bin/space forget <slug>
@@ -86,7 +92,7 @@ cmd_new() {
 	# The Boss tab's argv is opened and recorded, and the record is what the guard reopens the tab
 	# with after a reboot: a broken one is refused here, not written down and replayed later.
 	if [ -z "$boss_argv" ]; then
-		boss_argv='["pi"]'
+		boss_argv=$(BARE=$pi_bare node -e 'process.stdout.write(JSON.stringify([process.env.BARE]))')
 	else
 		boss_argv=$(node -e '
 			let a;
@@ -94,6 +100,17 @@ cmd_new() {
 			if (!Array.isArray(a) || !a.length || a.some((v) => typeof v !== "string" || !v)) process.exit(2);
 			process.stdout.write(JSON.stringify(a));
 		' "$boss_argv") || die "--argv takes a JSON array of strings, like --argv '[\"pi\"]' — got '$boss_argv'"
+		# One line, not a silent acceptance: a sandboxed Boss is the thing this record exists to
+		# prevent, so it is refused here rather than written down and replayed after a reboot.
+		sandboxed=$(ARGV=$boss_argv node -e '
+			let a = [];
+			try { a = JSON.parse(process.env.ARGV || "[]"); } catch {}
+			if (!Array.isArray(a) || !a.length) process.exit(0);
+			const first = String(a[0] || "").split("/").pop();
+			if ("pi pisandbox pi-sandboxed".split(" ").includes(first)) process.stdout.write(first);
+		') || sandboxed=""
+		[ -z "$sandboxed" ] ||
+			die "the Boss is bare: --argv takes $pi_bare, not '$sandboxed' — workers are sandboxed, the Boss is not"
 	fi
 	# No `need hc`: `space new` opens the space through herdr-app and never talks to
 	# herdr-core itself. Demanding hc refused every offline test and every runner.
