@@ -50,6 +50,22 @@ out_has() { # <why> <text>
 		fail "$2" "missing: $1" "$OUT"
 	fi
 }
+out_lacks() { # <why> <text> — a line that must NOT be there (a name, or a repeat)
+	if printf '%s\n' "$OUT" | grep -Fq -- "$1"; then
+		fail "$2" "unexpectedly present: $1" "$OUT"
+	else
+		pass "$2"
+	fi
+}
+out_has_once() { # <why> <text> — exactly one line, so a per-poll announcement cannot repeat
+	local n
+	n=$(printf '%s\n' "$OUT" | grep -Fc -- "$1")
+	if [ "$n" -eq 1 ]; then
+		pass "$2"
+	else
+		fail "$2" "seen $n time(s), expected 1: $1" "$OUT"
+	fi
+}
 
 # A gh stub: `gh pr view <n> --json ...` prints $GH_FIXTURE. A numbered sibling ($GH_FIXTURE.1,
 # .2, ...) is used when it exists, so --wait can be given one fixture per poll.
@@ -225,15 +241,56 @@ expect_rc "no gh, no green" nonzero
 out_has "gh is not installed" "the refusal names the missing tool"
 
 # ---------------------------------------------------------------------------
-case_start "a failed check stops the wait"
-# A gate that keeps polling after a failure never ends and never helps: --wait must return on the
-# first failed run, not after --max.
+case_start "one failure does not end the wait: the rest of the rollup does"
+# Measured: a check failed three seconds in while fourteen were still QUEUED and the old --wait
+# exited at once, so nobody learned whether the other fourteen passed. A failure says waiting cannot
+# turn *that* check green; the verdict is the whole rollup, so --wait keeps polling until every
+# check has a conclusion and then judges once.
+write_rollup "$WORK/late-fail.json.1" "$FULL" "$(repeat_spec run:COMPLETED:SUCCESS 11)" run:COMPLETED:FAILURE run:IN_PROGRESS:
+write_rollup "$WORK/late-fail.json.2" "$FULL" "$(repeat_spec run:COMPLETED:SUCCESS 11)" run:COMPLETED:FAILURE run:COMPLETED:FAILURE
+start=$(date +%s)
+run_pr_ready "$WORK/late-fail.json" 209 --sha "$FULL" --wait --interval 2 --max 30
+end=$(date +%s)
+elapsed=$((end - start))
+expect_rc "a rollup with a concluded failure is not green" nonzero
+out_has "check c12 failed; still waiting for 1" "the first failure is announced as it appears, with what is still running"
+out_has "check c13 failed; still waiting for 0" "the second failure is announced when its check concludes"
+out_has_once "check c12 failed" "the announcement for c12 appears once, not once per poll"
+out_has "checks 13, pending 0, fail 2, finished" "the last line carries the whole completed rollup"
+if [ "$elapsed" -ge 2 ]; then pass "it kept polling after the first failure ($elapsed s, not the instant exit)"
+else fail "it exited after $elapsed s, before the second poll could look"; fi
+
+# ---------------------------------------------------------------------------
+case_start "--fail-fast is the impatient mode: the first failure, and only it"
+start=$(date +%s)
+run_pr_ready "$WORK/late-fail.json" 209 --sha "$FULL" --wait --fail-fast --interval 5 --max 60
+end=$(date +%s)
+expect_rc "--fail-fast refuses on the first failure" nonzero
+out_has "check c12 failed" "it names the check that failed"
+out_lacks "c13" "it names nothing about the checks still running"
+elapsed=$((end - start))
+if [ "$elapsed" -lt 5 ]; then pass "it stopped before the next interval ($elapsed s)"
+else fail "it waited $elapsed s with a failure on the board"; fi
+
+# ---------------------------------------------------------------------------
+case_start "a rollup that has not registered yet waits instead of refusing"
+printf '{"headRefOid":"%s","statusCheckRollup":[]}\n' "$FULL" >"$WORK/unregistered.json.1"
+all_success "$WORK/unregistered.json.2" "$FULL"
+run_pr_ready "$WORK/unregistered.json" 209 --sha "$FULL" --wait --interval 1 --max 15
+expect_rc "the rollup appears on the next poll, so --wait passes" 0
+out_has "no check has registered yet" "the empty rollup is named as unregistered, not as no checks"
+out_has "checks 12, pending 0, fail 0, finished" "the pass carries the finished rollup"
+
+# ---------------------------------------------------------------------------
+case_start "--fail-fast stops at the first failure"
+# A gate that keeps polling after a failure never ends and never helps: --fail-fast must return on
+# the first failed run, not after --max. The default --wait does the opposite (the case above).
 write_rollup "$WORK/wait-fail.json" "$FULL" "$(repeat_spec run:COMPLETED:SUCCESS 11)" run:COMPLETED:IN_PROGRESS
 write_rollup "$WORK/wait-fail-2.json" "$FULL" "$(repeat_spec run:COMPLETED:SUCCESS 11)" run:COMPLETED:FAILURE
 start=$(date +%s)
 OUT=$(env -i PATH="$WORK/stub:/usr/bin:/bin" HOME="$WORK/home" TMPDIR="$WORK" \
 	GH_FIXTURE="$WORK/wait-fail-2.json" GH_COUNT="$WORK/count" \
-	bash "$PR_READY" 209 --sha "$FULL" --wait --interval 5 --max 60 2>&1)
+	bash "$PR_READY" 209 --sha "$FULL" --wait --fail-fast --interval 5 --max 60 2>&1)
 RC=$?
 rm -f "$WORK/count"
 end=$(date +%s)
