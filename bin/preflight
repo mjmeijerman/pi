@@ -1116,25 +1116,48 @@ pf_has_body_gate() {
 	[ -x "$cwd/scripts/pr-gate.sh" ]
 }
 
-# pf_docs_budget <cwd> — the docs-budget half of the body check. A budget is a rule of a checkout
-# that has a root AGENTS.md; one that does not (a pi checkout keeps its instructions at
+# pf_docs_budget <repo> <branch> — the docs-budget half of the body check. A budget is a rule of a
+# checkout that has a root AGENTS.md; one that does not (a pi checkout keeps its instructions at
 # agent/AGENTS.md, which is not a docs budget) has nothing here to measure. That is "not applicable
 # here", said in a line, never a pass that pretends to have measured something and never a failure
 # the branch cannot fix — a gate that fails on its own shape is a gate people learn to bypass.
+#
+# The file it measures is the BRANCH's, never the checkout the caller stands in. Measured on PR #217:
+# the report said `AGENTS.md 5225 B / 8192 B` while the branch's own file was 5530 B, because the
+# budget read --cwd (trunk) — a branch could break the budget and the gate stayed green. So the tree
+# is the checkout that holds <branch> (a worktree of it, `pf_branch_checkout`), the branch's blob when
+# only a ref exists, and --cwd only when there is neither. The line names the tree it read.
 pf_docs_budget() {
-	local cwd=$1 bytes limit
-	if [ ! -f "$cwd/AGENTS.md" ]; then
+	local repo=$1 branch=${2:-} dir="" bytes limit where="" main=""
+	limit=${AGENTS_MD_LIMIT:-8192}
+	if [ -n "$branch" ]; then
+		dir=$(pf_branch_checkout "$repo" "$branch" 2>/dev/null) || dir=""
+	fi
+	if [ -n "$dir" ] && [ -f "$dir/AGENTS.md" ]; then
+		bytes=$(wc -c <"$dir/AGENTS.md" | tr -d '[:space:]')
+		# Named relative to the repo's main checkout, whichever checkout the caller stands in: the
+		# same tree then reads the same in the report, and `.worktrees/<slug>` is a path a reader
+		# can open. A tree outside the repo keeps its absolute path.
+		main=$(git -C "$repo" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')
+		[ -n "$main" ] || main=$repo
+		case $dir in "$main"/*) where=${dir#"$main"/} ;; "$main") where=. ;; *) where=$dir ;; esac
+	elif [ -z "$dir" ] && [ -n "$branch" ] &&
+		git -C "$repo" cat-file -e "$branch:AGENTS.md" 2>/dev/null; then
+		# No checkout holds the branch: read its own tree out of the object store, so a branch-only
+		# ref is measured on the branch too and not on trunk.
+		bytes=$(git -C "$repo" cat-file blob "$branch:AGENTS.md" | wc -c | tr -d '[:space:]')
+		where="$branch:AGENTS.md"
+	fi
+	if [ -z "$where" ]; then
 		case $PF_SHAPE in
 		pi) printf 'docs budget: no root AGENTS.md in this checkout — skipped (a pi checkout keeps its instructions at agent/AGENTS.md, which is not a docs budget)\n' ;;
 		*) printf 'docs budget: no root AGENTS.md in this checkout — skipped (this checkout has no docs budget to measure)\n' ;;
 		esac
 		return 0
 	fi
-	limit=${AGENTS_MD_LIMIT:-8192}
-	bytes=$(wc -c <"$cwd/AGENTS.md" | tr -d '[:space:]')
-	printf 'docs budget: AGENTS.md %s B / %s B\n' "$bytes" "$limit"
+	printf 'docs budget: AGENTS.md %s B / %s B (from %s)\n' "$bytes" "$limit" "$where"
 	if [ "$bytes" -gt "$limit" ]; then
-		printf 'AGENTS.md is %s B over its %s B budget\n' "$((bytes - limit))" "$limit"
+		printf 'AGENTS.md is %s B over its %s B budget in %s\n' "$((bytes - limit))" "$limit" "$where"
 		return 1
 	fi
 	return 0
@@ -1306,7 +1329,8 @@ pf_check_body() {
 	elif ! pf_has_body_gate "$PF_CWD"; then
 		printf 'body: no pr-check target in this checkout — skipped (no Makefile pr-check target and no scripts/pr-gate.sh in %s, so there is no body gate to run)\n' "$PF_CWD"
 	elif ! run_body_gate "$PF_CWD" "$PF_BRANCH" "$body"; then
-		printf 'the body gate %srefused the body bin/publish would send\n' "${BODY_GATE:+($BODY_GATE) }"
+		printf 'the body gate %srefused the body bin/publish would send (measured in %s)\n' \
+			"${BODY_GATE:+($BODY_GATE) }" "${PF_GATE_DIR:-$PF_CWD}"
 		rc=1
 	else
 		printf 'body gate: %s passed on the body bin/publish would send (%s) in %s\n' \
@@ -1314,8 +1338,9 @@ pf_check_body() {
 	fi
 	# ...then the budget, which is a rule of the checkouts that have one. It can fail on its own (an
 	# AGENTS.md over budget) and that failure stands; a checkout with no root AGENTS.md says so by
-	# name instead of reading as a failure the branch is supposed to fix.
-	pf_docs_budget "$PF_CWD" || rc=1
+	# name instead of reading as a failure the branch is supposed to fix. It reads the branch's tree,
+	# never the trunk checkout the caller stands in.
+	pf_docs_budget "$PF_CWD" "$PF_BRANCH" || rc=1
 	return "$rc"
 }
 
