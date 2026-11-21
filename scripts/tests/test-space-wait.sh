@@ -119,7 +119,7 @@ if [ "$(grep -c '^Restart ' "$SPEC")" = 3 ]; then pass 'the spec records each re
 if grep -q 'Mission: test fixture' "$SPEC"; then pass 'the spec is appended to, not rewritten'; else fail 'the spec lost its original text'; fi
 if grep -q '<fill in' "$REPORT"; then pass 'the report is a fresh skeleton'; else fail 'the report was not reset for the restart'; fi
 if grep -q '"restarts": 3' "$(sd demo)/delegations.json"; then pass 'the record counts three restarts'; else fail 'the record does not count the restarts' "$(cat "$(sd demo)/delegations.json")"; fi
-if grep -q '"restart"' "$PI_SPACE_ROOT/state/decisions.jsonl" 2>/dev/null; then pass 'each restart is in the decision log'; else fail 'no restart decision was recorded'; fi
+if grep -q '"restart"' "$(sd demo)/state/decisions.jsonl" 2>/dev/null; then pass 'each restart is in the decision log'; else fail 'no restart decision was recorded'; fi
 LINES=$(printf '%s\n' "$OUT" | grep -c 'restart [123]/3')
 if [ "$LINES" -ge 3 ]; then pass 'one line per poll'; else fail "poll lines: $LINES" "$OUT"; fi
 case $OUT in

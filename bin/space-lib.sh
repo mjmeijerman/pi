@@ -129,6 +129,37 @@ space_resolve() {
 	' "${1:-.}"
 }
 
+# space_pick <explicit|empty> <dir> [slug] — the slug of the space a command runs in, in the one
+# rule bin/delegate uses: the space --space named, else the space whose project is the longest one
+# containing <dir>, else — when the folder is in no space — the space whose record tracks worker
+# <slug> (space_of_slug, the answer `delegate finish` trusts for that slug). The last one is what
+# makes a worker's own `bin/preflight --slug <slug>` in its worktree find the report: a worktree
+# lives outside the space's project. Prints nothing and returns 0 when none of the three names a
+# space, so a caller can keep the pre-space layout; a --space that names no space prints why on
+# stderr and returns 2, and the caller refuses in its own words rather than guessing.
+space_pick() {
+	local explicit=${1:-} dir=${2:-.} worker=${3:-} slug
+	if [ -n "$explicit" ]; then
+		space_valid_slug "$explicit" || {
+			printf -- "--space takes a space name: '%s'\n" "$explicit" >&2
+			return 2
+		}
+		if ! space_exists "$explicit"; then
+			printf 'no such space: %s — bin/space list\n' "$explicit" >&2
+			return 2
+		fi
+		printf '%s' "$explicit"
+		return 0
+	fi
+	slug=$(space_resolve "$dir")
+	if [ -n "$slug" ]; then
+		printf '%s' "$slug"
+		return 0
+	fi
+	[ -z "$worker" ] || space_of_slug "$worker"
+	return 0
+}
+
 # space_of_slug <slug> — the space that tracks worker <slug>, from this machine's record.
 space_of_slug() {
 	local s

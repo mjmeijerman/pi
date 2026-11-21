@@ -1,0 +1,1520 @@
+#!/usr/bin/env bash
+# preflight — the checks CI would run, run here first, on the branch about to be published.
+#
+#   bin/preflight [--cwd DIR] [--slug SLUG] [--space SLUG] [--only NAME]... [--list] [--fresh] [BRANCH]
+#
+# The space is where state lives: `--space <slug>` names the space this run belongs to, else it is
+# the space whose project contains --cwd (or the current directory), and a folder no space claims
+# keeps the pre-space layout. The report the body is built from, the decisions file and the
+# receipts are all under state/spaces/<slug>/ — the same rule bin/delegate uses, so
+# `delegate finish` inside a space reaches the report that space wrote.
+#
+# Why it exists: every red CI round in this workspace was a round trip — a rebase, a second worker,
+# ten minutes of waiting — over something a machine here answers in seconds. `new RegExp(variable)`
+# (semgrep 1.186 is installed), a test whose stub PATH has no `node` (an `env -i` run shows it), a
+# stale `Review tier:` in the PR body (the body gate refuses it), a host-dependent assertion. CI
+# found them; this finds them first. `delegate finish` runs it before it publishes.
+#
+# It decides which checks apply from the diff against the merge base with trunk, so a docs-only
+# change is seconds and an engine change is thorough. A check that does not apply is printed as
+# `skip` with the reason — never as a pass:
+#
+#   behind    the branch's base against a just-fetched origin/<trunk>: a branch cut before a pull
+#             request merged publishes a CONFLICTING one (#68 was spawned at 19:27:52Z, #67 merged at
+#             19:32:04Z, AGENTS.md and README.md colliding) — but only when a path the branch touched
+#             also moved on trunk. That is the FAIL: it names how far behind, which paths collided,
+#             and the rebase. Behind with no touched path moved is a named PASS ("merges without a
+#             rebase"): GitHub merges it, the extra commits are history. It never rebases for you,
+#             and an unreachable origin is a named pass, because a gate that blocks on a flaky
+#             network gets bypassed
+#   syntax    bash -n on the changed shell files, node --check on the changed .mjs/.js, and the
+#             checkout's own `tsc --noEmit` on a changed .ts/.tsx — a project with no type checker
+#             gets one named skip line per file and a summary that counts it as skipped, never as
+#             passed, because node --check cannot parse types either and a green TS diff used to be
+#             un-publishable on a "line 60: syntax error near unexpected token `('" from bash -n
+#   suites    the repo's own tests, each exactly once: in a pi checkout the node suite and every
+#             scripts/tests/*.test.sh — the globs `make scripts-test` runs, run directly, so the
+#             node suite cannot run twice (it used to: `node --test` and then a target that begins
+#             with it, 30 extra seconds on a five-file diff); a target that does more than those
+#             two globs is run whole, once, and a checkout with neither is named
+#   semgrep   the changed files only, the workflow's own --config when a repo pins one, else
+#             p/default plus scripts/semgrep-rules.yml; semgrep missing is a FAIL, never a pass
+#   scrub     the changed test files under `env -i PATH=<empty stub>:/usr/bin:/bin HOME=<tmp>` —
+#             the runner does not have your PATH, and this is the check that catches it (pi#66)
+#   body      the AGENTS.md docs budget and the target repo's own body gate, run on the body
+#             `bin/publish` would actually send, so a wrong tier cannot reach GitHub. The gate runs
+#             in the checkout that holds the branch being gated, never the one the caller stands in:
+#             a repo whose `pr-check` refuses a checkout that is not on the branch (pi's does) is
+#             right to refuse, and pointing it at trunk's checkout made every worker publish fail.
+#             Shape-aware: a checkout with no root AGENTS.md has no budget to measure, so that half
+#             is skipped by name (a pi checkout keeps its instructions at agent/AGENTS.md, which is
+#             not one) and the gate half still runs and still blocks; no pr-check target is a named
+#             skip too
+#
+#   mutation  the CI job's own scope, opt-in: `bash scripts/mutate-changed.sh`, which derives the
+#             added line ranges of agent/extensions/**/*.ts from the branch's diff and leaves
+#             stryker to break at 100 on what the branch introduced. The whole-file run is 20+
+#             minutes and was never in this gate for that reason; the changed-line run is the
+#             scope CI already pays for, and a receipt makes the second one free. Not in the
+#             default set: a publish that does not ask for it is as fast as before, and the
+#             default run prints it as a named skip instead of leaving it out silently. The
+#             verdict is mutate-changed.sh's exit code, never a score parsed out of its output;
+#             a checkout with no scripts/mutate-changed.sh or no agent/stryker.conf.json has no
+#             mutation scope and says so instead of passing
+#
+# The checks run side by side and each suite inside them writes its own log: they read files, they
+# build throwaway roots, none of them shares state with another — so the wall clock is the slowest
+# check rather than the sum of them, and the output is still one line per check and one line per
+# suite, never two suites interleaved. The scrub is the exception on purpose: it runs the same test
+# files the suites just ran, in an emptied environment, and it runs after them, never instead of
+# them. PREFLIGHT_JOBS caps the suites in flight at once (default 4): one process per test file on
+# a 32-core machine is 32 node processes fighting for the same tmpfs, and CI runs them serially.
+#
+# Output is plain and meant to be pasted: one line per check, verdict, name, elapsed, detail; the
+# detail under a failing check; then a summary. No colour, no progress bars.
+#
+#   bin/preflight --list                      the seven check names, nothing run
+#   bin/preflight --only semgrep feat/x       one check, on that branch
+#   bin/preflight --only mutation feat/x      the CI job's changed-line stryker run, here
+#   bin/preflight --slug w1                   the branch and body of worker w1
+#   bin/preflight --fresh --slug w1           run everything, forget this tree's receipts
+#
+# The same tree is checked twice per publish — the worker checks it to paste the Evidence block, then
+# `delegate finish` checks it again before it pushes — and neither run is redundant: the second is
+# the verdict at the moment of the push, not a memory of one. So the work is recorded rather than
+# repeated, once per check, in a receipt under state/preflight/ keyed by the check's whole input
+# (the tree, the branch, the checkout, the check set, this file's own hash, the check's name). A
+# second run on the same inputs prints the verdict and the transcript and runs nothing:
+#
+#   pass  suites (the repo's own tests)           12s  pass (cached 4m from the run at 2026-11-20T09:58:11Z)
+#
+# A cached FAIL still blocks and still shows the transcript that failed. --fresh ignores every
+# receipt and empties the ledger, so the gate that runs next cannot reuse the verdict this run
+# refused to reuse. PI_PREFLIGHT_CACHE_TTL (default 6h, 0 disables) expires receipts, and a check a
+# fast path skipped writes none: a skip is not a verdict to reuse. `behind` is never cached either: its answer
+# is about origin, which moves without this tree moving, and a remembered pass there is exactly the
+# CONFLICTING publish it exists to stop. It is one quiet fetch, so it runs every time.
+#
+# Exit 0 only when every check that applied passed. A failing check prints the exact command that
+# reproduces it, because that command is the next thing a person types.
+set -uo pipefail
+
+self_root=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
+BIN=$self_root/bin
+ROOT=${PI_BOSS_ROOT:-${PI_MASTER_ROOT:-$self_root}}
+
+# bin/delegate gives fresh_trunk_branch (which ref is trunk, in this tree) and the report functions
+# the body check reads its report through. Sourcing only defines functions and variables, so
+# nothing here starts a worker. Its `set -e` is put back: this script reports every check, and one
+# check failing must not abort the run before the next one says what it found.
+# shellcheck source=bin/delegate
+. "$BIN/delegate"
+set +e
+# delegate points BIN at $ROOT/bin — the tree a caller named with PI_BOSS_ROOT, which is where state
+# lives and need not carry the programs. preflight's own programs come from the tree it sits in.
+PBIN=$self_root/bin
+
+prog=preflight
+DECISIONS=$ROOT/state/decisions.jsonl
+# The space this run belongs to, set by space_settle once the arguments are known. State lives in
+# the space, git lives in the project: the report, the decisions file and the receipts follow the
+# space, and the checkout being checked still comes from --cwd or the delegation record.
+SPACE=""
+PF_SPACE=""
+
+# space_settle <space|empty> <dir> [slug] — point REPORTS, DELEGATIONS, DECISIONS and the receipt
+# ledger at the space this run belongs to: space_pick's rule, which is bin/delegate's (the space
+# --space named, else the longest project path containing <dir>, else the space whose record tracks
+# worker <slug> — the last one is what lets a worker run this in its own worktree). Returns 1 and
+# leaves the pre-space layout alone when no space claims the folder, 2 when --space named no space
+# (space_pick said why).
+space_settle() {
+	local slug
+	slug=$(space_pick "${1:-}" "${2:-.}" "${3:-}") || return 2
+	[ -n "$slug" ] || return 1
+	use_space "$slug"
+	PF_SPACE=$slug
+	DECISIONS=$(space_dir "$slug")/state/decisions.jsonl
+	PF_CACHE_DIR=$(space_dir "$slug")/state/preflight
+	export PI_RECEIPT_DIR=$PF_CACHE_DIR
+	return 0
+}
+# How many suites run at once. Bounded on purpose: the suites are independent, but the machine they
+# run on is not infinite, and a gate that spawns thirty processes is a gate that measures itself.
+PF_JOBS=${PREFLIGHT_JOBS:-4}
+case $PF_JOBS in '' | *[!0-9]* | 0) PF_JOBS=4 ;; esac
+say() { printf '%s\n' "$*"; }
+die() { printf '%s: error: %s\n' "$prog" "$*" >&2; exit 2; }
+
+PREFLIGHT_TMP=""
+# The throwaway checkout the body gate sometimes needs (a branch no checkout holds): recorded here
+# so the EXIT trap removes it too, never only on the path that returned normally.
+PF_GATE_TMP=""
+PF_GATE_REPO=""
+PF_GATE_SELECTED=""
+PF_GATE_DIR=""
+cleanup() {
+	pf_gate_checkout_cleanup
+	[ -z "$PREFLIGHT_TMP" ] || rm -rf "$PREFLIGHT_TMP"
+}
+trap cleanup EXIT
+
+want_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+# --- receipts: the second run on an unchanged tree is free --------------------------------------
+#
+# A receipt is never a pass by staleness, so its key is the whole input the verdict came from:
+#   the tree        HEAD plus `git status --porcelain`, so an unstaged edit invalidates it
+#   the place       the checkout and the branch, so a rebase or another worktree cannot reuse it
+#   the check set   the checks that applied, so a run of a different set cannot reuse it
+#   the gate        sha256 of this file, so a changed bin/preflight never reuses an old verdict
+#   the check       its own name
+# The body check adds the two inputs its verdict really comes from and no tree hash can see: the
+# report the body is built from (reports/<slug>.md, outside the checkout) and the environment the
+# target repo's own gate reads. Both are cheap to hash, and they stop the one staleness that could
+# publish a body nobody would send.
+# The body check adds the two inputs its verdict really comes from and no tree hash can see: the
+# report the body is built from (reports/<slug>.md, outside the checkout) and the environment the
+# target repo's own gate reads. Both are cheap to hash, and they stop the one staleness that could
+# publish a body nobody would send.
+#
+# The ledger itself is bin/receipts.sh, shared with `scripts/ci-local.sh` and `scripts/ci-offline.sh`:
+# the suites below are the same test scripts those two run, so each suite is asked for by the same
+# (tree, script, gate) key from both sides and its answer is kept once — a test script ci-offline
+# ran is not run here, and one this check ran is not run there. PI_RECEIPT_DIR is the handle a
+# caller pins it with; this file exports it to every suite it starts, so a gate that runs inside
+# this one (ci-local, and ci-offline inside that) writes exactly where this run reads.
+# shellcheck source=bin/receipts.sh
+. "$self_root/bin/receipts.sh"
+PF_CACHE_DIR=$ROOT/state/preflight
+PF_CACHE_VERSION=""
+export PI_RECEIPT_DIR=$PF_CACHE_DIR
+
+pf_sha() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
+
+pf_gate_version() { # this file's own bytes, which are part of every verdict it produced
+	sha256sum "${BASH_SOURCE[0]}" 2>/dev/null | cut -d' ' -f1
+}
+
+pf_tree_hash() { # <cwd> — HEAD and the working tree, so a dirty tree is its own tree
+	local cwd=$1 head st
+	head=$(git -C "$cwd" rev-parse HEAD 2>/dev/null || printf 'no-head')
+	st=$(git -C "$cwd" status --porcelain 2>/dev/null | LC_ALL=C sort)
+	pf_sha "$head"$'\n'"$st"
+}
+
+# PI_PREFLIGHT_CACHE_TTL: seconds, or Ns/Nm/Nh. Default six hours; 0 disables the cache.
+pf_ttl_seconds() {
+	local v=${PI_PREFLIGHT_CACHE_TTL:-6h} n unit=1
+	case $v in *[!0-9smhSMH]*) printf '21600'; return 0 ;; esac
+	case $v in
+	*[hH]) n=${v%[hH]} unit=3600 ;;
+	*[mM]) n=${v%[mM]} unit=60 ;;
+	*[sS]) n=${v%[sS]} ;;
+	*) n=$v ;;
+	esac
+	case $n in '' | *[!0-9]*) n=21600 unit=1 ;; esac
+	printf '%s' "$((n * unit))"
+}
+
+pf_age_human() { # <seconds> — "8s", "4m", "3h", "2d"
+	local s=$1
+	if [ "$s" -lt 90 ]; then printf '%ss' "$s"
+	elif [ "$s" -lt 5400 ]; then printf '%sm' "$((s / 60))"
+	elif [ "$s" -lt 172800 ]; then printf '%sh' "$((s / 3600))"
+	else printf '%sd' "$((s / 86400))"; fi
+}
+
+# pf_report_path — the report this slug's body is built from. It lives outside the checkout, which
+# is why the body check's receipt key cannot rely on the tree hash alone.
+pf_report_path() {
+	local p=""
+	[ -n "${PF_SLUG:-}" ] || return 0
+	if [ -f "$DELEGATIONS" ]; then
+		p=$(node -e '
+			const fs = require("fs");
+			let j = {};
+			try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.exit(0); }
+			process.stdout.write(String((j[process.argv[2]] || {}).report || ""));' "$DELEGATIONS" "$PF_SLUG" 2>/dev/null || true)
+	fi
+	[ -n "$p" ] || p=$REPORTS/$PF_SLUG.md
+	printf '%s' "$p"
+}
+
+# pf_fresh_always <id> — a check whose answer the tree hash cannot see is never reused. The tree
+# hash holds HEAD and the working tree; origin/trunk is not in it, and a branch that was level ten
+# minutes ago can be behind now — the one failure the behind check exists for. A remembered pass
+# would be a pass by staleness, which is the thing a cache must never produce.
+pf_fresh_always() {
+	case $1 in behind) return 0 ;; esac
+	return 1
+}
+
+pf_receipt_key() { # <id> — every input that made this check's verdict, as one hash
+	local id=$1 extra="" report
+	if [ "$id" = body ]; then
+		report=$(pf_report_path)
+		if [ -n "$report" ] && [ -f "$report" ]; then
+			extra="report=$(sha256sum "$report" 2>/dev/null | cut -d' ' -f1)"
+		else
+			extra='report=none'
+		fi
+		extra="$extra"$'\n'"env=$(env | LC_ALL=C sort | sha256sum | cut -d' ' -f1)"
+	fi
+	pf_sha "$PF_CACHE_VERSION"$'\n'"${PF_CWD:-}"$'\n'"${PF_BRANCH:-}"$'\n'"${PF_RAN_FP:-}"$'\n'"${PF_TREE:-}"$'\n'"$id"$'\n'"$extra"
+}
+
+# pf_receipt_read <id> <out-file> — prints "exit elapsed_ms ts" and writes the stored transcript to
+# <out-file>; nonzero when there is no receipt for this key. Nothing is returned from a receipt the
+# caller has not first checked for age: freshness is the caller's decision, never the reader's.
+pf_receipt_read() {
+	local id=$1 file=$2 key
+	key=$(pf_receipt_key "$id")
+	[ -n "$key" ] && [ -f "$PF_CACHE_DIR/$key.json" ] || return 1
+	node -e '
+		const fs = require("fs");
+		const [path, into] = process.argv.slice(1);
+		let j;
+		try { j = JSON.parse(fs.readFileSync(path, "utf8")); } catch { process.exit(1); }
+		if (typeof j.exit !== "number" || typeof j.ts !== "number") process.exit(1);
+		fs.writeFileSync(into, String(j.output == null ? "" : j.output));
+		process.stdout.write(`${j.exit} ${j.elapsed_ms || 0} ${j.ts}`);' "$PF_CACHE_DIR/$key.json" "$file"
+}
+
+# pf_receipt_write <id> <exit> <elapsed_ms> <out-file> — record a verdict that was actually reached.
+pf_receipt_write() {
+	local id=$1 rc=$2 ms=$3 file=$4 key tmp
+	[ -f "$file" ] || return 0
+	key=$(pf_receipt_key "$id")
+	[ -n "$key" ] || return 0
+	mkdir -p "$PF_CACHE_DIR" 2>/dev/null || return 0
+	tmp=$PF_CACHE_DIR/.$key.$$.tmp
+	node -e '
+		const fs = require("fs");
+		const [dest, tmp, check, rc, ms, out, tree, version] = process.argv.slice(1);
+		const rec = {
+			check,
+			exit: Number(rc),
+			elapsed_ms: Number(ms),
+			ts: Math.floor(Date.now() / 1000),
+			at: new Date().toISOString(),
+			tree: tree,
+			version: version,
+			output: fs.readFileSync(out, "utf8"),
+		};
+		fs.writeFileSync(tmp, JSON.stringify(rec, null, 1) + "\n");
+		fs.renameSync(tmp, dest);' "$PF_CACHE_DIR/$key.json" "$tmp" "$id" "$rc" "$ms" "$file" "${PF_TREE:-}" "${PF_CACHE_VERSION:-}" 2>/dev/null || rm -f "$tmp"
+	return 0
+}
+
+# --- the checks, in the order they run ---------------------------------------------------------
+
+preflight_ids=(behind syntax suites semgrep scrub body mutation)
+preflight_names=(
+	"behind (did a touched path also move on trunk?)"
+	"syntax (bash -n, node --check, shellcheck)"
+	"suites (the repo's own tests)"
+	"semgrep (the changed files)"
+	"scrub (env -i, the runner does not have your PATH)"
+	"body (docs budget and the body gate)"
+	"mutation (stryker on the changed extensions lines)"
+)
+# `preflight_ids` is also the default set, and it contains `mutation`: the default run selects it
+# but pf_applies refuses it unless the caller asked (`--only mutation`), so a publish pays nothing
+# for it while still seeing it named in the output. An opt-in check that is simply absent is a
+# check nobody remembers exists.
+
+name_of() {
+	local i
+	for i in "${!preflight_ids[@]}"; do
+		[ "${preflight_ids[$i]}" = "$1" ] && { printf '%s' "${preflight_names[$i]}"; return 0; }
+	done
+	return 1
+}
+
+# --- what changed, and which checks that makes apply -------------------------------------------
+
+# pf_trunk <cwd> — the trunk this branch is compared against, read the way publish reads it.
+pf_trunk() {
+	local t
+	t=$(fresh_trunk_branch "$1" 2>/dev/null || true)
+	[ -n "$t" ] || t=main
+	printf '%s' "$t"
+}
+
+# pf_collect <cwd> <branch> — fill PF_CHANGED (every changed path), PF_CODE (the ones a linter or a
+# compiler reads) and PF_TESTS (the ones that are test files), and set PF_BASE/PF_TRUNK/PF_NOTE.
+# A branch with no merge base against trunk is compared against the trunk itself, so a fresh
+# branch still diffs its own work instead of refusing.
+pf_collect() {
+	local cwd=$1 branch=$2 f mb base
+	PF_TRUNK=$(pf_trunk "$cwd")
+	base=""
+	for candidate in "refs/remotes/origin/$PF_TRUNK" "$PF_TRUNK"; do
+		if git -C "$cwd" rev-parse --verify --quiet "$candidate" >/dev/null 2>&1; then
+			base=$candidate
+			break
+		fi
+	done
+	[ -n "$base" ] || base=$PF_TRUNK
+	mb=$(git -C "$cwd" merge-base "$base" "$branch" 2>/dev/null) || mb=""
+	PF_BASE=$mb
+	if [ -z "$mb" ]; then
+		mb=$base
+		PF_NOTE="no merge base with $base: diffing $base..$branch"
+	fi
+	PF_CHANGED=()
+	PF_CODE=()
+	PF_TESTS=()
+	# A pure-docs diff: every changed path is prose. That is the shape the fast paths exist for —
+	# nothing in it compiles, lints, or has a test to scrub — and it is counted, never guessed, so
+	# one stray .sh in the diff takes the whole run off the fast path.
+	PF_DOCS_ONLY=1
+	PF_DOCS_COUNT=0
+	# The mutation check's scope, counted here so its skip line can say which of the three reasons
+	# it has — and so a diff of test files only (which mutate-changed.sh refuses rather than passes)
+	# is a skip, not a FAIL.
+	PF_MUTATION_FILES=0
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		PF_CHANGED+=("$f")
+		case $f in
+		*.md | *.markdown | docs/*) PF_DOCS_COUNT=$((PF_DOCS_COUNT + 1)) ;;
+		*) PF_DOCS_ONLY=0 ;;
+		esac
+		case $f in
+		*.sh | bin/*)
+			case $f in *.mjs | *.js | *.md) ;; *) PF_CODE+=("$f") ;; esac
+			;;
+		*.mjs | *.js | *.ts | *.tsx | *.py) PF_CODE+=("$f") ;;
+		esac
+		case $f in
+		scripts/tests/* | tests/* | *test-*.sh | *.test.mjs | *.test.js | *_test.py) PF_TESTS+=("$f") ;;
+		esac
+		case $f in
+		agent/extensions/?*.ts | agent/extensions/*/?*.ts | agent/extensions/*/*/?*.ts)
+			case $f in *__tests__* | *.test.ts) ;; *) PF_MUTATION_FILES=$((PF_MUTATION_FILES + 1)) ;; esac
+			;;
+		esac
+	done < <(git -C "$cwd" diff --name-only --diff-filter=ACMR "${mb}..${branch}" 2>/dev/null)
+	# An empty diff is not a prose diff: nothing changed at all is a different line.
+	[ "$PF_DOCS_COUNT" -gt 0 ] || PF_DOCS_ONLY=0
+	return 0
+}
+
+# pf_applies <id> — true when the check has something to look at.
+pf_applies() {
+	case $1 in
+	syntax | semgrep) [ "${#PF_CODE[@]}" -gt 0 ] ;;
+	scrub) [ "${#PF_TESTS[@]}" -gt 0 ] ;;
+	suites) [ "$PF_SHAPE" != none ] && [ "${#PF_CODE[@]}" -gt 0 ] ;;
+	body) return 0 ;;
+	behind) return 0 ;;
+	# Opt-in, and then only where the diff holds a mutant host and the checkout holds a way to run
+	# one. Everything else is a skip with a reason, never a pass: a mutation gate that passes because
+	# it could not run is one thing worse than no mutation gate.
+	mutation)
+		[ "${PF_MUTATION_REQUESTED:-0}" = 1 ] || return 1
+		[ "${PF_MUTATION_FILES:-0}" -gt 0 ] || return 1
+		pf_mutation_scope
+		;;
+	*) return 1 ;;
+	esac
+}
+
+# pf_skip_reason <id> — why a check does not apply here, in one line that names the fact. A
+# prose-only diff gets its own line rather than the generic one, because "the diff is docs" and "the
+# diff touched no code file" are two different reasons a person may want to argue with.
+pf_skip_reason() {
+	case $1 in
+	syntax | semgrep)
+		if [ "$PF_DOCS_ONLY" = 1 ]; then
+			printf 'docs-only diff: no changed code file, so nothing in %s file(s) compiles or lints' "$PF_DOCS_COUNT"
+		else
+			printf 'no changed code file (nothing here compiles or lints)'
+		fi
+		;;
+	scrub)
+		if [ "$PF_DOCS_ONLY" = 1 ]; then
+			printf 'docs-only diff: no changed test file, so there is nothing to run under env -i'
+		else
+			printf 'no changed test file (nothing to run under the scrub)'
+		fi
+		;;
+	suites)
+		if [ "$PF_SHAPE" = none ]; then
+			printf 'no suite found: no Makefile scripts-test target, no scripts/tests/*.test.mjs, no scripts/ci-local.sh in %s' "$PF_CWD"
+		else
+			printf 'docs-only diff: no code file changed, so the %s suite has nothing new to prove' "$PF_SHAPE_NAME"
+		fi
+		;;
+	mutation)
+		if [ "${PF_MUTATION_REQUESTED:-0}" != 1 ]; then
+			printf 'not requested (--only mutation) — the CI job mutates the changed lines and breaks at 100'
+		elif [ "${PF_MUTATION_FILES:-0}" -eq 0 ]; then
+			printf 'no changed agent/extensions/**/*.ts (a docs or shell-only diff introduces no mutant)'
+		else
+			printf 'no mutation scope in this checkout (needs scripts/mutate-changed.sh and agent/stryker.conf.json)'
+		fi
+		;;
+	*) printf 'does not apply' ;;
+	esac
+}
+
+# pf_mutation_scope <cwd> — the two files the mutation check needs: the range rule and the stryker
+# config it feeds. Both or neither: a script with no config runs stryker against stryker's defaults
+# over the whole tree, which is the 20-minute run this check exists to avoid.
+pf_mutation_scope() {
+	local cwd=${1:-$PF_CWD}
+	[ -f "$cwd/scripts/mutate-changed.sh" ] && [ -f "$cwd/agent/stryker.conf.json" ]
+}
+
+# pf_repo_shape <cwd> — "pi" (scripts/tests/*.test.mjs or a Makefile scripts-test target), "boss"
+# (scripts/ci-local.sh), else "none". Naming the shape is what the skip line has to carry: "skipped"
+# with no reason is how a check that never ran reads as one that passed.
+pf_repo_shape() {
+	local cwd=$1
+	if [ -f "$cwd/Makefile" ] && grep -qE '^scripts-test[[:space:]]*:' "$cwd/Makefile"; then
+		printf 'pi'
+		return 0
+	fi
+	if compgen -G "$cwd/scripts/tests/*.test.mjs" >/dev/null 2>&1; then
+		printf 'pi'
+		return 0
+	fi
+	if [ -f "$cwd/scripts/ci-local.sh" ]; then
+		printf 'boss'
+		return 0
+	fi
+	printf 'none'
+}
+
+# --- check: behind -----------------------------------------------------------------------------
+
+# The one check no local test can find: a branch that started before a pull request merged. A
+# worker cuts its branch from trunk and works; the trunk moves while it works; the branch arrives
+# `CONFLICTING`, or worse, green against a diff nobody reviewed. Nothing else here can see it —
+# syntax, semgrep, scrub and the body gate all pass on a stale base.
+#
+# One question, asked after a quiet bounded fetch: is origin/<trunk> already an ancestor of HEAD?
+# When it is not, the branch is behind or diverged. Being behind is not itself the problem — GitHub
+# merges a branch behind trunk, and those extra commits are history, not conflict. The problem is a
+# path this branch touched that also moved on trunk: that is a merge to resolve, and the person's
+# minutes. So the verdict is the intersection. Collisions fail, naming how far behind, the colliding
+# paths, and the exact remedy in that worktree. No collision passes, with a line that says so by
+# name: an unconditional fail here refuses a branch GitHub would merge, and five branches in one day
+# paid a rebase worker for nothing.
+#
+# It never rebases either way. A rebase can conflict, and a gate that rewrites history is worse than
+# one that refuses: an automatic rebase turns a visible refusal into a half-resolved tree. And an
+# unreachable origin is a named PASS, because a gate that blocks on a flaky network is a gate
+# people learn to skip — the line says what was not checked, so "pass" never reads as "level".
+# pf_branch_merged <cwd> <trunk-ref> <branch> — true when origin/trunk already carries this
+# branch's work: the branch's own diff against trunk is empty (three dots: from the merge base to
+# the branch, so trunk's newer commits are not counted against it), or every commit the branch has
+# that trunk does not is a patch trunk already holds — the squash and the rebase a merge button
+# produces, which `git cherry` marks `-`. A `+` is work trunk has not got.
+#
+# This is the shape a worker is in after the boss merged it: #205 and #206 merged while their
+# workers sat in the gate, and the collision list below then failed a finished worker over paths
+# that were its own, already-landed work. A merged branch has nothing for a rebase to do.
+pf_branch_merged() {
+	local cwd=$1 ref=$2 branch=$3 marks
+	git -C "$cwd" diff --quiet "$ref...$branch" 2>/dev/null && return 0
+	marks=$(git -C "$cwd" cherry "$ref" "$branch" 2>/dev/null) || return 1
+	printf '%s\n' "$marks" | grep -qE '^\+' && return 1
+	return 0
+}
+
+pf_check_behind() {
+	local cwd=$PF_CWD trunk=$PF_TRUNK ref fetch_out n p f mb cmd=()
+	local moved=() touched=() collide=()
+	ref="refs/remotes/origin/$trunk"
+	if want_cmd timeout; then cmd=(timeout 25 git -C "$cwd" fetch --quiet origin); else cmd=(git -C "$cwd" fetch --quiet origin); fi
+	if ! fetch_out=$(env GIT_TERMINAL_PROMPT=0 "${cmd[@]}" 2>&1); then
+		printf 'could not reach origin; behind-ness unchecked (%s)\n' "$(printf '%s\n' "$fetch_out" | head -n 1 | cut -c1-120)"
+		return 0
+	fi
+	if ! git -C "$cwd" rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
+		printf 'no %s after the fetch; behind-ness unchecked\n' "$ref"
+		return 0
+	fi
+	if git -C "$cwd" merge-base --is-ancestor "$ref" "$PF_BRANCH" 2>/dev/null; then
+		printf 'origin/%s is in %s: level with trunk or ahead of it\n' "$trunk" "$PF_BRANCH"
+		return 0
+	fi
+	if pf_branch_merged "$cwd" "$ref" "$PF_BRANCH"; then
+		printf '%s is already merged: origin/%s carries its work (an empty diff against trunk), so there is nothing to rebase\n' \
+			"$PF_BRANCH" "$trunk"
+		return 0
+	fi
+	n=$(git -C "$cwd" rev-list --count "$PF_BRANCH..$ref" 2>/dev/null) || n=?
+	# Both sides of the merge base, read after the fetch so the base is the trunk as it is now: the
+	# branch's own paths, trunk's paths, and the intersection is the collision list. A path this
+	# branch never touched cannot conflict, and listing trunk's whole diff would bury the ones that
+	# can. PF_CHANGED is not reused because it was collected before this fetch.
+	mb=$(git -C "$cwd" merge-base "$ref" "$PF_BRANCH" 2>/dev/null) || mb=""
+	[ -n "$mb" ] || mb=$ref
+	mapfile -t touched < <(git -C "$cwd" diff --name-only "$mb..$PF_BRANCH" 2>/dev/null)
+	mapfile -t moved < <(git -C "$cwd" diff --name-only "$mb..$ref" 2>/dev/null)
+	for p in "${moved[@]}"; do
+		[ -n "$p" ] || continue
+		for f in "${touched[@]}"; do
+			if [ "$f" = "$p" ]; then
+				collide+=("$p")
+				break
+			fi
+		done
+	done
+	if [ "${#collide[@]}" -eq 0 ]; then
+		# Behind, and not one path this branch touched moved on trunk: a clean merge on GitHub,
+		# with the extra commits as history. Passed by name, because this line is the whole answer
+		# and "pass" alone would read as "level with trunk".
+		printf '%s is %s commit(s) behind origin/%s, no touched path moved: this branch merges without a rebase\n' \
+			"$PF_BRANCH" "$n" "$trunk"
+		return 0
+	fi
+	printf '%s is %s commit(s) behind origin/%s; %d of the %d touched path(s) also moved on trunk\n' \
+		"$PF_BRANCH" "$n" "$trunk" "${#collide[@]}" "${#touched[@]}"
+	printf 'the collisions, by path:\n'
+	printf '  %s\n' "${collide[@]}"
+	printf 'Fix: git -C %s rebase origin/%s\n' "$cwd" "$trunk"
+	return 1
+}
+
+# --- check: syntax -----------------------------------------------------------------------------
+
+# pf_ts_checker <cwd> — print the type-check command this checkout can answer, or nothing. A
+# project with a tsconfig.json and a local typescript answers `tsc --noEmit -p .`; one with neither
+# cannot be type-checked here, and that is a fact to print, never a pass to claim.
+pf_ts_checker() {
+	local cwd=$1
+	[ -f "$cwd/tsconfig.json" ] || return 1
+	if [ -x "$cwd/node_modules/.bin/tsc" ]; then
+		printf '%s' './node_modules/.bin/tsc --noEmit -p .'
+		return 0
+	fi
+	command -v npx >/dev/null 2>&1 || return 1
+	(cd "$cwd" && npx --no-install tsc --version >/dev/null 2>&1) || return 1
+	printf '%s' 'npx --no-install tsc --noEmit -p .'
+}
+
+# Three parsers, and every file goes to the one that can read it. A .ts/.tsx file fed to bash -n is
+# the bug this check carried: bash said "line 60: syntax error near unexpected token `('" about
+# valid TypeScript, so a green TS diff could never publish. node --check cannot read types either,
+# so the only honest verdict for a TS file is the checkout's own compiler, or a skip named per file.
+pf_check_syntax() {
+	local f rc=0 nb=0 nm=0 nts=0 nts_skip=0 nunk=0 out tsc_cmd=""
+	local tsfiles=() unk=()
+	for f in "${PF_CODE[@]}"; do
+		[ -f "$PF_CWD/$f" ] || continue
+		case $f in
+		*.mjs | *.js)
+			nm=$((nm + 1))
+			if ! out=$(node --check "$PF_CWD/$f" 2>&1); then
+				rc=1
+				printf '%s:\n%s\n' "$f" "$(printf '%s\n' "$out" | head -n 3 | sed 's/^/  /')"
+			fi
+			;;
+		*.ts | *.tsx)
+			nts=$((nts + 1))
+			tsfiles+=("$f")
+			;;
+		*.sh | *.bash | bin/*)
+			nb=$((nb + 1))
+			if ! out=$(bash -n "$PF_CWD/$f" 2>&1); then
+				rc=1
+				printf '%s:\n%s\n' "$f" "$(printf '%s\n' "$out" | head -n 3 | sed 's/^/  /')"
+			fi
+			;;
+		*)
+			# Neither shell nor JavaScript nor TypeScript: there is no parser here for it, so it
+			# is named and counted as skipped — never fed to bash -n (a .py file is not shell), and
+			# never left to pass by saying nothing.
+			nunk=$((nunk + 1))
+			unk+=("$f")
+			;;
+		esac
+	done
+	if [ "$nts" -gt 0 ]; then
+		if tsc_cmd=$(pf_ts_checker "$PF_CWD"); then
+			if ! out=$(cd "$PF_CWD" && bash -c "$tsc_cmd" 2>&1); then
+				rc=1
+				printf 'TypeScript: %s failed on %d changed TS file(s) in %s:\n%s\n' "$tsc_cmd" "$nts" "$PF_CWD" \
+					"$(printf '%s\n' "$out" | head -n 12 | sed 's/^/  /')"
+			fi
+		else
+			nts_skip=$nts
+			for f in "${tsfiles[@]}"; do
+				printf 'TypeScript in %s: no type check in this checkout — node --check cannot parse types; the suites check compiles it\n' "$f"
+			done
+		fi
+	fi
+	for f in "${unk[@]}"; do
+		printf 'syntax in %s: no parser for this extension here — skipped, not checked\n' "$f"
+	done
+	printf 'bash -n: %d file(s), node --check: %d file(s), TypeScript: %d file(s) type-checked, %d skipped (no type check in this checkout)' \
+		"$nb" "$nm" "$((nts - nts_skip))" "$nts_skip"
+	[ "$nunk" -eq 0 ] || printf ', %d unknown extension(s) skipped' "$nunk"
+	printf '\n'
+	# The linter, on the changed shell files, when it is installed. Absence is said out loud rather
+	# than read as clean — the same line scripts/ci-local.sh prints — but it is not a failure: the
+	# gate refuses work, and a missing linter is not the work's fault.
+	local shells=()
+	for f in "${PF_CODE[@]}"; do
+		case $f in *.sh | bin/*) [ -f "$PF_CWD/$f" ] && shells+=("$f") ;; esac
+	done
+	if [ "${#shells[@]}" -eq 0 ]; then
+		printf 'shellcheck: no changed shell file\n'
+	elif ! want_cmd shellcheck; then
+		printf 'shellcheck: not installed here, so %d changed shell file(s) went unlinted — install it (apt install shellcheck) to have the linter CI runs\n' "${#shells[@]}"
+	else
+		if ! out=$(cd "$PF_CWD" && shellcheck --severity=error "${shells[@]}" 2>&1); then
+			rc=1
+			printf 'shellcheck --severity=error on %s:\n%s\n' "${shells[*]}" "$(printf '%s\n' "$out" | head -n 12 | sed 's/^/  /')"
+		else
+			printf 'shellcheck --severity=error: %d changed shell file(s) clean\n' "${#shells[@]}"
+		fi
+	fi
+	return $rc
+}
+
+# --- check: the repo's own suites --------------------------------------------------------------
+
+# A suite is one unit: a name and a command, run in the checkout, with its own log and its own
+# elapsed time. Units are independent (they build throwaway roots), so they run at once — capped,
+# because the cap is what keeps a gate from measuring its own process storm.
+pf_unit_add() { # <name> <command>
+	PF_UNIT_NAME+=("$1")
+	PF_UNIT_CMD+=("$2")
+}
+
+# pf_pi_superset_is_globs <cwd> — true when this checkout's `make scripts-test` is exactly the
+# standard two-glob recipe: the node suite, then every scripts/tests/*.test.sh through bash. Its
+# recipe is then proof that running those globs here is running the target — which is how the same
+# suite stops running twice (this check used to call `node --test` and then a target that begins
+# with it). A target that grew a step is not recognised: it is run whole, once, so the gate cannot
+# quietly stop doing something the target does. No target at all is the globs by definition.
+pf_pi_superset_is_globs() {
+	local cwd=$1 probe line saw_node=0 saw_loop=0
+	[ -f "$cwd/Makefile" ] || return 0
+	grep -qE '^scripts-test[[:space:]]*:' "$cwd/Makefile" || return 0
+	probe=$(cd "$cwd" && make --no-print-directory -n scripts-test 2>/dev/null) || return 1
+	[ -n "$probe" ] || return 1
+	while IFS= read -r line; do
+		line=${line#"${line%%[![:space:]]*}"} # leading blanks
+		line=${line%\\}                      # a shell line continuation
+		line=${line%"${line##*[![:space:]]}"} # trailing blanks
+		[ -n "$line" ] || continue
+		case $line in
+		'echo '* | 'printf '*) ;;
+		'node --test '*scripts/tests/*.test.mjs*) saw_node=1 ;;
+		'for t in scripts/tests/*.test.sh; do') saw_loop=1 ;;
+		'[ -e "$t" ] || continue;') ;;
+		'bash "$t" || '*) ;;
+		done) ;;
+		*) return 1 ;;
+		esac
+	done <<<"$probe"
+	[ "$saw_node" = 1 ] && [ "$saw_loop" = 1 ]
+}
+
+# pf_suite_units — fill PF_UNIT_NAME/PF_UNIT_CMD with the suites this checkout's superset would run.
+# pi: the two globs the target runs, or the target itself when its recipe is not those globs.
+# boss: scripts/ci-local.sh's own jobs, one each — the script declares them (`job_ids=(...)`), and a
+# script that declares none is run whole instead. Never both halves: that is the double run again.
+pf_suite_units() {
+	local cwd=$PF_CWD t n=0 id ids=""
+	local -a ids_a=()
+	PF_UNIT_NAME=()
+	PF_UNIT_CMD=()
+	case $PF_SHAPE in
+	pi)
+		if pf_pi_superset_is_globs "$cwd"; then
+			if compgen -G "$cwd/scripts/tests/*.test.mjs" >/dev/null 2>&1; then
+				for t in "$cwd"/scripts/tests/*.test.mjs; do [ -f "$t" ] && n=$((n + 1)); done
+				pf_unit_add "node --test scripts/tests/*.test.mjs ($n file(s))" 'node --test scripts/tests/*.test.mjs'
+			fi
+			for t in "$cwd"/scripts/tests/*.test.sh; do
+				[ -f "$t" ] || continue
+				pf_unit_add "bash scripts/tests/$(basename "$t")" "bash scripts/tests/$(basename "$t")"
+			done
+		else
+			pf_unit_add 'make scripts-test (its own recipe, not the two globs)' 'make --no-print-directory scripts-test'
+		fi
+		;;
+	boss)
+		ids=$(sed -nE 's/^job_ids=\(([^)]*)\)$/\1/p' "$cwd/scripts/ci-local.sh" 2>/dev/null | head -n 1)
+		case $ids in *[!a-z0-9\ -]*) ids="" ;; esac
+		read -r -a ids_a <<<"$ids"
+		if [ "${#ids_a[@]}" -eq 0 ]; then
+			pf_unit_add 'bash scripts/ci-local.sh' 'bash scripts/ci-local.sh'
+		else
+			for id in "${ids_a[@]}"; do
+				pf_unit_add "ci-local: $id" "bash scripts/ci-local.sh --only $id"
+			done
+		fi
+		;;
+	esac
+}
+
+# pf_run_units — run the discovered units at most PF_JOBS at a time and report them: one line per
+# suite with its own elapsed time, the wall clock, and every failure's own tail at the end. Nothing
+# interleaves because nothing shares a stream: each unit writes its own log.
+pf_run_units() {
+	local n=${#PF_UNIT_CMD[@]} i=0 j=0 idx pid rc ms fails=0 dir started ended cached=0 note
+	local -a pids=() unit_rc=() unit_ms=() unit_cached=() unit_ts=() unit_name=()
+	dir=$PREFLIGHT_TMP/units
+	mkdir -p "$dir"
+	# Every unit is asked for by name before anything is launched: a suite that already answered
+	# on this tree, under these gates, answers again from its receipt and is never started. That is
+	# the shared half — a test script ci-offline ran is not run here, and one this check ran is not
+	# run there — and the line under it says where the answer came from.
+	for ((i = 0; i < n; i++)); do
+		unit_name[i]=$(receipt_unit_name "${PF_UNIT_CMD[i]}")
+		unit_cached[i]=""
+		if receipt_lookup "${unit_name[i]}" "$dir/$i.log"; then
+			unit_rc[i]=$RECEIPT_RC
+			unit_ms[i]=$RECEIPT_MS
+			unit_cached[i]=$RECEIPT_AGE
+			unit_ts[i]=$RECEIPT_TS
+			printf '%s %s\n' "$RECEIPT_RC" "$RECEIPT_MS" >"$dir/$i.status"
+			cached=$((cached + 1))
+		fi
+	done
+	started=$(date +%s%N)
+	i=0
+	while [ "$i" -lt "$n" ]; do
+		pids=()
+		j=0
+		while [ "$j" -lt "$PF_JOBS" ] && [ "$i" -lt "$n" ]; do
+			idx=$i
+			i=$((i + 1))
+			[ -z "${unit_cached[$idx]}" ] || continue
+			(
+				local s e r
+				s=$(date +%s%N)
+				(cd "$PF_CWD" && bash -c "${PF_UNIT_CMD[$idx]}") >"$dir/$idx.log" 2>&1
+				r=$?
+				e=$(date +%s%N)
+				printf '%s %s\n' "$r" "$(((e - s) / 1000000))" >"$dir/$idx.status"
+			) &
+			pids+=($!)
+			j=$((j + 1))
+		done
+		for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+	done
+	ended=$(date +%s%N)
+	for ((i = 0; i < n; i++)); do
+		rc=1
+		ms=0
+		[ -f "$dir/$i.status" ] && read -r rc ms <"$dir/$i.status"
+		unit_rc[i]=$rc
+		unit_ms[i]=$ms
+		# A verdict reached here is one the other gate may reuse — a failure too, stored as it is
+		# and never read back as anything else.
+		[ -n "${unit_cached[$i]}" ] || [ ! -f "$dir/$i.status" ] ||
+			receipt_write "${unit_name[$i]}" "$rc" "$ms" "$dir/$i.log"
+	done
+	printf '%s: %d suite(s) discovered, %d ran once each, %d from receipts, wall %ss (at most %s at a time)\n' \
+		"$PF_SHAPE_NAME" "$n" "$((n - cached))" "$cached" "$(((ended - started) / 1000000000))" "$PF_JOBS"
+	for ((i = 0; i < n; i++)); do
+		note=""
+		[ -z "${unit_cached[$i]}" ] ||
+			note=" (cached $(pf_age_human "${unit_cached[$i]}") from the run at $(date -u -d "@${unit_ts[$i]}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf 'ts %s' "${unit_ts[$i]}"))"
+		if [ "${unit_rc[i]}" = 0 ]; then
+			printf '%-58s %5ss  ok%s\n' "${PF_UNIT_NAME[i]}" "$((unit_ms[i] / 1000))" "$note"
+		else
+			fails=$((fails + 1))
+			printf '%-58s %5ss  FAILED (exit %s)%s\n' "${PF_UNIT_NAME[i]}" "$((unit_ms[i] / 1000))" "${unit_rc[i]}" "$note"
+		fi
+	done
+	[ "$fails" = 0 ] && return 0
+	printf 'failures (last 20 lines of each):\n'
+	for ((i = 0; i < n; i++)); do
+		[ "${unit_rc[i]}" = 0 ] && continue
+		printf '%s, exit %s:\n' "${PF_UNIT_NAME[i]}" "${unit_rc[i]}"
+		tail -n 20 "$dir/$i.log" 2>/dev/null | sed 's/^/  /'
+	done
+	return 1
+}
+
+pf_check_suites() {
+	if [ "$PF_SHAPE" = none ]; then
+		printf 'no suite in this checkout\n'
+		return 1
+	fi
+	pf_suite_units
+	if [ "${#PF_UNIT_CMD[@]}" -eq 0 ]; then
+		printf 'no suite found in %s\n' "$PF_CWD"
+		return 1
+	fi
+	pf_run_units
+}
+
+# --- check: semgrep, on the changed files only --------------------------------------------------
+
+# pf_semgrep_configs <cwd> — the configs to hand semgrep, one per line. The repo's workflow wins
+# when it pins one (that is what CI would run); otherwise p/default. The harness's own pinned rules
+# ride along either way, so the rule that catches a `new RegExp(variable)` is present on a repo
+# whose workflow never mentions semgrep. PREFLIGHT_SEMGREP_CONFIG replaces the registry half, which
+# is the one that needs the network.
+pf_semgrep_configs() {
+	local cwd=$1 f c found=""
+	for f in "$cwd"/.github/workflows/*.yml "$cwd"/.github/workflows/*.yaml; do
+		[ -f "$f" ] || continue
+		c=$(grep -oE -- '--config[= ][^ "]+' "$f" 2>/dev/null | head -n 1 | sed -E 's/^--config[= ]//')
+		[ -n "$c" ] && {
+			found=$c
+			break
+		}
+	done
+	[ -n "$found" ] || found=${PREFLIGHT_SEMGREP_CONFIG:-p/default}
+	printf '%s\n' "$found"
+	# The pinned local rules ride along unless the repo already points at that same file, so the
+	# invocation reads once rather than twice.
+	if [ -f "$self_root/scripts/semgrep-rules.yml" ] && [ "$found" != "$self_root/scripts/semgrep-rules.yml" ]; then
+		printf '%s\n' "$self_root/scripts/semgrep-rules.yml"
+	fi
+	return 0
+}
+
+pf_check_semgrep() {
+	local configs=() f cfg rc=0 out files=()
+	if ! want_cmd semgrep; then
+		printf 'semgrep is not installed here, so this check cannot pass — install it (pipx install semgrep) and run it again\n'
+		return 1
+	fi
+	mapfile -t configs < <(pf_semgrep_configs "$PF_CWD")
+	for f in "${PF_CODE[@]}"; do
+		[ -f "$PF_CWD/$f" ] || continue
+		files+=("$f")
+	done
+	[ "${#files[@]}" -gt 0 ] || {
+		printf 'no changed code file\n'
+		return 0
+	}
+	local args=( --error --quiet --metrics=off --disable-version-check --no-git-ignore )
+	for cfg in "${configs[@]}"; do args+=( --config "$cfg" ); done
+	out=$(cd "$PF_CWD" && semgrep "${args[@]}" "${files[@]}" 2>&1)
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		# Name the files and the rules rather than dumping the banner: a finding without its file is
+		# a reading task, and the reproduce line below already carries the whole invocation.
+		printf 'semgrep (%s) over %d changed file(s):\n' "$(printf '%s' "${configs[*]}" | sed 's/ /, /g')" "${#files[@]}"
+		printf '%s\n' "$out" | grep -E '^ {4}[^ ]+\.(mjs|cjs|js|jsx|ts|tsx|sh|bash|py|go|rs|java|rb|php)$' \
+			| tr -d ' ' | sort -u | sed 's/^/  file: /'
+		printf '%s\n' "$out" | grep -oE '❱+ [^ ]+$' | sed -E 's/^❱+ //' | sort -u | sed 's/^/  rule: /'
+		return 1
+	fi
+	printf 'semgrep: %d changed file(s) clean, configs: %s\n' "${#files[@]}" "$(printf '%s' "${configs[*]}" | sed 's/ /, /g')"
+	return 0
+}
+
+# --- check: the scrubbed environment -----------------------------------------------------------
+
+# The check that catches pi#66: a test that reaches a tool through the developer's PATH and finds
+# it, so it passes here and fails on a runner that has only /usr/bin:/bin. The emptied environment
+# is the whole point — an empty stub directory first (so a test's own fake commands have somewhere
+# to go and nothing of the user's leaks in), then the two directories a runner does have, and a
+# throwaway HOME. Any test that needs one of the user's own tools fails here, which is what CI
+# would have said ten minutes later.
+pf_check_scrub() {
+	local tmp stub f rc=0 n=0 out
+	tmp=$PREFLIGHT_TMP/scrub
+	mkdir -p "$tmp/stub" "$tmp/home"
+	stub=$tmp/stub
+	for f in "${PF_TESTS[@]}"; do
+		[ -f "$PF_CWD/$f" ] || continue
+		n=$((n + 1))
+		case $f in
+		*.mjs | *.js) out=$(cd "$PF_CWD" && env -i PATH="$stub:/usr/bin:/bin" HOME="$tmp/home" TMPDIR="$tmp" node --test "$PF_CWD/$f" 2>&1) ;;
+		*) out=$(cd "$PF_CWD" && env -i PATH="$stub:/usr/bin:/bin" HOME="$tmp/home" TMPDIR="$tmp" bash "$PF_CWD/$f" 2>&1) ;;
+		esac
+		if [ $? -ne 0 ]; then
+			rc=1
+			printf '%s failed with only %s:/usr/bin:/bin on PATH:\n%s\n' "$f" "$stub" \
+				"$(printf '%s\n' "$out" | tail -n 20 | sed 's/^/  /')"
+		fi
+	done
+	printf 'the runner does not have your PATH: %d changed test file(s) under env -i\n' "$n"
+	return $rc
+}
+
+# --- check: the body, before it can reach GitHub ------------------------------------------------
+
+# pf_has_body_gate <cwd> — true when the checkout has a body gate of its own: a `make pr-check`
+# target or an executable scripts/pr-gate.sh. One definition, read by run_body_gate and by the body
+# check's own skip line, so "there is no gate here" cannot drift from "the gate did not run".
+pf_has_body_gate() {
+	local cwd=$1
+	if [ -f "$cwd/Makefile" ] && grep -qE '^pr-check[[:space:]]*:' "$cwd/Makefile"; then
+		return 0
+	fi
+	[ -x "$cwd/scripts/pr-gate.sh" ]
+}
+
+# pf_docs_budget <cwd> — the docs-budget half of the body check. A budget is a rule of a checkout
+# that has a root AGENTS.md; one that does not (a pi checkout keeps its instructions at
+# agent/AGENTS.md, which is not a docs budget) has nothing here to measure. That is "not applicable
+# here", said in a line, never a pass that pretends to have measured something and never a failure
+# the branch cannot fix — a gate that fails on its own shape is a gate people learn to bypass.
+pf_docs_budget() {
+	local cwd=$1 bytes limit
+	if [ ! -f "$cwd/AGENTS.md" ]; then
+		case $PF_SHAPE in
+		pi) printf 'docs budget: no root AGENTS.md in this checkout — skipped (a pi checkout keeps its instructions at agent/AGENTS.md, which is not a docs budget)\n' ;;
+		*) printf 'docs budget: no root AGENTS.md in this checkout — skipped (this checkout has no docs budget to measure)\n' ;;
+		esac
+		return 0
+	fi
+	limit=${AGENTS_MD_LIMIT:-8192}
+	bytes=$(wc -c <"$cwd/AGENTS.md" | tr -d '[:space:]')
+	printf 'docs budget: AGENTS.md %s B / %s B\n' "$bytes" "$limit"
+	if [ "$bytes" -gt "$limit" ]; then
+		printf 'AGENTS.md is %s B over its %s B budget\n' "$((bytes - limit))" "$limit"
+		return 1
+	fi
+	return 0
+}
+
+pf_gate_note() {
+	if declare -F note >/dev/null 2>&1; then note "$@"; else printf '%s: %s\n' "${prog:-preflight}" "$*" >&2; fi
+}
+
+# pf_branch_checkout <repo> <branch> — the checkout that holds <branch>, read from the repo's own
+# worktree list (`git worktree list --porcelain`: one block per checkout, its path and its branch).
+# Prints nothing and returns nonzero when no checkout holds the branch — it exists only as a ref.
+pf_branch_checkout() {
+	local repo=$1 branch=$2 line path
+	path=""
+	while IFS= read -r line; do
+		case $line in
+		worktree\ *) path=${line#worktree } ;;
+		branch\ refs/heads/*)
+			if [ "${line#branch refs/heads/}" = "$branch" ] && [ -n "$path" ] && [ -d "$path" ]; then
+				printf '%s\n' "$path"
+				return 0
+			fi
+			;;
+		esac
+	done < <(git -C "$repo" worktree list --porcelain 2>/dev/null)
+	return 1
+}
+
+# pf_throwaway_checkout <repo> <branch> — a detached worktree of the commit <branch> points at, for
+# a branch no checkout holds. Detached on purpose: the commit is what the gate reads, so a checkout
+# of the same commit under another name would be the same tree with a misleading label. The path is
+# recorded in PF_GATE_TMP (and its repo in PF_GATE_REPO) so pf_gate_checkout_cleanup removes it on
+# every path out, a refused gate included.
+pf_throwaway_checkout() {
+	local repo=$1 branch=$2 dir commit
+	commit=$(git -C "$repo" rev-parse --verify --quiet "$branch^{commit}" 2>/dev/null) || return 1
+	dir=$(mktemp -d "${TMPDIR:-/tmp}/preflight-gate.XXXXXX") || return 1
+	rmdir "$dir" 2>/dev/null || rm -rf "$dir"
+	if ! git -C "$repo" worktree add --detach --quiet "$dir" "$commit" >/dev/null 2>&1; then
+		rm -rf "$dir"
+		return 1
+	fi
+	# The checkout is only worth gating in when it really is the branch's commit. A `git` that says
+	# it made one and made nothing would otherwise hand the gate an empty tree, the gate would find
+	# no Makefile, and a publish would go out with no body gate at all — the failure that looks like
+	# a pass. Verified, or the caller's own checkout is used with the branch named to it, as before.
+	if [ "$(git -C "$dir" rev-parse --verify --quiet HEAD 2>/dev/null || true)" != "$commit" ]; then
+		git -C "$repo" worktree remove "$dir" >/dev/null 2>&1 || true
+		rm -rf "$dir"
+		return 1
+	fi
+	# Set here, not printed: a caller that read the path out of `$(...)` would set these in a
+	# subshell, and the cleanup would have nothing to remove — the leak this line exists to stop.
+	PF_GATE_TMP=$dir
+	PF_GATE_REPO=$repo
+	return 0
+}
+
+# pf_gate_checkout_cleanup — remove the throwaway checkout, if one was made. Called before every
+# return out of run_body_gate and from the EXIT trap, because a worktree left behind holds a ref in
+# the repo it borrowed from and the next `git worktree add` of it would refuse.
+pf_gate_checkout_cleanup() {
+	[ -n "${PF_GATE_TMP:-}" ] || return 0
+	git -C "${PF_GATE_REPO:-$PWD}" worktree remove "$PF_GATE_TMP" >/dev/null 2>&1 || true
+	rm -rf "$PF_GATE_TMP"
+	git -C "${PF_GATE_REPO:-$PWD}" worktree prune >/dev/null 2>&1 || true
+	PF_GATE_TMP=""
+	PF_GATE_REPO=""
+}
+
+# pf_gate_checkout <repo> <branch> — the directory the body gate must run in. The checkout that
+# holds the branch, when one does; a throwaway detached worktree of that commit when none does; the
+# caller's own checkout only when there is no branch to look for. Nothing else is honest: a repo
+# whose `pr-check` refuses a checkout that is not on the branch it gates is right to refuse, and
+# running it in trunk's checkout is a gate pointed at the wrong tree (three publishes in a row).
+pf_gate_checkout() {
+	local repo=$1 branch=$2 dir
+	PF_GATE_SELECTED=$repo
+	PF_GATE_TMP=""
+	PF_GATE_REPO=""
+	[ -n "$branch" ] || return 0
+	if dir=$(pf_branch_checkout "$repo" "$branch"); then
+		PF_GATE_SELECTED=$dir
+		return 0
+	fi
+	if pf_throwaway_checkout "$repo" "$branch"; then
+		PF_GATE_SELECTED=$PF_GATE_TMP
+		pf_gate_note "no checkout holds $branch, so the gate runs in a throwaway worktree of it ($PF_GATE_TMP)"
+	fi
+	return 0
+}
+
+# run_body_gate <cwd> <branch> <body-file> — the target repo's own body gate, and the one
+# definition of it: bin/publish sources this file and calls it, so the gate the preflight runs is
+# the gate a publish runs. `make pr-check BODY=<file>` when the repo has that target,
+# `scripts/pr-gate.sh --body <file>` when it has that script, else a named skip. It runs in the
+# checkout that holds <branch> (pf_gate_checkout), and every line it prints names that directory, so
+# a reader can see the gate was pointed at the right tree. There the checkout is on the branch, so
+# no BRANCH= is needed; in the throwaway detached checkout the branch is named to the gate exactly
+# when the target is shown to expand it: a gate that diffs trunk against trunk sees no changed files
+# and refuses every publish. Sets BODY_GATE to the gate that ran (empty when none did) and returns
+# nonzero when it refused. publish has its own note (it prefixes "publish:"); standalone there is
+# nobody to ask.
+run_body_gate() {
+	local cwd=$1 branch=$2 body=$3 dir head_branch gate_branch probe gate_flag rc=0
+	BODY_GATE=""
+	pf_gate_checkout "$cwd" "$branch"
+	dir=$PF_GATE_SELECTED
+	if ! pf_has_body_gate "$dir"; then
+		pf_gate_note "body gate skipped: $dir has no 'make pr-check' target and no scripts/pr-gate.sh"
+		pf_gate_checkout_cleanup
+		return 0
+	fi
+	head_branch=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+	gate_branch=""
+	[ "$head_branch" = "$branch" ] || gate_branch=$branch
+	if [ -f "$dir/Makefile" ] && grep -qE '^pr-check[[:space:]]*:' "$dir/Makefile"; then
+		BODY_GATE="make pr-check"
+		local gate_args=( BODY="$body" )
+		if [ -n "$gate_branch" ] &&
+			probe=$(make -C "$dir" --no-print-directory -n pr-check BODY=/dev/null BRANCH=__publish_probe__ 2>/dev/null) &&
+			printf '%s\n' "$probe" | grep -q '__publish_probe__'; then
+			gate_args+=( "BRANCH=$branch" )
+			pf_gate_note "body gate: make -C $dir pr-check BRANCH=$branch (its recipe expands BRANCH)"
+			pf_gate_note "the checkout is on ${head_branch:-a detached HEAD}, not $branch"
+		else
+			pf_gate_note "body gate: make -C $dir pr-check"
+		fi
+		make -C "$dir" --no-print-directory pr-check "${gate_args[@]}" || rc=1
+		PF_GATE_DIR=$dir
+		pf_gate_checkout_cleanup
+		return $rc
+	fi
+	if [ -x "$dir/scripts/pr-gate.sh" ]; then
+		BODY_GATE="scripts/pr-gate.sh"
+		gate_flag=""
+		if [ -n "$gate_branch" ] && grep -qE -- '--branch[)=|[:space:]]' "$dir/scripts/pr-gate.sh"; then
+			gate_flag=1
+		fi
+		if [ -n "$gate_flag" ]; then
+			pf_gate_note "body gate: $dir/scripts/pr-gate.sh --body --branch $branch"
+			( cd "$dir" && ./scripts/pr-gate.sh --body "$body" --branch "$branch" ) || rc=1
+		else
+			pf_gate_note "body gate: $dir/scripts/pr-gate.sh --body"
+			( cd "$dir" && ./scripts/pr-gate.sh --body "$body" ) || rc=1
+		fi
+		PF_GATE_DIR=$dir
+		pf_gate_checkout_cleanup
+		return $rc
+	fi
+	pf_gate_note "body gate skipped: $dir has no 'make pr-check' target and no scripts/pr-gate.sh"
+	pf_gate_checkout_cleanup
+	return 0
+}
+
+pf_check_body() {
+	local rc=0 body out
+	body=$PREFLIGHT_TMP/body.md
+	# The gate half first. It is the half a branch can fail, so the line the check is read by is a
+	# verdict about this body, never a budget this checkout does not have.
+	if [ -z "$PF_SLUG" ]; then
+		printf 'body gate: no --slug, so there is no report to build the body from and nothing to gate\n'
+	elif ! out=$("$PBIN/publish" --body-out "$body" --cwd "$PF_CWD" ${PF_SPACE:+--space "$PF_SPACE"} "$PF_SLUG" 2>&1); then
+		printf 'the body bin/publish would send cannot be built:\n%s\n' "$(printf '%s\n' "$out" | sed 's/^/  /')"
+		rc=1
+	elif ! pf_has_body_gate "$PF_CWD"; then
+		printf 'body: no pr-check target in this checkout — skipped (no Makefile pr-check target and no scripts/pr-gate.sh in %s, so there is no body gate to run)\n' "$PF_CWD"
+	elif ! run_body_gate "$PF_CWD" "$PF_BRANCH" "$body"; then
+		printf 'the body gate %srefused the body bin/publish would send\n' "${BODY_GATE:+($BODY_GATE) }"
+		rc=1
+	else
+		printf 'body gate: %s passed on the body bin/publish would send (%s) in %s\n' \
+			"${BODY_GATE:-none in this repo}" "$body" "${PF_GATE_DIR:-$PF_CWD}"
+	fi
+	# ...then the budget, which is a rule of the checkouts that have one. It can fail on its own (an
+	# AGENTS.md over budget) and that failure stands; a checkout with no root AGENTS.md says so by
+	# name instead of reading as a failure the branch is supposed to fix.
+	pf_docs_budget "$PF_CWD" || rc=1
+	return $rc
+}
+
+# --- check: union on the changed extensions lines (opt-in) ----------------------------------
+
+# The seventh check, and the only slow one, so it costs nothing unless asked for. The scope is not
+# invented here: `scripts/mutate-changed.sh` derives the added line ranges of
+# agent/extensions/**/*.ts from the branch's diff and runs stryker on exactly those, which is what
+# the CI job `mutation on changed files (stryker)` does. The verdict is that script's exit code,
+# never a score parsed out of its output: stryker's clear-text reporter is a display, and a gate
+# that reads its prose goes green on a run whose break threshold was never consulted.
+#
+# The whole-file run is the 20+ minutes that kept mutation out of this gate. This one is minutes,
+# and a receipt keyed on the tree makes the publish's second run free — which is the whole reason a
+# minutes-long check is tolerable inside a pre-publish gate.
+pf_check_mutation() {
+	local out rc conf=$PF_CWD/agent/stryker.conf.json
+	out=$(cd "$PF_CWD" && bash scripts/mutate-changed.sh 2>&1)
+	rc=$?
+	printf '%s\n' "$out"
+	if [ "$rc" -ne 0 ]; then
+		printf 'mutate-changed.sh exited %s: a mutant the changed lines introduced survived, and the CI job breaks at 100\n' "$rc"
+		return 1
+	fi
+	printf 'mutate-changed.sh exited 0: the script passed, and its exit code is the verdict here\n'
+	# The exit code is the verdict and nothing here parses a score — which is only worth anything
+	# when the script can fail. It cannot where the config's break is null (pi's is, on purpose:
+	# the whole-file weekly run has no break, and the pull-request job writes its own derived
+	# config with break 100 and calls stryker itself). So a pass here says "the script passed",
+	# and when the config cannot break, this line says so instead of letting the pass read as
+	# "no survivor". Measured on a 33-line diff: 7 survivors, exit 0.
+	if ! grep -qE '"break"[[:space:]]*:[[:space:]]*100([[:space:]]*[,}]|$)' "$conf" 2>/dev/null; then
+		printf 'note: %s does not break at 100, so this pass means the script passed, not that every mutant died — the CI job writes its own break-100 config and calls stryker itself; give scripts/mutate-changed.sh a break to make it a gate\n' "${conf#$PF_CWD/}"
+	fi
+	return 0
+}
+
+# --- dispatch ----------------------------------------------------------------------------------
+
+usage() {
+	local id
+	printf 'usage: %s [--cwd DIR] [--slug SLUG] [--space SLUG] [--only NAME]... [--list] [--fresh] [BRANCH]\n' "$prog" >&2
+	# The same words `--list` prints, so help and the list cannot drift apart: what a check is
+	# called is the only place its verdict is explained before it runs.
+	printf 'checks:\n' >&2
+	for id in "${preflight_ids[@]}"; do
+		printf '  %s\t%s\n' "$id" "$(name_of "$id")" >&2
+	done
+	exit 2
+}
+
+resolve() {
+	local s=$1 i
+	for i in "${!preflight_ids[@]}"; do
+		[ "$s" = "${preflight_ids[$i]}" ] && { printf '%s' "${preflight_ids[$i]}"; return 0; }
+	done
+	return 1
+}
+
+# pf_branch_for_slug <cwd> <slug> — the branch a worker's commits are on. A recorded branch that is
+# not trunk is the answer; a trunk branch is what the boss checkout sits on, so the branch is found
+# by its `Agent-Slug:` trailer, one match, exactly as bin/publish finds it.
+pf_branch_for_slug() {
+	local cwd=$1 slug=$2 recorded trunk found candidate
+	recorded=""
+	if [ -f "$DELEGATIONS" ]; then
+		recorded=$(node -e '
+			const fs=require("fs");let j={};
+			try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
+			process.stdout.write(String((j[process.argv[2]]||{}).branch||""))' "$DELEGATIONS" "$slug")
+	fi
+	trunk=$(pf_trunk "$cwd")
+	case $recorded in
+	"" | "$trunk" | trunk | main | master) ;;
+	*) printf '%s' "$recorded"; return 0 ;;
+	esac
+	found=""
+	for candidate in $(git -C "$cwd" for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null); do
+		if git -C "$cwd" log --format=%B "refs/remotes/origin/$trunk..$candidate" 2>/dev/null |
+			grep -qE "^Agent-Slug:[[:space:]]*${slug}[[:space:]]*$"; then
+			found="$found$candidate"$'\n'
+		fi
+	done
+	found=$(printf '%s' "$found" | grep -E . || true)
+	[ "$(printf '%s' "$found" | grep -cE . || true)" = 1 ] || return 1
+	printf '%s' "$found"
+}
+
+preflight_main() {
+	local cwd="" slug="" space="" branch="" selected=() id out rc fails=0 ran=0 start end ms part fresh=0
+	local -a parts=()
+	local total_start total_end
+	# The one opt-in check: set when `--only` really names it, so the default run prints its skip
+	# line without paying for the run.
+	PF_MUTATION_REQUESTED=0
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--cwd)
+			[ "$#" -ge 2 ] && [ -n "$2" ] || die "--cwd needs a directory"
+			cwd=$2
+			shift 2
+			;;
+		--cwd=*)
+			cwd=${1#--cwd=}
+			shift
+			;;
+		--slug)
+			[ "$#" -ge 2 ] && [ -n "$2" ] || die "--slug needs a worker slug"
+			slug=$2
+			shift 2
+			;;
+		--slug=*)
+			slug=${1#--slug=}
+			shift
+			;;
+		--space)
+			[ "$#" -ge 2 ] && [ -n "$2" ] || die "--space needs a space name"
+			space=$2
+			shift 2
+			;;
+		--space=*)
+			space=${1#--space=}
+			[ -n "$space" ] || die "--space needs a space name"
+			shift
+			;;
+		--only)
+			[ "$#" -ge 2 ] || usage
+			IFS=, read -r -a parts <<<"$2"
+			for part in "${parts[@]}"; do
+				[ -n "$part" ] || continue
+				id=$(resolve "$part") || die "no such check: $part (bin/preflight --list names them)"
+				selected+=("$id")
+				[ "$id" != mutation ] || PF_MUTATION_REQUESTED=1
+			done
+			shift 2
+			;;
+		--only=*)
+			IFS=, read -r -a parts <<<"${1#--only=}"
+			for part in "${parts[@]}"; do
+				[ -n "$part" ] || continue
+				id=$(resolve "$part") || die "no such check: $part (bin/preflight --list names them)"
+				selected+=("$id")
+				[ "$id" != mutation ] || PF_MUTATION_REQUESTED=1
+			done
+			shift
+			;;
+		--list)
+			for id in "${preflight_ids[@]}"; do say "$id	$(name_of "$id")"; done
+			return 0
+			;;
+		--fresh) fresh=1; shift ;;
+		-h | --help | help) usage ;;
+		-*) die "unknown option $1" ;;
+		*)
+			[ -z "$branch" ] || die "one branch at a time: got '$branch' and '$1'"
+			branch=$1
+			shift
+			;;
+		esac
+	done
+
+	# The space first: it says where the report, the decisions and the receipts are, and through
+	# its delegation record which tree the slug's branch lives in. A folder no space claims keeps
+	# the pre-space layout, so a gate on a checkout outside every space still runs.
+	local space_rc=0
+	space_settle "$space" "${cwd:-$PWD}" "$slug" || space_rc=$?
+	[ "$space_rc" -ne 2 ] || exit 2
+
+	# --slug with no --cwd: the worker's own tree is where its branch lives. A gate that runs where
+	# the caller happens to stand checks a checkout the branch is not in, and says "no such branch".
+	if [ -z "$cwd" ] && [ -n "$slug" ] && [ -f "$DELEGATIONS" ]; then
+		cwd=$(node -e '
+			const fs = require("fs");
+			let j = {};
+			try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.exit(0); }
+			const w = j[process.argv[2]];
+			if (w && w.cwd) process.stdout.write(String(w.cwd));' "$DELEGATIONS" "$slug" 2>/dev/null || true)
+	fi
+	[ -n "$cwd" ] || cwd=$(git -C . rev-parse --show-toplevel 2>/dev/null || true)
+	[ -n "$cwd" ] || die "no --cwd and not inside a git repository"
+	cwd=$(cd -- "$cwd" 2>/dev/null && pwd) || die "--cwd is not a directory"
+	git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1 || die "$cwd is not a git repository"
+	[ -n "$slug" ] || slug=""
+	if [ -z "$branch" ] && [ -n "$slug" ]; then
+		branch=$(pf_branch_for_slug "$cwd" "$slug") ||
+			die "no branch in $cwd carries 'Agent-Slug: $slug' (or several do), so there is nothing to check"
+	fi
+	if [ -z "$branch" ]; then
+		branch=$(git -C "$cwd" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+		[ -n "$branch" ] || die "no branch given and $cwd is on a detached HEAD"
+	fi
+	git -C "$cwd" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null ||
+		git -C "$cwd" rev-parse --verify --quiet "$branch" >/dev/null ||
+		die "no such branch in $cwd: $branch"
+
+	PREFLIGHT_TMP=$(mktemp -d "${TMPDIR:-/tmp}/preflight.XXXXXX") || die "cannot make a temporary directory"
+	PF_CWD=$cwd
+	PF_BRANCH=$branch
+	PF_SLUG=$slug
+	PF_SHAPE=$(pf_repo_shape "$cwd")
+	case $PF_SHAPE in
+	pi) PF_SHAPE_NAME="pi checkout" ;;
+	boss) PF_SHAPE_NAME="this workspace" ;;
+	*) PF_SHAPE_NAME="a checkout with no suite" ;;
+	esac
+	pf_collect "$cwd" "$branch"
+	# The ledger's handle is already exported above: receipt_init keeps it and takes the tree hash
+	# from the checkout being checked, not from the tree this program sits in.
+	receipt_init "$cwd"
+	if [ "$fresh" = 1 ]; then
+		receipt_forget
+		export PI_RECEIPT_FRESH=1
+	fi
+
+	if [ "${#selected[@]}" -eq 0 ]; then
+		selected=("${preflight_ids[@]}")
+	fi
+
+	say "preflight: $branch in $cwd"
+	if [ -n "$PF_BASE" ]; then
+		say "  against ${PF_BASE:0:7} (merge base with $PF_TRUNK), ${#PF_CHANGED[@]} file(s) changed, shape: $PF_SHAPE_NAME"
+	else
+		say "  ${PF_NOTE:-no merge base}, ${#PF_CHANGED[@]} file(s) changed, shape: $PF_SHAPE_NAME"
+	fi
+	[ "$fresh" = 0 ] || say "  --fresh: every receipt is ignored, every check runs"
+	say ""
+
+	# Which checks have something to look at, and the list as one string to test membership in.
+	local -a run_ids=() pids=()
+	local ran_list=" "
+	for id in "${selected[@]}"; do
+		if pf_applies "$id"; then
+			run_ids+=("$id")
+			ran_list="$ran_list$id "
+		fi
+	done
+	ran=${#run_ids[@]}
+
+	# The receipts: every input of every verdict once, then one lookup per check. A check whose key
+	# has a fresh receipt is not launched at all — its stored transcript takes the place of its
+	# output and its stored exit takes the place of its status, so the report below reads the same
+	# two files either way and cannot tell a cached verdict from a fresh one by accident.
+	PF_CACHE_VERSION=$(pf_gate_version)
+	PF_RAN_FP=$(pf_sha "$(printf '%s\n' "${run_ids[@]}")")
+	PF_TREE=$(pf_tree_hash "$cwd")
+	local ttl now_i age stamp crc cms cts cached=0 ran_now=0 now_list=" "
+	local -a run_now=()
+	local -A cached_age=() cached_rc=() cached_ms=() cached_ts=()
+	ttl=$(pf_ttl_seconds)
+	for id in "${run_ids[@]}"; do
+		if [ "$fresh" = 0 ] && [ "$ttl" -gt 0 ] && [ -n "$PF_CACHE_VERSION" ] && ! pf_fresh_always "$id" &&
+			stamp=$(pf_receipt_read "$id" "$PREFLIGHT_TMP/$id.out" 2>/dev/null) && [ -n "$stamp" ]; then
+			read -r crc cms cts <<<"$stamp"
+			now_i=$(date +%s)
+			age=$((now_i - cts))
+			# A receipt from the future is a clock that moved: treat it as no receipt at all.
+			if [ "$age" -ge 0 ] && [ "$age" -le "$ttl" ]; then
+				cached_age[$id]=$age
+				cached_rc[$id]=$crc
+				cached_ms[$id]=$cms
+				cached_ts[$id]=$cts
+				printf '%s %s\n' "$crc" "$cms" >"$PREFLIGHT_TMP/$id.status"
+				cached=$((cached + 1))
+				continue
+			fi
+		fi
+		run_now+=("$id")
+		now_list="$now_list$id "
+	done
+	ran_now=${#run_now[@]}
+
+	# The checks are independent — semgrep reads changed files, the suites build throwaway roots,
+	# the body check builds a body in the temporary directory — so they run side by side and the
+	# wall clock is the slowest of them instead of the sum. Each writes its own log; the report
+	# below is still one block per check, in the order a person reads them, whatever finished first.
+	#
+	# The scrub is the exception and it is deliberate: it runs the same test files the suites just
+	# ran, with almost nothing on PATH, and it runs after them — never alongside, so "passes here,
+	# fails there" stays a statement about one suite at a time, and never skipped, since it is the
+	# check that catches a test reaching for the developer's tools.
+	total_start=$(date +%s%N)
+	for id in "${run_now[@]}"; do
+		(
+			local s e r m
+			s=$(date +%s%N)
+			m=pf_check_"$id"
+			"$m" >"$PREFLIGHT_TMP/$id.out" 2>&1
+			r=$?
+			e=$(date +%s%N)
+			printf '%s %s\n' "$r" "$(((e - s) / 1000000))" >"$PREFLIGHT_TMP/$id.status"
+		) &
+		pids+=($!)
+	done
+	for start in "${pids[@]}"; do wait "$start" 2>/dev/null || true; done
+	if case $now_list in *" scrub "*) true ;; *) false ;; esac; then
+		(
+			local s e r m
+			s=$(date +%s%N)
+			m=pf_check_scrub
+			"$m" >"$PREFLIGHT_TMP/scrub.out" 2>&1
+			r=$?
+			e=$(date +%s%N)
+			printf '%s %s\n' "$r" "$(((e - s) / 1000000))" >"$PREFLIGHT_TMP/scrub.status"
+		)
+	fi
+	total_end=$(date +%s%N)
+
+	for id in "${selected[@]}"; do
+		out=$PREFLIGHT_TMP/$id.out
+		if ! case $ran_list in *" $id "*) true ;; *) false ;; esac; then
+			printf 'skip  %-44s %4ss  %s\n' "$(name_of "$id")" 0 "$(pf_skip_reason "$id")"
+			continue
+		fi
+		rc=1
+		ms=0
+		[ -f "$PREFLIGHT_TMP/$id.status" ] && read -r rc ms <"$PREFLIGHT_TMP/$id.status"
+		# A receipt in play says so on the same line the verdict is on, and the stored transcript is
+		# printed under it — a cached FAIL is read exactly like a fresh one, which is the point: it
+		# blocks, it shows what failed, and it is never mistaken for something that passed.
+		if [ -n "${cached_age[$id]:-}" ]; then
+			stamp=$(date -u -d "@${cached_ts[$id]:-0}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf 'ts %s' "${cached_ts[$id]:-0}")
+			mark="cached $(pf_age_human "${cached_age[$id]}") from the run at $stamp"
+			if [ "$rc" = 0 ]; then
+				printf 'pass  %-44s %4ss  pass (%s)\n' "$(name_of "$id")" "$((ms / 1000))" "$mark"
+				[ -s "$out" ] && sed 's/^/      /' "$out"
+			else
+				fails=$((fails + 1))
+				printf 'FAIL  %-44s %4ss  exit %s (%s)\n' "$(name_of "$id")" "$((ms / 1000))" "$rc" "$mark"
+				sed 's/^/      /' "$out" 2>/dev/null
+				printf '      reproduce: %s --fresh --only %s%s%s %s\n' "$PBIN/preflight" "$id" \
+					"${slug:+ --slug $slug}" "${cwd:+ --cwd $cwd}" "$branch"
+			fi
+			continue
+		fi
+		if [ "$rc" = 0 ]; then
+			printf 'pass  %-44s %4ss  %s\n' "$(name_of "$id")" "$((ms / 1000))" "$(head -n 1 "$out" 2>/dev/null)"
+			[ "$(wc -l <"$out" 2>/dev/null || echo 0)" -le 1 ] || sed 's/^/      /' "$out" | tail -n +2
+		else
+			fails=$((fails + 1))
+			printf 'FAIL  %-44s %4ss  exit %s\n' "$(name_of "$id")" "$((ms / 1000))" "$rc"
+			sed 's/^/      /' "$out" 2>/dev/null
+			printf '      reproduce: %s --only %s%s%s %s\n' "$PBIN/preflight" "$id" \
+				"${slug:+ --slug $slug}" "${cwd:+ --cwd $cwd}" "$branch"
+		fi
+		# A verdict that was reached is worth keeping; one whose status file never appeared is not, and
+		# neither is one whose answer can go stale without this tree moving.
+		if [ -f "$PREFLIGHT_TMP/$id.status" ] && ! pf_fresh_always "$id"; then
+			pf_receipt_write "$id" "$rc" "$ms" "$out"
+		fi
+	done
+
+	say ""
+	if [ "$fails" = 0 ]; then
+		say "preflight: $ran/$ran passed ($cached cached, $ran_now ran) on $branch in $(( (total_end - total_start) / 1000000000 ))s"
+		return 0
+	fi
+	say "preflight: $((ran - fails))/$ran passed, $fails FAILED ($cached cached, $ran_now ran) on $branch in $(( (total_end - total_start) / 1000000000 ))s"
+	say "nothing should be published from this branch until the checks above pass — or say why the check does not apply: delegate finish <slug> --skip-preflight \"<reason>\""
+	return 1
+}
+
+# Dispatch only when executed: bin/publish sources this file for run_body_gate, and sourcing must
+# define the function without running a check.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+	preflight_main "$@"
+fi

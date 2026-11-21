@@ -328,6 +328,10 @@ use_space() {
 	if [ ! -f "$DELEGATIONS" ] && [ -f "$SPACE_LEGACY_ROOT/state/delegations.json" ]; then
 		DELEGATIONS=$SPACE_LEGACY_ROOT/state/delegations.json
 	fi
+	# The decisions a space records — a wipe row, an override, a --skip-preflight reason — belong to
+	# that space: the reason is what `bin/publish` reads back as evidence that a gate was skipped on
+	# purpose, and a space's decisions written to the pre-space file would be invisible to it.
+	DECISIONS=$(space_dir "$SPACE")/state/decisions.jsonl
 }
 
 # need_space <explicit|empty> <dir> — the space this command runs in: the one --space named,
@@ -1432,7 +1436,7 @@ defaults_json() {
 # list` the same way.
 record_decision() {
 	local cmd=$1 task=$2 decision=$3 reason=$4 overridden=$5 slug=$6 jev=${7:-} extra=${8:-}
-	mkdir -p "$STATE"
+	mkdir -p "$(dirname "$DECISIONS")"
 	node -e '
 		const fs=require("fs");
 		const [file,command,task,decision,reason,overridden,slug,jev,extra]=process.argv.slice(1);
@@ -2962,9 +2966,13 @@ cmd_finish() {
 	fi
 	DELEGATIONS=$(delegations_all)
 
-	pub=$(command -v publish 2>/dev/null || true)
-	[ -n "$pub" ] || pub=$(bin_prog publish)
-	[ -x "$pub" ] || die "cannot publish $slug: no publish command on PATH, and none at $self_bin/publish"
+	# The gate and the publisher from this tree, never whichever copy PATH happens to hold: the
+	# pre-space copies in ~/big-boss-pi/bin resolve a report under $PI_BOSS_ROOT/reports, so a
+	# worker in a space was refused with "does not exist, so there is no report to publish" and
+	# #205 and #206 were published by hand. The ported pair resolves the space itself, and this
+	# passes the one it selected so the two cannot disagree about it.
+	local pub=$self_bin/publish
+	[ -x "$pub" ] || die "cannot publish $slug: no publish command at $pub"
 
 	# A best-effort extra step, before the gates: a finish is where the leftovers can be closed
 	# without a new command to remember. It never changes the exit status and never blocks.
@@ -2980,12 +2988,11 @@ cmd_finish() {
 		record_decision preflight "$slug" skipped "$preflight_skip" false "$slug"
 		say "finish: $slug — 1/4 preflight: skipped, reason recorded in state/decisions.jsonl: $preflight_skip"
 	else
-		pf=$(command -v preflight 2>/dev/null || true)
-		[ -n "$pf" ] || pf=$self_bin/preflight
+		pf=$self_bin/preflight
 		if [ ! -x "$pf" ]; then
-			printf '%s: finish stopped at step 1 of 4 (preflight) for %s: no preflight command on PATH and none at %s, so the gate CI would run cannot be proved here. Nothing was published, wiped or closed.\n' \
-				"$prog" "$slug" "$self_bin/preflight" >&2
-			printf 'Fix: restore %s, or say why the gate does not apply and run this again:\n' "$self_bin/preflight" >&2
+			printf '%s: finish stopped at step 1 of 4 (preflight) for %s: there is no preflight command at %s, so the gate CI would run cannot be proved here. Nothing was published, wiped or closed.\n' \
+				"$prog" "$slug" "$pf" >&2
+			printf 'Fix: restore %s, or say why the gate does not apply and run this again:\n' "$pf" >&2
 			printf '  %s finish %s --skip-preflight "<why the gate cannot run>"\n' "$BIN/delegate" "$slug" >&2
 			return 1
 		fi
@@ -2994,6 +3001,7 @@ cmd_finish() {
 		# are about a branch (behind) and about a pull request (body) are dropped, and the four
 		# that are about the code stay. Named one by one, so the gate is the same gate.
 		local pf_args=( --slug "$slug" )
+		[ -z "$worker_space" ] || pf_args+=( --space "$SPACE" )
 		[ -z "$lookup_cwd" ] || pf_args+=( --cwd "$lookup_cwd" )
 		if [ "$space_git" != true ]; then
 			pf_args+=( --only syntax --only suites --only semgrep --only scrub )
@@ -3033,7 +3041,10 @@ cmd_finish() {
 	# `already published` instead of claiming this run pushed something. The output is captured and
 	# replayed unchanged, so nothing publish said is lost — only read.
 	local pub_out="" publish_word=published
-	if ! pub_out=$("$pub" "$slug" ${lookup_cwd:+--cwd "$lookup_cwd"}); then
+	local pub_args=( "$slug" )
+	[ -z "$worker_space" ] || pub_args+=( --space "$SPACE" )
+	[ -z "$lookup_cwd" ] || pub_args+=( --cwd "$lookup_cwd" )
+	if ! pub_out=$("$pub" "${pub_args[@]}"); then
 		printf '%s: finish stopped at step 2 of 4 (publish) for %s: nothing was wiped, nothing was closed, and the worker is still open.\n' "$prog" "$slug" >&2
 		printf 'Fix: the refusal above names what the report is missing. Once it is fixed, run this again:\n' >&2
 		printf '  %s finish %s\n' "$BIN/delegate" "$slug" >&2

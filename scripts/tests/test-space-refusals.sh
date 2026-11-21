@@ -70,6 +70,11 @@ STUB
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$PF_LOG"\nexit 0\n' >"$PI_SPACE_ROOT/bin/preflight"
 printf '#!/usr/bin/env bash\nprintf "publish was called\\n" >>"$HERDR_LOG"\nexit 0\n' >"$PI_SPACE_ROOT/bin/publish"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$PI_SPACE_ROOT/bin/pi-bare"
+# `finish` runs the programs in the tree it lives in (bin/preflight, bin/publish), never whichever
+# copies PATH happens to hold, so the harness under test is a copy of that tree beside the stubs —
+# the layout a real install has, where $PI_BOSS_ROOT/bin is the delegate's own bin.
+cp "$ROOT/bin/delegate" "$ROOT/bin/space-lib.sh" "$PI_SPACE_ROOT/bin/"
+DELEGATE="$PI_SPACE_ROOT/bin/delegate"
 chmod +x "$WORK/stub/"* "$PI_SPACE_ROOT/bin/"*
 
 PASS_N=0
@@ -276,7 +281,7 @@ if [ -s "$(sd nogit)/delegations.json" ] && grep -q '"ng1"' "$(sd nogit)/delegat
 else
 	pass 'the worker record is closed'
 fi
-DEC="$PI_SPACE_ROOT/state/decisions.jsonl"
+DEC="$(sd nogit)/state/decisions.jsonl"
 if grep -q '"publish".*"none"' "$DEC"; then pass 'the decision log records that nothing was published'; else fail 'no publish decision was recorded'; fi
 
 printf '\n%d passed, %d failed\n' "$PASS_N" "$FAIL_N"
