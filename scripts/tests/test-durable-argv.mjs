@@ -80,8 +80,10 @@ test("an empty path is refused, in both modes, and says what to do instead", () 
 	assert.throws(() => newArgv({ name: "site", mode: "folder" }), /folder|project field/i);
 });
 
-test("forget names the space positionally, the way bin/space takes it", () => {
-	assert.deepEqual(forgetArgv({ name: "site" }), ["forget", "site"]);
+test("forget names the space positionally, the way bin/space takes it, and answers its question", () => {
+	// `--yes` is the answer the binary asks for on a terminal: a mod has no terminal, so it says yes
+	// up front rather than letting the call hang or be refused.
+	assert.deepEqual(forgetArgv({ name: "site" }), ["forget", "site", "--yes"]);
 	assert.throws(() => forgetArgv({ name: "Site" }), saysRule);
 });
 
