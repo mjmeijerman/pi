@@ -81,6 +81,7 @@ import {
 	PI_WRAPPER_BLOCK,
 	PI_WRAPPER_END,
 	POSIX_WRAPPERS,
+	PI_HOME_CARRIERS,
 	SOURCE_LIBS,
 	cmdShim,
 	deepseekApiKey,
@@ -107,6 +108,7 @@ import {
 	spawnPlan,
 	spaceIdIn,
 	spliceManagedBlock,
+	stampPiHome,
 	startAndVerifyGuard,
 	systemSummary,
 	systemdUnitsIn,
@@ -304,14 +306,22 @@ function gitConfig(key, value) {
  * linkOrCopy — the one place the symlink-vs-copy choice lives. A bin entry is a
  * symlink where the OS allows it and a copy where it needs elevation (Windows
  * without Developer Mode). Re-pointing an existing entry is idempotent.
+ *
+ * Copy mode is also the mode with nothing to follow, so the copy carries the
+ * checkout it came from: `space`, `delegate` and `guard` read `state/` through
+ * `space-lib.sh`, which takes PI_HOME first (scripts/install-lib.mjs
+ * `stampPiHome`). The comparison is against the stamped text, so a second run
+ * of the installer says `same` instead of rewriting all three (#260).
  */
 function linkOrCopy(target, dest) {
 	ensureDir(path.dirname(dest));
 	const useCopy = PLAN.linkMode === 'copy';
+	const name = path.basename(dest);
+	const wanted = useCopy && PI_HOME_CARRIERS.includes(name) ? stampPiHome({ piHome: P.piHome, name, text: read(target) }) : null;
 	if (exists(dest)) {
 		let already = false;
 		try {
-			already = useCopy ? read(dest) === read(target) : fs.readlinkSync(dest) === target;
+			already = useCopy ? read(dest) === (wanted ?? read(target)) : fs.readlinkSync(dest) === target;
 		} catch {
 			already = false;
 		}
@@ -320,7 +330,8 @@ function linkOrCopy(target, dest) {
 	}
 	if (!DRY) {
 		if (useCopy) {
-			fs.copyFileSync(target, dest);
+			if (wanted === null) fs.copyFileSync(target, dest);
+			else writeText(dest, wanted);
 			fs.chmodSync(dest, 0o755);
 		} else {
 			fs.symlinkSync(target, dest);

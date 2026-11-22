@@ -53,7 +53,9 @@ if [ -f "$here/shell-resolve.sh" ]; then . "$here/shell-resolve.sh"; fi
 
 # The Boss is bare: `bin/pi-bare` in this tree, never a sandboxed wrapper. Workers are sandboxed,
 # the Boss is not, and a record that says otherwise brings a sandboxed Boss back after every reboot.
-pi_home=$(cd -- "$here/.." && pwd)
+# `space-lib.sh` has already decided which tree that is — PI_HOME for a copied entry, the checkout
+# a symlink lands in otherwise — so this file never works it out a second way.
+pi_home=$_space_home
 pi_bare=$pi_home/bin/pi-bare
 # On Windows Herdr starts a program, and an extensionless bash script is a text file there: the
 # `.cmd` the install writes beside the entry is the only spelling that opens a Boss tab. It is
@@ -372,7 +374,13 @@ cmd_list() {
 	local slugs s project git tabs state kind boss live="" live_id="" snap="" unavailable=0
 	slugs=$(space_slugs)
 	if [ -z "$slugs" ]; then
-		if [ "$json" = 1 ]; then say "[]"; else say "no spaces — bin/space new <slug> in the project folder"; fi
+		if [ "$json" = 1 ]; then say "[]"; else
+			# The directory, always: a copied `space` that resolved to the wrong `state/` printed
+			# the same "no spaces" as a machine that has none, and that is what hid #260.
+			say "no spaces in $SPACES_DIR — bin/space new <slug> in the project folder"
+			[ "$_space_home_from" = parent ] && say "space: no PI_HOME set and $_space_lib_parent is not a harness checkout — a copied entry needs PI_HOME=<checkout>"
+			:
+		fi
 		return 0
 	fi
 	if command -v herdr-app >/dev/null 2>&1; then

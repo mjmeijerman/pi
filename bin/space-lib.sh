@@ -9,17 +9,42 @@
 # record from where it was run). Sourcing defines functions and variables only.
 #
 # PI_SPACE_ROOT points the whole record somewhere else (a test, a second machine). It defaults to
-# the tree this file lives in. PI_LEGACY_BOSS_ROOT, when a caller sets it, names the pre-space
-# record: read and never written.
+# the harness home this block decides. PI_LEGACY_BOSS_ROOT, when a caller sets it, names the
+# pre-space record: read and never written.
 
+# Where the harness is — and so where `state/` and `agent/space-rules.md` are. Three answers, in
+# this order, and nothing guessed:
+#   1. PI_HOME, when the caller set it. Copy mode writes it into the entries it copies
+#      (scripts/install-lib.mjs `stampPiHome`), because a copy on PATH has no symlink to follow
+#      back to its checkout: it resolved to `%USERPROFILE%\.local`, whose `state/` holds nothing,
+#      while `%USERPROFILE%\.pi\state` held the harness space (#260).
+#   2. the checkout this file or its caller belongs to: `readlink -f` follows the symlink a POSIX
+#      install makes, and the directory above `bin/` counts only when it really holds this file
+#      and the rules template beside it. A copy's parent holds neither, so a copy is never taken
+#      for a checkout.
+#   3. this library's own parent, when the first two are absent. The last resort, and `bin/space
+#      list` names the directory it read rather than printing an empty list as if the machine had
+#      no spaces at all.
 _space_lib_dir=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)
-: "${SPACE_STATE:=${PI_SPACE_ROOT:-$(cd -- "$_space_lib_dir/.." && pwd)}/state}"
+_space_lib_parent=$(cd -- "$_space_lib_dir/.." && pwd)
+_space_is_checkout() { [ -f "$1/bin/space-lib.sh" ] && [ -f "$1/agent/space-rules.md" ]; }
+if [ -n "${PI_HOME:-}" ]; then
+	_space_home=$PI_HOME
+	_space_home_from=PI_HOME
+elif _space_is_checkout "$_space_lib_parent"; then
+	_space_home=$_space_lib_parent
+	_space_home_from=checkout
+else
+	_space_home=$_space_lib_parent
+	_space_home_from=parent
+fi
+: "${SPACE_STATE:=${PI_SPACE_ROOT:-$_space_home}/state}"
 SPACES_DIR=$SPACE_STATE/spaces
 # The pre-space checkout is retired: its name must not be a default anywhere, or a deleted
 # folder stays alive as a fallback path. PI_LEGACY_BOSS_ROOT still names one for a caller that
 # keeps records made before the move, and an empty value is the ordinary case.
 SPACE_LEGACY_ROOT=${PI_LEGACY_BOSS_ROOT:-}
-SPACE_RULES_TEMPLATE=${PI_SPACE_RULES_TEMPLATE:-$(cd -- "$_space_lib_dir/.." && pwd)/agent/space-rules.md}
+SPACE_RULES_TEMPLATE=${PI_SPACE_RULES_TEMPLATE:-$_space_home/agent/space-rules.md}
 SPACE_CEILING=8
 
 space_valid_slug() {
