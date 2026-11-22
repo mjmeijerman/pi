@@ -208,6 +208,91 @@ case $OUT in
 esac
 if [ -f "$HOME/projects/taken/keep.txt" ]; then pass 'nothing in it was touched'; else fail 'the existing folder was deleted'; fi
 
+# -------------------------------------------- the questions a bare `space new` asks --
+# Feed stdin with a pipe: `where` takes a folder or a URL, and the git question is only asked for a
+# folder with no `.git`. The reading taken is said on stderr, in one line, so a misread URL is seen.
+new_case 'a bare space new asks, and n records git: false'
+H="$WORK/gitless"
+project "$H"
+: >"$HERDR_LOG"
+OUT=$(printf 'asked\n%s\nn\n' "$H" | "$SPACE" new 2>&1)
+RC=$?
+if [ "$RC" -eq 0 ]; then pass 'the space is made'; else fail 'a bare space new failed' "$OUT"; fi
+if [ -f "$(record asked)" ]; then pass 'the record is written'; else fail 'no record was written' "$OUT"; fi
+if grep -q '"git": false' "$(record asked)" 2>/dev/null; then pass "the fourth answer 'n' records git: false"; else fail "the 'n' did not reach the git question" "$(cat "$(record asked)" 2>/dev/null)"; fi
+if grep -q '"project": "'"$H"'"' "$(record asked)" 2>/dev/null; then pass 'the folder was taken as given'; else fail 'the folder is not the one answered' "$(cat "$(record asked)" 2>/dev/null)"; fi
+case $OUT in
+*"space: folder $H"*) pass 'the reading taken (a folder) is said in one line' ;;
+*) fail 'it does not say it read a folder' "$OUT" ;;
+esac
+if script --version 2>/dev/null | grep -q util-linux; then
+	# Only a terminal shows the prompts; the behaviour above is the same either way.
+	printf 'gibprompt\n%s\nn\n' "$H" | script -qec "$SPACE new" /dev/null >"$WORK/gib.out" 2>&1
+	case $(cat "$WORK/gib.out") in
+	*"is it a git project?"*) pass 'the git question is asked, on a terminal' ;;
+	*) fail 'the git question is not asked' "$(cat "$WORK/gib.out")" ;;
+	esac
+	if grep -q '"git": false' "$(record gibprompt)" 2>/dev/null; then pass 'and its answer is recorded'; else fail 'the terminal answer was not recorded' "$(cat "$WORK/gib.out")"; fi
+else
+	pass 'skipped the prompt text (no util-linux script(1) here)'
+fi
+
+new_case 'a bare space new answering y on a folder that is not a repository'
+H2="$WORK/gitless2"
+project "$H2"
+OUT=$(printf 'asked-y\n%s\ny\n' "$H2" | "$SPACE" new 2>&1)
+RC=$?
+if [ "$RC" -eq 0 ]; then pass 'the run succeeds'; else fail 'the run failed' "$OUT"; fi
+# `y` says "it is a git project", and the folder is none: there is no remote to record either way,
+# so the honest record is the same one `n` gives, and the report says so rather than pretending.
+if grep -q '"git": false' "$(record asked-y)" 2>/dev/null; then pass 'git is false anyway: nothing to pull from'; else fail 'y recorded something else' "$(cat "$(record asked-y)" 2>/dev/null)"; fi
+
+new_case 'a bare space new whose folder answer is a URL'
+SRC2="$WORK/origin2"
+gitproject "$SRC2"
+git clone -q --bare "$SRC2" "$WORK/origin2.git"
+OUT=$(printf 'urlspace\nfile://%s\nn\n' "$WORK/origin2.git" | "$SPACE" new 2>&1)
+RC=$?
+if [ "$RC" -eq 0 ]; then pass 'the space is made'; else fail 'the URL answer was not cloned' "$OUT"; fi
+if [ -d "$HOME/projects/urlspace/.git" ]; then pass 'it is cloned into ~/projects/<name>'; else fail 'no clone at ~/projects/urlspace' "$OUT"; fi
+case $OUT in
+*"space: cloning file://$WORK/origin2.git"*) pass 'the reading taken (a clone) is said in one line' ;;
+*) fail 'it does not say it read a URL' "$OUT" ;;
+esac
+if grep -q '"git": true' "$(record urlspace)" 2>/dev/null; then pass 'no git question is asked: the trailing n is not taken as an answer' ; else fail 'the clone was recorded as no-git' "$(cat "$(record urlspace)" 2>/dev/null)"; fi
+
+new_case 'a bare space new whose answer is a URL beside --no-git'
+: >"$HERDR_LOG"
+OUT=$(printf 'nope-clone\nfile://%s\n' "$WORK/origin2.git" | "$SPACE" new --no-git 2>&1)
+RC=$?
+if [ "$RC" -ne 0 ]; then pass 'it is refused'; else fail '--no-git with a clone was accepted' "$OUT"; fi
+case $OUT in
+*"--clone and --no-git answer the same question"*) pass 'the refusal names both answers' ;;
+*) fail 'the refusal does not name the conflict' "$OUT" ;;
+esac
+if [ -e "$(record nope-clone)" ]; then fail 'a record was written'; else pass 'no record was written'; fi
+if [ -e "$HOME/projects/nope-clone" ]; then fail 'a clone was made'; else pass 'nothing was cloned'; fi
+if [ -z "$(cat "$HERDR_LOG")" ]; then pass 'the app was never called'; else fail 'a tab was opened' "$(cat "$HERDR_LOG")"; fi
+
+new_case 'space new <name> asks nothing at all'
+S="$WORK/silent"
+project "$S"
+cd "$S" || exit 1
+OUT=$("$SPACE" new silent </dev/null 2>&1)
+RC=$?
+cd "$WORK" || exit 1
+if [ "$RC" -eq 0 ]; then pass 'it is created from the name alone'; else fail 'the positional path asked a question' "$OUT"; fi
+if grep -q '"project": "'"$S"'"' "$(record silent)" 2>/dev/null; then pass 'the project is the folder it ran in'; else fail 'the project is not $PWD' "$(cat "$(record silent)" 2>/dev/null)"; fi
+
+new_case 'a folder answer that does not exist, answered n'
+: >"$HERDR_LOG"
+OUT=$(printf 'gone\n%s\nn\n' "$WORK/nothere" | "$SPACE" new 2>&1)
+RC=$?
+if [ "$RC" -ne 0 ]; then pass 'it exits 1'; else fail 'a refused folder was created' "$OUT"; fi
+if [ -e "$(record gone)" ]; then fail 'the record was written'; else pass 'no record was written'; fi
+if [ -e "$WORK/nothere" ]; then fail 'the folder was created anyway'; else pass 'the folder was not created'; fi
+if [ -z "$(cat "$HERDR_LOG")" ]; then pass 'the app was never called'; else fail 'a tab was opened' "$(cat "$HERDR_LOG")"; fi
+
 # ------------------------------------------------------------- show, forget --
 new_case 'show and forget'
 run "$SPACE" show demo

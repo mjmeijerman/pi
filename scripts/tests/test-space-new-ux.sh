@@ -118,10 +118,11 @@ if grep -q '"project": "'"$WORK/fed"'"' "$(record fed)"; then pass 'the empty fo
 if grep -qF "do space.new --name fed --folder $WORK/fed" "$HERDR_LOG"; then pass 'the tab is opened for that folder'; else fail 'the app was not asked' "$(cat "$HERDR_LOG")"; fi
 
 new_case 'the answer "n" creates nothing'
-mkdir -p "$WORK/nope"
-cd "$WORK/nope" || exit 1
+# The folder is named and is not there, so `create it?` is the question the third answer answers;
+# the assertions below are the ones they always were.
+cd "$WORK" || exit 1
 : >"$HERDR_LOG"
-OUT=$(printf 'nope\n\nn\n' | "$SPACE" new 2>&1)
+OUT=$(printf 'nope\n%s/nope\nn\n' "$WORK" | "$SPACE" new 2>&1)
 RC=$?
 if [ "$RC" -ne 0 ]; then pass 'it exits 1'; else fail 'a refused space was created' "$OUT"; fi
 if [ -e "$(record nope)" ]; then fail 'the record was written'; else pass 'no record was written'; fi
