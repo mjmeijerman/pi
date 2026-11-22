@@ -14,37 +14,38 @@
  * straight from the pull request itself, 25 to a GraphQL request, every 30s.
  *
  * Right, below the diff: a note field with Approve / Request changes / Comment,
- * and four buttons that each start a brand-new agent — review the PR, fix the
- * pipeline, fix the merge conflicts, fix the review comments. That agent does
- * not do the work either: it hands it to a worker whose cwd is the PR's clone.
- * The boss delegates, the worker commits and stops, the boss publishes it (push,
- * pull request, review replies). Only the human merges.
+ * and four buttons — review the PR, fix the pipeline, fix the merge conflicts, fix
+ * the review comments. Each button sends its job as a message to the Boss of the
+ * space that owns the PR's repository: no new agent, no new space. That boss
+ * hands the job to a worker whose cwd is the PR's clone, and publishes what the
+ * worker committed.
  *
  * Every button acts in the space that owns the PR's repository — the record in
  * ~/.pi/state/spaces/<slug>/space.json whose project is that clone or its nearest
- * ancestor — and starts its agent as a new tab there, in the space's own
- * project, with the job as that agent's first message. It never types into an
- * agent that is already running: the pane the person is working in is theirs.
+ * ancestor. The job is typed into that space's Boss tab, resolved from the record
+ * (`uberboss_tab`, then the tab named `boss`) and the app's live spaces. No Boss
+ * running: the view says so and starts nothing.
  *
- * When no space owns the repository nothing is started: the view says so and
- * offers one button that opens the durable mod's New form. The mod makes no
+ * When no space owns the repository nothing is started either: the view says so
+ * and offers one button that opens the durable mod's New form. The mod makes no
  * space itself, so a button can never quietly start a second boss in the wrong
  * project.
  *
  * Keys: ↑/↓ move · a/x/c review · m merge (twice) · o browser · r refresh ·
- * esc cancel · 1..4 start a new agent on one of the four jobs.
+ * esc cancel · 1..4 send one of the four jobs to the space's Boss.
  *
  * Props: `{ "open": "owner/repo#12" }` starts on that pull request.
  *
  * Radar basis: #17 risk-tiered human oversight and #42 human-in-the-loop
  * theater — the human reads the change and presses the key, and the agent that
  * acts on it is the boss of that project's space, the one they already watch,
- * never a second one the button quietly started.
+ * never a second one the button quietly started. The job is a message to that
+ * boss, so the one agent that owns the project stays the one agent.
  */
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle, Scrollbar, Textarea, TextareaState } from "gpui-base";
-import { appHome, exec, home, nextCommand, props, readTextFile, run, settings, theme, writeTextFile } from "herdr";
-import { noSpaceMessage, routeLabel, spaceForFolder, spaceName } from "./route.mjs";
+import { appHome, exec, hc, home, nextCommand, props, readTextFile, run, settings, spaces, theme, writeTextFile } from "herdr";
+import { bossTerminal, liveSpaceFor, noSpaceMessage, routeLabel, spaceForFolder, spaceName } from "./route.mjs";
 
 /**
  * The search answers one question only: which open pull requests exist. Its index
@@ -215,6 +216,12 @@ const ACTIONS = [
 	{ key: "conflicts", label: "fix merge conflicts" },
 	{ key: "comments", label: "fix review comments" },
 ];
+
+/** What the notice says the boss was asked to do, in the button's own words. */
+function jobLabel(kind) {
+	if (kind === "line") return "fix a line comment";
+	return ACTIONS.find((action) => action.key === kind)?.label ?? kind;
+}
 
 export default class PullRequests extends View {
 	init(_props, cx) {
@@ -799,16 +806,6 @@ export default class PullRequests extends View {
 		return this.folders[repo];
 	}
 
-	/** The pi binary: the desktop session's PATH usually lacks wherever it was installed. */
-	async piPath() {
-		if (this.pi) return this.pi;
-		const script =
-			'for c in "$HOME/.local/share/pnpm/bin/pi" "$HOME/.local/bin/pi" /usr/local/bin/pi /usr/bin/pi; do [ -x "$c" ] && { echo "$c"; exit 0; }; done; command -v pi';
-		const found = (await exec("/bin/sh", ["-c", script], { timeout: 8000 }).catch(() => null))?.stdout?.trim();
-		this.pi = found || `${home()}/.local/share/pnpm/bin/pi`;
-		return this.pi;
-	}
-
 	startAgent(kind, cx) {
 		const pr = this.current;
 		if (!pr) return;
@@ -816,16 +813,16 @@ export default class PullRequests extends View {
 	}
 
 	/**
-	 * Starts one button's job as a brand-new agent, in the space that owns the PR's
-	 * repository: a tab there, in the space's own project, with the job as its first
-	 * message. An agent that is already running is never touched — that pane belongs
-	 * to the person using it. No space, no agent: the view says which repository has
-	 * none and offers to make one, and this mod never creates a space itself.
+	 * Sends one button's job as a message to the Boss of the space that owns the PR's
+	 * repository — `hc send` into the terminal `bossTerminal` resolved there. No agent is
+	 * started and no space is made: the boss that already owns the project hands the job to
+	 * a worker. No space, no message: the view says which repository has none and offers to
+	 * make one. No live Boss tab, no message either: the view says which space to open and
+	 * starts nothing. An `hc send` that fails is reported with what hc said, never retried.
 	 */
 	spawnAgent(kind, pr, quote, cx) {
 		this.error = "";
 		this.needSpace = null;
-		const name = `${pr.repo.split("/")[1]}#${pr.number} ${kind === "line" ? "note" : kind}`;
 		cx.spawn(async (cx) => {
 			// The clone decides the route: the space's project is that clone or its ancestor.
 			const { folder, space } = await this.routeFor(pr);
@@ -838,18 +835,34 @@ export default class PullRequests extends View {
 				cx.notify();
 				return;
 			}
-			const text = task(kind, pr, quote, folder, space);
-			const argv = [await this.piPath()];
+			// The record says which tab is the Boss; the app's own list says what is running.
+			let live = null;
 			try {
-				run("tab.new", { space: space.id || space.name, name, folder: space.project, argv, task: text });
+				live = liveSpaceFor(space, await spaces());
+			} catch {
+				live = null;
+			}
+			const terminal = bossTerminal(space, live);
+			if (!terminal) {
+				this.error = `no Boss tab is running in space ${space.name} — open that space and start it, then press the button again`;
+				this.notice = "";
+				cx.notify();
+				return;
+			}
+			const text = task(kind, pr, quote, folder, space);
+			try {
+				const said = await hc(["send", terminal, text]);
+				const why = String(said?.stderr || said?.error || said?.message || "").trim();
+				if (said && typeof said === "object" && said.code !== undefined && said.code !== 0) throw new Error(why || `hc send exited ${said.code}`);
+				if (said && typeof said === "object" && said.ok === false) throw new Error(why || "hc send was refused");
 			} catch (e) {
-				this.error = `could not start ${name} in space ${space.name}: ${e?.message ?? e}`;
+				this.error = `could not tell the boss of space ${space.name}: ${String(e?.message ?? e).trim().split("\n")[0]}`;
 				cx.notify();
 				return;
 			}
 			this.error = "";
 			this.needSpace = null;
-			this.notice = `started ${name} in space ${space.name}`;
+			this.notice = `told the boss of space ${space.name} to ${jobLabel(kind)}`;
 			cx.notify();
 		});
 	}
