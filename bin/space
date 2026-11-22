@@ -55,6 +55,17 @@ if [ -f "$here/shell-resolve.sh" ]; then . "$here/shell-resolve.sh"; fi
 # the Boss is not, and a record that says otherwise brings a sandboxed Boss back after every reboot.
 pi_home=$(cd -- "$here/.." && pwd)
 pi_bare=$pi_home/bin/pi-bare
+# On Windows Herdr starts a program, and an extensionless bash script is a text file there: the
+# `.cmd` the install writes beside the entry is the only spelling that opens a Boss tab. It is
+# looked for where that install puts it — beside this tool when it runs from the bin directory,
+# otherwise in the bin directory under HOME — and on POSIX neither file exists, so the bare script
+# stays the answer. (Without this, a Windows record carried a path nothing there can start.)
+for boss_cmd in "$here/pi-bare.cmd" "${HOME:-}/.local/bin/pi-bare.cmd"; do
+	if [ -f "$boss_cmd" ]; then
+		pi_bare=$boss_cmd
+		break
+	fi
+done
 
 prog=space
 die() { printf '%s: error: %s\n' "$prog" "$*" >&2; exit 1; }

@@ -262,7 +262,7 @@ variable one of the two engines or `scripts/install-lib.mjs` reads.
 | Herdr mods and menu row | `~/.config/herdr-app/mods/`, `~/.config/herdr-app/programs.json` — the config directory is created when herdr-app has not run yet, so a fresh install gets its mods and menu row before the app's first launch; an existing `programs.json` is left alone and the line says what to add by hand |
 | `herdr-app` | Linux and macOS `~/.local/share/herdr-app/herdr-app` (`$XDG_DATA_HOME` when set), Windows `%LOCALAPPDATA%\Programs\herdr-app\herdr-app.exe` — then a bin entry |
 | the durable key | `~/.config/herdr-app/keys.json` — `alt-shift-n` opens a tab running `space new`. Added only to a `keys.json` that is already there: Herdr rewrites only a file whose bytes are one of its own releases, so a key map written before the app's first start would be the whole file and every other shortcut would go. A machine whose app has never run says so, and the next install adds the key |
-| the harness space | `~/.pi/state/spaces/harness/space.json` — `bin/space new --name harness --project ~/.pi --kind harness`, once: a record that is already there is left byte for byte, and without `herdr-app` on PATH the step prints the command to run by hand |
+| the harness space | `~/.pi/state/spaces/harness/space.json` — `bin/space new --name harness --project ~/.pi --kind harness`, once: a record that is already there is left byte for byte, and without `herdr-app` on PATH the step prints the command to run by hand. On Windows the step runs `bin/space` through Git Bash and prints `space.cmd` as the by-hand command: with no `bash.exe` there is nothing to run it with, and the extensionless script is a text file to Windows |
 | services | Linux `~/.config/systemd/user/`, macOS `~/Library/LaunchAgents/`, Windows a Task Scheduler entry — installed and started on all three by default, so a space a reboot forgets is repaired. `PI_SKIP_SYSTEMD=1` is the one way out |
 
 Nothing here touches `~/.pi/agent/auth.json`, sessions, `models-store.json`, or a
@@ -282,7 +282,7 @@ space with no record, so the guard does not keep it and a reboot takes it.
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | sandbox | bubblewrap: `pi` runs under `~/.pi/sandbox/pi-sandbox.sh` | not available — one line, no failure | not available natively — WSL2 and Docker provide it: [Sandboxing on Windows](#sandboxing-on-windows) |
-| bin entries | symlinks | symlinks | copies; a symlink needs elevation or Developer Mode. Every bash wrapper (the two in `scripts/`, plus `jev`, `delegate`, `local-run` from the clone) also gets a `<name>.cmd` that runs the resolved `bash.exe` on it, forwards `%*` and returns the exit status — PowerShell, `cmd.exe` and the Herdr menu row can only start a `.cmd`, and the list is read from the engine so a new wrapper is not forgotten |
+| bin entries | symlinks | symlinks | copies, and so are the `.sh` libraries the tools source (`space-lib.sh`, `records-lib.sh`, `shell-resolve.sh`, `pi-resolve.sh`, `receipts.sh`): a copy with its library left in the clone dies at its first line. A symlink needs elevation or Developer Mode. Every bash wrapper (the two in `scripts/`, plus `jev`, `delegate`, `local-run` from the clone) also gets a `<name>.cmd` that runs the resolved `bash.exe` on it, forwards `%*` and returns the exit status — PowerShell, `cmd.exe` and the Herdr menu row can only start a `.cmd`, and the list is read from the engine so a new wrapper is not forgotten |
 | `herdr-app` | `curl … install.sh \| sh` | same | `pwsh -NoProfile -Command "irm … install.ps1 \| iex"`, falling back to `powershell` when PowerShell 7 is not on `PATH` |
 | guard service | systemd user unit, `enable --now` then `restart` when a user manager answers | launchd plist, installed and `kickstart -k`-ed by default (`PI_SKIP_SYSTEMD=1` turns it off) | `schtasks /Create /SC ONLOGON` then `/Run`, installed and started by default (same switch); the task runs a generated `~/.pi/state/guard-hidden.vbs` through `wscript.exe` — no console window — and the launcher runs `bin/guard` through the Git for Windows `bash.exe` it resolves (see below) |
 | weekly timers (`pi-evals`, `pi-retro`) | systemd timers, enabled | skipped, one line | skipped, one line |
@@ -292,8 +292,15 @@ space with no record, so the guard does not keep it and a reboot takes it.
 `~/.local/bin` is where the bin entries land on all three systems. Linux and macOS
 normally have it on `PATH` already (many distros do not — check `echo $PATH`); on
 Windows nothing adds it, so add `%USERPROFILE%\.local\bin` to your user `PATH`
-once. On Windows, run the `.cmd` name (`pi-bare.cmd`, and `pi-bare` also works
-because `cmd.exe` appends the extension); Git Bash runs either one.
+once. This is the line — the installer prints it too, and never runs it:
+
+```powershell
+[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';' + "$env:USERPROFILE\.local\bin", 'User')
+```
+
+Open a new PowerShell window afterwards: a running one keeps the `PATH` it
+started with. On Windows, run the `.cmd` name (`pi-bare.cmd`, and `pi-bare` also
+works because `cmd.exe` appends the extension); Git Bash runs either one.
 
 ## Sandboxing on Windows
 
@@ -658,6 +665,11 @@ line in the install transcript:
    headless run, or Windows and macOS before the app is there). The transcript
    says `== space harness: herdr-app is not on PATH — no space opened` and gives
    the command: `~/.pi/bin/space new --name harness --project ~/.pi --kind harness`.
+   On Windows that command is `space.cmd`, and with no Git Bash on the machine
+   the step is skipped for a second reason — `bin/space` is a bash program, so
+   `== space harness: no Git Bash found and bin/space is a bash program` names
+   it. Install Git for Windows (or set `PI_GIT_BASH`), re-run, and the space is
+   made; the by-hand line then works as printed.
 2. **The service step was turned off.** `PI_SKIP_SYSTEMD=1` (or
    `PI_SKIP_SERVICES=1`) was in the environment, and the transcript says
    `== guard service (launchd / Task Scheduler): PI_SKIP_SYSTEMD=1 — no login entry registered`.

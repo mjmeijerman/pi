@@ -442,5 +442,20 @@ case $OUT in
 esac
 if [ "$(tab_names tabspace)" = "Boss,logs" ]; then pass 'the record is unchanged'; else fail 'the refused verb removed the entry' "$(cat "$(record tabspace)")"; fi
 
+new_case 'the Boss argv is the .cmd in the bin directory when there is one'
+# Windows starts a program, not a shebang: the install writes `<bin dir>/pi-bare.cmd`
+# and Herdr cannot start the extensionless script the record used to carry. The
+# file only exists there on Windows, so its presence is the whole test.
+PC="$WORK/projcmd"
+project "$PC"
+run "$SPACE" new --name posixboss --project "$PC"
+if grep -qF "\"$ROOT/bin/pi-bare\"" "$(record posixboss)"; then pass 'without a .cmd the bare script is recorded'; else fail 'the default Boss argv is not the script beside bin/' "$(cat "$(record posixboss)")"; fi
+mkdir -p "$HOME/.local/bin"
+printf '@echo off\r\n' >"$HOME/.local/bin/pi-bare.cmd"
+run "$SPACE" new --name winboss --project "$PC"
+if [ "$RC" -eq 0 ]; then pass 'the space is made with a .cmd present'; else fail 'space new failed with a .cmd present' "$OUT"; fi
+if grep -qF "\"$HOME/.local/bin/pi-bare.cmd\"" "$(record winboss)"; then pass 'the .cmd is recorded as the Boss argv'; else fail 'the record does not name the .cmd' "$(cat "$(record winboss)")"; fi
+rm -f "$HOME/.local/bin/pi-bare.cmd"
+
 printf '\n%d passed, %d failed\n' "$PASS_N" "$FAIL_N"
 [ "$FAIL_N" -eq 0 ]
