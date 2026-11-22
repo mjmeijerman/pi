@@ -544,6 +544,27 @@ delegation_tracked() {
 		process.exit(j[process.argv[2]] ? 0 : 1);' "$DELEGATIONS" "${1:-}"
 }
 
+# delegation_file <slug> — the delegations document that actually holds this worker's entry, so a
+# write lands in the file a later read reads. `DELEGATIONS_WRITE` is the resolved space's record and
+# is right for every worker this tool spawned; a record written by hand, or a space folder with no
+# record of its own, leaves the entry in one of the other documents `delegation_field` reads through,
+# and a tell that wrote the wrong file would print `working` while the state said `reported`.
+delegation_file() {
+	local slug=${1:-} f
+	for f in "$DELEGATIONS_WRITE" "$SPACES_DIR"/*/delegations.json "$DELEGATIONS" "$STATE/delegations.json"; do
+		[ -f "$f" ] || continue
+		if node -e '
+			const fs = require("fs");
+			let j = {};
+			try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
+			process.exit(j[process.argv[2]] ? 0 : 1);' "$f" "$slug"; then
+			printf '%s' "$f"
+			return 0
+		fi
+	done
+	return 1
+}
+
 # delegation_kind <slug> — the shape the record says this worker was started in: `tab` (a tab in
 # the boss's space) or `space` (its own space, before workers became tabs). A record with no
 # `kind` is read as `space`, which is what it was, so an older worker keeps the close and the
@@ -704,6 +725,84 @@ reap_finished_learners() {
 	return 0
 }
 
+# file_epoch <file> — the file's modification time in seconds since the epoch, 0 when it is not
+# there. One clock for every freshness question here, so a report, a tell and a commit are compared
+# in the same units instead of in prose.
+file_epoch() {
+	local f=${1:-} t=""
+	[ -f "$f" ] || {
+		printf '0'
+		return 0
+	}
+	t=$(stat -c %Y -- "$f" 2>/dev/null) || t=$(stat -f %m -- "$f" 2>/dev/null) || t=""
+	case $t in '' | *[!0-9]*) t=0 ;; esac
+	printf '%s' "$t"
+}
+
+# worker_commit_epoch <slug> — the committer time of the tip of the worker's branch, 0 when the
+# record names no branch that resolves here. The second fact in "is this worker still working?": a
+# commit made after the tell is work the report on disk does not describe yet.
+worker_commit_epoch() {
+	local slug=${1:-} cwd branch t=""
+	cwd=$(delegation_field "$slug" cwd)
+	branch=$(delegation_field "$slug" branch)
+	[ -n "$cwd" ] && [ -n "$branch" ] || {
+		printf '0'
+		return 0
+	}
+	t=$(git -C "$cwd" log -1 --format=%ct "refs/heads/$branch" 2>/dev/null) || t=""
+	case $t in '' | *[!0-9]*) t=0 ;; esac
+	printf '%s' "$t"
+}
+
+# worker_fact <slug> — the one fact that decides whether this worker's report is still its answer,
+# as one word a reader can quote: `report`, `tell`, `commit` or `no-report`.
+#
+# The bug this exists for: a worker wrote its report, `delegate tell` sent it back to work, and while
+# it was editing, `delegate status` printed `reported` and `delegate wait --forever` returned on the
+# old file, so the boss ran `finish` against a half-finished branch. The report on disk is an answer
+# only while nothing newer has been said. `tell` writes `toldAt` on the record, so the report in the
+# file stops being an answer at that second; a branch commit made after the tell, and after the
+# report, stops it again. A worker that was never told has no `toldAt` and reads exactly as before.
+worker_fact() {
+	local slug=${1:-} report told commit mtime
+	report=$(report_path "$slug")
+	mtime=$(file_epoch "$report")
+	told=$(delegation_field "$slug" toldAt)
+	if [ -n "$told" ]; then
+		if [ "$mtime" -le "$told" ]; then
+			printf 'tell'
+			return 0
+		fi
+		commit=$(worker_commit_epoch "$slug")
+		if [ "$commit" -gt "$told" ] && [ "$commit" -gt "$mtime" ]; then
+			printf 'commit'
+			return 0
+		fi
+	fi
+	[ "$mtime" -gt 0 ] && {
+		printf 'report'
+		return 0
+	}
+	printf 'no-report'
+}
+
+# worker_reopened <slug> — true when the report on disk was overtaken by work that came after it.
+worker_reopened() {
+	case $(worker_fact "${1:-}") in tell | commit) return 0 ;; esac
+	return 1
+}
+
+# worker_reported <slug> — true when the report is written AND is still the newest fact about the
+# worker. This is what `reported` means and what `delegate wait` blocks on, so the two cannot drift:
+# a told worker's old file is not a report to publish.
+worker_reported() {
+	local slug=${1:-}
+	report_written "$(report_path "$slug")" || return 1
+	worker_reopened "$slug" && return 1
+	return 0
+}
+
 # worker_state <slug> — `reported`, `gone` or `working`.
 #
 # `delegate list` used to read state/delegations.json alone, so a worker whose space was closed
@@ -713,10 +812,24 @@ reap_finished_learners() {
 # recorded terminal herdr no longer lists and which never wrote a report is `gone`: not working,
 # and nothing to report. A report is still `reported` whatever herdr says — the report is the
 # thing the boss acts on, and a closed space after a report is the normal end of a worker.
+#
+# A report overtaken by a tell or a commit is `working` again, whatever the file says (see
+# worker_fact), and then the tab decides between `working` and `gone`: a tell goes into a live
+# terminal, so a reopened worker whose terminal is gone now is not working, it is gone. The three
+# facts have to agree before the word is `reported`.
 worker_state() {
 	local slug=${1:-} report terminal terms
 	report=$(report_path "$slug")
 	if report_written "$report"; then
+		if worker_reopened "$slug"; then
+			terminal=$(delegation_field "$slug" terminal)
+			if [ -n "$terminal" ] && ! terminal_listed "$terminal"; then
+				printf 'gone'
+				return 0
+			fi
+			printf 'working'
+			return 0
+		fi
 		printf 'reported'
 		return 0
 	fi
@@ -820,7 +933,9 @@ unread_reports_in() {
 	while read -r line; do
 		[ -n "$line" ] || continue
 		report=$(printf '%s\n' "$line" | awk '{print $3}')
-		report_written "$report" || continue
+		# `worker_reported`, not `report_written`: a report overtaken by a tell is the worker still
+		# typing, and counting it would block the next spawn on news that is already out of date.
+		worker_reported "$(printf '%s\n' "$line" | awk '{print $1}')" || continue
 		printf '%s\n' "$line"
 	done < <(node -e '
 		const fs = require("fs"), path = require("path");
@@ -2473,6 +2588,9 @@ restart_worker() {
 		if (j[slug]) {
 			const e=j[slug];
 			e.kind="tab"; e.space=space; e.tab=tab||""; e.terminal=terminal||"";
+			// A restart is a fresh skeleton and a fresh terminal: the tell that reopened the dead run
+			// says nothing about this one, and leaving it behind would make the new report look stale.
+			delete e.toldAt; delete e.toldAtISO;
 			e.restarts=Number(e.restarts||0)+1;
 			e.restartList=Array.isArray(e.restartList)?e.restartList:[];
 			e.restartList.push({attempt:Number(attempt),space,terminal:terminal||"",at:new Date().toISOString()});
@@ -2517,8 +2635,9 @@ cmd_wait() {
 			# for minutes must ask again each time, or a worker that starts working after a restart
 			# would still read "gone" from the first poll.
 			herdr_terminals_read=""
-			if report_written "$report"; then
-				say "== $slug reported =="
+			state=$(worker_state "$slug")
+			if [ "$state" = reported ]; then
+				say "== $slug reported (decided by the $(worker_fact "$slug")) =="
 				cat "$report"
 				mark_read "$slug"
 				say ""
@@ -2531,9 +2650,10 @@ cmd_wait() {
 				fi
 				return 0
 			fi
-			state=$(worker_state "$slug")
 			stamp=$(date +%H:%M:%S 2>/dev/null || printf 'poll')
-			say "$stamp $slug $state (restart $restarts/3) $report"
+			# The fact is printed beside the word: `working (tell)` says a told worker is typing, and
+			# `reported (report)` says nothing has been said since the report was written.
+			say "$stamp $slug $state ($(worker_fact "$slug"), restart $restarts/3) $report"
 			if [ "$state" = gone ]; then
 				if [ "$restarts" -ge 3 ]; then
 					die "$slug: restarted 3 times and it is gone again, with no report. What I saw: $seen.
@@ -2562,8 +2682,10 @@ Its last terminal was $(delegation_field "$slug" terminal), and $(delegation_fie
 	command -v timeout >/dev/null 2>&1 || die "timeout not found"
 	local waited=0
 	while [ "$waited" -lt "$timeout" ]; do
-		if report_written "$report"; then
-			say "== $slug reported =="
+		# `worker_reported`, not `report_written`: a told worker's old file is not an answer, and
+		# returning on it is the publish-a-half-finished-branch bug this exists to stop.
+		if worker_reported "$slug"; then
+			say "== $slug reported (decided by the $(worker_fact "$slug")) =="
 			cat "$report"
 			# Printing the report is reading it: the marker clears this cwd's in-flight block.
 			mark_read "$slug"
@@ -2659,10 +2781,11 @@ cmd_list() {
 #
 # Nothing else: no polling (`delegate wait` is the loop), no colour, no sentence. A boss that needs to
 # know whether a worker is done asks this, and quotes its one word, instead of grepping the report for
-# a field the worker wrote in its own prose. `--json` gives the same word with the slug and the report
-# path, for a script that asked.
+# a field the worker wrote in its own prose. `--json` gives the same word with the fact that decided
+# it (`decided`: report, tell, commit or no-report), the slug and the report path, for a script that
+# asked: a `working` from a tell and a `working` from a worker that never reported are different news.
 cmd_status() {
-	local slug="" json=0 word report rc=0
+	local slug="" json=0 word report fact="" rc=0
 	while [ "$#" -gt 0 ]; do
 		case $1 in
 		--json) json=1; shift ;;
@@ -2675,8 +2798,13 @@ cmd_status() {
 	DELEGATIONS=$(delegations_all)
 	word=$(worker_word "$slug") || rc=1
 	report=$(report_of "$slug") || report=""
+	# The word is one word; the fact behind it is the second. `working` from a tell and `working`
+	# from a worker that never wrote a report are not the same news, and a reader who can see
+	# `decided: tell` knows which one it is holding.
+	fact=""
+	if delegation_tracked "$slug"; then fact=$(worker_fact "$slug"); fi
 	if [ "$json" = 1 ]; then
-		printf '{"slug":"%s","status":"%s","report":"%s"}\n' "$slug" "$word" "$report"
+		printf '{"slug":"%s","status":"%s","decided":"%s","report":"%s"}\n' "$slug" "$word" "$fact" "$report"
 	else
 		printf '%s\n' "$word"
 	fi
@@ -2690,6 +2818,11 @@ cmd_status() {
 # terminal the record already names, prints the state word it found, and records the send in
 # state/decisions.jsonl, so "the worker was told what failed" is on the record and not only in a
 # scrollback the next close wipes.
+#
+# It also moves the record back to `working`: `tell` is the one command that reopens a worker, and a
+# worker that is editing again must not read `reported` while it types. Nothing is written to the
+# report — the old one stays exactly as the worker wrote it — and `worker_state` decides from the
+# record's `toldAt`, the report's mtime and the branch tip.
 #
 # Refused twice, and the word is printed first so the reader sees which one: a slug nothing tracks
 # (there is nothing to send to), and a worker whose terminal is gone — a `gone`, `closed` or
@@ -2730,7 +2863,29 @@ What is tracked:  $BIN/delegate list"
 			"$prog" "$slug" "$terminal" >&2
 		return 1
 	fi
-	record_decision tell "$text" sent "sent to the worker's terminal $terminal" false "$slug"
+	# The record moves back to working, and the report is not touched: the file the worker wrote is
+	# still there, and it is not this worker's answer any more. `toldAt` is the second that separates
+	# "reported" from "working again", and `worker_state` compares the report's mtime and the branch
+	# tip against it. Written before the decision line, so a reader of the log never sees a tell the
+	# record does not know about; a failed write is a refusal, because a tell the state cannot see is
+	# the lie this exists to end.
+	local record_file
+	record_file=$(delegation_file "$slug") || record_file=$DELEGATIONS_WRITE
+	records_mutate "$record_file" '
+		const fs=require("fs");
+		const [file,slug,at]=process.argv.slice(1);
+		let j={};try{j=JSON.parse(fs.readFileSync(file,"utf8"))}catch{}
+		if (!j[slug]) process.exit(1);
+		const e=j[slug];
+		e.toldAt=Number(at);
+		e.toldAtISO=new Date(Number(at)*1000).toISOString();
+		e.toldCount=Number(e.toldCount||0)+1;
+		process.stdout.write(JSON.stringify(j,null,2)+"\n");' "$slug" "$(date +%s)" || {
+		printf '%s: refusing to tell %s: its record in %s could not be marked working, and a tell the state cannot see is the half-finished publish this exists to stop\n' \
+			"$prog" "$slug" "$record_file" >&2
+		return 1
+	}
+	record_decision tell "$text" sent "sent to the worker's terminal $terminal; the record is working again from here" false "$slug"
 	printf 'told %s: %s\n' "$slug" "$text"
 }
 
@@ -3005,6 +3160,31 @@ cmd_close() {
 	[ -n "$kind" ] || kind=space
 	cwd=$(printf '%s' "$meta" | json_field cwd)
 	branch=$(printf '%s' "$meta" | json_field branch)
+
+	# A worker that is working has a tab that is mid-edit: closing it tears that tab down under the
+	# person typing in it, and everything the report's gates say about a branch the worker has not
+	# finished is stale the moment it lands. Refused, with the fact that decided it, and the wait
+	# that follows it. No flag overrides this: `finish` reaches the same refusal, which is the point.
+	local close_word close_fact
+	close_word=$(worker_state "$slug")
+	if [ "$close_word" = working ]; then
+		close_fact=$(worker_fact "$slug")
+		case $close_fact in
+		tell | commit)
+			printf '%s: refusing to close %s: it is working again — a tell reopened it and its %s is newer than the report it left, so the report on disk is not its answer yet.\n' \
+				"$prog" "$slug" "$([ "$close_fact" = commit ] && printf 'commit' || printf 'tell')" >&2
+			printf 'Fix: wait for the report it writes now, then close it:\n' >&2
+			printf '  %s/delegate wait %s --forever\n' "$BIN" "$slug" >&2
+			;;
+		*)
+			printf '%s: refusing to close %s: it is working — its report is not written yet, and closing tears down the tab that is writing it.\n' \
+				"$prog" "$slug" >&2
+			printf 'Fix: wait for it, then close it:\n' >&2
+			printf '  %s/delegate wait %s --forever\n' "$BIN" "$slug" >&2
+			;;
+		esac
+		return 1
+	fi
 
 	# Evidence before the space goes: a close is the last moment a claim can be checked, and a
 	# closed worker is not coming back to paste the output. Refuse, name what is missing, and
@@ -3813,6 +3993,13 @@ cmd_sweep() {
 		fi
 		if report_needs_decision "$report"; then
 			say "keep   $slug (decision needed, ask the user)"
+			kept=$((kept + 1))
+			continue
+		fi
+		# A report a tell or a commit overtook is a worker still typing: sweep keeps it and says so,
+		# rather than counting the close refusal of a report that is no longer an answer.
+		if worker_reopened "$slug"; then
+			say "keep   $slug (working again: reopened by the $(worker_fact "$slug"))"
 			kept=$((kept + 1))
 			continue
 		fi
