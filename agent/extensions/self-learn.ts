@@ -36,8 +36,8 @@
  *    `learn-10-48` was started on two lines where one meant "I will try
  *    tomorrow again" — a sentence that repeats nothing.
  * 3. **The output is a proposal and a branch, never a merge.** The learner writes
- *    one proposal, commits it on its own feature branch and hands the PR to
- *    big-boss-pi; reading and merging stays a High-tier human review. An agent
+ *    one proposal, commits it on its own feature branch and hands the PR to the
+ *    host; reading and merging stays a High-tier human review. An agent
  *    that rewrites its own system prompt unread is the failure mode blips 17 and
  *    42 are about.
  *
@@ -79,8 +79,8 @@ const spaceRoot = (): string => join(process.env.PI_SPACE_ROOT ?? REPO, "state",
 /**
  * The hand-off. The learner runs sandboxed and has no `gh` login and no git
  * credential, so it cannot publish and neither can a bare `pi` it starts. This
- * script spawns a big-boss-pi agent space on the host, where the key lives, and
- * that agent pushes and opens the PR.
+ * script spawns an agent space on the host, where the key lives, and that agent
+ * pushes and opens the PR.
  */
 const PUBLISH_SCRIPT = join(REPO, "scripts", "learn-publish.sh");
 /**
@@ -861,7 +861,10 @@ const MAX_TRANSCRIPT = 2 * 1024 * 1024;
 const MAX_REPORTS = 400;
 const MAX_REPORT_BYTES = 256 * 1024;
 const MAX_LINES_PER_REPORT = 40;
-const WORKSPACE = join(homedir(), "big-boss-pi");
+// The delegation workspace this checkout replaced: reports/ and state/decisions.jsonl are read
+// from here, and every path built from it is inside this repo now, not the retired checkout.
+// Exported because a test names it: nothing else pins where the default resolves to.
+export const WORKSPACE = join(homedir(), ".pi");
 
 /** A report or decision line, with where it came from. */
 export interface ReportText {
@@ -3673,7 +3676,7 @@ function evidenceMarkdown(input: {
 		"sandbox mount, and it refuses a sandboxed caller. Ask the host instead, with one",
 		"JSON object in the publish queue. The host session that started you runs the",
 		"broker: it runs `learn-publish.sh` for that file, records the outcome in",
-		"`runs.jsonl`, and starts the big-boss-pi agent space that pushes and opens the PR.",
+		"`runs.jsonl`, and starts the agent space that pushes and opens the PR.",
 		"Concrete values for this run:",
 		"",
 		`- slug / herdr space: ${slug}`,

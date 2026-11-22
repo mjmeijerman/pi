@@ -108,7 +108,7 @@ export function withoutSessionArgs(args: string[]): string[] {
  * leave in the environment.
  *
  * The wrappers (`scripts/pi-bare`, `scripts/pisandbox`,
- * `big-boss-pi/bin/pi-sandboxed|pi-nonet|pi-bare`) are the only place a mode is
+ * `bin/pi-sandboxed|pi-nonet|pi-bare`) are the only place a mode is
  * decided, and each one exports a marker, so the marker is a faithful record of
  * the wrapper. Inside bubblewrap `/proc` shows only the sandbox's own
  * processes, so walking the parent chain is not an option; the markers are.
@@ -124,9 +124,9 @@ export function deriveLaunch(input: DeriveInput): Launch {
 	const piBin = typeof argv[1] === "string" && isAbsolute(argv[1]) && exists(argv[1]) ? argv[1] : undefined;
 
 	const worker = env.PI_WORKER === "1";
-	const workerBare = join(home, "big-boss-pi", "bin", "pi-bare");
-	const workerSandboxed = join(home, "big-boss-pi", "bin", "pi-sandboxed");
-	const workerNoNet = join(home, "big-boss-pi", "bin", "pi-nonet");
+	const workerBare = join(home, ".pi", "bin", "pi-bare");
+	const workerSandboxed = join(home, ".pi", "bin", "pi-sandboxed");
+	const workerNoNet = join(home, ".pi", "bin", "pi-nonet");
 	const sandbox = join(home, ".pi", "scripts", "pisandbox");
 
 	if (env.PI_BARE === "1") {

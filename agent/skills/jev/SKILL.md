@@ -9,7 +9,7 @@ A wrapper around TypeSafe's Jev decision model at `https://api.typesafe.ai/v1/sy
 
 It is remote: it needs a key and network, and it costs money — $0.042 per MTok of input, output free. Measured on this machine: 193–268 ms per `plan`, against 3–8 s for the chat model it replaced. There is no local fallback: `local-run` and the `local_llm` tool stay on ollama `qwen3.8:27b`, no network, no cost, and jev never moves to them.
 
-Binary: `jev` on PATH (`~/.local/bin/jev` → `~/big-boss-pi/bin/jev` → `jev.mjs`).
+Binary: `jev` on PATH (`~/.local/bin/jev` → `~/.pi/bin/jev`, a symlink to `bin/jev.mjs`).
 Key: `TYPESAFE_API_KEY`, else the `TYPESAFE_API_KEY=` line of `JEV_KEY_FILE` (default `~/.pi/agent/env.secret`, mode 600). Never printed, never logged.
 Env overrides: `JEV_MODEL` (default `jev-latest`, currently `jev-1.14.0`), `JEV_ENDPOINT`, `JEV_TIMEOUT` (ms, default 20000), `JEV_MIN_CONFIDENCE` (default 0.5).
 
@@ -104,7 +104,7 @@ A sandboxed run fails because the path is invisible — the sandbox does not mou
 jev mode "inspect herdr panes over the control socket"
 → jev: bare
 
-jev permit "read /home/mark/big-boss-pi/specs"
+jev permit "read /home/mark/.pi/state/spaces"
 → jev: yes
 ```
 

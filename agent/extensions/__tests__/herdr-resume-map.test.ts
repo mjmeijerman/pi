@@ -25,7 +25,7 @@ writeFileSync(
 	join(binDir, "hc"),
 	`#!/bin/sh
 if [ "$1" = get ]; then
-	printf '%s\\n' '{"address":"t7","name":"review","scope":"abc","state":"live","labels":{"herdr.space":"big-boss-pi","herdr.tab":"worker"}}'
+	printf '%s\\n' '{"address":"t7","name":"review","scope":"abc","state":"live","labels":{"herdr.space":"harness","herdr.tab":"worker"}}'
 	exit 0
 fi
 exit 1
@@ -34,7 +34,7 @@ exit 1
 chmodSync(join(binDir, "hc"), 0o755);
 
 // Candidate wrappers the launch derivation looks for.
-for (const wrapper of ["big-boss-pi/bin/pi-bare", "big-boss-pi/bin/pi-sandboxed", "big-boss-pi/bin/pi-nonet", ".pi/scripts/pisandbox"]) {
+for (const wrapper of [".pi/bin/pi-bare", ".pi/bin/pi-sandboxed", ".pi/bin/pi-nonet", ".pi/scripts/pisandbox"]) {
 	const path = join(home, wrapper);
 	mkdirSync(join(path, ".."), { recursive: true });
 	writeFileSync(path, "#!/bin/sh\n");
@@ -148,11 +148,11 @@ test("a sandboxed worker records the wrapper, the flags and the labels", async (
 	assert.equal(entry.session_id, "session-1");
 	assert.equal(entry.cwd, "/home/mark/projects/app");
 	assert.equal(entry.mode, "sandbox");
-	assert.deepEqual(entry.argv, [join(home, "big-boss-pi/bin/pi-sandboxed"), "--thinking", "high", "-a"]);
-	assert.equal(entry.wrapper, join(home, "big-boss-pi/bin/pi-sandboxed"));
+	assert.deepEqual(entry.argv, [join(home, ".pi/bin/pi-sandboxed"), "--thinking", "high", "-a"]);
+	assert.equal(entry.wrapper, join(home, ".pi/bin/pi-sandboxed"));
 	assert.equal(entry.model, "claude-x");
 	assert.equal(entry.thinking, "high");
-	assert.equal(entry.space, "big-boss-pi", "hc answered inside its 2000 ms budget at least once");
+	assert.equal(entry.space, "harness", "hc answered inside its 2000 ms budget at least once");
 	assert.equal(entry.tab, "worker");
 	assert.equal(typeof entry.boot_id, "string");
 	assert.equal(entry.version, 1);
@@ -244,7 +244,7 @@ test("deriveLaunch keeps the mode honest and never guesses a launch", async () =
 	assert.deepEqual(bare.argv, [join(root, "fake-pi.mjs"), "-a"]);
 
 	const bareWorker = mod.deriveLaunch({ ...base, env: { PI_BARE: "1", PI_WORKER: "1" } });
-	assert.deepEqual(bareWorker.argv, [join(home, "big-boss-pi/bin/pi-bare"), "-a"]);
+	assert.deepEqual(bareWorker.argv, [join(home, ".pi/bin/pi-bare"), "-a"]);
 
 	const sandbox = mod.deriveLaunch({ ...base, env: { PI_SANDBOX_MODE: "bwrap", PI_SANDBOX_NET: "on" } });
 	assert.deepEqual(sandbox.argv, [join(home, ".pi/scripts/pisandbox"), "--", "-a"]);
@@ -255,7 +255,7 @@ test("deriveLaunch keeps the mode honest and never guesses a launch", async () =
 	assert.equal(noNet.mode, "sandbox-nonet");
 
 	const noNetWorker = mod.deriveLaunch({ ...base, env: { PI_SANDBOX_MODE: "bwrap", PI_SANDBOX_NET: "off", PI_WORKER: "1" } });
-	assert.deepEqual(noNetWorker.argv, [join(home, "big-boss-pi/bin/pi-nonet"), "-a"]);
+	assert.deepEqual(noNetWorker.argv, [join(home, ".pi/bin/pi-nonet"), "-a"]);
 
 	// A sandbox marker with no wrapper on disk is not a licence to run bare.
 	const unknown = mod.deriveLaunch({ ...base, env: { PI_SANDBOX_MODE: "bwrap", PI_WORKER: "1" }, exists: () => false });

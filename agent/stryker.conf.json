@@ -9,7 +9,6 @@
     "extensions/lib/**/*.ts",
     "extensions/merge-guard.ts",
     "extensions/secret-guard.ts",
-    "extensions/pi-master-guard.ts",
     "extensions/config-guard.ts",
     "!extensions/**/*.test.ts",
     "!extensions/**/__tests__/**"
