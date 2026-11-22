@@ -531,6 +531,19 @@ export const POSIX_WRAPPERS = [
  * One list, exported: the `.cmd` shims and the tests both read it, so a tool
  * added here cannot arrive as a file Windows cannot start.
  */
+/**
+ * SOURCE_LIBS — the `.sh` files in `bin/` that the bin entries source.
+ *
+ * Every entry is a bash program that reads its library from the directory it
+ * lives in, so a copy of one entry is not a working tool: `space`, `delegate`
+ * and `guard` each source at least one of these, and the copy mode Windows needs
+ * put the program in `%USERPROFILE%\.local\bin` with the library left behind in
+ * the clone. The install copies these beside the entries under the same rule;
+ * a name added to a tool's `source` and not to this list is a tool that starts
+ * on Linux and dies on Windows.
+ */
+export const SOURCE_LIBS = ['pi-resolve.sh', 'receipts.sh', 'records-lib.sh', 'shell-resolve.sh', 'space-lib.sh'];
+
 export const HARNESS_TOOLS = [
 	'delegate',
 	'guard',
@@ -1626,6 +1639,34 @@ export function spawnPlan(cmd, args = [], { platform = process.platform, comspec
 		// receive; node quoting them a second time is what breaks .cmd shims.
 		windowsVerbatimArguments: true,
 	};
+}
+
+/**
+ * userPathLine — the one line that puts the bin directory on the user PATH.
+ *
+ * Nothing here writes `PATH`. On Windows the bin directory is under
+ * `%USERPROFILE%`, which no installer adds to it, so every bare name the harness
+ * documents (`space`, `delegate`, `guard`) is "not recognized" in a fresh
+ * prompt — the fourth thing the Windows box reported. Editing a user
+ * environment variable is a change to a machine nobody asked this script to
+ * make and nobody can undo with the same command, so the line is printed in the
+ * summary and in docs/install.md and run by hand, once.
+ *
+ * Null when there is nothing to say: not Windows, no bin directory named, or the
+ * directory is already on the user PATH.
+ */
+export function userPathLine({ platform = process.platform, binDir = '', pathEnv = process.env.PATH } = {}) {
+	if (platform !== 'win32' || !binDir) return null;
+	const norm = (p) => String(p).replace(/[\\/]+$/, '').toLowerCase();
+	const dirs = String(pathEnv || '')
+		.split(';')
+		.filter(Boolean)
+		.map(norm);
+	if (dirs.includes(norm(binDir))) return null;
+	// Single quotes, doubled inside: PowerShell expands `$` and backtick inside
+	// double quotes, and a user profile path with a `$` in it is rare but real.
+	const quoted = String(binDir).replace(/'/g, "''");
+	return `[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';' + '${quoted}', 'User')`;
 }
 
 /** describeSkip — one line when a section does not apply to this OS. */

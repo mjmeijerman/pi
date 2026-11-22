@@ -81,6 +81,7 @@ import {
 	PI_WRAPPER_BLOCK,
 	PI_WRAPPER_END,
 	POSIX_WRAPPERS,
+	SOURCE_LIBS,
 	cmdShim,
 	deepseekApiKey,
 	deepseekKeyState,
@@ -109,6 +110,7 @@ import {
 	startAndVerifyGuard,
 	systemSummary,
 	systemdUnitsIn,
+	userPathLine,
 	wslMountWarnings,
 } from './scripts/install-lib.mjs';
 import { prereqsSkipped, stepPrereqs } from './scripts/prereqs.mjs';
@@ -326,6 +328,35 @@ function linkOrCopy(target, dest) {
 	}
 	changed++;
 	return useCopy ? 'copy' : 'link';
+}
+
+/**
+ * copySourcedLibraries — the `.sh` files the tools source, beside the copies.
+ *
+ * Copy mode copies `space`, `delegate` and `guard` and, before this step, not
+ * what they read. Each one sources its library from the directory it lives in,
+ * so a copy in `%USERPROFILE%\.local\bin` died at its first line with
+ * `space-lib.sh: No such file or directory` — the second thing the Windows box
+ * reported. Symlink mode reads the libraries through the link, so it copies
+ * nothing and cannot double up.
+ *
+ * Once per run, from the step that writes the entries: the entry loop runs per
+ * tool, and these are the same files for all of them.
+ */
+let libsWritten = false;
+function copySourcedLibraries() {
+	if (PLAN.linkMode !== 'copy' || libsWritten) return;
+	libsWritten = true;
+	for (const name of SOURCE_LIBS) {
+		const src = path.join(SOURCE_DIR, 'bin', name);
+		if (!exists(src)) {
+			warn(`bin/${name} not found — the tools that source it will not start from ${P.binDir}`);
+			continue;
+		}
+		const dest = path.join(P.binDir, name);
+		const how = linkOrCopy(src, dest);
+		note(`${name} -> ${dest} (${how})`);
+	}
 }
 
 // --- 0. prerequisites -------------------------------------------------------
@@ -833,6 +864,8 @@ function stepBins() {
 		installWrapper(name, dest);
 	}
 
+	copySourcedLibraries();
+
 	// The Herdr menu row is app config, not harness config: install the file when
 	// Herdr has none, never overwrite one somebody edited.
 	const programsSrc = path.join(SOURCE_DIR, 'sandbox', 'herdr-programs.json');
@@ -997,6 +1030,7 @@ function stepBinsOnPath() {
 		note(`${name} -> ${dest} (${how})`);
 		installWrapper(name, dest);
 	}
+	copySourcedLibraries();
 }
 
 // --- 5c. the harness space --------------------------------------------------
@@ -1012,9 +1046,31 @@ function harnessBin(name) {
 	return exists(installed) ? installed : path.join(SOURCE_DIR, 'bin', name);
 }
 
+/** spaceArgv — how this OS starts `bin/space`, as `[file, args]`, or null.
+ *
+ * `bin/space` is a bash program and CreateProcess reads no shebang, so on win32
+ * it runs through the Git Bash the `.cmd` shims are built from. No bash on the
+ * machine is `null`: there is nothing to run the step with, and the caller
+ * prints the `.cmd` a person can type instead of the extensionless path that
+ * opened the Windows "select an app" dialog.
+ */
+function spaceArgv(args) {
+	const script = harnessBin('space');
+	if (PLAN.platform !== 'win32') return [script, args];
+	const bash = shimInterpreter();
+	return bash ? [bash, [script, ...args]] : null;
+}
+
 /** spaceByHand — the one command that makes the space when this run cannot. */
 function spaceByHand() {
-	return `"${harnessBin('space')}" new --name ${HARNESS_SPACE} --project "${P.piHome}" --kind harness`;
+	const args = `new --name ${HARNESS_SPACE} --project "${P.piHome}" --kind harness`;
+	if (PLAN.platform !== 'win32') return `"${harnessBin('space')}" ${args}`;
+	// The `.cmd` on PATH is what PowerShell and a Herdr menu row start; the
+	// extensionless copy beside it is a text file to Windows.
+	const cmd = path.join(P.binDir, 'space.cmd');
+	if (exists(cmd)) return `"${cmd}" ${args}`;
+	const bash = resolveGitBash();
+	return bash ? `"${bash}" "${harnessBin('space')}" ${args}` : `"${cmd}" ${args}`;
 }
 
 /** recordProject — the project a space record names, '' when it does not parse. */
@@ -1057,7 +1113,18 @@ function stepSpace() {
 		);
 		return;
 	}
-	const status = run(harnessBin('space'), ['new', '--name', HARNESS_SPACE, '--project', P.piHome, '--kind', 'harness'], {
+	const argv = spaceArgv(['new', '--name', HARNESS_SPACE, '--project', P.piHome, '--kind', 'harness']);
+	if (!argv) {
+		// win32 with no Git Bash: `bin/space` is a bash program, so this run has
+		// nothing to start it with. The by-hand line is the `.cmd` the install writes
+		// on PATH — not the extensionless script, which Windows cannot start either.
+		skipped(
+			`space ${HARNESS_SPACE}`,
+			`no Git Bash found and bin/space is a bash program — no space opened, the rest of the install is unaffected; install Git for Windows (or set PI_GIT_BASH to bash.exe), re-run, then make it by hand: ${spaceByHand()}`,
+		);
+		return;
+	}
+	const status = run(argv[0], argv[1], {
 		allowFail: true,
 		// The record's root, said out loud: `bin/space` defaults to the tree it lives
 		// in, which is this checkout — the same place on a real install, and the
@@ -1407,6 +1474,17 @@ function summary() {
 	say('   herdr-app --version                             # desktop app');
 	say('   jev count "split this task"                     # the tools bin/ puts on PATH');
 	say('   bin/space list                                  # the spaces this machine records');
+	// Printed, never run: the bin directory on Windows is under %USERPROFILE%, no
+	// installer puts it on PATH, and a bare `space` in a fresh prompt would not be
+	// found. Editing a user environment variable is the person's call, in a line
+	// they can read first.
+	const pathLine = userPathLine({ platform: PLAN.platform, binDir: P.binDir, pathEnv: process.env.PATH });
+	if (pathLine) {
+		say('');
+		say(`${P.binDir} is not on your user PATH — nothing there is found by its bare name.`);
+		say('Run this once in PowerShell, then open a new window:');
+		say(`   ${pathLine}`);
+	}
 	if (PLAN.service === 'systemd' && systemdInstalled.length > 0) {
 		say('Disable:');
 		for (const unit of systemdInstalled.filter((u) => u.enable)) {
