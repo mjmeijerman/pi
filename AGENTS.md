@@ -52,6 +52,14 @@ is the body gate, and its tier goes in the body as `Review tier: low|medium|high
 
 A harness path in the diff is high whatever the body says.
 
+## A merged PR is not the last step
+
+The turn that sees a PR merged pulls trunk (`git pull --ff-only`) and cleans what the worker left:
+`git worktree remove`, `git worktree prune`, delete its branch, then `bin/delegate list` is empty.
+The same cleanup applies to work that was decided against: the worktree, the branch and the tab are
+removed when the decision is made, not kept as a reminder. Nothing is spawned on a trunk that is
+behind: pull first, then spawn.
+
 ## Red CI is the boss's
 
 A red check is yours to fix or to hand to a worker with the failing line quoted. Never
