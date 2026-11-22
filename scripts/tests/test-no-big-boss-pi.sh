@@ -39,10 +39,6 @@ fail() {
 # The names that must stay in the migration, and the reason each allowlisted path
 # may still name the folder. One path per line, `path|reason`.
 ALLOW=$(cat <<'EOF'
-agent/extensions/big-boss-pi-guard.ts|the delegation-workspace guard is named after the folder it guards; renaming it is its own spec
-agent/extensions/__tests__/big-boss-pi-guard.test.ts|the guard's own tests, fixtures named after the guard
-agent/extensions/__tests__/big-boss-pi-guard-mutants.test.ts|the guard's mutant tests, same names
-agent/extensions/__tests__/merge-guard.test.ts|a session path fixture inside the workspace the guard protects
 docs/mutation-survivors.md|dated ledger whose rows quote test inputs from the guard's test files
 docs/radar-conformance.md|the 2026-11-18 mutation reading names the six files it scored, two of them guard names
 docs/radar-adoption-brief.md|the brief measures the backlog that lives in that folder, dated
