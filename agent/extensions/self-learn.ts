@@ -26,11 +26,15 @@
  *    learning.** A gate runs first, with no model call. It fires on two or more
  *    of the same failed tool signature, the same CI check failing on two
  *    branches or in two workers' reports, the same gate failure recorded by two
- *    workers, two learners that died without writing a proposal, two of the
- *    person's own "this again" lines, or one `/suggest` note. Everything else is
- *    silence — a reflection nobody needed is cost with extra steps. A
- *    repetition explained by something outside the harness (a missing binary, a
- *    network outage) is explained, not learned from.
+ *    workers, two learners that died without writing a proposal, or one
+ *    `/suggest` note. Everything else is silence — a reflection nobody needed is
+ *    cost with extra steps. A repetition explained by something outside the
+ *    harness (a missing binary, a network outage) is explained, not learned
+ *    from.
+ *    The person's own words are quoted into the evidence file and never fire
+ *    the gate by themselves: "again" and "still" are ordinary English, and
+ *    `learn-10-48` was started on two lines where one meant "I will try
+ *    tomorrow again" — a sentence that repeats nothing.
  * 3. **The output is a proposal and a branch, never a merge.** The learner writes
  *    one proposal, commits it on its own feature branch and hands the PR to
  *    big-boss-pi; reading and merging stays a High-tier human review. An agent
@@ -250,7 +254,7 @@ export function worstError(errors: Map<string, Failure>): [string, number] | nul
 }
 
 /** Which repetition the gate acted on. */
-export type SignalKind = "died-learner" | "ci-check" | "worker-failure" | "tool-error" | "frustration";
+export type SignalKind = "died-learner" | "ci-check" | "worker-failure" | "tool-error";
 
 export interface Signal {
 	kind: SignalKind;
@@ -265,8 +269,12 @@ export interface Signal {
  *
  * Order is deliberate. A learner that died before writing anything outranks a
  * repeated tool error: the first says the learning loop is broken, the second
- * says one command is. Frustration ranks last — it is the weakest evidence the
- * gate has, and it is quoted, never obeyed.
+ * says one command is.
+ *
+ * The person's quoted lines are not a signal: `input.frustration` is rendered
+ * into the evidence file for whoever judges it, and it never reaches this list.
+ * A phrase as common as "again" cannot tell a repetition from an ordinary
+ * sentence, and a learner started on one is a turn spent re-deriving nothing.
  */
 export function firedSignals(input: Evidence): Signal[] {
 	const out: Signal[] = [];
@@ -289,22 +297,7 @@ export function firedSignals(input: Evidence): Signal[] {
 	}
 	const repeated = worstError(input.errors);
 	if (repeated) out.push({ kind: "tool-error", key: repeated[0], count: repeated[1], sample: input.errors.get(repeated[0])?.sample ?? "" });
-	for (const [phrase, quotes] of quotesByPhrase(input.frustration ?? [])) {
-		if (quotes.length < MIN_REPEATS) continue;
-		out.push({ kind: "frustration", key: phrase, count: quotes.length, sample: quotes[0] ?? "" });
-	}
 	return out;
-}
-
-/** Quotes grouped by the phrase that matched, in first-seen order. */
-export function quotesByPhrase(quotes: FrustrationQuote[]): Map<string, string[]> {
-	const grouped = new Map<string, string[]>();
-	for (const { phrase, quote } of quotes) {
-		const list = grouped.get(phrase);
-		if (list) list.push(quote);
-		else grouped.set(phrase, [quote]);
-	}
-	return grouped;
 }
 
 /** How many signals the reason names before it says "and N more", in one line. */
@@ -321,8 +314,6 @@ export function describeSignal(signal: Signal): string {
 			return `${signal.count}× workers recorded "${signal.key}"`;
 		case "died-learner":
 			return `${signal.count} learners died without a proposal (${signal.key})`;
-		case "frustration":
-			return `${signal.count}× "${signal.key}" in the session transcript`;
 	}
 }
 
@@ -1274,12 +1265,13 @@ export function diedLearnersFrom(
 }
 
 /**
- * The phrases the gate looks for in the person's own words.
+ * The phrases that pick the person's own lines out of a session transcript.
  *
- * Short and literal on purpose. This is not a mood detector, and it never
- * becomes an instruction: the quotes are pasted into the evidence file with a
- * line saying so, and the learner is told to read the repetition, not to obey
- * the sentence.
+ * Short and literal on purpose. This is not a mood detector and not a gate: the
+ * quotes are pasted into the evidence file with a line saying they are evidence,
+ * and the learner is told to read the repetition, not to obey the sentence. They
+ * used to count as a gate signal of their own, which meant a sentence like "will
+ * kick tomorrow again" started a learner (2026-11-22).
  */
 export const FRUSTRATION_PHRASES = ["again", "still", "same failure", "you keep", "why did", "frustrat"];
 /** Cap on quoted lines: enough to show the repetition, not a transcript dump. */
@@ -1292,8 +1284,8 @@ const MAX_QUOTE_MESSAGE = 2_000;
  *
  * Measured on 200 transcripts: 141 had "again" in a user message, because whole
  * transcripts, JSON blobs and tool output get pasted into the prompt as user
- * turns. Without this filter the frustration signal fires on most sessions and
- * the gate stops being conservative, so a pasted line is not a quote.
+ * turns. Without this filter most sessions would carry pasted lines in the
+ * evidence file, so a pasted line is not a quote.
  */
 const PASTED_LINE = /("transcript"|Source entry id|\[Assistant @|^\s*[{[<])/;
 
