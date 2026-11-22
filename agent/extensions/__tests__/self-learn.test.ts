@@ -91,6 +91,8 @@ const {
 	supersededOut,
 	ghLiveBranches,
 	goneBranchOut,
+	ghAbandonedBranches,
+	abandonedOut,
 	ghCiSettled,
 	CI_FAILURE_WINDOW_MS,
 	SPAWN_FAILED_WINDOW_MS,
@@ -2571,7 +2573,7 @@ describe("repeated failing CI checks", () => {
 			const bin = join(dir, "gh");
 			await writeFile(
 				bin,
-				`#!/usr/bin/env bash\ncase "$2$4" in\n  listsuccess) printf '%s' '${greens}' ;;\n  listfailure) printf '%s' '${failures}' ;;\n  --paginate--jq) printf '%s\\n' fixed-yesterday still-red ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;;\nesac\n`,
+				`#!/usr/bin/env bash\ncase "$2$4" in\n  listsuccess) printf '%s' '${greens}' ;;\n  listfailure) printf '%s' '${failures}' ;;\n  listclosed) printf '%s' '[]' ;;\n  --paginate--jq) printf '%s\\n' fixed-yesterday still-red ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Set up job"}]}]}' ;;\nesac\n`,
 				"utf8",
 			);
 			await chmod(bin, 0o755);
@@ -2612,6 +2614,72 @@ describe("repeated failing CI checks", () => {
 			"an unreadable branch list drops nothing: doubt counts normally",
 		);
 		assert.deepEqual(goneBranchOut([], ["trunk"]), { runs: [], gone: 0 }, "no failures is nothing to drop");
+	});
+
+	test("a branch whose pull request was closed after the run is not evidence either", () => {
+		// 2026-11-22: the whole CI table was `fix/agent-pane-sandbox-pi` and
+		// `feat/learner-gaps-2`, both branches still on the remote, both pull requests
+		// (131, 128) closed on 2026-11-18 — the work was given up on, not deleted.
+		const failures = [
+			{ name: "tests", headBranch: "given-up", conclusion: "failure", databaseId: 1, createdAt: "2026-11-18T09:55:30Z" },
+			{ name: "tests", headBranch: "pushed-again", conclusion: "failure", databaseId: 2, createdAt: "2026-11-18T11:00:00Z" },
+			{ name: "tests", headBranch: "still-open", conclusion: "failure", databaseId: 3, createdAt: "2026-11-18T09:55:30Z" },
+			{ name: "tests", headBranch: "undated", conclusion: "failure", databaseId: 4 },
+		];
+		const closed = new Map([
+			["given-up", Date.parse("2026-11-18T10:32:12Z")],
+			["pushed-again", Date.parse("2026-11-18T10:32:12Z")],
+			["undated", Date.parse("2026-11-18T10:32:12Z")],
+		]);
+		const kept = abandonedOut(failures, closed);
+		assert.deepEqual(
+			kept.runs.map((run) => run.headBranch),
+			["pushed-again", "still-open", "undated"],
+			"a close after the run means nobody pushes again; a close before it leaves the newer red as evidence, " +
+				"a branch with no close is untouched, and an undated run is kept because doubt counts",
+		);
+		assert.equal(kept.abandoned, 1);
+		assert.deepEqual(
+			abandonedOut(failures, null),
+			{ runs: failures, abandoned: 0 },
+			"an unreadable pull request list drops nothing",
+		);
+		assert.deepEqual(abandonedOut([], new Map()), { runs: [], abandoned: 0 }, "no failures is nothing to drop");
+	});
+
+	test("a merged pull request is not an abandoned branch, and a later close wins over an earlier one", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-abandoned-gh-"));
+		try {
+			const prs = JSON.stringify([
+				{ state: "MERGED", headRefName: "landed", closedAt: "2026-11-21T09:00:00Z" },
+				{ state: "CLOSED", headRefName: "given-up", closedAt: "2026-11-18T10:32:12Z" },
+				{ state: "CLOSED", headRefName: "given-up", closedAt: "2026-11-19T10:32:12Z" },
+				{ state: "CLOSED", headRefName: " padded ", closedAt: "2026-11-18T10:32:12Z" },
+				{ state: "CLOSED", headRefName: "no-date" },
+			]);
+			const bin = join(dir, "gh");
+			await writeFile(bin, `#!/usr/bin/env bash\nprintf '%s' '${prs}'\n`, "utf8");
+			await chmod(bin, 0o755);
+			const read = await ghAbandonedBranches(dir, bin);
+			assert.equal(read.warning, null, "a list that parsed needs no warning");
+			assert.deepEqual(
+				[...(read.closed ?? new Map())],
+				[
+					["given-up", Date.parse("2026-11-19T10:32:12Z")],
+					["padded", Date.parse("2026-11-18T10:32:12Z")],
+				],
+				"merged rows are ignored, the newest close is the one kept, and a close with no date is not guessed at",
+			);
+
+			const broken = join(dir, "gh-broken");
+			await writeFile(broken, "#!/usr/bin/env bash\necho 'HTTP 401: Bad credentials' >&2\nexit 1\n", "utf8");
+			await chmod(broken, 0o755);
+			const unreadable = await ghAbandonedBranches(dir, broken);
+			assert.equal(unreadable.closed, null, "an unreadable list is null, never an empty map");
+			assert.match(unreadable.warning ?? "", /closed pull requests not read: HTTP 401/);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("the branch list is every page, and an unreadable list keeps every failure", async () => {

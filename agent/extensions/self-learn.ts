@@ -1443,7 +1443,11 @@ export async function ghCiRuns(cwd = REPO, bin = "gh"): Promise<{ runs: CiRun[];
 	if (branches.warning) notes.push(branches.warning);
 	const onBranch = goneBranchOut(live.runs, branches.names);
 	if (onBranch.gone > 0) notes.push(goneWarning(onBranch.gone, parsed.length));
-	const judged = await judgedByCode(onBranch.runs, cwd, bin);
+	const abandonedPrs = await ghAbandonedBranches(cwd, bin);
+	if (abandonedPrs.warning) notes.push(abandonedPrs.warning);
+	const onLiveBranch = abandonedOut(onBranch.runs, abandonedPrs.closed);
+	if (onLiveBranch.abandoned > 0) notes.push(abandonedWarning(onLiveBranch.abandoned, parsed.length));
+	const judged = await judgedByCode(onLiveBranch.runs, cwd, bin);
 	if (judged.runs.length === 0 && judged.refused > 0) return { runs: [], warning: blockedWarning(judged.refused, parsed.length) };
 	const aged = agedOut(judged.runs, Date.now());
 	if (judged.refused > 0) notes.push(partialWarning(judged.refused, parsed.length));
@@ -1506,6 +1510,81 @@ export async function ghLiveBranches(cwd: string, bin: string): Promise<{ names:
 		.filter((line) => line !== "");
 	if (names.length === 0) return { names: null, warning: "branches on the remote not read: gh printed no branch name" };
 	return { names, warning: null };
+}
+
+/**
+ * The head branches whose pull request was closed without merging, and when.
+ *
+ * A branch outlives its pull request: `fix/agent-pane-sandbox-pi` (PR 131) and
+ * `feat/learner-gaps-2` (PR 128) were closed on 2026-11-18 and were still on the
+ * remote four days later, so `goneBranchOut` kept their red runs and the
+ * 2026-11-22 compaction was answered with a table of those two and nothing else.
+ *
+ * `--state closed` also returns merged pull requests, so only a CLOSED row counts:
+ * a merged PR's lesson landed, and its branch is normally deleted anyway.
+ *
+ * Unreadable is `null`, never an empty map — the same rule `ghLiveBranches` uses,
+ * because "every branch was given up on" is the answer that throws the table away.
+ */
+export async function ghAbandonedBranches(cwd: string, bin: string): Promise<{ closed: Map<string, number> | null; warning: string | null }> {
+	const argv = [bin, "pr", "list", "--state", "closed", "--limit", "200", "--json", "state,headRefName,closedAt"];
+	const result = await runOnce(argv, cwd, 5_000);
+	if (result.status !== 0) {
+		const why = clipDetail(result.stderr) || `gh exited ${result.status === null ? "with no status" : result.status}`;
+		return { closed: null, warning: `closed pull requests not read: ${why}` };
+	}
+	let parsed: { state?: string; headRefName?: string; closedAt?: string }[];
+	try {
+		parsed = JSON.parse(result.stdout) as { state?: string; headRefName?: string; closedAt?: string }[];
+	} catch {
+		return { closed: null, warning: "closed pull requests not read: gh printed something that is not JSON" };
+	}
+	if (!Array.isArray(parsed)) return { closed: null, warning: "closed pull requests not read: gh printed something that is not a list" };
+	const closed = new Map<string, number>();
+	for (const pr of parsed) {
+		// `--state closed` returns merged pull requests too, and a merged PR's lesson
+		// landed: only a CLOSED row means the branch was given up on.
+		if (pr.state !== "CLOSED") continue;
+		const branch = (pr.headRefName ?? "").trim();
+		const at = Date.parse(pr.closedAt as string);
+		if (branch === "" || !Number.isFinite(at)) continue;
+		const seen = closed.get(branch);
+		if (seen === undefined || at > seen) closed.set(branch, at);
+	}
+	// An empty map drops nothing, so it needs no warning: only an unreadable list
+	// (null) has to say so, because it is the answer that keeps every failure.
+	return { closed, warning: null };
+}
+
+/**
+ * Drop a failing run whose branch was given up on *after* the run: a pull request
+ * on that branch was closed without merging, later than the run started.
+ *
+ * A branch outlives its pull request, so `goneBranchOut` cannot answer this one.
+ * `fix/agent-pane-sandbox-pi` (PR 131) and `feat/learner-gaps-2` (PR 128) were
+ * closed on 2026-11-18 and were still on the remote four days later; the
+ * 2026-11-22 compaction was answered with a table of those two branches and
+ * nothing else, which is a learner started to re-derive that the work was closed.
+ *
+ * The close has to come *after* the run: a branch pushed to again after its PR was
+ * closed is alive, and its newer red is the evidence. An unreadable date keeps the
+ * run, on the same rule `agedOut` uses.
+ */
+export function abandonedOut(failures: CiRun[], closed: Map<string, number> | null): { runs: CiRun[]; abandoned: number } {
+	if (closed === null) return { runs: failures, abandoned: 0 };
+	const keep: CiRun[] = [];
+	let abandoned = 0;
+	for (const run of failures) {
+		const branch = (run.headBranch ?? "").trim();
+		const at = Date.parse(run.createdAt as string);
+		const gaveUpAt = branch === "" ? undefined : closed.get(branch);
+		if (gaveUpAt !== undefined && Number.isFinite(at) && gaveUpAt > at) {
+			abandoned += 1;
+			continue;
+		}
+		keep.push(run);
+	}
+	return { runs: keep, abandoned };
 }
 
 /**
@@ -1727,6 +1806,11 @@ function supersededWarning(superseded: number, total: number): string {
  */
 function goneWarning(gone: number, total: number): string {
 	return `CI failures on a deleted branch not counted: ${gone} of ${total} failing runs sit on a branch the remote no longer has, so no push can answer them and nobody can act on them`;
+}
+
+/** A branch's pull request was closed after the run: say how many, so the smaller table is a measurement. */
+function abandonedWarning(abandoned: number, total: number): string {
+	return `CI failures on an abandoned branch not counted: ${abandoned} of ${total} failing runs sit on a branch whose pull request was closed without merging after the run, so nobody is going to push to it`;
 }
 
 /** Some of the failing runs never started: count the rest, and say what was dropped. */
