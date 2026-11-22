@@ -278,5 +278,76 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# The CI runner (`--ci`). bin/ci is the pipeline's own job list, so a case here stubs it: these
+# tests pin the wiring, never bin/ci itself. The contract it owes is four flags, one summary line
+# `ci: N/N runnable green, S skipped, F failed`, an exit 0 only when every runnable job passed, and
+# the failing job's log path in its output.
+mkdir -p "$WORK/cistub" "$WORK/noci"
+cat >"$WORK/cistub/ci" <<'STUB'
+#!/usr/bin/env bash
+[ -z "${CI_STUB_ARGV:-}" ] || printf '%s\n' "$*" >"$CI_STUB_ARGV"
+if [ "${CI_STUB_RC:-0}" = 0 ]; then
+	printf 'ok   build\n'
+	printf 'ci: 12/12 runnable green, 0 skipped, 0 failed\n'
+	exit 0
+fi
+printf 'FAIL build: exit 1\n'
+printf 'log: %s\n' "${CI_STUB_LOG:-/tmp/ci/build.log}"
+printf 'ci: 11/12 runnable green, 0 skipped, 1 failed\n'
+exit 1
+STUB
+chmod +x "$WORK/cistub/ci"
+
+# run_ci <path> [flags...] — the real preflight, --ci, over the fixture checkout, with bin/ci
+# reachable only through <path>. CI_STUB_RC=1 puts a red runner on it.
+run_ci() {
+	local path=$1
+	shift
+	rm -f "$WORK/ci-argv"
+	OUT=$(env -i PATH="$path" HOME="$WORK/home" TMPDIR="$WORK" \
+		PI_SPACE_ROOT="$WORK/space-root" CI_STUB_RC="${CI_STUB_RC:-0}" \
+		CI_STUB_ARGV="$WORK/ci-argv" CI_STUB_LOG="$WORK/ci/build.log" \
+		bash "$PREFLIGHT" --cwd "$WORK/repo" "$@" 2>&1)
+	RC=$?
+}
+
+case_start "preflight --ci with a green bin/ci prints the runner's summary and passes"
+run_ci "$WORK/cistub:$WORK/bin" --ci
+[ "$RC" -eq 0 ] && pass "the check passes" || fail "the check passes" "exit $RC" "$OUT"
+out_has "ci: 12/12 runnable green, 0 skipped, 0 failed" "the pass carries the runner's own summary line"
+out_has "pass  ci" "the verdict is the ci check's, and it is a pass"
+
+case_start "preflight --ci with a red bin/ci FAILs naming the job and its log"
+CI_STUB_RC=1 run_ci "$WORK/cistub:$WORK/bin" --ci
+[ "$RC" -ne 0 ] && pass "the check refuses" || fail "the check refuses" "exit 0 over a red runner" "$OUT"
+out_has "FAIL  ci" "the FAIL is the ci check's"
+out_has "build" "the FAIL names the failing job"
+out_has "$WORK/ci/build.log" "the FAIL names the failing job's log"
+out_has "ci: 11/12 runnable green, 0 skipped, 1 failed" "the summary line is the runner's"
+
+case_start "preflight --ci passes --timeout, --pr and --body to the runner"
+printf 'body\n' >"$WORK/body-ci.md"
+run_ci "$WORK/cistub:$WORK/bin" --ci --timeout 600 --pr 7 --body "$WORK/body-ci.md"
+[ "$RC" -eq 0 ] && pass "the check passes" || fail "the check passes" "exit $RC" "$OUT"
+argv=$(cat "$WORK/ci-argv" 2>/dev/null)
+case $argv in
+*"--timeout 600"*"--pr 7"*"--body $WORK/body-ci.md"*) pass "the runner got --timeout, --pr and --body: $argv" ;;
+*) fail "the runner did not get the flags it was owed" "argv: ${argv:-<none>}" ;;
+esac
+
+case_start "a checkout with no bin/ci says ci: not run and does not fail"
+run_ci "$WORK/noci:$WORK/bin" --ci
+[ "$RC" -eq 0 ] && pass "a missing runner is not a failure" || fail "a missing runner failed the gate" "exit $RC" "$OUT"
+out_has "ci: not run — bin/ci is not in this checkout" "the one line says what is missing"
+
+case_start "a run without --ci never starts the runner"
+run_ci "$WORK/cistub:$WORK/bin" --only body
+if [ -f "$WORK/ci-argv" ]; then
+	fail "the runner was started without --ci" "argv: $(cat "$WORK/ci-argv")"
+else
+	pass "the runner was not started (no --ci, no pipeline run)"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed in %d cases\n'  "$PASS_N" "$FAIL_N" "$CASE_N"
 [ "$FAIL_N" -eq 0 ]

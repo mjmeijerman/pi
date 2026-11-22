@@ -25,7 +25,7 @@ fi
 #   delegate close <slug> --space SLUG --nothing "<why nothing landed>"   (a worker whose change never landed)
 #   delegate close <slug> --rewritten <sha> "<why the tip is another worker's, rewritten>"
 #                  (a worker whose only commit is another worker's branch, rebased)
-#   delegate finish <slug> [--cwd DIR] [--skip "<reason>"]   (publish, wipe, close — the whole tail)
+#   delegate finish <slug> [--cwd DIR] [--skip "<reason>"] [--skip ci "<reason>"]   (publish, wipe, close)
 #   delegate ask "<question>" [--json]
 #   delegate stats [--since DURATION] [--json]
 #   delegate sweep
@@ -3208,7 +3208,7 @@ fi
 # second one, and a wipe already recorded is kept rather than recorded twice.
 cmd_finish() {
 	local slug=${1:-} lookup_cwd="" skip="" skip_given="" pf="" preflight_skip="" preflight_skip_given="" pub keep_open=0
-	[ -n "$slug" ] || die 'usage: delegate finish <slug> [--cwd DIR] [--skip "<reason>"] [--skip-preflight "<reason>"] [--keep-open]'
+	[ -n "$slug" ] || die 'usage: delegate finish <slug> [--cwd DIR] [--skip "<reason>"] [--skip ci "<reason>"] [--skip-preflight "<reason>"] [--keep-open]'
 	shift || true
 	while [ "$#" -gt 0 ]; do
 		case $1 in
@@ -3219,19 +3219,28 @@ cmd_finish() {
 			shift 2
 			;;
 		--skip)
-			skip=${2:-}
-			skip_given=1
-			if [ "$#" -ge 2 ]; then shift 2; else shift 1; fi
+			# `--skip ci "<reason>"`: the deliberate bypass of the CI gate, said in one place and
+			# recorded in the decision row, so a pass nobody earned is visible in
+			# state/decisions.jsonl. Plain `--skip "<reason>"` stays the wipe skip it always was.
+			if [ "${2:-}" = ci ]; then
+				preflight_skip=${3:-}
+				preflight_skip_given=1
+				if [ "$#" -ge 3 ]; then shift 3; elif [ "$#" -ge 2 ]; then shift 2; else shift 1; fi
+			else
+				skip=${2:-}
+				skip_given=1
+				if [ "$#" -ge 2 ]; then shift 2; else shift 1; fi
+			fi
 			;;
 		--skip-preflight)
 			preflight_skip=${2:-}
 			preflight_skip_given=1
 			if [ "$#" -ge 2 ]; then shift 2; else shift 1; fi
 			;;
-		*) die "unknown option $1 — usage: delegate finish <slug> [--cwd DIR] [--skip \"<reason>\"] [--skip-preflight \"<reason>\"] [--keep-open]" ;;
+		*) die "unknown option $1 — usage: delegate finish <slug> [--cwd DIR] [--skip \"<reason>\"] [--skip ci \"<reason>\"] [--skip-preflight \"<reason>\"] [--keep-open]" ;;
 		esac
 	done
-	[ -n "$slug" ] || die 'usage: delegate finish <slug> [--cwd DIR] [--skip "<reason>"] [--skip-preflight "<reason>"] [--keep-open]'
+	[ -n "$slug" ] || die 'usage: delegate finish <slug> [--cwd DIR] [--skip "<reason>"] [--skip ci "<reason>"] [--skip-preflight "<reason>"] [--keep-open]'
 	# A skip with no reason is the one thing a skip may not be: it says the step does not apply,
 	# and only the sentence says why. Refused before the report is published, so a typo costs
 	# nothing (the wipe refuses it too; this is the cheap, first refusal).
@@ -3293,6 +3302,10 @@ cmd_finish() {
 		[ -z "$lookup_cwd" ] || pf_args+=( --cwd "$lookup_cwd" )
 		if [ "$space_git" != true ]; then
 			pf_args+=( --only syntax --only suites --only semgrep --only scrub )
+		else
+			# The pipeline itself, as the run's only check: every check above is this checkout's
+			# model of CI, and the model is what printed `preflighted` over a branch GitHub failed.
+			pf_args+=( --ci )
 		fi
 		# The output is kept as well as shown: a stopped finish hands the failing line back as the
 		# one command that puts it in the worker's own terminal, and a line nobody captured cannot be
@@ -3305,12 +3318,14 @@ cmd_finish() {
 			printf '%s: finish stopped at step 1 of 4 (preflight) for %s: nothing was pushed, the PR body was not touched, nothing was wiped, nothing was closed, and the worker is still open.\n' "$prog" "$slug" >&2
 			printf 'Fix: the FAIL line above names the check and the exact command that reproduces it — run that, fix it, commit, then run this again:\n' >&2
 			printf '  %s finish %s\n' "$BIN/delegate" "$slug" >&2
+			printf 'If the check itself is broken on this machine, record why and publish anyway:\n' >&2
+			printf '  %s finish %s --skip ci "<why the gate cannot run>"\n' "$BIN/delegate" "$slug" >&2
+			# The last line is the one a person copies: the failing line, handed to the worker that
+			# caused it. Nothing is printed after it, so `finish 2>&1 | tail -1` is always that command.
 			if [ -n "$pf_fail" ]; then
 				printf 'Or hand the failing line to the worker that caused it, in its own terminal:\n' >&2
 				printf 'fix in place: bin/delegate tell %s %s\n' "$slug" "${pf_fail@Q}" >&2
 			fi
-			printf 'If the check itself is broken on this machine, record why and publish anyway:\n' >&2
-			printf '  %s finish %s --skip-preflight "<why the gate cannot run>"\n' "$BIN/delegate" "$slug" >&2
 			return 1
 		fi
 	fi

@@ -300,6 +300,83 @@ else
 	fail 'it skipped the gate or the publisher' "$(cat "$PORTED_LOG")"
 fi
 
+# ------------------------------------------- the CI gate: finish publishes only a green one --
+# The gate `finish` runs is now `preflight --ci`, so a publish is refused when the pipeline's own
+# jobs fail here — it printed `preflighted` for a branch GitHub failed, three times in one night.
+# `<slot>` is the directory the stub programs live in, so a case can swap one out.
+CIGATE() { # <dir> — delegate + space-lib from this tree, stub preflight and publish beside them
+	mkdir -p "$1/bin"
+	cp "$DELEGATE" "$ROOT/bin/space-lib.sh" "$1/bin/"
+	cat >"$1/bin/preflight" <<'STUB'
+#!/usr/bin/env bash
+printf 'preflight %s\n' "$*" >>"$PORTED_LOG"
+if [ "${CI_PF_RC:-0}" != 0 ]; then
+	printf 'FAIL  ci (bin/ci, the pipeline jobs, run here)    2s  exit 1\n'
+	printf '      ci: 11/12 runnable green, 0 skipped, 1 failed\n'
+	printf '      ci: log: /tmp/ci/build.log\n'
+	exit 1
+fi
+printf 'preflight: 1/1 passed (0 cached, 1 ran)\n'
+exit 0
+STUB
+	cat >"$1/bin/publish" <<'STUB'
+#!/usr/bin/env bash
+printf 'publish %s\n' "$*" >>"$PORTED_LOG"
+printf 'published w1: #41 now at abc1234 (OPEN, MERGEABLE)\n'
+printf 'https://example.invalid/pr/41\n'
+exit 0
+STUB
+	chmod +x "$1/bin/"*
+}
+
+new_case 'finish runs the gate with --ci, not with a hand-picked sample of the checks'
+CI_DIR="$WORK/cigate"
+CIGATE "$CI_DIR"
+: >"$PORTED_LOG"
+run "$CI_DIR/bin/delegate" finish w1 --cwd "$PRJ" --keep-open
+if [ "$RC" -eq 0 ]; then pass 'the gated finish publishes'; else fail 'the gated finish failed' "$OUT"; fi
+if grep -q '^preflight .*--ci' "$PORTED_LOG"; then
+	pass 'the gate was run with --ci'
+else
+	fail 'the gate was run without --ci' "$(cat "$PORTED_LOG")"
+fi
+if grep -q '^publish ' "$PORTED_LOG"; then pass 'a green gate published'; else fail 'nothing was published'; fi
+
+new_case 'finish refuses to publish when the CI stub is red, and names the tell as its last line'
+: >"$PORTED_LOG"
+CI_PF_RC=1 run "$CI_DIR/bin/delegate" finish w1 --cwd "$PRJ" --keep-open
+if [ "$RC" -ne 0 ]; then pass 'the red gate stops the finish'; else fail 'finish exited 0 over a red pipeline' "$OUT"; fi
+if has 'finish stopped at step 1 of 4 (preflight)'; then
+	pass 'the refusal names step 1'
+else
+	fail 'the refusal does not name the step' "$OUT"
+fi
+if grep -q '^publish ' "$PORTED_LOG"; then fail 'it published over a red pipeline' "$(cat "$PORTED_LOG")"; else pass 'nothing was published'; fi
+last_line=$(printf '%s\n' "$OUT" | tail -n 1)
+case $last_line in
+'fix in place: bin/delegate tell w1 '*ci*) pass "the last line is the tell command: $last_line" ;;
+*) fail 'the last line is not the tell command' "last line: $last_line" ;;
+esac
+
+new_case '--skip ci "<reason>" publishes anyway and records the reason'
+: >"$PORTED_LOG"
+DECISIONS_FILE="$SPACE_DIR/state/decisions.jsonl"
+rm -f "$DECISIONS_FILE"
+run "$CI_DIR/bin/delegate" finish w1 --cwd "$PRJ" --keep-open --skip ci 'the CI runner is broken on this machine'
+if [ "$RC" -eq 0 ]; then pass 'the bypassed finish publishes'; else fail 'the bypassed finish failed' "$OUT"; fi
+if grep -q '^preflight ' "$PORTED_LOG"; then
+	fail 'it ran the gate it was told to skip' "$(cat "$PORTED_LOG")"
+else
+	pass 'the gate was skipped, not run and ignored'
+fi
+if grep -q '^publish ' "$PORTED_LOG"; then pass 'it published'; else fail 'it did not publish'; fi
+if [ -f "$DECISIONS_FILE" ] && grep -q '"command":"preflight"' "$DECISIONS_FILE" &&
+	grep -q 'the CI runner is broken on this machine' "$DECISIONS_FILE"; then
+	pass 'the reason is in state/decisions.jsonl, so the bypass is visible'
+else
+	fail 'the preflight skip and its reason were not recorded' "$(cat "$DECISIONS_FILE" 2>/dev/null)"
+fi
+
 # ------------------------------------------- verdict --
 printf '\n%s passed, %s failed\n' "$PASS_N" "$FAIL_N"
 [ "$FAIL_N" -eq 0 ]
