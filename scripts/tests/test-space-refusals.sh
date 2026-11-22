@@ -224,7 +224,7 @@ printf 'x\n' >"$NG/note.txt"
 rm -f "$(sd demo)/delegations.json"
 run "$DELEGATE" spawn ng1 --space nogit --cwd "$NG" "append one line to note.txt"
 if [ "$RC" -eq 0 ]; then pass 'the spawn succeeds'; else fail 'the spawn failed' "$OUT"; fi
-SPEC="$(sd nogit)/specs/ng1.md"
+SPEC="$(sd nogit)/specs/ng1.spawn.md"
 if grep -qi 'work directly in' "$SPEC"; then pass 'the spec says work directly in the folder'; else fail 'the spec does not say work directly in the folder'; fi
 if grep -qi 'worktree add' "$SPEC"; then fail 'the spec still asks for a worktree'; else pass 'the spec asks for no worktree'; fi
 if grep -q 'no git; the changed files' "$(sd nogit)/reports/ng1.md" || [ ! -f "$(sd nogit)/reports/ng1.md" ]; then

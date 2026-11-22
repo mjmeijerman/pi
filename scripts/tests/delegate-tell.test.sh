@@ -11,7 +11,11 @@
 #   1. a slug nothing tracks is refused, and nothing is sent;
 #   2. a working worker gets the text on its own terminal, the state word is printed, and the send
 #      is on the record in state/decisions.jsonl;
-#   3. a worker whose report is written is refused with the word `reported`, and nothing is sent;
+#   3. a worker whose report is written but whose terminal is still open is told — `land` keeps a
+#      worker alive exactly so a red check is fixed in place, and the fix has to reach a worker that
+#      has already reported;
+#   3b. a worker whose report is written and whose terminal herdr no longer lists is refused with
+#      the word `reported`, and nothing is sent;
 #   4. a tell with no text is refused with its usage;
 #   5. a record with no terminal is refused, naming that, rather than sending into nothing.
 #
@@ -42,9 +46,16 @@ mkdir -p "$HOME" "$WORK/stub" "$PI_SPACE_ROOT/state/spaces/demo/specs" \
 # Two stubs, and both are the fixture: `hc` logs the send so a case can say whether one happened,
 # and `hc ls` answers nothing, so herdr is a herdr this side cannot see and the record's own state
 # stands — which is how a record with no report reads as `working`.
+# `hc ls --all --json` reads $WORK/terminals.json when a case writes one, so a case can say what
+# herdr still runs. No file is the ambiguous answer (nothing listed), which reads as "herdr this side
+# cannot see", never as "every tab is closed".
 cat >"$WORK/stub/hc" <<STUB
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"$WORK/hc.log"
+if [ "\$1" = ls ]; then
+	if [ -f "$WORK/terminals.json" ]; then cat "$WORK/terminals.json"; else printf '{"terminals":[]}\n'; fi
+	exit 0
+fi
 exit 0
 STUB
 chmod +x "$WORK/stub/hc"
@@ -107,6 +118,9 @@ fail() {
 run() { OUT=$("$@" 2>&1); RC=$?; }
 hc_log() { [ -f "$WORK/hc.log" ] && cat "$WORK/hc.log" || printf ''; }
 clear_hc() { rm -f "$WORK/hc.log"; }
+# The reads are logged beside the sends, and a read is not a message: a case about "nothing was
+# sent" has to look past `ls`.
+hc_sends() { hc_log | grep -v '^ls ' || true; }
 clear_report() { rm -f "$REPORT"; }
 
 # ------------------------------------------------ 1. a slug nothing tracks --
@@ -149,13 +163,38 @@ else
 	fail 'no command=tell row in state/decisions.jsonl' "$(cat "$(decisions_file)" 2>/dev/null || printf '<no decisions file>')"
 fi
 
-# ------------------------------------- 3. a worker whose report is written --
-new_case 'a worker whose report is written'
+# ------------------------ 3. a worker whose report is written, tab still open --
+# The landing loop's whole point: `land` leaves a worker open after a red check, so the fix goes into
+# a terminal that outlived the report. Refusing that made `fix in place:` a command that never worked.
+new_case 'a reported worker whose terminal is still open is told'
 write_record
 cp "$WORK/finished.md" "$REPORT"
 clear_hc
+printf '{"terminals":[{"id":"t1","state":"idle"}]}\n' >"$WORK/terminals.json"
+run "$DELEGATE" tell w1 "the check is red: not ready: 1 check(s) FAILED"
+if [ "$RC" -eq 0 ]; then pass 'it exits 0'; else fail "it exited $RC" "$OUT"; fi
+case $OUT in
+reported*) pass 'it prints the state word reported first' ;;
+*) fail "it did not print 'reported' first" "$OUT" ;;
+esac
+LOG=$(hc_log)
+case $LOG in
+*t1*) pass 'the message went to the terminal the record names' ;;
+*) fail 'the terminal id is not in what was sent' "$LOG" ;;
+esac
+case $LOG in
+*"not ready: 1 check(s) FAILED"*) pass 'the failing line arrived whole' ;;
+*) fail 'the text did not arrive whole' "$LOG" ;;
+esac
+
+# --------------------- 3b. a worker whose report is written and whose tab is gone --
+new_case 'a reported worker whose terminal herdr no longer lists'
+write_record
+cp "$WORK/finished.md" "$REPORT"
+clear_hc
+printf '{"terminals":[{"id":"t9","state":"idle"}]}\n' >"$WORK/terminals.json"
 run "$DELEGATE" tell w1 "please fix it"
-if [ "$RC" -ne 0 ]; then pass "it exits $RC, not 0"; else fail 'it sent to a finished worker'; fi
+if [ "$RC" -ne 0 ]; then pass "it exits $RC, not 0"; else fail 'it sent to a closed tab'; fi
 case $OUT in
 reported*) pass 'it prints the word reported first' ;;
 *) fail "it did not print 'reported'" "$OUT" ;;
@@ -164,7 +203,8 @@ case $OUT in
 *"refusing to tell"*) pass 'it refuses in words, not silently' ;;
 *) fail 'the refusal is not named' "$OUT" ;;
 esac
-if [ -z "$(hc_log)" ]; then pass 'nothing was sent'; else fail 'it sent to a closed tab' "$(hc_log)"; fi
+if [ -z "$(hc_sends)" ]; then pass 'nothing was sent'; else fail 'it sent to a closed tab' "$(hc_sends)"; fi
+rm -f "$WORK/terminals.json"
 
 # ------------------------------------------------- 4. a tell with no text --
 new_case 'a tell with no text'

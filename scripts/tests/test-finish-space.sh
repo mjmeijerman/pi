@@ -251,6 +251,55 @@ fi
 if [ ! -s "$LEGACY_LOG" ]; then pass 'the pre-space copies were never run'; else fail 'finish ran a pre-space copy' "$(cat "$LEGACY_LOG")"; fi
 if [ ! -s "$PATH_LOG" ]; then pass 'no copy on PATH was run'; else fail 'finish ran a copy from PATH' "$(cat "$PATH_LOG")"; fi
 
+# ------------------------------------------- --keep-open stops after publish --
+# The boss's landing loop needs the worker alive after the pull request exists: a red check is fixed
+# by `delegate tell` into the worker's own terminal, and that needs a worker. --keep-open publishes
+# and stops there — no wipe, no close, and no pretending the run finished.
+new_case '--keep-open publishes and does not wipe or close'
+KEEP="$WORK/keepopen"
+mkdir -p "$KEEP/bin"
+cp "$DELEGATE" "$ROOT/bin/space-lib.sh" "$KEEP/bin/"
+cat >"$KEEP/bin/preflight" <<'STUB'
+#!/usr/bin/env bash
+printf 'preflight %s\n' "$*" >>"$PORTED_LOG"
+printf 'preflight: 7/7 passed (0 cached, 7 ran)\n'
+exit 0
+STUB
+cat >"$KEEP/bin/publish" <<'STUB'
+#!/usr/bin/env bash
+printf 'publish %s\n' "$*" >>"$PORTED_LOG"
+printf 'published w1: #41 now at abc1234 (OPEN, MERGEABLE)\n'
+printf 'https://example.invalid/pr/41\n'
+exit 0
+STUB
+chmod +x "$KEEP/bin/"*
+: >"$PORTED_LOG"
+rm -f "$PI_SPACE_ROOT/state/decisions.jsonl"
+KEEP_RECORD="$SPACE_DIR/delegations.json"
+KEEP_BEFORE=$(cksum "$KEEP_RECORD")
+run "$KEEP/bin/delegate" finish w1 --cwd "$PRJ" --keep-open
+if [ "$RC" -eq 0 ]; then pass 'the kept-open finish exits 0'; else fail 'the kept-open finish failed' "$OUT"; fi
+if has 'kept open: #41 at abc1234'; then
+	pass 'it prints the pull request and the head sha `land` waits on'
+else
+	fail 'it printed no kept-open line naming the PR and sha' "$OUT"
+fi
+if [ "$(cksum "$KEEP_RECORD")" = "$KEEP_BEFORE" ] && grep -q '"w1"' "$KEEP_RECORD"; then
+	pass 'the worker is still recorded, so it is still open'
+else
+	fail 'the kept-open finish closed the worker' "$(cat "$KEEP_RECORD")"
+fi
+if [ -f "$PI_SPACE_ROOT/state/decisions.jsonl" ] && grep -q '"command":"wipe"' "$PI_SPACE_ROOT/state/decisions.jsonl"; then
+	fail 'the kept-open finish recorded a wipe'
+else
+	pass 'no wipe was recorded'
+fi
+if grep -q '^preflight ' "$PORTED_LOG" && grep -q '^publish ' "$PORTED_LOG"; then
+	pass 'it did run the gate and the publisher'
+else
+	fail 'it skipped the gate or the publisher' "$(cat "$PORTED_LOG")"
+fi
+
 # ------------------------------------------- verdict --
 printf '\n%s passed, %s failed\n' "$PASS_N" "$FAIL_N"
 [ "$FAIL_N" -eq 0 ]

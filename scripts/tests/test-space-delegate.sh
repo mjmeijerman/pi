@@ -208,5 +208,64 @@ case $OUT in
 *) pass 'wait reads the worker record by slug' ;;
 esac
 
+# ------------------------------- a brief a person wrote at specs/<slug>.md is never overwritten --
+# The path a person writes their brief at is the obvious one, and spawn used to write its generated
+# wrapper there, one second after the brief landed: the worker booted on "Read this spec and do it"
+# pointing at itself. Three workers were spent on that stub in one night. The wrapper is now
+# specs/<slug>.spawn.md, a hand-written specs/<slug>.md is the task verbatim, and the record names it.
+BRIEF_PROJ="$WORK/briefprj"
+mkdir -p "$BRIEF_PROJ"
+printf 'x\n' >"$BRIEF_PROJ/a.txt"
+"$SPACE" new --name brief --project "$BRIEF_PROJ" >/dev/null
+BRIEF_SPEC="$PI_SPACE_ROOT/state/spaces/brief/specs/wb.md"
+BRIEF_WRAPPER="$PI_SPACE_ROOT/state/spaces/brief/specs/wb.spawn.md"
+mkdir -p "$(dirname "$BRIEF_SPEC")"
+printf '# a brief a person wrote\n\nDo the thing in a.txt, and nothing else.\n' >"$BRIEF_SPEC"
+BRIEF_SUM=$(cksum "$BRIEF_SPEC")
+
+new_case 'a hand-written spec survives spawn byte-identical'
+run "$DELEGATE" spawn wb --cwd "$BRIEF_PROJ" "write one line in a.txt"
+if [ "$RC" -eq 0 ]; then pass 'the spawn succeeds'; else fail 'the spawn failed' "$OUT"; fi
+if [ "$(cksum "$BRIEF_SPEC")" = "$BRIEF_SUM" ]; then
+	pass 'the brief is byte-identical after spawn'
+else
+	fail 'spawn rewrote the brief' "$(cat "$BRIEF_SPEC")"
+fi
+if [ -f "$BRIEF_WRAPPER" ]; then pass 'the wrapper is specs/<slug>.spawn.md'; else fail 'no wrapper at specs/<slug>.spawn.md'; fi
+if grep -qxF "Read \`$BRIEF_SPEC\` and do it." "$BRIEF_WRAPPER"; then
+	pass 'the wrapper points at the brief instead of copying it'
+else
+	fail 'the wrapper does not point at the brief' "$(sed -n '/^## Task/,/^## Rules/p' "$BRIEF_WRAPPER")"
+fi
+if grep -qF 'The line that summoned this worker was: write one line in a.txt' "$BRIEF_WRAPPER"; then
+	pass 'the summoning line is kept as context, and labelled as such'
+else
+	fail 'the summoning line was dropped' "$(sed -n '/^## Task/,/^## Rules/p' "$BRIEF_WRAPPER")"
+fi
+if grep -qF "\"spec\": \"$BRIEF_SPEC\"" "$(delegations brief)"; then
+	pass "the record's spec names the hand-written file"
+else
+	fail "the record does not name the brief as the spec" "$(cat "$(delegations brief)")"
+fi
+
+new_case 'with no hand-written spec the wrapper carries the task'
+NOPRJ="$WORK/nobriefprj"
+mkdir -p "$NOPRJ"
+printf 'x\n' >"$NOPRJ/a.txt"
+"$SPACE" new --name nobrief --project "$NOPRJ" >/dev/null
+NOPR_WRAPPER="$PI_SPACE_ROOT/state/spaces/nobrief/specs/wc.spawn.md"
+run "$DELEGATE" spawn wc --cwd "$NOPRJ" "write two lines in a.txt"
+if [ "$RC" -eq 0 ]; then pass 'the spawn succeeds'; else fail 'the spawn failed' "$OUT"; fi
+if [ -f "$NOPR_WRAPPER" ] && grep -qF 'write two lines in a.txt' "$NOPR_WRAPPER"; then
+	pass 'the wrapper carries the task text'
+else
+	fail 'the wrapper does not carry the task' "$(cat "$NOPR_WRAPPER" 2>/dev/null)"
+fi
+if grep -qF "\"spec\": \"$NOPR_WRAPPER\"" "$(delegations nobrief)"; then
+	pass 'the record names the wrapper it wrote'
+else
+	fail 'the record does not name the wrapper' "$(cat "$(delegations nobrief)")"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS_N" "$FAIL_N"
 [ "$FAIL_N" -eq 0 ]
