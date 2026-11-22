@@ -512,7 +512,7 @@ cmd_policy() {
 	fi
 }
 
-# cmd_move — point a record at another folder, and change nothing else.
+# cmd_move — point a record at another folder, and change nothing else it can keep.
 #
 # A record outlives the folder it was made in: a checkout renamed, a clone replaced, a workspace
 # retired. The move keeps `id`, `boss`, `boss_argv`, the tabs and every report — they live beside
@@ -520,6 +520,13 @@ cmd_policy() {
 # second one. The tabs that sat in the old folder follow it, because a tab with a dead cwd is a
 # tab the app cannot start; the two ways to make the record a lie are refused by name: a folder
 # that is not there, and a folder another record already claims (one folder is one space).
+#
+# `git` and `remote` are answers about the folder, not history, so the move re-derives them the way
+# `space new` does. `bin/delegate` counts a space's open pull requests with that `remote`: a
+# repository renamed leaves the record naming the old one, and GitHub's rename redirect hides it
+# until somebody registers the old name — then the gate counts pull requests in a repository this
+# space is not. One writer, here: nothing else derives `remote` at read time. Moving a space to the
+# folder it is already on is the refresh, not a refusal.
 cmd_move() {
 	local slug="" project="" json=0
 	while [ "$#" -gt 0 ]; do
@@ -551,7 +558,22 @@ cmd_move() {
 		die "$project is already the project of space '$other' — one folder is one space, so give the move another folder (bin/space show $other)"
 	done <<<"$(space_slugs)"
 	command -v node >/dev/null 2>&1 || die "node is not on PATH"
-	MOVE_SLUG=$slug MOVE_PROJECT=$project SPACES_DIR=$SPACES_DIR node -e '
+	local before before_git before_remote move_git=false move_remote="" origin_read=1
+	before=$(space_field "$slug" project)
+	before_git=$(space_field "$slug" git)
+	before_remote=$(space_field "$slug" remote)
+	# A folder that has become a repository is `git: true`, one that no longer is says false; a
+	# `--no-git` record on a folder with no `.git` lands on the same false. `git` failing is an
+	# empty answer and never a refusal — a folder with a broken `.git` still moves, and the record
+	# then says `git: true` with no remote, which is said out loud below.
+	if [ -e "$project/.git" ]; then
+		move_git=true
+		if ! move_remote=$(git -C "$project" remote get-url origin 2>/dev/null); then
+			move_remote=""
+			origin_read=0
+		fi
+	fi
+	MOVE_SLUG=$slug MOVE_PROJECT=$project MOVE_GIT=$move_git MOVE_REMOTE=$move_remote SPACES_DIR=$SPACES_DIR node -e '
 		const fs = require("fs"), path = require("path");
 		const file = path.join(process.env.SPACES_DIR, process.env.MOVE_SLUG, "space.json");
 		let r;
@@ -563,13 +585,35 @@ cmd_move() {
 		for (const t of Array.isArray(r.tabs) ? r.tabs : []) {
 			if (t && typeof t === "object" && String(t.folder || "") === before) t.folder = r.project;
 		}
+		// The two fields the folder answers, in the same write that moves `project`. No remote is
+		// no field: `space new` writes one only when there is a URL, and a stale one here is the
+		// lie this refresh exists to remove.
+		r.git = process.env.MOVE_GIT === "true";
+		const remote = String(process.env.MOVE_REMOTE || "");
+		if (remote) r.remote = remote;
+		else delete r.remote;
 		fs.writeFileSync(file, JSON.stringify(r, null, 2) + "\n");
 	' "$(space_record "$slug")" || die "could not rewrite $(space_record "$slug") — nothing changed"
 	if [ "$json" = 1 ]; then
 		cat "$(space_record "$slug")"
 		return 0
 	fi
-	say "space: $slug -> $project"
+	if [ -n "$before" ] && [ "$before" = "$project" ]; then
+		say "space: $slug is already $project"
+	else
+		say "space: $slug -> $project"
+	fi
+	# Said only when it changed: the common move stays quiet about what it found the same.
+	[ "${before_git:-false}" = "$move_git" ] || say "git: ${before_git:-false} -> $move_git"
+	if [ "$origin_read" = 0 ]; then
+		# A repository git cannot read. Said only when that is news: a move that finds exactly
+		# what the record already said stays quiet, like every other unchanged field.
+		if [ -n "$before_remote" ] || [ "${before_git:-false}" != "$move_git" ]; then
+			say "remote: - (could not read an origin in $project — the record says git: $move_git with no remote)"
+		fi
+	elif [ "${before_remote:--}" != "${move_remote:--}" ]; then
+		say "remote: ${before_remote:--} -> ${move_remote:--}"
+	fi
 	# herdr cannot move a tab, so the Boss's next command opens the same tab in the new folder, in
 	# the same space (the record's id) and with the argv the record keeps. No id recorded means no
 	# live space to aim at, and then the one command is the guard adopting the record.

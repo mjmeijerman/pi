@@ -207,6 +207,108 @@ case $OUT in
 *) pass 'no space.new call anywhere in the plan' ;;
 esac
 
+# -------------------------------------------------- derived fields refreshed --
+# A record keeps `git` and `remote`, and `bin/delegate` counts a space's open pull requests with
+# that `remote`. A renamed repository leaves the record naming the old one, and GitHub's rename
+# redirect hides it until somebody registers the old name — at which point the gate counts pull
+# requests in a repository this space is not. So the move re-reads what the folder is, the way
+# `space new` does, and says so only when the answer changed.
+
+git_remote() { # git_remote <folder> <url> — a repository with that origin
+	git -C "$1" init -q && git -C "$1" remote add origin "$2"
+}
+
+new_case 'a folder whose origin differs from the record: remote follows the folder'
+GIT_A="$WORK/git-a"
+mkdir -p "$GIT_A"
+git_remote "$GIT_A" git@github.com:mjmeijerman/retired-name.git
+run "$SPACE" move harness --project "$GIT_A"
+if [ "$RC" -eq 0 ]; then pass 'the move succeeds'; else fail 'the move failed' "$OUT"; fi
+if [ "$(field harness remote)" = git@github.com:mjmeijerman/retired-name.git ]; then
+	pass 'remote is the folder origin'
+else
+	fail 'remote does not name the folder origin' "$(field harness remote)"
+fi
+if [ "$(field harness git)" = true ]; then pass 'git is true'; else fail 'git is not true' "$(field harness git)"; fi
+case $OUT in
+*"remote: - -> git@github.com:mjmeijerman/retired-name.git"*) pass 'it prints the remote change' ;;
+*) fail 'the remote change is not printed' "$OUT" ;;
+esac
+case $OUT in
+*"git: false -> true"*) pass 'it prints the git change' ;;
+*) fail 'the git change is not printed' "$OUT" ;;
+esac
+
+new_case 'a git: false record moved onto a repository becomes git: true'
+mkdir -p "$WORK/plain"
+run "$SPACE" new --name plain --project "$WORK/plain"
+if [ "$(field plain git)" = false ]; then pass 'the fixture starts git: false'; else fail 'the fixture is not git: false' "$(field plain git)"; fi
+GIT_B="$WORK/git-b"
+mkdir -p "$GIT_B"
+git_remote "$GIT_B" git@github.com:mjmeijerman/pi.git
+run "$SPACE" move plain --project "$GIT_B"
+if [ "$RC" -eq 0 ]; then pass 'the move succeeds'; else fail 'the move failed' "$OUT"; fi
+if [ "$(field plain git)" = true ]; then pass 'git becomes true'; else fail 'git stayed false' "$(field plain git)"; fi
+if [ "$(field plain remote)" = git@github.com:mjmeijerman/pi.git ]; then
+	pass 'remote is the folder origin'
+else
+	fail 'remote does not name the folder origin' "$(field plain remote)"
+fi
+case $OUT in
+*"git: false -> true"*) pass 'it prints the git change' ;;
+*) fail 'the git change is not printed' "$OUT" ;;
+esac
+
+new_case 'a record moved onto a folder with no .git loses git and its remote'
+NONGIT="$WORK/no-git"
+mkdir -p "$NONGIT"
+run "$SPACE" move harness --project "$NONGIT"
+if [ "$RC" -eq 0 ]; then pass 'the move succeeds'; else fail 'the move failed' "$OUT"; fi
+if [ "$(field harness git)" = false ]; then pass 'git becomes false'; else fail 'git stayed true' "$(field harness git)"; fi
+if [ "$(field harness remote)" = "" ]; then pass 'no remote is recorded'; else fail 'the old remote is still there' "$(field harness remote)"; fi
+if grep -q 'retired-name' "$(record harness)"; then fail 'the record still names the old repository' "$(cat "$(record harness)")"; else pass 'the record names no repository'; fi
+case $OUT in
+*"git: true -> false"*) pass 'it prints the git change' ;;
+*) fail 'the git change is not printed' "$OUT" ;;
+esac
+
+new_case 'a broken .git still moves, and says it could not read an origin'
+BROKEN="$WORK/broken-git"
+mkdir -p "$BROKEN/.git"
+printf 'nope\n' >"$BROKEN/.git/HEAD"
+run "$SPACE" move harness --project "$BROKEN"
+if [ "$RC" -eq 0 ]; then pass 'the move succeeds'; else fail 'a broken .git refused the move' "$OUT"; fi
+if [ "$(field harness project)" = "$(cd -- "$BROKEN" && pwd -P)" ]; then pass 'project is the new folder'; else fail 'project was not rewritten' "$(field harness project)"; fi
+if [ "$(field harness git)" = true ]; then pass 'git is true'; else fail 'git is not true' "$(field harness git)"; fi
+if [ "$(field harness remote)" = "" ]; then pass 'no remote is recorded'; else fail 'a remote was recorded from a broken .git' "$(field harness remote)"; fi
+case $OUT in
+*"could not read an origin"*) pass 'it prints that it could not read an origin' ;;
+*) fail 'the unreadable origin is not printed' "$OUT" ;;
+esac
+
+new_case 'moving to the folder it is already on is the refresh'
+BEFORE_ID=$(field harness id)
+BEFORE_TABS=$(node -e 'process.stdout.write(JSON.stringify(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).tabs))' "$(record harness)")
+cp "$(record harness)" "$WORK/already-before.json"
+run "$SPACE" move harness --project "$BROKEN"
+if [ "$RC" -eq 0 ]; then pass 'it succeeds'; else fail 'it failed' "$OUT"; fi
+case $OUT in
+*"space: harness is already $BROKEN"*) pass 'it says the space is already there' ;;
+*) fail 'it does not say the space is already there' "$OUT" ;;
+esac
+case $OUT in
+*"space: harness -> "*) fail 'it prints a move that did not happen' "$OUT" ;;
+*) pass 'it prints no move arrow' ;;
+esac
+case $OUT in
+*"git:"* | *"remote:"*) fail 'it speaks when nothing changed' "$OUT" ;;
+*) pass 'it is silent about unchanged derived fields' ;;
+esac
+if [ "$(field harness id)" = "$BEFORE_ID" ]; then pass 'id is kept'; else fail 'the id changed' "$(field harness id)"; fi
+AFTER_TABS=$(node -e 'process.stdout.write(JSON.stringify(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).tabs))' "$(record harness)")
+if [ "$AFTER_TABS" = "$BEFORE_TABS" ]; then pass 'tabs are byte-identical'; else fail "tabs changed: $BEFORE_TABS -> $AFTER_TABS"; fi
+if cmp -s "$WORK/already-before.json" "$(record harness)"; then pass 'the record is byte-identical'; else fail 'the record was rewritten' "$(diff "$WORK/already-before.json" "$(record harness)")"; fi
+
 printf '\n'
 if [ "$FAIL_N" -eq 0 ]; then
 	printf 'all %d checks passed\n' "$PASS_N"
