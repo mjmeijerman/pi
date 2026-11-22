@@ -65,6 +65,11 @@ in a reply, and judge each one. One review claimed `bin/pr-ready` did not exist 
 tree; it does — a false finding is rebutted, not obeyed. A finding left open is not
 green.
 
+The local gate is the pipeline, not a sample of it: `bin/preflight --ci` runs `bin/ci`, which runs
+every job `gh pr checks` prints — in parallel, so it costs the slowest job. `delegate finish` refuses
+to publish while any of them is red. Jobs that cannot run here (`install-matrix`'s Windows and macOS
+runners, `prose-review`'s model call) are reported `skipped` with the reason and never counted green.
+
 The loop, in that order: `bin/delegate wait <slug> --forever` until the report exists,
 `bin/delegate finish <slug>` to publish, `bin/pr-ready <n> --sha <sha> --wait` until the
 rollup is green, `gh pr view <n> --json mergeable` until it says MERGEABLE, then the

@@ -2,6 +2,7 @@
 # preflight — the checks CI would run, run here first, on the branch about to be published.
 #
 #   bin/preflight [--cwd DIR] [--slug SLUG] [--space SLUG] [--only NAME]... [--list] [--fresh] [BRANCH]
+#   bin/preflight --ci [--timeout SECONDS] [--pr N] [--body FILE]   bin/ci as the run's only check
 #
 # The space is where state lives: `--space <slug>` names the space this run belongs to, else it is
 # the space whose project contains --cwd (or the current directory), and a folder no space claims
@@ -71,6 +72,17 @@
 #             not one) and the gate half still runs and still blocks; no pr-check target is a named
 #             skip too
 #
+#   ci        `bin/ci`, the pipeline's own jobs, run here — the flag `--ci` makes it the run's
+#             ONLY check (never an extra one beside the others: the pipeline already holds them),
+#             and it runs in the tree the changed files are read from ($PF_READ), passing
+#             --timeout/--pr/--body through when preflight was given them. It prints the runner's
+#             own summary line as `ci: N/N runnable green, S skipped, F failed`, and a red run is a
+#             FAIL naming the failing job and its log. `delegate finish` passes --ci by default,
+#             which is the whole point: it printed `preflighted` for a branch GitHub failed, three
+#             times in one night. A checkout with no bin/ci (a project, not the harness) says
+#             `ci: not run — bin/ci is not in this checkout` and does not fail: a missing runner is
+#             not a green pipeline, it is a fact this checkout states
+#
 #   mutation  the CI job's own scope, opt-in: `bash scripts/mutate-changed.sh`, which derives the
 #             added line ranges of agent/extensions/**/*.ts from the branch's diff and leaves
 #             stryker to break at 100 on what the branch introduced. The whole-file run is 20+
@@ -93,7 +105,8 @@
 # Output is plain and meant to be pasted: one line per check, verdict, name, elapsed, detail; the
 # detail under a failing check; then a summary. No colour, no progress bars.
 #
-#   bin/preflight --list                      the eight check names, nothing run
+#   bin/preflight --list                      the check names, nothing run
+#   bin/preflight --ci --slug w1              the CI pipeline's jobs, here, and nothing else
 #   bin/preflight --only semgrep feat/x       one check, on that branch
 #   bin/preflight --only mutation feat/x      the CI job's changed-line stryker run, here
 #   bin/preflight --slug w1                   the branch and body of worker w1
@@ -269,7 +282,13 @@ pf_report_path() {
 # minutes ago can be behind now — the one failure the behind check exists for. A remembered pass
 # would be a pass by staleness, which is the thing a cache must never produce.
 pf_fresh_always() {
-	case $1 in behind) return 0 ;; esac
+	case $1 in
+	behind) return 0 ;;
+	# A remembered pipeline verdict is a remembered pass over a tree that has since moved, and an
+	# untracked change (a runner rewritten in place) does not move the tree hash. The whole point
+	# of this check is the verdict at the moment of the push, so it is never a file read.
+	ci) return 0 ;;
+	esac
 	return 1
 }
 
@@ -332,7 +351,7 @@ pf_receipt_write() {
 
 # --- the checks, in the order they run ---------------------------------------------------------
 
-preflight_ids=(behind syntax suites harness offline semgrep scrub body mutation)
+preflight_ids=(behind syntax suites harness offline semgrep scrub body mutation ci)
 preflight_names=(
 	"behind (did a touched path also move on trunk?)"
 	"syntax (bash -n, node --check, shellcheck)"
@@ -343,11 +362,13 @@ preflight_names=(
 	"scrub (env -i, the runner does not have your PATH)"
 	"body (docs budget and the body gate)"
 	"mutation (stryker on the changed extensions lines)"
+	"ci (bin/ci, the pipeline's own jobs, run here)"
 )
-# `preflight_ids` is also the default set, and it contains `mutation`: the default run selects it
-# but pf_applies refuses it unless the caller asked (`--only mutation`), so a publish pays nothing
-# for it while still seeing it named in the output. An opt-in check that is simply absent is a
-# check nobody remembers exists.
+# The default set. `mutation` is in it but pf_applies refuses it unless the caller asked (`--only
+# mutation`), so a publish pays nothing for it while still seeing it named in the output — an
+# opt-in check that is simply absent is a check nobody remembers exists. `ci` is NOT in it: `--ci`
+# runs it as the run's only check, so a plain preflight's output and verdicts are unchanged.
+preflight_default_ids=(behind syntax suites harness offline semgrep scrub body mutation)
 
 name_of() {
 	local i
@@ -454,6 +475,9 @@ pf_applies() {
 	offline) [ -f "$PF_CWD/scripts/ci-offline.sh" ] && pf_offline_scope ;;
 	body) return 0 ;;
 	behind) return 0 ;;
+	# Only when asked for: `--ci` (or `--only ci`) selects it and nothing else, so a plain run
+	# never pays for the pipeline twice.
+	ci) [ "${PF_CI_REQUESTED:-0}" = 1 ] ;;
 	# Opt-in, and then only where the diff holds a mutant host and the checkout holds a way to run
 	# one. Everything else is a skip with a reason, never a pass: a mutation gate that passes because
 	# it could not run is one thing worse than no mutation gate.
@@ -506,6 +530,7 @@ pf_skip_reason() {
 			printf 'no changed file under bin/ or scripts/: the offline suite reads neither'
 		fi
 		;;
+	ci) printf 'not requested (--ci) — bin/ci runs the jobs the pipeline itself runs, here, as the only check' ;;
 	mutation)
 		if [ "${PF_MUTATION_REQUESTED:-0}" != 1 ]; then
 			printf 'not requested (--only mutation) — the CI job mutates the changed lines and breaks at 100'
@@ -1041,6 +1066,60 @@ pf_check_offline() {
 	fi
 	printf 'the full run: bash scripts/ci-offline.sh (transcript: %s)\n' "$out"
 	return 1
+}
+
+# --- check: ci, the pipeline's own jobs ---------------------------------------------------------
+#
+# Why it exists: every check above is a good guess at what CI will say, and a guess is what shipped
+# a branch GitHub refused — `delegate finish` printed `preflighted` three times in one night over a
+# pull request that was red ten minutes later. `bin/ci` maps GitHub's jobs to local commands and
+# runs them, so this check is not a model of the pipeline, it is the pipeline's own list. `--ci`
+# makes it the run's only check: the other checks are the fallback for a checkout where no runner
+# exists, and running both is paying twice for one answer.
+#
+# The verdict is the runner's exit code, never a summary parsed out of its text; the summary line is
+# printed because it is what a person reads, and a red run is a FAIL that names the failing job and
+# the log it left. A checkout with no bin/ci is a project, not the harness: it says so in one line
+# and does not fail, because "this checkout has no runner" is a fact, and a gate that fails on it
+# would be bypassed on the first project it met.
+pf_check_ci() {
+	local read=${PF_READ:-$PF_CWD} runner="" out rc=0 summary failing log
+	printf 'tree: %s\n' "$read"
+	for runner in "$read/bin/ci" "$PF_CWD/bin/ci"; do
+		[ -n "$runner" ] && [ -f "$runner" ] && break
+		runner=""
+	done
+	if [ -z "$runner" ]; then
+		runner=$(command -v ci 2>/dev/null || true)
+	fi
+	if [ -z "$runner" ]; then
+		printf 'ci: not run — bin/ci is not in this checkout\n'
+		return 0
+	fi
+	local -a args=()
+	[ -z "${PF_CI_TIMEOUT:-}" ] || args+=(--timeout "$PF_CI_TIMEOUT")
+	[ -z "${PF_CI_PR:-}" ] || args+=(--pr "$PF_CI_PR")
+	[ -z "${PF_CI_BODY:-}" ] || args+=(--body "$PF_CI_BODY")
+	out=$( (cd "$read" && bash "$runner" "${args[@]}") 2>&1) || rc=$?
+	summary=$(printf '%s\n' "$out" | grep -aE '^ci: ' | tail -n 1)
+	# The transcript as the runner wrote it, minus the summary line this function prints itself in
+	# one place: a reader of a red needs the failing job's own words, and the log path is in them.
+	printf '%s\n' "$out" | grep -av '^ci: ' | sed '/^$/d'
+	if [ -z "$summary" ]; then
+		printf 'ci: FAILED — the runner printed no summary line (ci: N/N runnable green, S skipped, F failed)\n'
+		printf 'the runner: %s\n' "$runner"
+		[ "$rc" -ne 0 ] || rc=1
+		return "$rc"
+	fi
+	printf '%s\n' "$summary"
+	[ "$rc" -eq 0 ] && return 0
+	failing=$(printf '%s\n' "$out" | grep -av '^ci: ' | grep -aE 'FAIL|fail|failed' | head -n 1)
+	[ -n "$failing" ] || failing=$(printf '%s\n' "$out" | grep -av '^ci: ' | tail -n 1)
+	log=$(printf '%s\n' "$out" | grep -aoE '/[^[:space:]\"'"'"']+\.(log|txt)' | tail -n 1)
+	printf 'ci: FAILED — %s\n' "${failing:-a job failed and the runner named none}"
+	[ -z "$log" ] || printf 'ci: log: %s\n' "$log"
+	printf 'the runner: %s%s\n' "$runner" "${args[*]:+ ${args[*]}}"
+	return "$rc"
 }
 
 # --- check: semgrep, on the changed files only --------------------------------------------------
@@ -1658,7 +1737,7 @@ pf_check_mutation() {
 
 usage() {
 	local id
-	printf 'usage: %s [--cwd DIR] [--slug SLUG] [--space SLUG] [--only NAME]... [--list] [--fresh] [BRANCH]\n' "$prog" >&2
+	printf 'usage: %s [--cwd DIR] [--slug SLUG] [--space SLUG] [--only NAME]... [--ci [--timeout SECONDS] [--pr N] [--body FILE]] [--list] [--fresh] [BRANCH]\n' "$prog" >&2
 	# The same words `--list` prints, so help and the list cannot drift apart: what a check is
 	# called is the only place its verdict is explained before it runs.
 	printf 'checks:\n' >&2
@@ -1706,12 +1785,17 @@ pf_branch_for_slug() {
 }
 
 preflight_main() {
-	local cwd="" slug="" space="" branch="" selected=() id out rc fails=0 ran=0 start end ms part fresh=0
+	local cwd="" slug="" space="" branch="" selected=() id out rc fails=0 ran=0 start end ms part fresh=0 ci_only=0
 	local -a parts=()
 	local total_start total_end
 	# The one opt-in check: set when `--only` really names it, so the default run prints its skip
 	# line without paying for the run.
 	PF_MUTATION_REQUESTED=0
+	# `--ci`: bin/ci as the run's only check, carrying the flags preflight was given for it.
+	PF_CI_REQUESTED=0
+	PF_CI_TIMEOUT=""
+	PF_CI_PR=""
+	PF_CI_BODY=""
 	while [ "$#" -gt 0 ]; do
 		case $1 in
 		--cwd)
@@ -1750,6 +1834,7 @@ preflight_main() {
 				id=$(resolve "$part") || die "no such check: $part (bin/preflight --list names them)"
 				selected+=("$id")
 				[ "$id" != mutation ] || PF_MUTATION_REQUESTED=1
+				[ "$id" != ci ] || { PF_CI_REQUESTED=1; ci_only=1; }
 			done
 			shift 2
 			;;
@@ -1760,9 +1845,29 @@ preflight_main() {
 				id=$(resolve "$part") || die "no such check: $part (bin/preflight --list names them)"
 				selected+=("$id")
 				[ "$id" != mutation ] || PF_MUTATION_REQUESTED=1
+				[ "$id" != ci ] || { PF_CI_REQUESTED=1; ci_only=1; }
 			done
 			shift
 			;;
+		--ci) PF_CI_REQUESTED=1; ci_only=1; shift ;;
+		--timeout)
+			[ "$#" -ge 2 ] && [ -n "$2" ] || die "--timeout needs seconds"
+			PF_CI_TIMEOUT=$2
+			shift 2
+			;;
+		--timeout=*) PF_CI_TIMEOUT=${1#--timeout=}; shift ;;
+		--pr)
+			[ "$#" -ge 2 ] && [ -n "$2" ] || die "--pr needs a pull request number"
+			PF_CI_PR=$2
+			shift 2
+			;;
+		--pr=*) PF_CI_PR=${1#--pr=}; shift ;;
+		--body)
+			[ "$#" -ge 2 ] && [ -n "$2" ] || die "--body needs a file"
+			PF_CI_BODY=$2
+			shift 2
+			;;
+		--body=*) PF_CI_BODY=${1#--body=}; shift ;;
 		--list)
 			for id in "${preflight_ids[@]}"; do say "$id	$(name_of "$id")"; done
 			return 0
@@ -1835,7 +1940,18 @@ preflight_main() {
 	fi
 
 	if [ "${#selected[@]}" -eq 0 ]; then
-		selected=("${preflight_ids[@]}")
+		selected=("${preflight_default_ids[@]}")
+	fi
+
+	if [ "$ci_only" = 1 ]; then
+		selected=(ci)
+	fi
+	# A flag that only feeds bin/ci is refused where it would be silently ignored: a --pr that no
+	# runner ever saw is a wrong verdict that looks like a checked one.
+	if [ "$ci_only" != 1 ] && [ -z "$PF_CI_TIMEOUT$PF_CI_PR$PF_CI_BODY" ]; then
+		:
+	elif [ "$ci_only" != 1 ]; then
+		die "--timeout/--pr/--body are bin/ci's flags: they mean nothing without --ci"
 	fi
 
 	say "preflight: $branch in $cwd"
