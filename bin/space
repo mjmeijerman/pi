@@ -6,6 +6,7 @@
 #   bin/space new              (on a terminal: ask for the name and the folder, with defaults)
 #   bin/space list [--json]
 #   bin/space show <slug>
+#   bin/space policy <slug> [--max-open-prs <n|unbounded>] [--json]
 #   bin/space move <slug> --project PATH [--json]
 #   bin/space forget <slug> [--yes]
 #
@@ -26,6 +27,14 @@
 # The project's AGENTS.md gets one block between two markers (agent/space-rules.md): one project
 # per space, another project's work is answered with the command to run in its space, one worker
 # at a time, merged before the next. Replacing means a re-run never grows a second copy.
+#
+# `max_open_prs` is how many of the space's pull requests may be open at once: an integer of 1 or
+# more, or `unbounded`. Absent means 1, which is the merged-before-the-next rule every record was
+# made under, so a space that wants several open at once says so in its own record rather than
+# every space loosening the rule. `bin/space policy` reads it and writes only that field.
+#
+# `forget` drops the record and nothing else, so it asks for the space's name typed back after
+# saying what goes and what stays: a `y` is an answer to a question nobody read.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
@@ -55,8 +64,14 @@ usage: bin/space new [<slug>] [--project PATH | --here | --clone URL] [--kind ha
        bare: an --argv naming pi, pisandbox or pi-sandboxed is refused.
        bin/space list [--json]
        bin/space show <slug>
+       bin/space policy <slug> [--max-open-prs <n|unbounded>] [--json]
        bin/space move <slug> --project PATH [--json]
        bin/space forget <slug> [--yes]
+
+bin/space policy prints a space's max_open_prs (1 (default) when the record has none; an
+integer of 1 or more, or unbounded) and, with --max-open-prs, writes that field and nothing
+else. bin/space forget asks for the space's name typed back before it drops the record; --yes
+answers it up front for a script and prints the same explanation to stderr.
 EOF
 	exit 1
 }
@@ -353,8 +368,68 @@ cmd_show() {
 	# Read through `space_kind` rather than printed from the record: a record written before the
 	# field existed is a project space, and this is the same answer the learner gets.
 	printf 'kind: %s\n' "$(space_kind "$slug")"
+	if [ -n "$(space_field "$slug" max_open_prs)" ]; then
+		printf 'max_open_prs: %s\n' "$(space_max_open_prs "$slug")"
+	else
+		printf 'max_open_prs: %s (default)\n' "$(space_max_open_prs "$slug")"
+	fi
 	printf 'specs: %s\n' "$(space_specs "$slug")"
 	printf 'reports: %s\n' "$(space_reports "$slug")"
+}
+
+# cmd_policy — `max_open_prs`, read and written in one place.
+#
+# The rule a space keeps is `merged before the next`, and the record is where a space says it keeps
+# a different one: a repo other people work in, a prototyping repo. No flag prints the effective
+# value and says `1 (default)` when the field is absent, so a person reads what the gate will do
+# rather than what the file says. With `--max-open-prs` only that field is written, through the
+# record's temp-file-plus-rename path: every other field, and every other space's record, is
+# untouched. A value that is neither an integer of 1 or more nor `unbounded` is refused naming both
+# accepted forms — the gate is not a place for a guess at what `0` meant.
+cmd_policy() {
+	local slug="" value="" setter=0 json=0 recorded effective
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--max-open-prs) value=${2:-}; setter=1; shift 2 ;;
+		--json) json=1; shift ;;
+		-h | --help) usage ;;
+		-*) die "unknown option $1" ;;
+		*)
+			[ -z "$slug" ] || die "policy takes one space name, and '$1' is a second one"
+			slug=$1
+			shift
+			;;
+		esac
+	done
+	[ -n "$slug" ] || usage
+	space_exists "$slug" || die "no such space: $slug — bin/space list"
+	if [ "$setter" = 1 ]; then
+		if [ "$value" != unbounded ] && ! printf '%s' "$value" | grep -Eq '^[1-9][0-9]*$'; then
+			die "--max-open-prs takes an integer of 1 or more, or unbounded; '$value' is neither.
+  bin/space policy $slug --max-open-prs 3
+  bin/space policy $slug --max-open-prs unbounded"
+		fi
+		space_set_field "$slug" max_open_prs "$value" ||
+			die "could not rewrite $(space_record "$slug") — nothing changed"
+	fi
+	recorded=$(space_field "$slug" max_open_prs)
+	effective=$(space_max_open_prs "$slug")
+	if [ "$json" = 1 ]; then
+		SPACE=$slug VALUE=$effective DEFAULTED=$([ -n "$recorded" ] && printf false || printf true) node -e '
+			const v = process.env.VALUE;
+			process.stdout.write(JSON.stringify({
+				space: process.env.SPACE,
+				max_open_prs: v === "unbounded" ? "unbounded" : Number(v),
+				default: process.env.DEFAULTED === "true",
+			}) + "\n");
+		'
+		return 0
+	fi
+	if [ -n "$recorded" ]; then
+		say "max_open_prs: $effective"
+	else
+		say "max_open_prs: $effective (default)"
+	fi
 }
 
 # cmd_move — point a record at another folder, and change nothing else.
@@ -439,10 +514,13 @@ cmd_move() {
 }
 
 # cmd_forget — drop the record, and nothing else. The record is what the guard reopens from, so
-# dropping it is a decision: on a terminal it is asked, and only `y`/`yes` does it. A script has
-# nobody to answer, so it passes `--yes` — the question is not skipped, it is answered up front.
+# dropping it is a decision, and a `y` answered to a question nobody read is not a decision: the
+# question says exactly what goes and what stays, and only the space's name typed back does it.
+# A script has nobody to answer, so it passes `--yes` — the question is not skipped, it is
+# answered up front, and the same explanation goes to stderr so the destructive path is never
+# silent. Anything but the exact name (trimmed) keeps the space and says so.
 cmd_forget() {
-	local slug="" yes=0 answer
+	local slug="" yes=0 answer project explanation
 	while [ "$#" -gt 0 ]; do
 		case $1 in
 		--yes | -y) yes=1; shift ;;
@@ -456,19 +534,25 @@ cmd_forget() {
 	done
 	[ -n "$slug" ] || usage
 	space_exists "$slug" || die "no such space: $slug — bin/space list"
+	if [ "$yes" = 0 ] && [ ! -t 0 ]; then
+		die "forget $slug needs an answer, and nothing here can give one — bin/space forget $slug --yes"
+	fi
+	project=$(space_field "$slug" project)
+	[ -n "$project" ] || project="(no project folder recorded)"
+	explanation="$slug is a durable space: $project
+  dropped: its record ($(space_record "$slug")), its tabs, and the guard reopening it at login
+  kept:    reports/, specs/, delegations.json and cache/ in $(space_dir "$slug") on this disk"
+	printf '%s\n' "$explanation" >&2
 	if [ "$yes" = 0 ]; then
-		if [ ! -t 0 ]; then
-			die "forget $slug needs an answer, and nothing here can give one — bin/space forget $slug --yes"
-		fi
-		printf '%s: drop its record (reports, specs, delegations stay on disk)? [y/N]: ' "$slug" >&2
+		printf 'Type the space name to drop its record, or press Enter to keep it: ' >&2
 		IFS= read -r answer || answer=""
-		case $answer in
-		y | Y | yes | YES | Yes) ;;
-		*)
+		# Trimmed both ends: a name pasted with a trailing space is the same name.
+		answer=${answer#"${answer%%[![:space:]]*}"}
+		answer=${answer%"${answer##*[![:space:]]}"}
+		if [ "$answer" != "$slug" ]; then
 			say "$slug: kept — nothing was dropped"
 			return 1
-			;;
-		esac
+		fi
 	fi
 	# The record is dropped; the space itself is not closed, and the folder it was is said out
 	# loud rather than deleted. Forgetting is about the list, not about the person's work.
@@ -480,6 +564,7 @@ case ${1:-} in
 new) shift; cmd_new "$@" ;;
 list | ls) shift; cmd_list "$@" ;;
 show) shift; cmd_show "$@" ;;
+policy) shift; cmd_policy "$@" ;;
 move) shift; cmd_move "$@" ;;
 forget) shift; cmd_forget "$@" ;;
 -h | --help | help) usage ;;

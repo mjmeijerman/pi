@@ -58,15 +58,41 @@ space_field() {
 
 # space_set_field <slug> <field> <value> — write one field into a record and leave every other
 # field as it was. The record is the whole document (`bin/space show` prints it), so a migration
-# that rewrote it would lose what this version does not know about.
+# that rewrote it would lose what this version does not know about. Written to a temp file beside
+# it and renamed, so a reader at the same moment sees the old record or the new one, never half
+# of either. A numeric value is written as a number, never as a string: the field types are read
+# back by `space_max_open_prs`, and "3" and 3 must not become two answers.
 space_set_field() {
-	node -e '
-		const fs = require("fs");
+	SPACE_FILE=$(space_record "${1:-}") SPACE_KEY=${2:-} SPACE_VALUE=${3:-} node -e '
+		const fs = require("fs"), path = require("path");
+		const file = process.env.SPACE_FILE;
 		let j = {};
-		try { j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
-		j[process.argv[2]] = process.argv[3];
-		fs.writeFileSync(process.argv[1], JSON.stringify(j, null, 2) + "\n");
-	' "$(space_record "${1:-}")" "${2:-}" "${3:-}"
+		try { j = JSON.parse(fs.readFileSync(file, "utf8")); } catch { process.exit(1); }
+		const raw = process.env.SPACE_VALUE;
+		j[process.env.SPACE_KEY] = /^[0-9]+$/.test(raw) ? Number(raw) : raw;
+		const tmp = path.join(path.dirname(file), ".space.json.tmp." + process.pid);
+		fs.writeFileSync(tmp, JSON.stringify(j, null, 2) + "\n");
+		fs.renameSync(tmp, file);
+	'
+}
+
+# space_max_open_prs <slug> — how many of this space's pull requests may be open at once, as the
+# record says it: a positive integer, or `unbounded`. Absent reads as `1`, which is the rule every
+# record written before the field existed was made under; a record hand-edited to something that is
+# neither is read the same way, because a typo must not quietly raise the gate it was meant to set.
+space_max_open_prs() {
+	local v
+	v=$(space_field "${1:-}" max_open_prs)
+	case $v in
+	unbounded) printf 'unbounded' ;;
+	*)
+		if printf '%s' "$v" | grep -Eq '^[1-9][0-9]*$'; then
+			printf '%s' "$v"
+		else
+			printf '1'
+		fi
+		;;
+	esac
 }
 
 # space_kind <slug> — what learning in this space may change: `harness` or `project`.

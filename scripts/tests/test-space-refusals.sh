@@ -154,12 +154,12 @@ gh_set '[{"number":7,"headRefName":"feat/elsewhere","updatedAt":"2026-11-19T10:0
 run "$DELEGATE" spawn gw1 --space gitdemo --cwd "$GITPROJ" "write one line"
 if [ "$RC" -ne 0 ]; then pass 'the spawn is refused'; else fail 'a spawn went ahead with an open PR' "$OUT"; fi
 case $OUT in
-*"PR #7"*) pass 'the refusal names the pull request' ;;
+*"1 open pull requests (#7)"*) pass 'the refusal names the pull request' ;;
 *) fail 'the refusal does not name the PR' "$OUT"; ;;
 esac
 case $OUT in
-*"asking the person to merge"*) pass 'the refusal says what the next move is' ;;
-*) fail 'the refusal does not say to ask the person' "$OUT" ;;
+*"Merge one, raise the limit, or continue one of them"*) pass 'the refusal says what the next move is' ;;
+*) fail 'the refusal does not name the ways out' "$OUT" ;;
 esac
 if grep -q 'pr list' "$GH_LOG"; then pass 'it asked gh for the open PRs'; else fail 'gh was never asked'; fi
 
@@ -180,8 +180,8 @@ gh_set '[{"number":9,"headRefName":"feat/trailer","updatedAt":"2020-01-01T00:00:
 run "$DELEGATE" spawn gw2 --space gitdemo --cwd "$GITPROJ" "write two lines"
 if [ "$RC" -ne 0 ]; then pass 'the spawn is refused'; else fail 'the trailer did not block the spawn' "$OUT"; fi
 case $OUT in
-*"PR #9"*"feat/trailer"*) pass 'the refusal names PR #9 on that branch' ;;
-*) fail 'the refusal does not name the PR and branch' "$OUT" ;;
+*"open pull requests (#9)"*) pass 'the refusal names PR #9, found by its trailer' ;;
+*) fail 'the refusal does not name PR #9' "$OUT" ;;
 esac
 
 new_case 'a pull request another space owns'
@@ -200,6 +200,111 @@ if [ "$RC" -eq 0 ]; then
 else
 	fail 'a PR that belongs to someone else blocked this space' "$OUT"
 fi
+
+# --------------------------------------------- more than one open PR, by policy --
+# Two counted pull requests: #7 through the 30-day fallback, #12 through a real trailer.
+(
+	cd "$GITPROJ" || exit 1
+	git -c core.hooksPath=/dev/null -c user.email=t@e -c user.name=t checkout -q -b feat/two
+	git -c core.hooksPath=/dev/null -c user.email=t@e -c user.name=t commit -q --allow-empty \
+		-m 'feat: a second pull request' -m 'Agent-Slug: gw1'
+	SHA=$(git rev-parse HEAD)
+	git checkout -q -
+	git update-ref refs/remotes/origin/feat/two "$SHA"
+)
+TWO_PRS='[{"number":7,"headRefName":"feat/elsewhere","updatedAt":"2026-11-19T10:00:00Z","url":"https://example.invalid/pull/7"},
+          {"number":12,"headRefName":"feat/two","updatedAt":"2020-01-01T00:00:00Z","url":"https://example.invalid/pull/12"}]'
+
+new_case 'two open pull requests against the default limit of one'
+gh_set "$TWO_PRS"
+run "$DELEGATE" spawn gx1 --space gitdemo --cwd "$GITPROJ" "write four lines"
+if [ "$RC" -ne 0 ]; then pass 'the spawn is refused'; else fail 'a spawn started beside two open PRs' "$OUT"; fi
+case $OUT in
+*"has 2 open pull requests (#7, #12)"*) pass 'the refusal counts both and names both numbers' ;;
+*) fail 'the refusal does not count and name both' "$OUT" ;;
+esac
+case $OUT in
+*"max_open_prs is 1"*) pass 'the refusal names the limit' ;;
+*) fail 'the refusal does not name the limit' "$OUT" ;;
+esac
+case $OUT in
+*"bin/space policy gitdemo --max-open-prs 2"*) pass 'the refusal names the way to raise the limit' ;;
+*) fail 'the refusal does not name bin/space policy' "$OUT" ;;
+esac
+case $OUT in
+*"--updates 7"*) pass 'the refusal names the way to continue one' ;;
+*) fail 'the refusal does not name --updates' "$OUT" ;;
+esac
+
+new_case 'two open pull requests against a limit of two'
+run "$SPACE" policy gitdemo --max-open-prs 2
+if [ "$RC" -eq 0 ]; then pass 'the limit is raised'; else fail 'space policy failed' "$OUT"; fi
+run "$DELEGATE" spawn gx2 --space gitdemo --cwd "$GITPROJ" "write five lines"
+if [ "$RC" -ne 0 ]; then pass 'the spawn is refused at exactly the limit'; else fail 'the count reached the limit and was allowed' "$OUT"; fi
+case $OUT in
+*"has 2 open pull requests"*"max_open_prs is 2"*) pass 'the refusal names the count and the raised limit' ;;
+*) fail 'the refusal does not name the count and the limit' "$OUT" ;;
+esac
+# One of them merged: the same space, same limit, one open PR — the spawn goes ahead.
+gh_set '[{"number":7,"headRefName":"feat/elsewhere","updatedAt":"2026-11-19T10:00:00Z","url":"https://example.invalid/pull/7"}]'
+run "$DELEGATE" spawn gx2 --space gitdemo --cwd "$GITPROJ" "write five lines"
+if [ "$RC" -eq 0 ]; then pass 'the spawn goes ahead at a limit of two with one open'; else fail 'one open PR blocked a limit of two' "$OUT"; fi
+
+new_case 'unbounded never refuses for pull requests'
+run "$SPACE" policy gitdemo --max-open-prs unbounded
+if [ "$RC" -eq 0 ]; then pass 'the limit is unbounded'; else fail 'space policy failed' "$OUT"; fi
+gh_set '[{"number":7,"headRefName":"feat/elsewhere","updatedAt":"2026-11-19T10:00:00Z","url":"https://example.invalid/pull/7"},
+         {"number":9,"headRefName":"feat/trailer","updatedAt":"2026-11-19T10:00:00Z","url":"https://example.invalid/pull/9"},
+         {"number":12,"headRefName":"feat/two","updatedAt":"2026-11-19T10:00:00Z","url":"https://example.invalid/pull/12"}]'
+run "$DELEGATE" spawn gx3 --space gitdemo --cwd "$GITPROJ" "write six lines"
+if [ "$RC" -eq 0 ]; then pass 'three open PRs are allowed'; else fail 'unbounded still refused for pull requests' "$OUT"; fi
+
+# ------------------------------------------------------------------ --updates --
+new_case '--updates continues the PR instead of counting it'
+(
+	cd "$GITPROJ" || exit 1
+	git -c core.hooksPath=/dev/null -c user.email=t@e -c user.name=t checkout -q -b feat/updates
+	git -c core.hooksPath=/dev/null -c user.email=t@e -c user.name=t commit -q --allow-empty \
+		-m 'feat: the open pull request' -m 'Agent-Slug: gw1'
+	SHA=$(git rev-parse HEAD)
+	git checkout -q -
+	git update-ref refs/remotes/origin/feat/updates "$SHA"
+	# No local branch left behind: the worktree below is the `-b` shape the spec names.
+	git branch -q -D feat/updates
+)
+run "$SPACE" policy gitdemo --max-open-prs 1
+gh_set '[{"number":7,"headRefName":"feat/updates","updatedAt":"2026-11-19T10:00:00Z","url":"https://example.invalid/pull/7"}]'
+run "$DELEGATE" spawn gx4 --space gitdemo --cwd "$GITPROJ" --updates 7 "write seven lines"
+if [ "$RC" -eq 0 ]; then pass 'continuing the only open PR is allowed at a limit of one'; else fail '--updates was counted as a second PR' "$OUT"; fi
+SPEC="$(sd gitdemo)/specs/gx4.spawn.md"
+if grep -q 'continuing PR #7 on' "$SPEC" && grep -q 'feat/updates' "$SPEC"; then
+	pass 'the worker is told it continues PR #7 on its branch'
+else
+	fail 'the spec does not say which PR and branch this worker continues' "$SPEC"
+fi
+if grep -q 'Agent-Slug' "$SPEC"; then pass 'the ordinary rules are still there'; else fail 'the spec lost its trailers rule'; fi
+# The rule the worker follows, run here: the worktree goes on PR #7's head branch, not off trunk.
+git -C "$GITPROJ" worktree add -q .worktrees/gx4 -b feat/updates origin/feat/updates 2>/dev/null
+if [ "$(git -C "$GITPROJ/.worktrees/gx4" rev-parse --abbrev-ref HEAD 2>/dev/null)" = feat/updates ]; then
+	pass 'the worktree is on PR #7 head branch'
+else
+	fail 'the worktree is not on the PR branch'
+fi
+if grep -q '"updates": 7' "$(sd gitdemo)/delegations.json"; then pass 'the record says which PR it continues'; else fail 'the record does not say --updates' "$(cat "$(sd gitdemo)/delegations.json")"; fi
+git -C "$GITPROJ" worktree remove --force .worktrees/gx4 2>/dev/null
+
+new_case '--updates with a PR that belongs to another space'
+gh_set '[{"number":7,"headRefName":"feat/updates","updatedAt":"2026-11-19T10:00:00Z","url":"https://example.invalid/pull/7"}]'
+run "$DELEGATE" spawn gx5 --space gitdemo --cwd "$GITPROJ" --updates 9 "write eight lines"
+if [ "$RC" -ne 0 ]; then pass 'it is refused'; else fail 'a PR of another space was continued' "$OUT"; fi
+case $OUT in
+*"PR #9 is not one of space 'gitdemo' open pull requests"*) pass 'the refusal names the PR and the space' ;;
+*) fail 'the refusal does not name the PR and the space' "$OUT" ;;
+esac
+case $OUT in
+*"saw: #7"*) pass 'it says what it saw' ;;
+*) fail 'it does not say what it saw' "$OUT" ;;
+esac
 
 # ------------------------------------------------------------------ the ceiling --
 new_case 'eight live spaces is the ceiling'
