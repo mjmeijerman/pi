@@ -79,7 +79,7 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$PI_SPACE_ROOT/bin/publish"
 # `finish` runs the programs in the tree it lives in (bin/preflight, bin/publish), never whichever
 # copies PATH happens to hold, so the harness under test is a copy of that tree beside the stubs —
 # the layout a real install has, where $PI_BOSS_ROOT/bin is the delegate's own bin.
-cp "$ROOT/bin/delegate" "$ROOT/bin/space-lib.sh" "$PI_SPACE_ROOT/bin/"
+cp "$ROOT/bin/delegate" "$ROOT/bin/space-lib.sh" "$ROOT/bin/records-lib.sh" "$PI_SPACE_ROOT/bin/"
 DELEGATE="$PI_SPACE_ROOT/bin/delegate"
 chmod +x "$WORK/stub/"* "$PI_SPACE_ROOT/bin/"*
 

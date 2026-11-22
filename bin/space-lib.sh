@@ -184,7 +184,9 @@ space_of_slug() {
 # space_merge_delegations <outfile> — every space's workers as one object, each entry carrying
 # `space`, plus the legacy record when one exists and no space's own record mentions that slug
 # (read once, for one release; never written back). One document, because every reader of
-# state/delegations.json parses the whole file as a single object.
+# state/delegations.json parses the whole file as a single object. Written to a temp file and
+# renamed, so a reader running at the same moment sees the old document or the new one, never a
+# half of either.
 space_merge_delegations() {
 	SPACES_DIR=$SPACES_DIR SPACE_LEGACY_DELEGATIONS="${SPACE_LEGACY_ROOT:+$SPACE_LEGACY_ROOT/state/delegations.json}" \
 		node -e '
@@ -200,7 +202,9 @@ space_merge_delegations() {
 		let legacy = {};
 		try { legacy = JSON.parse(fs.readFileSync(process.env.SPACE_LEGACY_DELEGATIONS, "utf8")); } catch {}
 		for (const k of Object.keys(legacy)) if (!out[k]) out[k] = Object.assign({}, legacy[k] || {}, { legacy: true });
-		fs.writeFileSync(process.argv[1], JSON.stringify(out, null, 2) + "\n");
+		const tmp = process.argv[1] + ".tmp." + process.pid;
+		fs.writeFileSync(tmp, JSON.stringify(out, null, 2) + "\n");
+		fs.renameSync(tmp, process.argv[1]);
 	' "${1:?space_merge_delegations needs an output file}"
 }
 

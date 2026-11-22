@@ -270,6 +270,10 @@ READ_MARKS=$STATE/read
 SPACE_STATE=$STATE
 # shellcheck source=bin/space-lib.sh
 . "$self_bin/space-lib.sh"
+# One lock, one atomic write for the file this script records workers in: two spawns or a close
+# running together used to drop each other's entry, and a live worker then had no record at all.
+# shellcheck source=bin/records-lib.sh
+. "$self_bin/records-lib.sh"
 # Before a space is selected: the pre-space layout, still readable for one release.
 SPECS=$ROOT/specs
 REPORTS=$ROOT/reports
@@ -2308,15 +2312,20 @@ Open it again, or make a new space and start there:
 	pane=$(printf '%s' "$out" | json_field pane)
 	terminal=$(printf '%s' "$out" | json_field terminal)
 
-	node -e '
+	# The record is written once the tab exists, and only the read-modify-write is locked: no
+	# herdr call, no sleep and no `hc send` happens inside the lock.
+	records_mutate "$DELEGATIONS_WRITE" '
 		const fs=require("fs");const [state,slug,space,tab,pane,terminal,cwd,mode,thinking,spec,report,jevEffort,overridden,reason,branch,acceptance,sourceSpec,spaceName]=process.argv.slice(1);
 		let j={};try{j=JSON.parse(fs.readFileSync(state,"utf8"))}catch{}
 		j[slug]={slug,kind:"tab",space,spaceName,tab,pane,terminal,cwd,mode,thinking,thinkingEffort:jevEffort,spec,report,
 			overridden:overridden==="true",overrideReason:reason||null,branch:branch||null,acceptance:acceptance==="true",
 			acceptanceSpec:sourceSpec||null,started:new Date().toISOString()};
-		fs.writeFileSync(state,JSON.stringify(j,null,2)+"\n");' \
-		"$DELEGATIONS_WRITE" "$spawn_slug" "$space" "$tab" "$pane" "$terminal" "$cwd" "$mode" "$thinking" "$record_spec" "$report" \
-		"$jev_effort" "$overridden" "$reason" "$base_branch" "$acceptance_bool" "$source_spec" "$SPACE"
+		process.stdout.write(JSON.stringify(j,null,2)+"\n");' \
+		"$spawn_slug" "$space" "$tab" "$pane" "$terminal" "$cwd" "$mode" "$thinking" "$record_spec" "$report" \
+		"$jev_effort" "$overridden" "$reason" "$base_branch" "$acceptance_bool" "$source_spec" "$SPACE" \
+		|| die "$spawn_slug was started in tab ${terminal:-?} but its record could not be written to $DELEGATIONS_WRITE, so nothing tracks it. Close that tab and start the worker again:
+  herdr-app do tab.close --id ${tab:-?}
+  $BIN/delegate spawn $spawn_slug --cwd $cwd \"<task>\""
 
 	# tab.new's --task can arrive before pi is listening, so send it again once the banner is up.
 	local i
@@ -2365,7 +2374,9 @@ restart_worker() {
 	tab=$(printf '%s' "$out" | json_field tab)
 	terminal=$(printf '%s' "$out" | json_field terminal)
 
-	node -e '
+	# Locked for the read-modify-write only: the tab is already open when this runs, and the
+	# `hc send` below is after the unlock.
+	records_mutate "$DELEGATIONS_WRITE" '
 		const fs=require("fs");
 		const [file,slug,space,tab,terminal,attempt]=process.argv.slice(1);
 		let j={};try{j=JSON.parse(fs.readFileSync(file,"utf8"))}catch{}
@@ -2375,8 +2386,10 @@ restart_worker() {
 			e.restarts=Number(e.restarts||0)+1;
 			e.restartList=Array.isArray(e.restartList)?e.restartList:[];
 			e.restartList.push({attempt:Number(attempt),space,terminal:terminal||"",at:new Date().toISOString()});
-			fs.writeFileSync(file,JSON.stringify(j,null,2)+"\n");
-		}' "$DELEGATIONS_WRITE" "$slug" "$space" "$tab" "$terminal" "$attempt"
+		}
+		process.stdout.write(JSON.stringify(j,null,2)+"\n");' \
+		"$slug" "$space" "$tab" "$terminal" "$attempt" \
+		|| printf '%s: warning: restart %s of %s could not be recorded in %s\n' "$prog" "$attempt" "$slug" "$DELEGATIONS_WRITE" >&2
 
 	record_decision restart "$spec" "restarted" "the terminal was gone before a report; restart $attempt of 3 as $slug-r$attempt" false "$slug"
 	hc send "$terminal" "Read $spec and do it. Report to $report." >/dev/null 2>&1 ||
@@ -3172,10 +3185,17 @@ fi
 		printf '  %s close %s\n' "$BIN/delegate" "$slug" >&2
 		return 1
 	fi
-	node -e '
+	# The tab is closed and confirmed gone; only now is its entry dropped, and the lock covers
+	# the read-modify-write alone (no herdr call, no git, no sleep runs inside it).
+	records_mutate "$DELEGATIONS_WRITE" '
 		const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
 		delete j[process.argv[2]];
-		fs.writeFileSync(process.argv[1],JSON.stringify(j,null,2)+"\n");' "$DELEGATIONS_WRITE" "$slug"
+		process.stdout.write(JSON.stringify(j,null,2)+"\n");' "$slug" \
+		|| {
+			printf '%s: refusing to close %s: its record could not be rewritten in %s, and a close that cannot say the entry is gone is not a close\n' \
+				"$prog" "$slug" "$DELEGATIONS_WRITE" >&2
+			return 1
+		}
 
 	# Catch a worker that switched the boss's live checkout anyway. Non-fatal in both halves: a
 	# warning plus a best-effort checkout, never a refused close and never a reset or a force.
