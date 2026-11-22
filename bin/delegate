@@ -334,11 +334,15 @@ delegations_all() {
 	printf '%s' "$DELEGATIONS_ALL"
 }
 
-# report_path <slug> — the report the record names; the pre-space reports/ folder as a fallback.
+# report_path <slug> — the report the record names; the resolved space's reports/ folder as the
+# fallback. Never $ROOT/reports once a space is resolved: a record with no `report` field (every
+# worker before that field existed) would otherwise be read out of the pre-space layout, and the
+# close below refused "records no commit sha" over a report the space was holding all along.
+# $REPORTS is $ROOT/reports until use_space runs, so a caller with no space reads what it always did.
 report_path() {
 	local p
 	p=$(delegation_field "${1:-}" report)
-	if [ -n "$p" ]; then printf '%s' "$p"; else printf '%s/reports/%s.md' "$ROOT" "${1:-}"; fi
+	if [ -n "$p" ]; then printf '%s' "$p"; else printf '%s/%s.md' "$REPORTS" "${1:-}"; fi
 }
 
 # use_space <slug> — point specs, reports and the delegation record at one space. A space whose
@@ -3190,6 +3194,25 @@ fi
 	printf '{"closed":"%s","space":"%s"}\n' "$slug" "$space"
 }
 
+# space_with_report <slug> [dir] — the space whose reports/ folder holds <slug>.md, for a worker
+# whose delegation record is already gone. The report is what is left of such a worker, and the
+# space that holds it is where its path belongs: printing the pre-space reports/ folder instead is
+# how one finish sent a reader to ~/.pi/reports/<slug>.md, a path no space ever wrote. <dir> (the
+# --cwd a finish was given) is tried first, because a folder inside a space names that space even
+# when nothing else does.
+space_with_report() {
+	local slug=${1:-} dir=${2:-} s="" one
+	[ -n "$slug" ] || return 0
+	if [ -n "$dir" ]; then
+		one=$(space_resolve "$dir")
+		[ -z "$one" ] || { printf '%s' "$one"; return 0; }
+	fi
+	for s in $(space_slugs); do
+		if [ -f "$(space_reports "$s")/$slug.md" ]; then printf '%s' "$s"; return 0; fi
+	done
+	return 0
+}
+
 # cmd_finish -- the boss's whole tail for a finished worker, in one turn: publish, wipe, close.
 #
 # Four commands for one intent (wait, publish, wipe, close) is four chances to stop halfway, and
@@ -3252,8 +3275,33 @@ cmd_finish() {
 	fi
 
 	DELEGATIONS=$(delegations_all)
-	# The worker's space decides where its report is and whether there is a remote at all.
+	# worker_space and space_git are declared here, before the record is judged: the refusal below
+	# resolves the space from the report when there is no record left to name it.
 	local worker_space="" space_git=true
+	# No record, no worker. The record is the whole reason finish can wipe and close at all, and a
+	# finish that ran without it published a second time and then died on a wipe with nothing to
+	# wipe — measured on ci-runner: PR #232 re-pushed, then `delegate: error: no such worker`, then
+	# "the worker is still open" about a worker that was already closed. Only finish gains this
+	# refusal: wipe and close cannot push, so their own `no such worker:` stays exactly as it was.
+	if ! delegation_tracked "$slug"; then
+		# The space is resolved from what is left — the report — so every path printed below is a
+		# path that exists. With no record to name a space, $REPORTS would be the pre-space
+		# reports/ folder, and a hint pointing there is a dead end.
+		worker_space=$(space_with_report "$slug" "$lookup_cwd")
+		if [ -n "$worker_space" ] && space_exists "$worker_space"; then use_space "$worker_space"; fi
+		printf 'finish: refusing %s: it has no delegation record, so there is no worker to publish, wipe or close (it was already closed)\n' \
+			"$slug"
+		if [ -f "$REPORTS/$slug.md" ]; then
+			printf 'Its report is at %s\n' "$REPORTS/$slug.md"
+			[ -z "$SPACE" ] || printf 'That is space %s, whose %s holds no entry for it\n' "$SPACE" "$DELEGATIONS"
+		else
+			printf 'No report for %s is under any of the spaces reports/ folders, so there is nothing left to publish either\n' "$slug"
+		fi
+		printf 'Nothing was pushed, no pull request body was touched, nothing was wiped, nothing was closed. No worker is tracked anywhere:\n'
+		printf '  %s/delegate list\n' "$BIN"
+		return 1
+	fi
+	# The worker's space decides where its report is and whether there is a remote at all.
 	worker_space=$(delegation_field "$slug" spaceName)
 	[ -n "$worker_space" ] || worker_space=$(space_of_slug "$slug")
 	if [ -n "$worker_space" ] && space_exists "$worker_space"; then
@@ -3346,7 +3394,7 @@ cmd_finish() {
 		say "finish: $slug — 3/4 wipe: none, nothing to consolidate without a trunk"
 		record_decision wipe "$slug" skipped "non-git space $SPACE: no branch to consolidate" false "$slug"
 		say "finish: $slug — 4/4 close"
-		if ! ( cmd_close "$slug" --nothing "non-git space: the change is in $(space_field "$SPACE" project), not in a commit" ); then
+		if ! ( SPACE=$SPACE REPORTS=$REPORTS DELEGATIONS=$DELEGATIONS DECISIONS=$DECISIONS cmd_close "$slug" --nothing "non-git space: the change is in $(space_field "$SPACE" project), not in a commit" ); then
 			printf '%s: finish stopped at step 4 of 4 (close) for %s: nothing was published, and the worker is still open.\n' "$prog" "$slug" >&2
 			return 1
 		fi
@@ -3399,7 +3447,10 @@ cmd_finish() {
 		say "finish: $slug — 3/4 wipe"
 		local wipe_args=( "$slug" )
 		[ -z "$skip_given" ] || wipe_args+=( --skip "$skip" )
-		if ! ( cmd_wipe "${wipe_args[@]}" ); then
+		# The space stays resolved the way it was at start: the subshell inherits these explicitly,
+		# so a wipe can never read a different delegations file — and so a different space's — than
+		# the publish one step earlier did.
+		if ! ( SPACE=$SPACE REPORTS=$REPORTS DELEGATIONS=$DELEGATIONS DECISIONS=$DECISIONS cmd_wipe "${wipe_args[@]}" ); then
 			printf '%s: finish stopped at step 3 of 4 (wipe) for %s: the report is published, so its PR exists, but nothing was wiped, nothing was closed, and the worker is still open.\n' "$prog" "$slug" >&2
 			printf 'Fix: write the five answers under "## Thrown away" in %s — or say why the step does not apply — then run this again:\n' "$REPORTS/$slug.md" >&2
 			printf '  %s finish %s\n' "$BIN/delegate" "$slug" >&2
@@ -3408,7 +3459,7 @@ cmd_finish() {
 	fi
 
 	say "finish: $slug — 4/4 close"
-	if ! ( cmd_close "$slug" ); then
+	if ! ( SPACE=$SPACE REPORTS=$REPORTS DELEGATIONS=$DELEGATIONS DECISIONS=$DECISIONS cmd_close "$slug" ); then
 		printf '%s: finish stopped at step 4 of 4 (close) for %s: the report is published and the wipe is recorded, but the space is still open.\n' "$prog" "$slug" >&2
 		printf 'Fix: the refusal above names what the report still needs; then run this again — the wipe is kept and the PR is not opened twice:\n' >&2
 		printf '  %s finish %s\n' "$BIN/delegate" "$slug" >&2
