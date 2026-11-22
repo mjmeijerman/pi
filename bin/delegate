@@ -481,11 +481,17 @@ Merge one, raise the limit, or continue one of them:  $BIN/space policy $space -
                                                      $BIN/delegate spawn <slug> --cwd $project --updates $first \"<task>\""
 }
 
-# space_gate <space> [<updates-pr>] — the two refusals a space keeps. Both are hard, and both name
+# space_gate <space> [<updates-pr>] — the three refusals a space keeps. All are hard, and all name
 # the next move. A PR the worker continues with --updates is subtracted from the count: continuing
 # one is not opening a second one.
+#
+# The third is the one this file learned the hard way: a report exists and nobody published it. A
+# worker whose report is written is finished, and starting the next one beside it is how a finished
+# branch sat unpublished until a person noticed. The refusal quotes the same sentence the prompt
+# line carries (`agent/extensions/open-work.ts`), so the two mechanisms cannot disagree about what
+# the next move is.
 space_gate() {
-	local space=$1 updates=${2:-0} project git remote live="" s st prs
+	local space=$1 updates=${2:-0} project git remote live="" unpublished="" unpublished_report="" s st prs
 	project=$(space_field "$space" project)
 	git=$(space_field "$space" git)
 	remote=$(space_field "$space" remote)
@@ -493,9 +499,10 @@ space_gate() {
 		while IFS= read -r s; do
 			[ -n "$s" ] || continue
 			st=$(worker_state "$s")
-			[ "$st" = working ] || continue
-			live=$s
-			break
+			case $st in
+			working) [ -n "$live" ] || live=$s ;;
+			reported) [ -n "$unpublished" ] || { unpublished=$s; unpublished_report=$(report_of "$s"); } ;;
+			esac
 		done <<<"$(node -e '
 			const fs=require("fs");let j={};try{j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}
 			for (const k of Object.keys(j)) console.log(k);' "$(space_delegations "$space")")"
@@ -504,6 +511,11 @@ space_gate() {
 		die "space '$space' already has a live worker: $live
 Two workers in one space is the thing spaces exist to prevent. Wait for it, then spawn again:
   $BIN/delegate wait $live --forever"
+	fi
+	if [ -n "$unpublished" ]; then
+		die "worker $unpublished: reported, report at $unpublished_report — next: bin/delegate finish $unpublished
+That report is written and unpublished, so space '$space' is not finished with it. Publish it before starting another worker:
+  $BIN/delegate finish $unpublished"
 	fi
 	[ "$git" = true ] || return 0
 	# Every open PR is counted, not the first one: a space that allows more than one must not be
@@ -3727,16 +3739,24 @@ cmd_finish() {
 	*"nothing new to push: "*) publish_word="already published" ;;
 	esac
 
+	# The pull request is recorded here, while the space still exists to record it in: publish has
+	# just verified that this commit is that PR's head, so its own verdict line is the cheapest
+	# honest source for the pair. `agent/extensions/open-work.ts` reads this row back on every turn
+	# and puts `PR #<n>: <rollup>, <mergeable|conflicts>` in the prompt until GitHub says merged —
+	# a PR opened and then forgotten is the same bug as a report left unpublished.
+	local pr_line pr_n pr_sha
+	pr_line=$(printf '%s\n' "$pub_out" | grep -aE '^published .*: #[0-9]+ now at [0-9a-f]+|^nothing new to push: #[0-9]+ is already at [0-9a-f]+' | tail -n 1)
+	pr_n=$(printf '%s' "$pr_line" | sed -nE 's/.*#([0-9]+).*/\1/p')
+	pr_sha=$(printf '%s' "$pr_line" | sed -nE 's/.* at ([0-9a-f]{7,40}).*/\1/p')
+	case $pr_n in '' | *[!0-9]*) pr_n="" ;; esac
+	if [ -n "$pr_n" ] && [ -n "$pr_sha" ]; then
+		record_decision publish "$slug" "$publish_word" "#$pr_n at $pr_sha" false "$slug" "" "{\"pr\":$pr_n,\"sha\":\"$pr_sha\"}"
+	fi
+
 	# --keep-open: publish and stop. A red check is fixed in the worker's own terminal with
 	# `delegate tell`, and that needs the worker to still be there.
 	if [ "$keep_open" = 1 ]; then
-		# The one line `land` waits on. publish has already verified that this commit is the pull
-		# request's head, so the number and the sha are read off its own verdict line instead of being
-		# asked of GitHub a second time, which could answer about a head that moved.
-		local pr_line pr_n pr_sha
-		pr_line=$(printf '%s\n' "$pub_out" | grep -aE '^published .*: #[0-9]+ now at [0-9a-f]+|^nothing new to push: #[0-9]+ is already at [0-9a-f]+' | tail -n 1)
-		pr_n=$(printf '%s' "$pr_line" | sed -nE 's/.*#([0-9]+).*/\1/p')
-		pr_sha=$(printf '%s' "$pr_line" | sed -nE 's/.* at ([0-9a-f]{7,40}).*/\1/p')
+		# The one line `land` waits on, read from the publish verdict above.
 		if [ -z "$pr_n" ] || [ -z "$pr_sha" ]; then
 			printf '%s: finish stopped after step 2 of 4 (publish) for %s: it published, but printed no "#<n> at <sha>" line, so nothing here names the pull request to wait for. Nothing was wiped, nothing was closed, and the worker is still open.\n' "$prog" "$slug" >&2
 			printf 'Fix: read the number from the output above and ask the gate directly:\n' >&2
