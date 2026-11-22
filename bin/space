@@ -9,6 +9,8 @@
 #   bin/space policy <slug> [--max-open-prs <n|unbounded>] [--json]
 #   bin/space move <slug> --project PATH [--json]
 #   bin/space forget <slug> [--yes]
+#   bin/space tab forget <slug> <name> [--json]
+#   bin/space tab list <slug> [--json]
 #
 # A space is one project. It is durable: the record at state/spaces/<slug>/space.json outlives
 # the terminals in it, so later workers can reopen the tabs and read where the work goes. The
@@ -35,6 +37,12 @@
 #
 # `forget` drops the record and nothing else, so it asks for the space's name typed back after
 # saying what goes and what stays: a `y` is an answer to a question nobody read.
+#
+# `tab forget` edits the record's `tabs[]` list, and that is the whole mechanism: `bin/guard`
+# rebuilds a space that is gone from every entry in `tabs[]`, so a tab a person closed comes back
+# after a reboot until its entry is gone. The verb never talks to herdr — it removes an entry from
+# a file — so no app running is not a failure here, and the tab that is open right now is not
+# closed by it either.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
@@ -69,11 +77,18 @@ usage: bin/space new [<slug>] [--project PATH | --here | --clone URL] [--kind ha
        bin/space policy <slug> [--max-open-prs <n|unbounded>] [--json]
        bin/space move <slug> --project PATH [--json]
        bin/space forget <slug> [--yes]
+       bin/space tab forget <slug> <name> [--json]
+       bin/space tab list <slug> [--json]
 
 bin/space policy prints a space's max_open_prs (1 (default) when the record has none; an
 integer of 1 or more, or unbounded) and, with --max-open-prs, writes that field and nothing
 else. bin/space forget asks for the space's name typed back before it drops the record; --yes
 answers it up front for a script and prints the same explanation to stderr.
+bin/space tab forget removes one entry from the record's tabs list, which is what bin/guard
+rebuilds a space from: a tab closed there stays closed. It edits the record and never talks to
+herdr, refuses the Boss tab (bin/space forget <slug> is the way to drop a whole space), refuses a
+name no entry matches (naming the entries there are) and refuses a tab a tracked worker is using
+(bin/delegate close <slug>). bin/space tab list prints the names.
 EOF
 	exit 1
 }
@@ -625,6 +640,126 @@ cmd_forget() {
 	say "forgot $slug: dropped $(space_record "$slug") (its herdr space is still open, and $(space_dir "$slug") is still on disk)"
 }
 
+# cmd_tab — one tab of a space's record: the list, and the verb that removes an entry.
+#
+# A durable space records `tabs[]`, and `bin/guard` rebuilds every entry in it when the space is
+# gone (a reboot, a herdr restart), so a tab a person closed comes back on the next rebuild.
+# `forget` removes that one entry and nothing else. It edits a file: it never talks to herdr, never
+# closes a tab, and a space with no herdr id or no app running is not a failure here.
+#
+# Three refusals, each by name:
+#   - the Boss tab: the record exists to bring the Boss back, so it is never removed; a space nobody
+#     wants is `bin/space forget <slug>`.
+#   - a name no entry matches, naming the entries that do exist — a typo must not read as "done".
+#   - a tab a tracked worker still uses (`delegations.json`, by worker slug or by tab id): closing
+#     the record of a working tab leaves a worker nobody can find.
+cmd_tab_forget() {
+	local slug="" name="" json=0 tabs left live boss rc=0
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--json) json=1; shift ;;
+		-*) die "unknown option $1" ;;
+		*)
+			if [ -z "$slug" ]; then
+				slug=$1
+			elif [ -z "$name" ]; then
+				name=$1
+			else
+				die "tab forget takes a space name and a tab name, and '$1' is a third word"
+			fi
+			shift
+			;;
+		esac
+	done
+	if [ -z "$slug" ] || [ -z "$name" ]; then usage; fi
+	space_exists "$slug" || die "no such space: $slug — bin/space list"
+	command -v node >/dev/null 2>&1 || die "node is not on PATH"
+	boss=$(space_field "$slug" boss)
+	[ -n "$boss" ] || boss=Boss
+	if [ "$name" = "$boss" ]; then
+		die "$name is the Boss tab of $slug, and the Boss is never closed — the guard restores it from this record, so removing it would open an empty space
+A space nobody wants is dropped whole: bin/space forget $slug"
+	fi
+	tabs=$(space_tabs "$slug")
+	if ! printf '%s\n' "$tabs" | grep -Fxq -- "$name"; then
+		die "$slug records no tab called '$name' — its tabs: $(printf '%s\n' "$tabs" | grep . | paste -sd, - | sed 's/,/, /g')"
+	fi
+	# A worker the delegate still tracks is a tab somebody is using: its entry stays until the
+	# worker is closed, and that command is the one the refusal names.
+	live=$(SPACE_FILE=$(space_record "$slug") DELEGATIONS=$(space_delegations "$slug") TAB_NAME=$name node -e '
+		const fs = require("fs");
+		let r = {};
+		try { r = JSON.parse(fs.readFileSync(process.env.SPACE_FILE, "utf8")); } catch { process.exit(0); }
+		const ids = new Set();
+		for (const t of Array.isArray(r.tabs) ? r.tabs : [])
+			if (t && typeof t === "object" && String(t.name || "") === process.env.TAB_NAME && t.id) ids.add(String(t.id));
+		let d = {};
+		try { d = JSON.parse(fs.readFileSync(process.env.DELEGATIONS, "utf8")); } catch { process.exit(0); }
+		for (const slug of Object.keys(d)) {
+			const e = d[slug] || {};
+			if (slug === process.env.TAB_NAME || (e.tab && ids.has(String(e.tab)))) {
+				process.stdout.write(String(slug));
+				process.exit(0);
+			}
+		}
+	')
+	if [ -n "$live" ]; then
+		die "$name is the tab of the worker '$live', which the delegate still tracks — closing its record would leave a worker nobody can find
+Close the worker first: bin/delegate close $live"
+	fi
+	left=$(space_remove_tab "$slug" "$name") || {
+		rc=$?
+		[ "$rc" != 3 ] || die "$slug records no tab called '$name' — nothing changed"
+		die "could not rewrite $(space_record "$slug") — nothing changed"
+	}
+	if [ "$json" = 1 ]; then
+		TAB_NAME=$name TABS=$left node -e '
+			const tabs = String(process.env.TABS || "").split("\n").filter(Boolean);
+			process.stdout.write(JSON.stringify({ name: process.env.TAB_NAME, removed: true, tabs }) + "\n");
+		'
+		return 0
+	fi
+	say "space: $slug: tab $name forgotten"
+	say "  the guard will no longer re-create it; still recorded: $(if [ -n "$left" ]; then printf '%s\n' "$left" | paste -sd, - | sed 's/,/, /g'; else printf 'no tabs'; fi)"
+}
+
+cmd_tab_list() {
+	local slug="" json=0 tabs
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--json) json=1; shift ;;
+		-*) die "unknown option $1" ;;
+		*)
+			[ -z "$slug" ] || die "tab list takes one space name, and '$1' is a second one"
+			slug=$1
+			shift
+			;;
+		esac
+	done
+	[ -n "$slug" ] || usage
+	space_exists "$slug" || die "no such space: $slug — bin/space list"
+	tabs=$(space_tabs "$slug")
+	if [ "$json" = 1 ]; then
+		TABS=$tabs node -e 'process.stdout.write(JSON.stringify({ space: process.argv[1], tabs: String(process.env.TABS || "").split("\n").filter(Boolean) }) + "\n")' "$slug"
+		return 0
+	fi
+	if [ -z "$tabs" ]; then
+		say "$slug: no tabs recorded"
+		return 0
+	fi
+	printf '%s\n' "$tabs"
+}
+
+cmd_tab() {
+	local verb=${1:-}
+	[ "$#" -eq 0 ] || shift
+	case $verb in
+	forget) cmd_tab_forget "$@" ;;
+	list | ls) cmd_tab_list "$@" ;;
+	*) die "tab takes forget or list — bin/space tab forget <slug> <name>" ;;
+	esac
+}
+
 case ${1:-} in
 new) shift; cmd_new "$@" ;;
 list | ls) shift; cmd_list "$@" ;;
@@ -632,6 +767,7 @@ show) shift; cmd_show "$@" ;;
 policy) shift; cmd_policy "$@" ;;
 move) shift; cmd_move "$@" ;;
 forget) shift; cmd_forget "$@" ;;
+tab) shift; cmd_tab "$@" ;;
 -h | --help | help) usage ;;
 *) usage ;;
 esac

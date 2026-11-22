@@ -367,5 +367,80 @@ case $SYSERR in
 esac
 if [ -f "$D/a.txt" ]; then pass 'the folder and its work stay'; else fail 'the folder was touched'; fi
 
+# ------------------------------------------------------------ tab forget --
+# `tabs[]` is the whole mechanism: `bin/guard` rebuilds a space that is gone from every entry in it,
+# so the verb that makes a closed tab stay closed is the one that removes the entry. The record is
+tab_names() {
+	node -e 'const j=require(process.argv[1]);process.stdout.write((Array.isArray(j.tabs)?j.tabs:[]).map(t=>t.name).join(","))' "$(record "$1")"
+}
+set_tabs() { # <slug> <tabs-json>
+	TABS="$2" node -e '
+		const fs = require("fs");
+		const file = process.argv[1];
+		const j = JSON.parse(fs.readFileSync(file, "utf8"));
+		j.tabs = JSON.parse(process.env.TABS);
+		fs.writeFileSync(file, JSON.stringify(j, null, 2) + "\n");
+	' "$(record "$1")"
+}
+TT="$WORK/tabspace"
+project "$TT"
+run "$SPACE" new --name tabspace --project "$TT"
+set_tabs tabspace "[{\"name\":\"Boss\",\"folder\":\"$TT\",\"argv\":[]},{\"name\":\"Extra\",\"folder\":\"$TT\",\"argv\":[\"sh\",\"-lc\",\"date\"]}]"
+
+new_case 'tab list names the recorded tabs'
+run "$SPACE" tab list tabspace
+if [ "$RC" -eq 0 ]; then pass 'it succeeds'; else fail 'tab list failed' "$OUT"; fi
+if [ "$OUT" = "Boss
+Extra" ]; then pass 'both entries are named, in record order'; else fail 'the list is not the two tabs' "$OUT"; fi
+run "$SPACE" tab list tabspace --json
+if [ "$OUT" = '{"space":"tabspace","tabs":["Boss","Extra"]}' ]; then pass '--json is the same answer for a script'; else fail '--json prints something else' "$OUT"; fi
+
+new_case 'tab forget removes the one entry and keeps the Boss'
+: >"$HERDR_LOG"
+run "$SPACE" tab forget tabspace Extra
+if [ "$RC" -eq 0 ]; then pass 'it succeeds'; else fail 'tab forget failed' "$OUT"; fi
+if [ "$(tab_names tabspace)" = "Boss" ]; then pass 'only Extra is gone'; else fail 'the tab list is not just Boss' "$(cat "$(record tabspace)")"; fi
+if grep -q '"project": "'"$TT"'"' "$(record tabspace)"; then pass 'the rest of the record is untouched'; else fail 'the record lost its fields' "$(cat "$(record tabspace)")"; fi
+case $OUT in
+*"tab Extra forgotten"*) pass 'it names the entry it removed' ;;
+*) fail 'it does not name the entry' "$OUT" ;;
+esac
+case $OUT in
+*"guard will no longer re-create it"*"still recorded: Boss"*) pass 'it says the guard stops rebuilding it, and what is left' ;;
+*) fail 'it does not say what will not come back' "$OUT" ;;
+esac
+if [ -s "$HERDR_LOG" ]; then fail 'the verb talked to herdr-app' "$(cat "$HERDR_LOG")"; else pass 'it edits the record and never talks to herdr'; fi
+
+new_case 'tab forget refuses the Boss tab and changes nothing'
+BEFORE=$(cat "$(record tabspace)")
+run "$SPACE" tab forget tabspace Boss
+if [ "$RC" -ne 0 ]; then pass 'it is refused'; else fail 'the Boss entry was removed' "$OUT"; fi
+case $OUT in
+*"bin/space forget tabspace"*) pass 'the refusal names the way to drop the whole space' ;;
+*) fail 'the refusal names no way out' "$OUT" ;;
+esac
+if [ "$(cat "$(record tabspace)")" = "$BEFORE" ]; then pass 'the record is unchanged'; else fail 'the refused verb rewrote the record'; fi
+
+new_case 'tab forget refuses a name no entry matches, naming the entries there are'
+run "$SPACE" tab forget tabspace Nope
+if [ "$RC" -ne 0 ]; then pass 'it is refused'; else fail 'a missing name was a success' "$OUT"; fi
+case $OUT in
+*"no tab called 'Nope'"*Boss*) pass 'the refusal names the entries that do exist' ;;
+*) fail 'the refusal does not name the entries' "$OUT" ;;
+esac
+
+new_case 'tab forget refuses a tab a tracked worker still uses'
+set_tabs tabspace "[{\"name\":\"Boss\",\"folder\":\"$TT\",\"argv\":[]},{\"name\":\"logs\",\"folder\":\"$TT\",\"argv\":[],\"id\":\"tb-worker\"}]"
+node -e '
+	const fs=require("fs");
+	fs.writeFileSync(process.argv[1], JSON.stringify({w7:{slug:"w7",kind:"tab",space:"s1",spaceName:"tabspace",tab:"tb-worker"}},null,2)+"\n")' "$PI_SPACE_ROOT/state/spaces/tabspace/delegations.json"
+run "$SPACE" tab forget tabspace logs
+if [ "$RC" -ne 0 ]; then pass 'it is refused'; else fail 'a working tab was unrecorded' "$OUT"; fi
+case $OUT in
+*"bin/delegate close w7"*) pass 'the refusal names the worker and the command that closes it' ;;
+*) fail 'the refusal names no way to close the worker' "$OUT" ;;
+esac
+if [ "$(tab_names tabspace)" = "Boss,logs" ]; then pass 'the record is unchanged'; else fail 'the refused verb removed the entry' "$(cat "$(record tabspace)")"; fi
+
 printf '\n%d passed, %d failed\n' "$PASS_N" "$FAIL_N"
 [ "$FAIL_N" -eq 0 ]
