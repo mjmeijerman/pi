@@ -187,10 +187,30 @@ jobs:
           printf '%s' "$PR_BODY" >"$RUNNER_TEMP/pr-body.md"
 
           # Same shared script, taken from the base commit for the same reason:
-          # a branch does not get to rewrite its gate.
+          # a branch does not get to rewrite its gate — and only this job
+          # narrows that, because a brand-new gate can only be introduced by a
+          # branch whose own copy of the script knows it. The base copy on that
+          # PR exits 2 with `not 'radar'`; that one verdict, and nothing else,
+          # means the base copy predates the gate, so the checkout's own copy is
+          # put in its place and run again. Any other failure is the gate's
+          # verdict and stays red. The moment trunk carries the gate the base
+          # copy answers, so it is preferred again and this fallback goes quiet.
           gate="$RUNNER_TEMP/pr-gate.sh"
           if ! git show "${BASE_SHA}:scripts/pr-gate.sh" >"$gate" 2>/dev/null; then
             cp scripts/pr-gate.sh "$gate"
+          else
+            # Unquoted exit status, so `set -e` must stand aside to read it.
+            set +e
+            out="$(bash "$gate" --gate radar --body "$RUNNER_TEMP/pr-body.md" \
+              --base "$BASE_SHA" --head "$HEAD_SHA" 2>&1)"
+            rc=$?
+            set -e
+            printf '%s\n' "$out"
+            if [[ $rc -eq 2 && $out == *"not 'radar'"* ]]; then
+              cp scripts/pr-gate.sh "$gate"
+            else
+              exit "$rc"
+            fi
           fi
 
           bash "$gate" --gate radar --body "$RUNNER_TEMP/pr-body.md" \
