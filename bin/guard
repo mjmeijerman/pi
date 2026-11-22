@@ -17,8 +17,8 @@ fi
 # worker is a tab in its boss's space (`kind: "tab"` in `delegations.json`). Nothing puts either
 # back after it vanishes: Herdr has no per-space lock, `space.close` ends a space and its
 # terminals, and a host reboot hands the tabs back as plain shells. So the space is made
-# self-healing here instead — the same idea `~/big-boss-pi/bin/guard` proved while there was one
-# space, now driven by the records rather than by one hardcoded name.
+# self-healing here instead — the same idea the pre-space `bin/guard` proved while there was
+# one space, now driven by the records rather than by one hardcoded name.
 #
 # Every pass, for every recorded space:
 #
@@ -86,10 +86,12 @@ INTERVAL=${PI_GUARD_INTERVAL:-20}
 HERDR_APP=${PI_GUARD_HERDR_APP:-herdr-app}
 RESUME_DIR=${PI_HERDR_RESUME_DIR:-${HOME:-}/.pi/agent/herdr-resume}
 RESUME_SCRIPT=${PI_GUARD_RESUME_SCRIPT:-${HOME:-}/.pi/scripts/herdr-resume.mjs}
-# The Boss is bare: `bin/pi-bare` in this tree, never a sandboxed wrapper and never the retired
-# `~/big-boss-pi` checkout. A record that names either is rewritten on the pass that reads it.
+# The Boss is bare: `bin/pi-bare` in this tree, never a sandboxed wrapper and never a path into
+# the retired checkout below. A record that names either is rewritten on the pass that reads it.
 PI_HOME=${PI_HOME:-$(cd -- "$here/.." && pwd)}
 PI_BARE=${PI_GUARD_PI_BARE:-$PI_HOME/bin/pi-bare}
+# Kept for records written before the retired checkout was removed, not for anything live: a
+# record that still carries its path is rewritten to this tree on the pass that reads it.
 LEGACY_ROOT=${SPACE_LEGACY_ROOT:-${PI_LEGACY_BOSS_ROOT:-${HOME:-}/big-boss-pi}}
 # Where a session's own folder is written down: the first line of every `*.jsonl` carries `cwd`,
 # so the newest session for a project is found by reading it, not by guessing at the slug.
@@ -244,8 +246,8 @@ adopt_space() {
 # normalise_boss_argv <slug> — a record that would bring the Boss back sandboxed is rewritten to
 # `bin/pi-bare`, and what was rewritten is printed once (one line for the whole record). Two shapes
 # count: a sandboxing wrapper first (`pi`, `pisandbox`, `pi-sandboxed` — `pi` on PATH is install.sh's
-# sandboxing entry point), and any argument pointing into the retired `~/big-boss-pi` checkout, whose
-# `bin/pi-bare` will not exist after that repo goes.
+# sandboxing entry point), and any argument pointing into the retired checkout, whose
+# `bin/pi-bare` no longer exists.
 normalise_boss_argv() {
 	RECORD=$(space_record "${1:-}") BARE=$PI_BARE LEGACY=$LEGACY_ROOT node -e '
 		const fs = require("fs");
@@ -683,8 +685,8 @@ one_space() {
 		fi
 		return 0
 	fi
-	# A Boss that would come back sandboxed, or from the retired `~/big-boss-pi` checkout, is
-	# rewritten before anything is opened: the record is what a reboot replays.
+	# A Boss that would come back sandboxed, or from the retired checkout, is rewritten before
+	# anything is opened: the record is what a reboot replays.
 	chg=$(normalise_boss_argv "$slug")
 	[ -z "$chg" ] || say "$name: Boss argv was not bare ($chg), recorded $PI_BARE"
 	record_tabs_seed "$slug"

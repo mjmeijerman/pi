@@ -1530,7 +1530,11 @@ describe("wiring", () => {
 		);
 		assert.match(body, /learn-\d{2}-\d{2}/, "the slug it must close is in the file");
 		assert.match(body, /worktree add/, "the boss's checkout must not be switched");
-		assert.match(body, /big-boss-pi agent space/, "the agent that publishes runs on the host");
+		assert.match(
+			body,
+			/starts the agent space that pushes and opens the PR/,
+			"the agent that publishes runs on the host",
+		);
 		assert.match(body, /sandboxed/, "and the learner is told why it cannot push");
 		// Both of these were literal mutations that survived: the spec's closing
 		// paragraph was never read back, so emptying it changed nothing asserted.
@@ -1588,7 +1592,7 @@ describe("wiring", () => {
 			"sandbox mount, and it refuses a sandboxed caller. Ask the host instead, with one",
 			"JSON object in the publish queue. The host session that started you runs the",
 			"broker: it runs `learn-publish.sh` for that file, records the outcome in",
-			"`runs.jsonl`, and starts the big-boss-pi agent space that pushes and opens the PR.",
+			"`runs.jsonl`, and starts the agent space that pushes and opens the PR.",
 			"Concrete values for this run:",
 			"3. Ask the host to publish it — one JSON object, one line, exactly these fields:",
 			"```json",

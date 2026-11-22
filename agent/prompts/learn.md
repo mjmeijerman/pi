@@ -233,8 +233,8 @@ and one paragraph naming what would change your mind.
 - **Never merge**, never commit on trunk, never upload onto trunk.
 - **No secrets.** Never read or copy `.env*`, keys, tokens, credential files. The
   queue file is already redacted; do not go looking for the raw text.
-- **No new agents** except the one big-boss-pi agent space that opens a project
-  learner's PR, and the broker's `scripts/learn-publish.sh` is what starts it.
+- **No new agents** except the one agent space that opens a project learner's PR,
+  and the broker's `scripts/learn-publish.sh` is what starts it.
 - **Never close, rename or move a space.** Your space is the person's: the host
   closes the tab you were in when you exit, and `agent-pane.sh close` from here
   would close the desk instead of the tab.

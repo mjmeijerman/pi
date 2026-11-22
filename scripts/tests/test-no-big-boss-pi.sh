@@ -49,12 +49,6 @@ docs/radar-adoption-brief.md|the brief measures the backlog that lives in that f
 docs/threat-model.md|the bare Boss's threat surface, dated, written about that box
 git-hooks/scan-mutation.sh|a comment saying which pushes touch no extension
 scripts/mutate-changed.sh|a comment saying where the sweep reports used to be archived
-agent/extensions/herdr-resume-map.ts|reads worker argv names by path to work out a resumed worker's mode — open item, repoint to ~/.pi/bin
-agent/extensions/__tests__/herdr-resume-map.test.ts|the fixtures for that mapping, open item with it
-agent/extensions/self-learn.ts|WORKSPACE = join(homedir(), "big-boss-pi") — open item, the learner still writes there
-agent/extensions/__tests__/self-learn.test.ts|the learner's own tests, open item with it
-agent/prompts/learn.md|prose about the space the learner hands a branch to, open item
-agent/skills/jev/SKILL.md|the jev binary resolution and one example path, open item
 EOF
 )
 
