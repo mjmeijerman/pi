@@ -427,7 +427,8 @@ space_open_pr() {
 				# A worker that has been closed is gone from the record but its spec is not: the
 				# spec is the durable half, so a PR whose trailer names one is still this space's.
 				if [ "$trailer" = "$space" ] || space_tracks_worker "$space" "$trailer" ||
-					[ -f "$(space_specs "$space")/$trailer.md" ]; then
+					[ -f "$(space_specs "$space")/$trailer.md" ] ||
+					[ -f "$(space_specs "$space")/$trailer.spawn.md" ]; then
 					printf '%s %s %s' "$num" "$branch" "$url"
 					return 0
 				fi
@@ -541,6 +542,18 @@ herdr_terminals_none() {
 	local terms
 	terms=$(herdr_terminals) || return 1
 	printf '%s' "$terms" | grep -qE '"terminals"[[:space:]]*:[[:space:]]*\[[[:space:]]*\]'
+}
+
+# terminal_listed <id> — true when herdr still names that terminal. An answer that lists no
+# terminal at all is a herdr this side cannot see (another core, a socket from inside a sandbox),
+# not a dead tab, so it counts as listed: guessing "gone" from silence is how a live worker gets
+# told nothing. Only a list that holds terminals and omits this one means herdr closed it.
+terminal_listed() {
+	local id=${1:-} terms
+	[ -n "$id" ] || return 1
+	terms=$(herdr_terminals) || return 0
+	printf '%s' "$terms" | grep -qE '"terminals"[[:space:]]*:[[:space:]]*\[[[:space:]]*[{"]' || return 0
+	printf '%s' "$terms" | grep -qF "\"$id\""
 }
 
 # reap_finished_learners — close the `learn-*` spaces a compaction leaves behind.
@@ -704,12 +717,14 @@ worker_word() {
 	fi
 	for dir in "$SPACES_DIR"/*/; do
 		[ -d "$dir" ] || continue
-		if [ -e "$dir/specs/$slug.md" ] || [ -e "$dir/specs/archive/$slug.md" ] || [ -e "$dir/reports/$slug.md" ]; then
+		if [ -e "$dir/specs/$slug.md" ] || [ -e "$dir/specs/$slug.spawn.md" ] ||
+			[ -e "$dir/specs/archive/$slug.md" ] || [ -e "$dir/specs/archive/$slug.spawn.md" ] ||
+			[ -e "$dir/reports/$slug.md" ]; then
 			printf 'closed'
 			return 0
 		fi
 	done
-	if [ -e "$ROOT/specs/$slug.md" ] || [ -e "$ROOT/reports/$slug.md" ]; then
+	if [ -e "$ROOT/specs/$slug.md" ] || [ -e "$ROOT/specs/$slug.spawn.md" ] || [ -e "$ROOT/reports/$slug.md" ]; then
 		printf 'closed'
 		return 0
 	fi
@@ -1892,7 +1907,7 @@ Declare the one measurement, or re-run with --allow-matrix --reason '<why this o
 	if [ "$acceptance" = 1 ]; then
 		source_spec=$(acceptance_source_spec "$task" "$cwd") ||
 			die "--acceptance needs a spec file under specs/ as the task: '${task}' names no such file"
-		[ "$source_spec" != "$SPECS/$slug.md" ] ||
+		[ "$source_spec" != "$SPECS/$slug.spawn.md" ] ||
 			die "--acceptance reads a spec, it does not write its own: '$slug' would overwrite $source_spec. Pick another slug."
 	fi
 	need herdr-app; need node; need hc
@@ -2093,7 +2108,7 @@ Forcing a second worker in the same area needs --override-jev --reason '<why the
 	# Acceptance mode rewrites the task section and adds one rule block. Everything else — the
 	# mission line, the worktree rule, the report shape — is the same worker, so it is the same
 	# template rather than a second one that drifts.
-	local acceptance_block="" acceptance_task="" task_block=$task base_task=$task
+	local acceptance_block="" acceptance_task="" task_block=$task base_task=$task task_note=""
 	local acceptance_bool=false patch_spec="" patch_block="" patch_json=""
 	if [ "$acceptance" = 1 ]; then
 		acceptance_bool=true
@@ -2148,7 +2163,13 @@ PATCH
 
 	# One spawn, one worker, one space. A second worker in the same space is the refusal two lines
 	# up; a task that needs more is a second spawn, after this one merged, in its own space.
-	local spawn_slug=$slug spec=$SPECS/$slug.md report=$REPORTS/$slug.md
+	# The wrapper spec is `specs/<slug>.spawn.md`, never `specs/<slug>.md`. That second path is the
+	# obvious place for a person to write their brief, and spawn used to overwrite it a second after it
+	# was written: the worker was then handed "Read this spec and do it" pointing at itself, and a whole
+	# worker turn was spent on a stub. A `<slug>.md` that exists is the task; spawn points at it and
+	# changes no byte of it.
+	local spawn_slug=$slug spec=$SPECS/$slug.spawn.md hand_spec=$SPECS/$slug.md report=$REPORTS/$slug.md
+	local record_spec=$spec
 	local argv out space tab pane terminal
 	local rule2 rule5 rule7
 	if [ "$is_git" = true ]; then
@@ -2158,7 +2179,7 @@ PATCH
 		rule5="5. Commit on your branch and stop: no push, no PR, no merge, never on trunk — the boss publishes.
    You stay sandboxed: publishing is the boss's
    job, so it never needs host access from you."
-		rule7="7. End every commit message with two trailers: \`Agent-Slug: $spawn_slug\` and \`Spec: $spec\`.
+		rule7="7. End every commit message with two trailers: \`Agent-Slug: $spawn_slug\` and \`Spec: $record_spec\`.
    The commit-msg hook stamps both; check \`git log -1 --format=%B\` before you report."
 	else
 		rule2="2. This project is not a git repository. Work directly in \`$cwd\`, and never run
@@ -2169,6 +2190,19 @@ PATCH
 	fi
 	task_block=$base_task
 	if [ "$acceptance" = 1 ]; then task_block=$acceptance_task; fi
+	# A brief a person wrote at `specs/<slug>.md` is the task, by path and not by copy: the wrapper
+	# points at that file, and the record names it as the spec the worker was told to read. A patch or
+	# an acceptance run already carries its own task block and names that file inside it.
+	if [ -f "$hand_spec" ] && [ "$acceptance" != 1 ] && [ "$patch_given" != 1 ]; then
+		task_block="Read \`$hand_spec\` and do it."
+		record_spec=$hand_spec
+		# The brief wins, but the line that summoned the worker is not thrown away with it: it is
+		# usually why this worker exists, and a worker that cannot see it re-derives the reason.
+		# It is labelled context so nobody reads two briefs and picks one.
+		if [ -n "$task" ]; then
+			task_note="The line that summoned this worker was: $task — the brief is the task, this line is context."
+		fi
+	fi
 	# One worker per spawn: the body below is a block, not a loop, because a task that needs more
 	# is a second spawn after this one merges, in its own space.
 	if :; then
@@ -2187,6 +2221,7 @@ You are the genie. Prove it runs.
 ## Task
 
 $task_block
+$task_note
 $acceptance_block
 $patch_block
 
@@ -2276,7 +2311,7 @@ Open it again, or make a new space and start there:
 			overridden:overridden==="true",overrideReason:reason||null,branch:branch||null,acceptance:acceptance==="true",
 			acceptanceSpec:sourceSpec||null,started:new Date().toISOString()};
 		fs.writeFileSync(state,JSON.stringify(j,null,2)+"\n");' \
-		"$DELEGATIONS_WRITE" "$spawn_slug" "$space" "$tab" "$pane" "$terminal" "$cwd" "$mode" "$thinking" "$spec" "$report" \
+		"$DELEGATIONS_WRITE" "$spawn_slug" "$space" "$tab" "$pane" "$terminal" "$cwd" "$mode" "$thinking" "$record_spec" "$report" \
 		"$jev_effort" "$overridden" "$reason" "$base_branch" "$acceptance_bool" "$source_spec" "$SPACE"
 
 	# tab.new's --task can arrive before pi is listening, so send it again once the banner is up.
@@ -2550,8 +2585,10 @@ cmd_status() {
 # scrollback the next close wipes.
 #
 # Refused twice, and the word is printed first so the reader sees which one: a slug nothing tracks
-# (there is nothing to send to), and a worker that is not `working` — a written report closes the tab
-# by rule, so a message sent there would land nowhere and prove nothing.
+# (there is nothing to send to), and a worker whose terminal is gone — a `gone`, `closed` or
+# `unknown` word, or a `reported` one whose tab herdr no longer lists. A written report alone is no
+# longer a refusal: `land` leaves a worker open exactly so a red check is fixed in place, and the fix
+# has to be said to a worker that has already reported. The tab is what matters, not the report.
 cmd_tell() {
 	local slug=${1:-} text="" word terminal worker_space
 	[ -n "$slug" ] || die 'usage: delegate tell <slug> "<text>"'
@@ -2568,11 +2605,14 @@ cmd_tell() {
 What is tracked:  $BIN/delegate list"
 	printf '%s\n' "$word"
 	if [ "$word" != working ]; then
-		printf '%s: refusing to tell %s: its state is %s, so its terminal is not there to read a message.\n' \
-			"$prog" "$slug" "$word" >&2
-		printf 'A tell is for a worker that is still working; what a finished one said is in its report:\n  %s/delegate wait %s\n' \
-			"$BIN" "$slug" >&2
-		return 1
+		terminal=$(delegation_field "$slug" terminal)
+		if [ "$word" != reported ] || ! terminal_listed "$terminal"; then
+			printf '%s: refusing to tell %s: its state is %s, so its terminal is not there to read a message.\n' \
+				"$prog" "$slug" "$word" >&2
+			printf 'A tell is for a worker whose terminal is still open; what a finished one said is in its report:\n  %s/delegate wait %s\n' \
+				"$BIN" "$slug" >&2
+			return 1
+		fi
 	fi
 	terminal=$(delegation_field "$slug" terminal)
 	[ -n "$terminal" ] ||
@@ -2697,14 +2737,21 @@ cmd_wipe() {
 	say ""
 	say "Write the answers into the report (## Thrown away), then this line records the step."
 	# Spec continuity (Radar blip 82): a finished spec moves out of specs/ into specs/archive/, where
-# the next worker in the same area reads it before it starts. A spec nobody archives is one the
-# next worker re-decides from nothing.
-local spec=$SPECS/$slug.md
-if [ -f "$spec" ]; then
-	mkdir -p "$SPECS/archive"
-	mv "$spec" "$SPECS/archive/$slug.md"
-	say "spec archived: specs/archive/$slug.md — the next worker in this area reads it first"
-fi
+	# the next worker in the same area reads it before it starts. A spec nobody archives is one the
+	# next worker re-decides from nothing. Only a generated wrapper moves: `specs/<slug>.spawn.md` is
+	# spawn's own file, and a `specs/<slug>.md` that opens with the wrapper header is an old-style one.
+	# A brief a person wrote is never moved, rewritten or archived — it is the record of what was asked.
+	local spec=$SPECS/$slug.spawn.md hand_spec=$SPECS/$slug.md
+	if [ -f "$spec" ]; then
+		mkdir -p "$SPECS/archive"
+		mv "$spec" "$SPECS/archive/$slug.spawn.md"
+		say "spec archived: specs/archive/$slug.spawn.md — the next worker in this area reads it first"
+	fi
+	if [ -f "$hand_spec" ] && head -n 1 -- "$hand_spec" | grep -qx "# Worker \`$slug\`"; then
+		mkdir -p "$SPECS/archive"
+		mv "$hand_spec" "$SPECS/archive/$slug.md"
+		say "spec archived: specs/archive/$slug.md — the next worker in this area reads it first"
+	fi
 	record_decision wipe "$slug" done "" false "$slug"
 	say "state/decisions.jsonl: wipe done for $slug — close goes through:  $BIN/delegate close $slug"
 }
@@ -3160,11 +3207,12 @@ fi
 # Rerunning after a close refusal is clean: publish prints the existing PR instead of opening a
 # second one, and a wipe already recorded is kept rather than recorded twice.
 cmd_finish() {
-	local slug=${1:-} lookup_cwd="" skip="" skip_given="" pf="" preflight_skip="" preflight_skip_given="" pub
-	[ -n "$slug" ] || die 'usage: delegate finish <slug> [--cwd DIR] [--skip "<reason>"] [--skip-preflight "<reason>"]'
+	local slug=${1:-} lookup_cwd="" skip="" skip_given="" pf="" preflight_skip="" preflight_skip_given="" pub keep_open=0
+	[ -n "$slug" ] || die 'usage: delegate finish <slug> [--cwd DIR] [--skip "<reason>"] [--skip-preflight "<reason>"] [--keep-open]'
 	shift || true
 	while [ "$#" -gt 0 ]; do
 		case $1 in
+		--keep-open) keep_open=1; shift ;;
 		--cwd)
 			[ "$#" -ge 2 ] && [ -n "$2" ] || die "--cwd needs a directory"
 			lookup_cwd=$2
@@ -3180,10 +3228,10 @@ cmd_finish() {
 			preflight_skip_given=1
 			if [ "$#" -ge 2 ]; then shift 2; else shift 1; fi
 			;;
-		*) die "unknown option $1 — usage: delegate finish <slug> [--cwd DIR] [--skip \"<reason>\"] [--skip-preflight \"<reason>\"]" ;;
+		*) die "unknown option $1 — usage: delegate finish <slug> [--cwd DIR] [--skip \"<reason>\"] [--skip-preflight \"<reason>\"] [--keep-open]" ;;
 		esac
 	done
-	[ -n "$slug" ] || die 'usage: delegate finish <slug> [--cwd DIR] [--skip "<reason>"] [--skip-preflight "<reason>"]'
+	[ -n "$slug" ] || die 'usage: delegate finish <slug> [--cwd DIR] [--skip "<reason>"] [--skip-preflight "<reason>"] [--keep-open]'
 	# A skip with no reason is the one thing a skip may not be: it says the step does not apply,
 	# and only the sentence says why. Refused before the report is published, so a typo costs
 	# nothing (the wipe refuses it too; this is the cheap, first refusal).
@@ -3276,6 +3324,10 @@ cmd_finish() {
 		record_decision publish "$slug" "none" "non-git space $SPACE: no branch and no PR. Changed since the spec was written: ${changed:-nothing found}" false "$slug"
 		say "finish: $slug — changed in $(space_field "$SPACE" project):"
 		if [ -n "$changed" ]; then printf '%s\n' "$changed"; else say "  (nothing newer than the spec)"; fi
+		if [ "$keep_open" = 1 ]; then
+			say "finish: $slug — kept open: $SPACE has no git, so there is no pull request to wait for; nothing wiped, nothing closed"
+			return 0
+		fi
 		say "finish: $slug — 3/4 wipe: none, nothing to consolidate without a trunk"
 		record_decision wipe "$slug" skipped "non-git space $SPACE: no branch to consolidate" false "$slug"
 		say "finish: $slug — 4/4 close"
@@ -3306,6 +3358,26 @@ cmd_finish() {
 	*"nothing new to push: "*) publish_word="already published" ;;
 	esac
 
+	# --keep-open: publish and stop. A red check is fixed in the worker's own terminal with
+	# `delegate tell`, and that needs the worker to still be there.
+	if [ "$keep_open" = 1 ]; then
+		# The one line `land` waits on. publish has already verified that this commit is the pull
+		# request's head, so the number and the sha are read off its own verdict line instead of being
+		# asked of GitHub a second time, which could answer about a head that moved.
+		local pr_line pr_n pr_sha
+		pr_line=$(printf '%s\n' "$pub_out" | grep -aE '^published .*: #[0-9]+ now at [0-9a-f]+|^nothing new to push: #[0-9]+ is already at [0-9a-f]+' | tail -n 1)
+		pr_n=$(printf '%s' "$pr_line" | sed -nE 's/.*#([0-9]+).*/\1/p')
+		pr_sha=$(printf '%s' "$pr_line" | sed -nE 's/.* at ([0-9a-f]{7,40}).*/\1/p')
+		if [ -z "$pr_n" ] || [ -z "$pr_sha" ]; then
+			printf '%s: finish stopped after step 2 of 4 (publish) for %s: it published, but printed no "#<n> at <sha>" line, so nothing here names the pull request to wait for. Nothing was wiped, nothing was closed, and the worker is still open.\n' "$prog" "$slug" >&2
+			printf 'Fix: read the number from the output above and ask the gate directly:\n' >&2
+			printf '  %s pr-ready <n> --sha <sha> --wait\n' "$BIN" >&2
+			return 1
+		fi
+		say "finish: $slug — 3/4 kept open: #$pr_n at $pr_sha (nothing wiped, nothing closed)"
+		return 0
+	fi
+
 	if wipe_recorded "$slug"; then
 		say "finish: $slug — 3/4 wipe: already recorded, keeping that line"
 	else
@@ -3328,6 +3400,202 @@ cmd_finish() {
 		return 1
 	fi
 	say "finish: $slug — preflighted, $publish_word, wiped, closed"
+}
+
+# --- land: the loop a boss types by hand, in one command -----------------------------------------
+#
+# After a report exists, the landing loop is four commands in one order, and every one of them has
+# to see the answer of the one before: publish, the rollup, the mergeable flag, the prose verdict.
+# Typed by hand that is four turns and four chances to stop half-way, and a worker that dies
+# between them is a report nobody can hand to anyone. `delegate land <slug>` runs the four and
+# keeps the worker open for `delegate tell` while a check is red, because that is the one place a
+# fix can be applied without a new spawn.
+
+# land_worktree <project> <slug> — the checkout the worker's branch is in: `.worktrees/<slug>` by
+# the convention every spec carries, else whichever worktree git says is on a branch of that name.
+land_worktree() {
+	local project=$1 slug=$2 line path="" out
+	[ -n "$project" ] || return 1
+	[ -d "$project/.worktrees/$slug" ] && {
+		printf '%s' "$project/.worktrees/$slug"
+		return 0
+	}
+	out=$(git -C "$project" worktree list --porcelain 2>/dev/null) || return 1
+	while IFS= read -r line; do
+		case $line in
+		worktree\ *) path=${line#worktree } ;;
+		branch\ refs/heads/"$slug")
+			[ -n "$path" ] && [ -d "$path" ] && {
+				printf '%s' "$path"
+				return 0
+			}
+			;;
+		esac
+	done <<<"$out"
+	return 1
+}
+
+# land_pr_ready <slug> <pr> <project> — the pr-ready this pull request is judged by.
+#
+# A branch that changes `bin/pr-ready` judges itself: the gate that has to prove an answered prose
+# review was the branch's own, and the copy in the boss's checkout could not see the change it was
+# waiting for. Whether the branch touches that file is read from the pull request's own file list,
+# never guessed from what a worktree holds.
+land_pr_ready() {
+	local slug=$1 pr=$2 project=$3 wt="" paths=""
+	if [ -n "$project" ] && wt=$(land_worktree "$project" "$slug" 2>/dev/null) && [ -x "$wt/bin/pr-ready" ]; then
+		paths=$(gh pr view "$pr" --json files --jq '.files[].path' 2>/dev/null || true)
+		case $paths in
+		*bin/pr-ready*)
+			printf '%s' "$wt/bin/pr-ready"
+			return 0
+			;;
+		esac
+	fi
+	if command -v pr-ready >/dev/null 2>&1; then
+		command -v pr-ready
+		return 0
+	fi
+	printf '%s' "$self_bin/pr-ready"
+}
+
+# land_fail_line <output> — the one line of a refusing gate a worker can act on. The gate's own
+# "not ready:" line first, then an open prose finding, then a failed check, then the first line
+# that is not a heading: a line nobody can act on is not a fix.
+land_fail_line() {
+	local out=$1 line
+	line=$(printf '%s\n' "$out" | grep -aE '^[[:space:]]*not ready: ' | head -n 1)
+	[ -n "$line" ] || line=$(printf '%s\n' "$out" | grep -aE '^FAIL ' | head -n 1)
+	[ -n "$line" ] || line=$(printf '%s\n' "$out" | grep -aE '^prose review: .*(open|unreadable)' | head -n 1)
+	[ -n "$line" ] || line=$(printf '%s\n' "$out" | grep -aE '^check .* failed|error: |finish stopped' | head -n 1)
+	[ -n "$line" ] || line=$(printf '%s\n' "$out" | grep -avE '^[[:space:]]*$' | head -n 1)
+	printf '%s' "${line#"${line%%[![:space:]]*}"}"
+}
+
+# land_fix <slug> <line> — the failure, and the one command that puts it in the worker's own
+# terminal. The worker is left open on purpose: a red check is fixed in place.
+land_fix() {
+	local slug=$1 line=$2
+	printf '%s: land stopped for %s: %s\n' "$prog" "$slug" "$line" >&2
+	# Quoted by hand rather than with ${line@Q}: bash escapes a byte it does not read as printable,
+	# so under a C locale the same finding prints as $'prose review: ... \342\200\224 ...' — a
+	# command a person cannot read, from a line a person has to paste. An embedded single quote is
+	# closed, escaped and reopened, which every shell reads the same way.
+	printf 'fix in place: bin/delegate tell %s %s\n' "$slug" "'${line//\'/\'\\\'\'}'"
+	return 1
+}
+
+cmd_land() {
+	local slug=${1:-} skip="" skip_given="" timeout=1800 interval=10
+	[ -n "$slug" ] || die 'usage: delegate land <slug> [--timeout SEC] [--skip "<why the wipe does not apply>"]'
+	shift || true
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--timeout)
+			timeout=${2:-}
+			[ -n "$timeout" ] || die "--timeout needs a number of seconds"
+			shift 2
+			;;
+		--skip)
+			skip=${2:-}
+			skip_given=1
+			if [ "$#" -ge 2 ]; then shift 2; else shift 1; fi
+			;;
+		*) die "unknown option $1 — usage: delegate land <slug> [--timeout SEC] [--skip \"<why>\"]" ;;
+		esac
+	done
+	[ -n "$slug" ] || die 'usage: delegate land <slug> [--timeout SEC] [--skip "<why the wipe does not apply>"]'
+	case $timeout in '' | *[!0-9]*) die "--timeout takes a number of seconds, not '$timeout'" ;; esac
+	if [ -n "$skip_given" ] && [ -z "${skip// /}" ]; then
+		die "--skip needs a reason: delegate land $slug --skip \"<why the wipe does not apply>\""
+	fi
+	# How long GitHub gets to stop answering UNKNOWN before the mergeable poll gives up. A test sets
+	# it to 0 rather than waiting ten seconds per attempt against a stub.
+	interval=${DELEGATE_LAND_INTERVAL:-10}
+
+	DELEGATIONS=$(delegations_all)
+	local worker_space="" cwd="" project=""
+	worker_space=$(delegation_field "$slug" spaceName)
+	[ -n "$worker_space" ] || worker_space=$(space_of_slug "$slug")
+	if [ -n "$worker_space" ] && space_exists "$worker_space"; then
+		use_space "$worker_space"
+		project=$(space_field "$SPACE" project)
+	fi
+	DELEGATIONS=$(delegations_all)
+	cwd=$(delegation_field "$slug" cwd)
+	[ -n "$project" ] || project=$cwd
+
+	# 1/4. publish, and stop there: the worker stays open, so a red check is fixed with `tell`.
+	local fin_out="" rc=0
+	fin_out=$("$BIN/delegate" finish "$slug" --keep-open 2>&1) || rc=$?
+	printf '%s\n' "$fin_out"
+	if [ "$rc" -ne 0 ]; then
+		land_fix "$slug" "$(land_fail_line "$fin_out")"
+		return 1
+	fi
+	# The pair finish printed, and nothing else: publish verified that sha is the pull request's head.
+	local pr="" sha="" pr_line=""
+	pr_line=$(printf '%s\n' "$fin_out" | grep -a 'kept open: #' | tail -n 1)
+	pr=$(printf '%s' "$pr_line" | sed -nE 's/.*#([0-9]+) at [0-9a-f]{7,40}.*/\1/p')
+	sha=$(printf '%s' "$pr_line" | sed -nE 's/.*#[0-9]+ at ([0-9a-f]{7,40}).*/\1/p')
+	if [ -z "$pr" ] || [ -z "$sha" ]; then
+		land_fix "$slug" "finish printed no kept-open line naming a pull request, so there is nothing to wait for"
+		return 1
+	fi
+
+	# 2/4. the rollup, on the head publish just verified.
+	local gate out=""
+	gate=$(land_pr_ready "$slug" "$pr" "$project")
+	say "land: $slug — 2/4 rollup: $gate $pr --sha $sha --wait --max $timeout"
+	rc=0
+	out=$("$gate" "$pr" --sha "$sha" --wait --max "$timeout" 2>&1) || rc=$?
+	printf '%s\n' "$out"
+	if [ "$rc" -ne 0 ]; then
+		land_fix "$slug" "$(land_fail_line "$out")"
+		return 1
+	fi
+
+	# 3/4. MERGEABLE, which GitHub computes: it answers UNKNOWN for a few seconds after a push.
+	local mergeable="" i
+	say "land: $slug — 3/4 mergeable"
+	for i in 1 2 3 4 5; do
+		mergeable=$(gh pr view "$pr" --json mergeable --jq '.mergeable' 2>/dev/null || true)
+		[ "$mergeable" = MERGEABLE ] && break
+		[ "$i" -eq 5 ] || sleep "$interval"
+	done
+	if [ "$mergeable" != MERGEABLE ]; then
+		land_fix "$slug" "mergeable: ${mergeable:-unreadable} after 5 checks ${interval}s apart, so the pull request cannot be merged yet"
+		return 1
+	fi
+
+	# 4/4. the prose verdict, on the same head. No --wait: a finding is answered by a commit or a
+	# reply, and polling writes neither.
+	say "land: $slug — 4/4 prose verdict"
+	rc=0
+	out=$("$gate" "$pr" --sha "$sha" 2>&1) || rc=$?
+	printf '%s\n' "$out"
+	if [ "$rc" -ne 0 ]; then
+		land_fix "$slug" "$(land_fail_line "$out")"
+		return 1
+	fi
+
+	# Green, mergeable and answered. The two steps finish would have run next, then the one line a
+	# person acts on.
+	say "land: $slug — wipe"
+	local wipe_args=( "$slug" )
+	[ -z "$skip_given" ] || wipe_args+=( --skip "$skip" )
+	if ! ( cmd_wipe "${wipe_args[@]}" ); then
+		printf '%s: land stopped for %s: the pull request is green and mergeable, but the wipe was refused, so nothing was closed and the worker is still open. The refusal above names what it needs.\n' "$prog" "$slug" >&2
+		printf 'fix in place: bin/delegate tell %s %s\n' "$slug" "'write the five answers under ## Thrown away in the report, then run bin/delegate land $slug again'"
+		return 1
+	fi
+	say "land: $slug — close"
+	if ! ( cmd_close "$slug" ); then
+		printf '%s: land stopped for %s: the pull request is green and mergeable and the wipe is recorded, but the close was refused and the worker is still open. The refusal above names what it needs.\n' "$prog" "$slug" >&2
+		printf 'fix in place: bin/delegate tell %s %s\n' "$slug" "'the close refusal above says what the report still needs; then run bin/delegate land <slug> again'"
+		return 1
+	fi
+	say "ready: #$pr $sha, merge it"
 }
 
 # cmd_sweep -- close every worker whose report exists and does not need a user decision.
@@ -3388,6 +3656,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 	sweep) shift; cmd_sweep "$@" ;;
 	wipe) shift; cmd_wipe "$@" ;;
 	finish) shift; cmd_finish "$@" ;;
-	*) die 'usage: delegate spawn|wait|list|status|tell|close|ask|stats|sweep|wipe|finish ...' ;;
+	land) shift; cmd_land "$@" ;;
+	*) die 'usage: delegate spawn|wait|list|status|tell|close|ask|stats|sweep|wipe|finish|land ...' ;;
 	esac
 fi
