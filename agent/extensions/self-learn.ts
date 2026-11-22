@@ -1530,7 +1530,7 @@ export async function ghAbandonedBranches(cwd: string, bin: string): Promise<{ c
 	const argv = [bin, "pr", "list", "--state", "closed", "--limit", "200", "--json", "state,headRefName,closedAt"];
 	const result = await runOnce(argv, cwd, 5_000);
 	if (result.status !== 0) {
-		const why = clipDetail(result.stderr) || `gh exited ${result.status === null ? "with no status" : result.status}`;
+		const why = clipDetail(result.stderr) || `gh exited ${result.status}`;
 		return { closed: null, warning: `closed pull requests not read: ${why}` };
 	}
 	let parsed: { state?: string; headRefName?: string; closedAt?: string }[];
@@ -1548,8 +1548,9 @@ export async function ghAbandonedBranches(cwd: string, bin: string): Promise<{ c
 		const branch = (pr.headRefName ?? "").trim();
 		const at = Date.parse(pr.closedAt as string);
 		if (branch === "" || !Number.isFinite(at)) continue;
-		const seen = closed.get(branch);
-		if (seen === undefined || at > seen) closed.set(branch, at);
+		// gh lists the newest pull request first, so the first close seen for a branch is
+		// the latest one: a reopened branch's newer close wins without a comparison.
+		if (!closed.has(branch)) closed.set(branch, at);
 	}
 	// An empty map drops nothing, so it needs no warning: only an unreadable list
 	// (null) has to say so, because it is the answer that keeps every failure.
@@ -1575,10 +1576,11 @@ export function abandonedOut(failures: CiRun[], closed: Map<string, number> | nu
 	const keep: CiRun[] = [];
 	let abandoned = 0;
 	for (const run of failures) {
-		const branch = (run.headBranch ?? "").trim();
-		const at = Date.parse(run.createdAt as string);
-		const gaveUpAt = branch === "" ? undefined : closed.get(branch);
-		if (gaveUpAt !== undefined && Number.isFinite(at) && gaveUpAt > at) {
+		// A run with no branch name looks up "", which the map never holds; a date that
+		// cannot be read is NaN, and every comparison with NaN is false, so doubt keeps
+		// the run without a second check.
+		const gaveUpAt = closed.get((run.headBranch ?? "").trim()) ?? Number.NEGATIVE_INFINITY;
+		if (gaveUpAt > Date.parse(run.createdAt as string)) {
 			abandoned += 1;
 			continue;
 		}

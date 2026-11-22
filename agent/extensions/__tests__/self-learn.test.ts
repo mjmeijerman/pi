@@ -2622,23 +2622,29 @@ describe("repeated failing CI checks", () => {
 		// (131, 128) closed on 2026-11-18 — the work was given up on, not deleted.
 		const failures = [
 			{ name: "tests", headBranch: "given-up", conclusion: "failure", databaseId: 1, createdAt: "2026-11-18T09:55:30Z" },
+			{ name: "tests", headBranch: " given-up ", conclusion: "failure", databaseId: 7, createdAt: "2026-11-18T09:55:30Z" },
 			{ name: "tests", headBranch: "pushed-again", conclusion: "failure", databaseId: 2, createdAt: "2026-11-18T11:00:00Z" },
 			{ name: "tests", headBranch: "still-open", conclusion: "failure", databaseId: 3, createdAt: "2026-11-18T09:55:30Z" },
-			{ name: "tests", headBranch: "undated", conclusion: "failure", databaseId: 4 },
+			{ name: "tests", headBranch: "same-instant", conclusion: "failure", databaseId: 4, createdAt: "2026-11-18T10:32:12Z" },
+			{ name: "tests", headBranch: "undated", conclusion: "failure", databaseId: 5 },
+			{ name: "tests", conclusion: "failure", databaseId: 6, createdAt: "2026-11-18T09:55:30Z" },
 		];
 		const closed = new Map([
 			["given-up", Date.parse("2026-11-18T10:32:12Z")],
 			["pushed-again", Date.parse("2026-11-18T10:32:12Z")],
+			["same-instant", Date.parse("2026-11-18T10:32:12Z")],
 			["undated", Date.parse("2026-11-18T10:32:12Z")],
+			["Stryker was here!", Date.parse("2026-11-18T10:32:12Z")],
 		]);
 		const kept = abandonedOut(failures, closed);
 		assert.deepEqual(
 			kept.runs.map((run) => run.headBranch),
-			["pushed-again", "still-open", "undated"],
-			"a close after the run means nobody pushes again; a close before it leaves the newer red as evidence, " +
-				"a branch with no close is untouched, and an undated run is kept because doubt counts",
+			["pushed-again", "still-open", "same-instant", "undated", undefined],
+			"a close after the run means nobody pushes again, however the branch name is spaced; a close before " +
+				"it leaves the newer red as evidence, a close in the same second is not newer, an undated run is " +
+				"kept, and a run with no branch name is matched to no key at all",
 		);
-		assert.equal(kept.abandoned, 1);
+		assert.equal(kept.abandoned, 2);
 		assert.deepEqual(
 			abandonedOut(failures, null),
 			{ runs: failures, abandoned: 0 },
@@ -2652,9 +2658,11 @@ describe("repeated failing CI checks", () => {
 		try {
 			const prs = JSON.stringify([
 				{ state: "MERGED", headRefName: "landed", closedAt: "2026-11-21T09:00:00Z" },
-				{ state: "CLOSED", headRefName: "given-up", closedAt: "2026-11-18T10:32:12Z" },
 				{ state: "CLOSED", headRefName: "given-up", closedAt: "2026-11-19T10:32:12Z" },
+				{ state: "CLOSED", headRefName: "given-up", closedAt: "2026-11-18T10:32:12Z" },
 				{ state: "CLOSED", headRefName: " padded ", closedAt: "2026-11-18T10:32:12Z" },
+				{ state: "CLOSED", headRefName: "", closedAt: "2026-11-18T10:32:12Z" },
+				{ state: "CLOSED", closedAt: "2026-11-18T10:32:12Z" },
 				{ state: "CLOSED", headRefName: "no-date" },
 			]);
 			const bin = join(dir, "gh");
@@ -2668,8 +2676,22 @@ describe("repeated failing CI checks", () => {
 					["given-up", Date.parse("2026-11-19T10:32:12Z")],
 					["padded", Date.parse("2026-11-18T10:32:12Z")],
 				],
-				"merged rows are ignored, the newest close is the one kept, and a close with no date is not guessed at",
+				"merged rows are ignored, the first close seen is the newest because gh lists it first, " +
+					"a row with no branch name is not the empty branch, and a close with no date is not guessed at",
 			);
+
+			const shapes: [string, string][] = [
+				["exit 7", "closed pull requests not read: gh exited 7"],
+				["printf '%s' 'not json'", "closed pull requests not read: gh printed something that is not JSON"],
+			];
+			for (const [answer, expected] of shapes) {
+				const shaped = join(dir, "gh-shaped");
+				await writeFile(shaped, `#!/usr/bin/env bash\n${answer}\n`, "utf8");
+				await chmod(shaped, 0o755);
+				const said = await ghAbandonedBranches(dir, shaped);
+				assert.equal(said.closed, null, `an answer that cannot be used is null, never an empty map: ${answer}`);
+				assert.equal(said.warning, expected, `the warning says what went wrong: ${answer}`);
+			}
 
 			const broken = join(dir, "gh-broken");
 			await writeFile(broken, "#!/usr/bin/env bash\necho 'HTTP 401: Bad credentials' >&2\nexit 1\n", "utf8");
@@ -2677,6 +2699,72 @@ describe("repeated failing CI checks", () => {
 			const unreadable = await ghAbandonedBranches(dir, broken);
 			assert.equal(unreadable.closed, null, "an unreadable list is null, never an empty map");
 			assert.match(unreadable.warning ?? "", /closed pull requests not read: HTTP 401/);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("ghCiRuns drops the branch that was given up on and says so, and an unreadable pull-request list keeps it", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-abandoned-wiring-"));
+		try {
+			const failures = JSON.stringify([
+				{ name: "tests", headBranch: "given-up", conclusion: "failure", databaseId: 1, createdAt: "2026-11-18T09:46:22Z" },
+				{ name: "tests", headBranch: "alive", conclusion: "failure", databaseId: 2, createdAt: "2026-11-18T09:46:22Z" },
+			]);
+			const closedPrs = JSON.stringify([
+				{ state: "CLOSED", headRefName: "given-up", closedAt: "2026-11-18T10:12:24Z" },
+				{ state: "MERGED", headRefName: "alive", closedAt: "2026-11-19T10:12:24Z" },
+			]);
+			const stub = (answer: string) =>
+				`#!/usr/bin/env bash\ncase "$2$4" in\n  listfailure) printf '%s' '${failures}' ;;\n  listsuccess) printf '%s' '[]' ;;\n  listclosed) ${answer} ;;\n  --paginate--jq) printf '%s\\n' given-up alive ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Run tests"}]}]}' ;;\nesac\n`;
+			const bin = join(dir, "gh");
+			await writeFile(bin, stub(`printf '%s' '${closedPrs}'`), "utf8");
+			await chmod(bin, 0o755);
+			const result = await ghCiRuns(dir, bin);
+			assert.deepEqual(
+				result.runs.map((run) => run.headBranch),
+				["alive"],
+				"the branch given up on is history; the branch whose pull request merged is still evidence",
+			);
+			assert.match(
+				result.warning ?? "",
+				/CI failures on an abandoned branch not counted: 1 of 2 failing runs sit on a branch whose pull request was closed without merging after the run, so nobody is going to push to it/,
+				"the smaller table is a measurement, not a silence",
+			);
+
+			await writeFile(bin, stub("exit 1"), "utf8");
+			await chmod(bin, 0o755);
+			const kept = await ghCiRuns(dir, bin);
+			assert.deepEqual(
+				kept.runs.map((run) => run.headBranch),
+				["given-up", "alive"],
+				"a pull-request list that could not be read drops nothing: doubt counts normally",
+			);
+			assert.match(kept.warning ?? "", /closed pull requests not read: gh exited 1/, "and the note says which list was missing");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("the pull-request query is pinned token by token, and a body that is not a list is a named warning", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "self-learn-abandoned-argv-"));
+		try {
+			const log = join(dir, "argv.txt");
+			const bin = join(dir, "gh");
+			await writeFile(bin, `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > '${log}'\nprintf '%s' '{"not":"a list"}'\n`, "utf8");
+			await chmod(bin, 0o755);
+			const result = await ghAbandonedBranches(dir, bin);
+			assert.deepEqual(
+				(await readFile(log, "utf8")).trim().split("\n"),
+				["pr", "list", "--state", "closed", "--limit", "200", "--json", "state,headRefName,closedAt"],
+				"closed, not all: a merged pull request's lesson landed, and gh applies neither the state nor a cap by itself",
+			);
+			assert.equal(result.closed, null, "a body that is not a list is unreadable, never an empty map");
+			assert.equal(
+				result.warning,
+				"closed pull requests not read: gh printed something that is not a list",
+				"the warning names what was wrong with the answer",
+			);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
