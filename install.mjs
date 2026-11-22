@@ -114,7 +114,7 @@ import {
 	wslMountWarnings,
 } from './scripts/install-lib.mjs';
 import { prereqsSkipped, stepPrereqs } from './scripts/prereqs.mjs';
-import { DURABLE_KEY, durableBinding, mergeDurableKeys } from './herdr-mods/durable/keys.mjs';
+import { DURABLE_ACTION, DURABLE_KEY, mergeDurableKeys } from './herdr-mods/durable/keys.mjs';
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
@@ -756,12 +756,17 @@ function stepHerdrMods() {
 
 // --- 1d. the key that makes a durable space ---------------------------------
 /**
- * stepHerdrKeys — `alt-shift-n` pressed anywhere opens a tab running `space new`.
+ * stepHerdrKeys — `alt-shift-n` pressed anywhere opens the durable mod's New form.
  *
  * The mods' own keys live in each mod's `keys.json` and Herdr merges them by hand; that
- * merge is this step, for the one key that has to work on a fresh install. The other
- * half is the argv: `terminal.open` with the installed `space` (and the `.cmd` on
- * Windows), so no machine's home folder is written into a file that travels.
+ * merge is this step, for the one key that has to work on a fresh install. The binding is
+ * `mod.open` with `{"name": "durable"}`: no argv and no path, so there is nothing to
+ * resolve for a platform and nothing that dies with "not a valid Win32 application" — the
+ * form is the mod's own, with its fields, its refusals and its clone toggle.
+ *
+ * A keys.json that already carries what an earlier install wrote for this key
+ * (`terminal.open` running `space new`) is moved to the form, and says so: that binding was
+ * this key, not somebody else's, and refusing it would leave a person on the tab forever.
  *
  * A missing keys.json is deliberately not created. Herdr only replaces a keys file whose
  * bytes are a shipped original, so any file written before the app's first start becomes
@@ -770,7 +775,7 @@ function stepHerdrMods() {
  * (after Herdr has written its own) adds the key beside them.
  */
 function stepHerdrKeys() {
-	const binding = durableBinding({ platform: PLAN.platform, binDir: P.binDir });
+	const binding = DURABLE_ACTION;
 	const file = path.join(P.herdrConfigDir, 'keys.json');
 	if (!exists(file)) {
 		note(`${path.basename(file)}: not there yet — Herdr writes it on its first start, then run this again and ${DURABLE_KEY} lands beside the shipped keys`);
@@ -779,9 +784,12 @@ function stepHerdrKeys() {
 	const { text, state } = mergeDurableKeys(read(file), binding);
 	if (state === 'added') {
 		writeText(file, text);
-		note(`${DURABLE_KEY} -> ${binding.args.argv.join(' ')} (new tab) in ${file}`);
+		note(`${DURABLE_KEY} -> mod.open durable (the New form, as an overlay) in ${file}`);
+	} else if (state === 'migrated') {
+		writeText(file, text);
+		note(`${DURABLE_KEY} -> mod.open durable (the New form) in ${file}: it used to open a terminal running \`space new\``);
 	} else if (state === 'kept') {
-		say(`== kept ${DURABLE_KEY} in ${path.basename(file)}: already ${binding.args.argv.join(' ')}`);
+		say(`== kept ${DURABLE_KEY} in ${path.basename(file)}: already opens the durable New form`);
 	} else if (state === 'taken') {
 		warn(`${DURABLE_KEY} is already bound to something else in ${file} — left as it is; bind it yourself or free the key`);
 	} else {

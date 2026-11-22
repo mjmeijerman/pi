@@ -1,11 +1,12 @@
-// A fresh install leaves `alt-shift-n` bound to the space prompt — and never eats a key.
+// A fresh install leaves `alt-shift-n` opening the durable New form — and never eats a key.
 //
 // Shape: a throwaway HOME, the real installer, and no herdr-app anywhere (the app is not
 // needed to write a keys.json, and a machine without it must still get the line). The two
 // answers that matter are pinned here: Herdr's own file is merged, never invented, because
 // a keys.json written before the app's first start becomes the person's whole key map; and
-// the argv the installer writes names a file that is really there afterwards — on Windows
-// the `.cmd` shim, which is the only spelling Windows can start.
+// the binding is `mod.open` with a mod name and no argv — the tab-running-`space new`
+// binding it replaces carried the path of the installed program, and that path is what
+// Windows could not start (`os error 193`).
 //
 // Run it when the plan's config directory is the one this host resolves: the mapping from
 // HOME to `~/.config/herdr-app` is install-lib's answer, so the test asks for it instead of
@@ -107,17 +108,39 @@ test('an existing keys.json gets the key, and its other keys survive', (t) => {
 	assert.ok(run.stdout.includes(LINE), `the install line is missing:\n${run.stdout}`);
 
 	const after = JSON.parse(readText(file));
-	assert.equal(after.global[KEY].command, 'terminal.open');
-	assert.equal(after.global[KEY].args.place, 'tab');
-	assert.deepEqual(after.global[KEY].args.argv.slice(1), ['new']);
-	// The argv names the program that is really there after this install: on Windows the
-	// `.cmd` shim beside the bash wrapper, everywhere else the wrapper itself.
-	assert.ok(fs.existsSync(after.global[KEY].args.argv[0]), `${after.global[KEY].args.argv[0]} is not there after install`);
+	assert.equal(after.global[KEY].command, 'mod.open');
+	assert.deepEqual(after.global[KEY].args, { name: 'durable' });
+	// No argv, so no program path to resolve — which is the whole point: the path the old
+	// binding carried is the one Windows cannot start.
+	assert.equal(Object.hasOwn(after.global[KEY].args, 'argv'), false);
 	assert.equal(after.global['ctrl-shift-t'], 'tab.new');
 	assert.equal(after.global['ctrl-shift-p'], 'app.palette');
 	assert.deepEqual(after.terminal, { 'ctrl-shift-c': 'terminal.copy' });
 
 	// A second install is not a second change: the bytes stay, and it says so.
+	const before = readText(file);
+	const again = install(home);
+	assert.equal(again.status, 0, again.stderr);
+	assert.ok(again.stdout.includes('kept alt-shift-n'), again.stdout);
+	assert.equal(readText(file), before);
+});
+
+test('a keys.json holding the old tab binding is moved to the form, and says so', (t) => {
+	const home = tempHome(t);
+	// What every earlier install wrote: `terminal.open` with the `space` it resolved.
+	const old = { command: 'terminal.open', args: { argv: ['space', 'new'], place: 'tab' } };
+	const file = writeKeys(home, { global: { [KEY]: old, 'ctrl-shift-t': 'tab.new' } });
+
+	const run = install(home);
+	assert.equal(run.status, 0, run.stderr);
+	assert.match(run.stdout, /mod\.open durable/, run.stdout);
+	assert.match(run.stdout, /used to open a terminal running/, run.stdout);
+
+	const after = JSON.parse(readText(file));
+	assert.deepEqual(after.global[KEY], { command: 'mod.open', args: { name: 'durable' } });
+	assert.equal(after.global['ctrl-shift-t'], 'tab.new');
+
+	// Moved once, not every install: the second run keeps the bytes.
 	const before = readText(file);
 	const again = install(home);
 	assert.equal(again.status, 0, again.stderr);

@@ -15,20 +15,38 @@
  *  · List    the same rows, read only, plus the guard's last line for each space — where a
  *            person checks that it is actually being watched.
  *
- * Every call goes through `bin/space` in the pi repo, resolved from `home()`; the argv comes
- * from `argv.mjs` and nowhere else. It creates and forgets, and does nothing else: no
+ * Every call goes through `bin/space`, and `space-path.mjs` is what picks the file: on a
+ * Windows home the `.cmd` the installer writes (Windows cannot exec the bash wrapper — os
+ * error 193), otherwise the wrapper itself, and a refusal naming both when neither is there.
+ * The argv comes from `argv.mjs` and nowhere else. It creates and forgets, and does nothing else: no
  * `space.close`, no `tab.close`, no deletion, no rename, no move.
  *
  * Keys: 1/2/3 or alt-shift-n/f/l switch view · r reload (list) · esc back, then close.
  */
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { checking, closeOverlay, exec, home, nextCommand, props, run, theme } from "herdr";
+import { checking, closeOverlay, exec, home, nextCommand, props, readTextFile, run, theme } from "herdr";
 import { NAME_RULE, forgetArgv, nameProblem, newArgv } from "./argv.mjs";
 import { initialForm } from "./prefill.mjs";
+import { toolProgram } from "./space-path.mjs";
 
-const spaceBin = () => `${home()}/.pi/bin/space`;
-const guardBin = () => `${home()}/.pi/bin/guard`;
+/** A file is there when the app can read it: `readTextFile` answers undefined otherwise, and
+ * that is the only existence test a mod has. The shims are a few lines, so reading one costs
+ * nothing worth caching separately. */
+const fileExists = async (file) => (await readTextFile(file).catch(() => undefined)) !== undefined;
+
+/** The program for a tool name, resolved once: `space-path.mjs` decides which file, and a
+ * refusal (neither the `.cmd` nor the wrapper) is thrown at the caller so the overlay can
+ * say it instead of running a path that cannot start. */
+const resolved = new Map();
+async function toolBin(name) {
+	const known = resolved.get(name);
+	if (known) return known;
+	const program = toolProgram({ home: home(), name, exists: fileExists });
+	resolved.set(name, program);
+	return program;
+}
+
 const defaultProject = (name) => `~/projects/${name}`;
 
 /** `~/x` is the person's word for home; nothing here goes through a shell to expand it. */
@@ -97,6 +115,9 @@ export default class Durable extends View {
 		this.confirm = "";
 		this.watching = {};
 		this.focus = "";
+		// The program `space` resolved to, once a call has asked: the form's "it runs:" line
+		// shows the real one on Windows (the `.cmd`), and "space" until then.
+		this.spacePath = "";
 
 		// The URL field holds the URL in clone mode, the folder otherwise — one field either way.
 		const given = start.clone ? start.url : start.project;
@@ -189,14 +210,27 @@ export default class Durable extends View {
 	load(cx) {
 		this.loading = true;
 		cx.spawn(async (cx) => {
-			const result = await exec(spaceBin(), ["list"], { timeout: 20000 }).catch((e) => ({
+			let space;
+			try {
+				space = await toolBin("space");
+			} catch (e) {
+				// No `space` this mod can start: one sentence, and the rows stay empty.
+				this.loading = false;
+				this.error = String(e?.message ?? e);
+				this.spacePath = "";
+				this.rows = [];
+				cx.notify();
+				return;
+			}
+			this.spacePath = space;
+			const result = await exec(space, ["list"], { timeout: 20000 }).catch((e) => ({
 				code: -1,
 				stdout: "",
 				stderr: String(e?.message ?? e),
 			}));
 			this.loading = false;
 			if (result.code !== 0) {
-				this.error = why(result, spaceBin());
+				this.error = why(result, space);
 				this.rows = [];
 			} else {
 				this.rows = parseRows(result.stdout);
@@ -212,12 +246,19 @@ export default class Durable extends View {
 		const rows = this.rows.slice(0, 20);
 		if (!rows.length) return;
 		cx.spawn(async (cx) => {
+			let guard;
+			try {
+				guard = await toolBin("guard");
+			} catch (e) {
+				for (const row of rows) this.watching[row.name] = String(e?.message ?? e);
+				cx.notify();
+				return;
+			}
 			for (const row of rows) {
-				const result = await exec(guardBin(), ["--dry-run", "--space", row.name], { timeout: 20000 }).catch(
+				const result = await exec(guard, ["--dry-run", "--space", row.name], { timeout: 20000 }).catch(
 					(e) => ({ code: -1, stdout: "", stderr: String(e?.message ?? e) }),
 				);
-				this.watching[row.name] =
-					result.code === 0 ? lastLine(result.stdout) : why(result, guardBin());
+				this.watching[row.name] = result.code === 0 ? lastLine(result.stdout) : why(result, guard);
 				cx.notify();
 			}
 		});
@@ -247,11 +288,23 @@ export default class Durable extends View {
 		this.error = "";
 		this.notice = "";
 		this.done = null;
-		this.ran = [spaceBin(), ...argv].join(" ");
+		this.ran = null;
 		this.output = "";
 		cx.notify();
 		cx.spawn(async (cx) => {
-			const result = await exec(spaceBin(), argv, { timeout: 600000 }).catch((e) => ({
+			let space;
+			try {
+				space = await toolBin("space");
+			} catch (e) {
+				this.busy = false;
+				this.error = String(e?.message ?? e);
+				cx.notify();
+				return;
+			}
+			this.spacePath = space;
+			this.ran = [space, ...argv].join(" ");
+			cx.notify();
+			const result = await exec(space, argv, { timeout: 600000 }).catch((e) => ({
 				code: -1,
 				stdout: "",
 				stderr: String(e?.message ?? e),
@@ -259,7 +312,7 @@ export default class Durable extends View {
 			this.busy = false;
 			if (result.code !== 0) {
 				// stderr first: the refusal's reason is the thing worth reading.
-				this.error = why(result, spaceBin());
+				this.error = why(result, space);
 				this.output = [result.stderr, result.stdout].filter((s) => String(s ?? "").trim()).join("\n").trim();
 				cx.notify();
 				return;
@@ -295,14 +348,24 @@ export default class Durable extends View {
 		this.confirm = "";
 		this.busy = true;
 		cx.spawn(async (cx) => {
-			const result = await exec(spaceBin(), forgetArgv({ name: row.name }), { timeout: 30000 }).catch((e) => ({
+			let space;
+			try {
+				space = await toolBin("space");
+			} catch (e) {
+				this.busy = false;
+				this.error = String(e?.message ?? e);
+				cx.notify();
+				return;
+			}
+			this.spacePath = space;
+			const result = await exec(space, forgetArgv({ name: row.name }), { timeout: 30000 }).catch((e) => ({
 				code: -1,
 				stdout: "",
 				stderr: String(e?.message ?? e),
 			}));
 			this.busy = false;
 			if (result.code !== 0) {
-				this.error = why(result, spaceBin());
+				this.error = why(result, space);
 				cx.notify();
 				return;
 			}
@@ -495,7 +558,7 @@ export default class Durable extends View {
 					.text_size(11)
 					.text_color(t.dim)
 					.child(
-						`it runs: ${spaceBin()} ${newArgvPreview(name, this.clone, this.clone ? where : expand(where), this.noGit)}`,
+						`it runs: ${this.spacePath || "space"} ${newArgvPreview(name, this.clone, this.clone ? where : expand(where), this.noGit)}`,
 					),
 			)
 			.child(
