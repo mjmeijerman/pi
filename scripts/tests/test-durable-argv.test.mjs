@@ -1,7 +1,7 @@
 // What the durable mod tells `bin/space` — and nothing else.
 //
 // Plain node: no herdr-app, no gpui-*, no home folder. `env -i node --test
-// scripts/tests/test-durable-argv.mjs` runs it on a machine that never opened the app.
+// scripts/tests/test-durable-argv.test.mjs` runs it on a machine that never opened the app.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

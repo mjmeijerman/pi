@@ -1,13 +1,13 @@
 // Which space a PR's repository belongs to — and what the view says when none owns it.
 //
 // Plain node: no herdr-app, no gpui-*, no home folder. `env -i node --test
-// scripts/tests/test-prs-route.mjs` runs it on a machine that never opened the app.
+// scripts/tests/test-prs-route.test.mjs` runs it on a machine that never opened the app.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { bossTerminal, liveSpaceFor, noSpaceMessage, routeLabel, spaceForFolder, spaceName } from "../../herdr-mods/prs/route.mjs";
+import { bossTerminal, liveSpaceFor, newSpaceSpec, noSpaceMessage, routeLabel, spaceForFolder, spaceName } from "../../herdr-mods/prs/route.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const SOURCE = readFileSync(`${HERE}../../herdr-mods/prs/main.js`, "utf8");
@@ -154,4 +154,38 @@ test("the mod sends its job to the boss instead of starting an agent", () => {
 	// And it says which space it told, or which one has no Boss running.
 	assert.match(SOURCE, /told the boss of space/);
 	assert.match(SOURCE, /no Boss tab is running in space/);
+});
+
+// --- "create a space for it": the overlay prs hands the app, filled in. ---
+
+const pr = (repo, number = 12) => ({ repo, number, title: "a change" });
+
+test("a clone on disk: the durable New form, opened with that folder", () => {
+	const spec = newSpaceSpec(pr("See-Horse/paddock"), "/home/someone/projects/paddock");
+	assert.equal(spec.mod, "durable");
+	assert.equal(spec.kind, "dialog");
+	assert.equal(spec.props.view, "new");
+	assert.equal(spec.props.project, "/home/someone/projects/paddock");
+	assert.equal("url" in spec.props, false, "a folder caller is not a clone caller");
+	assert.equal(spec.props.name, "paddock");
+});
+
+test("no clone: the URL to clone, an empty folder, and clone mode by consequence", () => {
+	const spec = newSpaceSpec(pr("See-Horse/paddock"), null);
+	assert.equal(spec.mod, "durable");
+	assert.equal(spec.props.url, "https://github.com/See-Horse/paddock");
+	assert.equal(spec.props.project, "");
+	assert.equal(spec.props.name, "paddock");
+});
+
+test("the name comes from the repository, and an invalid one is passed through", () => {
+	assert.equal(newSpaceSpec(pr("See-Horse/paddock"), null).props.name, "paddock");
+	// The slug rule is the field's own grey line, not a refusal here: the person can fix it.
+	assert.equal(newSpaceSpec(pr("acme/zipstream_php"), null).props.name, "zipstream_php");
+});
+
+test("the dead command cannot come back: prs opens an overlay, never a mod command", () => {
+	assert.match(SOURCE, /openOverlay\(/);
+	assert.doesNotMatch(SOURCE, /run\("durable\.new"/, "prs sends durable.new again — shown copies only, and no props");
+	assert.match(SOURCE, /newSpaceSpec\(/);
 });

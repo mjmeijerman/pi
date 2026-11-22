@@ -25,6 +25,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { checking, closeOverlay, exec, home, nextCommand, props, run, theme } from "herdr";
 import { NAME_RULE, forgetArgv, nameProblem, newArgv } from "./argv.mjs";
+import { initialForm } from "./prefill.mjs";
 
 const spaceBin = () => `${home()}/.pi/bin/space`;
 const guardBin = () => `${home()}/.pi/bin/guard`;
@@ -81,8 +82,10 @@ function why(result, cmd) {
 export default class Durable extends View {
 	init(_props, cx) {
 		this.handle = cx.focus_handle();
-		const start = props()?.view;
-		this.view = start === "forget" || start === "list" ? start : "new";
+		// What the caller opened this copy with: `openOverlay({ mod, props })` reaches us here,
+		// and a `run` command does not — the form fills in either way, even when nothing does.
+		const start = initialForm(props());
+		this.view = start.view;
 		this.busy = false;
 		this.rows = [];
 		this.loading = true;
@@ -95,12 +98,15 @@ export default class Durable extends View {
 		this.watching = {};
 		this.focus = "";
 
-		this.name = InputState.new({ value: "" });
-		this.path = InputState.new({ value: "" });
+		// The URL field holds the URL in clone mode, the folder otherwise — one field either way.
+		const given = start.clone ? start.url : start.project;
+		this.name = InputState.new({ value: start.name });
+		this.path = InputState.new({ value: given });
 		this.next = InputState.new({ value: "" });
 		this.setting = false;
-		this.pathTouched = false;
-		this.clone = false;
+		// A path the caller chose is theirs: the name's change handler must not overwrite it.
+		this.pathTouched = Boolean(given);
+		this.clone = start.clone;
 		this.noGit = false;
 
 		this.name.on("change", (_e, cx) => {
@@ -152,7 +158,13 @@ export default class Durable extends View {
 			return;
 		}
 		this.load(cx);
-		if (this.view === "new") cx.timer.after(80, () => this.name.focus());
+		// Focus the first field still empty, so a prefilled form is one Tab from Create space.
+		if (this.view === "new") {
+			cx.timer.after(80, () => {
+				if (!start.name) this.name.focus();
+				else if (!given) this.path.focus();
+			});
+		}
 	}
 
 	setPath(text) {
