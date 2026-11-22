@@ -300,6 +300,24 @@ no_test_line() {
 	printf '%s' "$proof"
 }
 
+# A code diff needs a Radar citation (agent/AGENTS.md, checked by
+# `scripts/pr-gate.sh --gate radar`). Only the proposal knows which blip this
+# learner answers, so its line is carried when it has one; a learner branch is
+# the feedback flywheel itself, so that blip and the learner's own test are the
+# honest default rather than an invented number.
+RADAR_BLIP=11
+radar_line() {
+	local claim=""
+	if [ -n "$PROPOSAL" ] && [ -r "$PROPOSAL" ]; then
+		claim=$(grep -im1 -E '^[*[:space:]]*radar:' "$PROPOSAL" \
+			| sed -E 's/^[*[:space:]]*[Rr]adar[*[:space:]]*:[[:space:]]*[*[:space:]]*//; s/[*`]//g; s/[[:space:]]*$//')
+	fi
+	if [ -z "$claim" ]; then
+		claim="blip $RADAR_BLIP — the failure a learner diagnosed reaches trunk as a reviewed pull request, checked by the learner's own test"
+	fi
+	printf '%s' "$claim"
+}
+
 # The pull request body, as the gate reads it. Plain lines and no backticks: the
 # spec may be read in a shell, and the gate strips emphasis instead.
 pr_body_body() {
@@ -310,6 +328,7 @@ pr_body_body() {
 	[ -z "$reason" ] || printf 'Test change: %s\n' "$reason"
 	proof=$(no_test_line)
 	[ -z "$proof" ] || printf 'No test: %s\n' "$proof"
+	printf 'Radar: %s\n' "$(radar_line)"
 	printf 'Proposal: %s\n' "$PROPOSAL"
 	printf 'Written by a self-learn learner; published by a pi agent space.\n'
 }

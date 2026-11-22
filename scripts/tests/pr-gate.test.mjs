@@ -104,6 +104,7 @@ test("the shipped PR template carries every line the gates read", () => {
 	assert.match(template, /^Mission:/m, "template has no literal `Mission:` line");
 	assert.match(template, /^Review tier:/m, "template has no literal `Review tier:` line");
 	assert.match(template, /^Test change:/m, "template has no literal `Test change:` line");
+	assert.match(template, /^Radar:/m, "template has no literal `Radar:` line");
 });
 
 test("the template fails on placeholders, never on a missing line", () => {
@@ -417,7 +418,7 @@ test("--branch checks another branch without switching this checkout", () => {
 test("the workflow calls the shared script and keeps no copy of the gates", () => {
 	const workflow = readFileSync(WORKFLOW, "utf8");
 
-	for (const name of ["tier", "mission", "test-change"]) {
+	for (const name of ["tier", "mission", "test-change", "radar"]) {
 		const at = workflow.indexOf(`--gate ${name}`);
 		assert.ok(at > -1, `the workflow never runs --gate ${name}`);
 		const after = workflow.slice(at + `--gate ${name}`.length, at + `--gate ${name}`.length + 1);
@@ -440,4 +441,76 @@ test("make pr-check is the documented local caller of the same script", () => {
 	assert.match(makefile, /scripts\/pr-gate\.sh/);
 	// A branch is checkable from a checkout that stays where it is.
 	assert.match(makefile, /--branch "\$\(BRANCH\)"/, "pr-check has no BRANCH= pass-through");
+});
+
+// --------------------------------------------------------------------- radar --
+// agent/AGENTS.md says a harness change cites a Thoughtworks Radar blip, with
+// the problem it fixes and how it is measured. Measured 2026-11-22: none of the
+// last 25 commits on trunk cited one — prose that nothing checks is gone. This
+// gate is the check: red on a code diff with no citation, red on a citation
+// whose number is not in docs/radar-blips.tsv, red on a number with no
+// measurement after it (blip 20: the guard fails loudly).
+const RADAR = "Radar: blip 20 — the gate is red on a code diff with no citation, checked by scripts/tests/pr-gate.test.mjs";
+const CODE = "scripts/pr-gate.sh";
+const TSV = "docs/radar-blips.tsv";
+
+test("radar: a code diff with no Radar line is red and names the line to add", () => {
+	const r = gate({ body: `${MISSION}\n\nReview tier: High\n`, paths: [CODE], gateName: "radar" });
+	assert.equal(r.status, 1, r.out);
+	assert.match(r.out, /Radar: blip/);
+	assert.doesNotMatch(r.out, /pr-gate: green/);
+});
+
+test("radar: a blip number with nothing after it does not say how it is measured", () => {
+	const r = gate({ body: `${MISSION}\n\nRadar: blip 20\n`, paths: [CODE], gateName: "radar" });
+	assert.equal(r.status, 1, r.out);
+	assert.match(r.out, /how it is measured/);
+	assert.doesNotMatch(r.out, /pr-gate: green/);
+});
+
+test("radar: a real blip number and a measurement is green", () => {
+	const r = gate({ body: `${MISSION}\n\n${RADAR}\n`, paths: [CODE], gateName: "radar" });
+	assert.equal(r.status, 0, r.out);
+	assert.match(r.out, /pr-gate: green/, r.out);
+	// Every code path the rule names is a code path.
+	for (const path of ["bin/delegate", "agent/extensions/x.ts", ".github/workflows/pr-tier.yml", "git-hooks/pre-commit.d/10-x", "sandbox/pi-sandbox.sh"]) {
+		const red = gate({ body: `${MISSION}\n`, paths: [path], gateName: "radar" });
+		assert.equal(red.status, 1, `${path} is code and needs a blip`);
+		assert.match(red.out, /Radar: blip/);
+	}
+});
+
+test("radar: a number that is not in docs/radar-blips.tsv is red and names both", () => {
+	const r = gate({
+		body: `${MISSION}\n\nRadar: blip 9999 — measured by a thing that does not exist\n`,
+		paths: [CODE],
+		gateName: "radar",
+	});
+	assert.equal(r.status, 1, r.out);
+	assert.match(r.out, /9999/);
+	assert.match(r.out, /docs\/radar-blips\.tsv/);
+	assert.doesNotMatch(r.out, /pr-gate: green/);
+	// The file the gate reads is the file in this repo.
+	assert.ok(readFileSync(join(ROOT, TSV), "utf8").length > 0);
+});
+
+test("radar: a docs-only diff needs no citation, and the run says so", () => {
+	const r = gate({ body: `${MISSION}\n\nReview tier: Low\n`, paths: [DOC], gateName: "radar" });
+	assert.equal(r.status, 0, r.out);
+	assert.match(r.out, /not applicable/);
+	assert.match(r.out, /pr-gate: green/, r.out);
+});
+
+test("radar: emphasis and spacing still count, a fenced line does not", () => {
+	const bold = gate({ body: `${MISSION}\n\n**Radar: blip 2** — mutation testing pins the assertions, checked by the suite\n`, paths: [CODE], gateName: "radar" });
+	assert.equal(bold.status, 0, bold.out);
+
+	const spaced = gate({ body: `${MISSION}\n\nradar : blip #20 — the guard fails loudly instead of repairing silently\n`, paths: [CODE], gateName: "radar" });
+	assert.equal(spaced.status, 0, spaced.out);
+
+	// A citation inside a code fence is an example, not the body's claim.
+	const fenced = gate({ body: `${MISSION}\n\nExample:\n\n\`\`\`\n${RADAR}\n\`\`\`\n`, paths: [CODE], gateName: "radar" });
+	assert.equal(fenced.status, 1, fenced.out);
+	assert.match(fenced.out, /Radar: blip/);
+	assert.doesNotMatch(fenced.out, /pr-gate: green/);
 });

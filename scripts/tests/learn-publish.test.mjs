@@ -379,7 +379,7 @@ test("the body the spec hands to gh passes the repo's own pr-gate", () => {
 	const proposal = join(f.dir, "agent", "proposals", "p.md");
 	writeFileSync(
 		proposal,
-		"# Publish the fix a dead learner wrote, so the same FAIL stops being re-learned\n\n**Verdict:** change\n**Risk tier:** Medium (`scripts/`)\n",
+		"# Publish the fix a dead learner wrote, so the same FAIL stops being re-learned\n\n**Verdict:** change\n**Risk tier:** Medium (`scripts/`)\n**Radar:** blip 11 — the diagnosed failure reaches trunk as a reviewed pull request, checked by the learner's own test\n",
 	);
 	// A learner's branch moves a script and its test together, and a learner's
 	// checkout has the origin/trunk ref the diff is read against. That pair is
@@ -409,6 +409,7 @@ test("the body the spec hands to gh passes the repo's own pr-gate", () => {
 	assert.match(body, /^Mission: Publish the fix a dead learner wrote/, "the proposal's H1 becomes the mission");
 	assert.match(body, /^Review tier: Medium$/m, "the gate's spelling, not `Tier:`");
 	assert.match(body, /^Test change: /m, "a test moved beside its source, so the reason is stated");
+	assert.match(body, /^Radar: blip 11 /m, "a code diff cites the blip it answers, and how it is measured");
 	assert.doesNotMatch(body, /^Tier:/m, "the old literal is not the body");
 
 	const verdict = gate(f, PR_BODY(f), pathsFile(f));
