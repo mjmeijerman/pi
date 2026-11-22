@@ -56,8 +56,10 @@ need() { command -v "$1" >/dev/null 2>&1 || die "$1 is not on PATH"; }
 usage() {
 	cat >&2 <<'EOF'
 usage: bin/space new [<slug>] [--project PATH | --here | --clone URL] [--kind harness|project] [--no-git] [--tab-name Boss] [--argv JSON]
-       bin/space new            (on a terminal: asks name, folder and "create it?", with defaults;
-                                with nothing to read it prints this and exits 1, the script path)
+       bin/space new            (on a terminal: asks name, where (a folder, or a URL to clone),
+                                "create it?" when the folder is not there, and whether it is a git
+                                project; with nothing to read it prints this and exits 1, the
+                                script path)
        The name is the one positional: `bin/space new demo` in a project folder means --project $PWD.
        --argv is the Boss tab's command as a JSON array (default ["<pi home>/bin/pi-bare"]); it is
        opened with it and the record keeps it, so the guard reopens the same command. The Boss is
@@ -80,42 +82,93 @@ json_field() {
 	node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{let j={};try{j=JSON.parse(d)}catch{}const v=process.argv[1].split(".").reduce((a,k)=>a?.[k],j);if(v!==undefined&&v!==null)process.stdout.write(String(v))})' "${1:-}"
 }
 
-# cmd_new_ask — the three questions a bare `space new` asks, in the shape a person answers:
-# `name [<folder's basename>]:`, `folder [<$PWD>]:`, `create it? [Y/n]:`. An empty line takes the
-# default and `n` touches nothing. The questions go to stderr, so stdout stays the one line that
-# matters; a `read` that hits end-of-file with nothing in it means nothing can answer — a script,
-# not a person — and that is the usage error, not a prompt nobody sees.
+# looks_like_url — is this answer a repository to clone, rather than a folder on disk? The three
+# shapes git itself accepts as a location (`https://…`, `ssh://…`, `git@host:path`) plus anything
+# ending in `.git`. The scheme is anchored and holds only letters, digits, `+`, `.` or `-`, so a
+# path that merely has `://` further in is still a path. A URL that is also a folder is a folder:
+# the caller tests the directory first, and this function never sees the question.
+looks_like_url() {
+	case $1 in
+	*.git) return 0 ;;
+	git@*:*) return 0 ;;
+	[a-zA-Z]*://*)
+		printf '%s' "$1" | grep -Eq '^[a-zA-Z][a-zA-Z0-9+.-]*://[^[:space:]]+$' || return 1
+		return 0
+		;;
+	esac
+	return 1
+}
+
+# cmd_new_ask — the questions a bare `space new` asks, in the shape a person answers:
+# `name [<folder's basename>]:`, `where [<$PWD>]:`, `create it? [Y/n]:` and `is it a git project?
+# [Y/n]:`. An empty line takes the default — for the first two the default is the thing shown; on
+# `create it?` it is yes and on the git question it is yes. `n` on `create it?` touches nothing.
+# The questions go to stderr, so stdout stays the one line that matters; a `read` that hits
+# end-of-file with nothing in it means nothing can answer — a script, not a person — and that is
+# the usage error, not a prompt nobody sees.
+#
+# A flag that already answers a question means the question is not asked: `--project`, `--here`
+# and `.` answer `where` with a folder, `--clone` answers it with a URL (and answers the git
+# question by definition), `--no-git` answers the git question. Both remaining questions are
+# asked only where the answer changes something: a folder that has to be made, and a folder with
+# no `.git` of its own.
 ASK_NAME=""
-ASK_FOLDER=""
+ASK_PROJECT=""
+ASK_CLONE=""
+ASK_NOGIT=0
 cmd_new_ask() {
-	local base answer
+	local base answer project=${1:-} clone=${2:-} no_git=${3:-0}
 	base=$(basename -- "$PWD")
 	if [ -t 0 ]; then printf 'name [%s]: ' "$base" >&2; fi
 	IFS= read -r answer || usage
 	ASK_NAME=${answer:-$base}
-	if [ -t 0 ]; then printf 'folder [%s]: ' "$PWD" >&2; fi
-	IFS= read -r answer || answer=""
-	ASK_FOLDER=${answer:-$PWD}
-	if [ -t 0 ]; then printf 'create it? [Y/n]: ' >&2; fi
-	IFS= read -r answer || answer=""
-	case $answer in
-	"" | y | Y | yes | YES | Yes) return 0 ;;
-	*)
-		say "space: nothing created"
-		return 1
-		;;
-	esac
+	# Question 2 is skipped when a flag already answered it: --project, --here and ` .` name a
+	# folder, --clone names a URL.
+	if [ -z "$project" ] && [ -z "$clone" ]; then
+		if [ -t 0 ]; then printf 'where [%s]: ' "$PWD" >&2; fi
+		IFS= read -r answer || answer=""
+		answer=${answer:-$PWD}
+		if [ -d "$answer" ]; then
+			# A folder that is there wins over any URL reading, so a checkout is never cloned over.
+			project=$answer
+			printf 'space: folder %s\n' "$project" >&2
+		elif looks_like_url "$answer"; then
+			clone=$answer
+			printf 'space: cloning %s into %s/projects/%s\n' "$clone" "$HOME" "$ASK_NAME" >&2
+		else
+			project=$answer
+			printf 'space: folder %s\n' "$project" >&2
+			if [ -t 0 ]; then printf 'create it? [Y/n]: ' >&2; fi
+			IFS= read -r answer || answer=""
+			case $answer in
+			"" | y | Y | yes | YES | Yes)
+				mkdir -p -- "$project" || return 1
+				;;
+			*)
+				say "space: nothing created"
+				return 1
+				;;
+			esac
+		fi
+	fi
+	# Question 4: only for a folder with no `.git` of its own, and never when --no-git answered it.
+	# `y` and `n` both leave the record saying `git: false` here — there is no repository and no
+	# remote, so `y` only says the answer was read.
+	if [ -n "$project" ] && [ "$no_git" = 0 ] && [ ! -e "$project/.git" ]; then
+		if [ -t 0 ]; then printf 'is it a git project? [Y/n]: ' >&2; fi
+		IFS= read -r answer || answer=""
+		case $answer in
+		"" | y | Y | yes | YES | Yes) ;;
+		*) no_git=1 ;;
+		esac
+	fi
+	ASK_PROJECT=$project ASK_CLONE=$clone ASK_NOGIT=$no_git
+	return 0
 }
 
 cmd_new() {
 	local name="" project="" clone="" no_git=0 tabname="Boss" kind="project" boss_argv=""
 	local positional=0 here=0
-	if [ "$#" -eq 0 ]; then
-		cmd_new_ask || exit 1
-		name=$ASK_NAME
-		project=$ASK_FOLDER
-		positional=1
-	fi
 	while [ "$#" -gt 0 ]; do
 		case $1 in
 		--name) name=${2:-}; positional=0; shift 2 ;;
@@ -145,8 +198,15 @@ cmd_new() {
 	# `--here` and `.` are the same answer as leaving the folder out: the folder you are standing in.
 	[ "$here" = 0 ] || project=$PWD
 	[ "$project" != . ] || project=$PWD
-	# A name given as the argument is the whole command: the project is where you are. `--name` keeps
-	# the old refusal, so a script that names a space without a folder still hears what is missing.
+	# No name at all means a person is typing it, so the questions are asked, each one skipped when a
+	# flag already answered it. `space new <name>` names the space in the command and asks nothing —
+	# that is the scripted path — and a `--name` without a folder keeps the old refusal.
+	if [ -z "$name" ]; then
+		cmd_new_ask "$project" "$clone" "$no_git" || exit 1
+		name=$ASK_NAME project=$ASK_PROJECT clone=$ASK_CLONE no_git=$ASK_NOGIT
+		positional=0
+	fi
+	# A name given as the argument is the whole command: the project is where you are.
 	if [ "$positional" = 1 ] && [ -z "$project" ] && [ -z "$clone" ]; then project=$PWD; fi
 	case $kind in
 	harness | project) ;;
@@ -160,6 +220,11 @@ cmd_new() {
 	fi
 	[ -n "$project" ] || [ -n "$clone" ] || die "space new needs --project PATH (a folder already on disk) or --clone URL"
 	[ -z "$project" ] || [ -z "$clone" ] || die "--project and --clone answer the same question; give one"
+	# A clone is a git repository by definition, so `--no-git` beside it answers a question the clone
+	# already answered. Refused, not silently dropped: the record would say `git: false` about a
+	# folder `git clone` just made.
+	[ -z "$clone" ] || [ "$no_git" = 0 ] ||
+		die "--clone and --no-git answer the same question; a clone is a git project"
 
 	need node
 	# The Boss tab's argv is opened and recorded, and the record is what the guard reopens the tab
