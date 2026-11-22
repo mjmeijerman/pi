@@ -20,7 +20,7 @@ Env overrides: `JEV_MODEL` (default `jev-latest`, currently `jev-1.14.0`), `JEV_
 | `jev ask "<question>"` | Should this go ahead? | `yes` / `no` / `unsure` |
 | `jev permit "<request>"` | Allow this sandbox permission request? | `yes` (allow) / `no` (refuse) / `unsure` (ask the human) |
 | `jev mode "<worker task>"` | Which sandbox mode should this worker run in? | `bare` / `sandboxed` / `no-net` |
-| `jev count "<task>"` | How many parallel workers does this need? | `1`–`4` |
+| `jev count "<task>"` | How many parallel workers one task would need, if a person asks | `1`–`4` |
 | `jev route "<task>"` | Local or remote at all? | `local` (exit 0) / `remote` (exit 1) |
 | `jev thinking "<task>"` | How much thinking effort does this worker need? | `low` / `medium` / `high` |
 | `jev plan "<task>"` | count, mode, route and thinking for one spawn | all four on one line, one request |
@@ -55,7 +55,7 @@ Env overrides: `JEV_MODEL` (default `jev-latest`, currently `jev-1.14.0`), `JEV_
 - A worker that needs a model cannot run `no-net`. No network means no model. `no-net` is only for executing untrusted repository scripts.
 - `sandboxed` is the default: read-only analysis, small edits, tests in a normal repository.
 - `bare` only when the work needs host access the sandbox refuses — Herdr control sockets, a GUI, docker, the ssh agent, or paths the sandbox does not mount.
-- A space runs one worker, and the boss spawns it. How many workers is not a question jev is asked, so the mode is the decision it answers.
+- A space runs one worker and the boss spawns it, so a count is never negotiated: `plan` still answers one, and nothing fans out on it. The mode is the decision that changes a spawn.
 
 ## Examples
 
