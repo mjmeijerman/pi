@@ -544,6 +544,47 @@ export const POSIX_WRAPPERS = [
  */
 export const SOURCE_LIBS = ['pi-resolve.sh', 'receipts.sh', 'records-lib.sh', 'shell-resolve.sh', 'space-lib.sh'];
 
+/**
+ * PI_HOME_CARRIERS — the bin entries that find `state/` through space-lib.sh.
+ *
+ * A copy on PATH cannot follow a symlink back to its checkout: `space-lib.sh`
+ * derived `state/` from the directory the file sits in, so
+ * `%USERPROFILE%\.local\bin\space` read `%USERPROFILE%\.local\state`, which
+ * holds nothing, while `%USERPROFILE%\.pi\state` held the harness space the
+ * same install had recorded (#260). A symlink install needs none of this —
+ * `readlink -f` lands in the checkout — so copy mode alone stamps, and only
+ * these three, which are the entries that source the library.
+ */
+export const PI_HOME_CARRIERS = ['delegate', 'guard', 'space'];
+
+/**
+ * stampPiHome — a copied entry, carrying the checkout it was copied from.
+ *
+ * The line goes after the shebang and before the first source, so the library
+ * the entry reads sees it. PI_HOME is the first answer `space-lib.sh` takes, and
+ * it is an absolute path the installer already knows (`P.piHome`), never a path
+ * the copy guesses at runtime. Anything that is not one of the carriers, or not
+ * a script at all, comes back untouched: `herdr-app.exe` is a real binary on
+ * Windows and one written line would ruin it.
+ */
+export function stampPiHome({ piHome, name, text }) {
+	if (!piHome) throw new Error('stampPiHome needs the ~/.pi it stamps in');
+	if (!PI_HOME_CARRIERS.includes(name)) return text;
+	if (!text.startsWith('#!')) return text;
+	const nl = text.indexOf('\n');
+	if (nl < 0) return text;
+	// Single-quoted, so a home with a space or a `$` survives: the value is a path
+	// the user chose, and this line runs before any of the script's own quoting.
+	const quoted = `'${String(piHome).split("'").join("'\\''")}'`;
+	const head = [
+		'# PI_HOME, written in by the installer: this entry is a copy on PATH, not a symlink, so it',
+		'# cannot reach its checkout by following its own path. `space-lib.sh` reads it for `state/`',
+		'# and `agent/space-rules.md`.',
+		`PI_HOME=${quoted}`,
+	].join('\n');
+	return `${text.slice(0, nl + 1)}${head}\n${text.slice(nl + 1)}`;
+}
+
 export const HARNESS_TOOLS = [
 	'delegate',
 	'guard',

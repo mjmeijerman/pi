@@ -267,7 +267,10 @@ self_root=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && 
 # The tree this script lives in, as opposed to ROOT (which a caller may point elsewhere).
 # Programs are found here; state and the jev stub are found under ROOT.
 self_bin=$self_root/bin
-ROOT=${PI_BOSS_ROOT:-${PI_MASTER_ROOT:-$self_root}}
+# ROOT: where `state/` is. `$self_root` is the checkout for a symlinked entry; a copy on PATH
+# (copy mode, Windows without Developer Mode) resolves to `~/.local`, so PI_HOME — which the
+# installer writes into the copy — is read before this file's own tree (#260).
+ROOT=${PI_BOSS_ROOT:-${PI_MASTER_ROOT:-${PI_HOME:-$self_root}}}
 BIN=$ROOT/bin
 STATE=$ROOT/state
 DECISIONS=$STATE/decisions.jsonl
