@@ -29,7 +29,14 @@
 #   zizmor        zizmor.yml: `uvx --from zizmor==1.32.0 zizmor --pedantic --no-progress .`
 #   mutation      test.yml job `mutation-changed`: `scripts/mutate-changed.sh` (a branch diff → --pr)
 #   tier, test-change, mission   pr-tier.yml: `scripts/pr-gate.sh --gate ... --body FILE` → --body
-#   install-matrix, prose-review cannot run here: a runner matrix, and a model plus an open PR.
+#   prose-review  the three states of prose-review.yml's job, never a silent green:
+#                 the PR's diff touches a prose path, PROSE_REVIEW_API_KEY is set and --pr was given
+#                 → the real review runs (`bin/prose-review --ci`), and a finding fails the job; no
+#                 key → `skipped:` naming the offline tests that ran instead; no prose path in the
+#                 diff → `skipped: … no prose path changed`, mirroring the workflow's paths: filter
+#   prose-offline `node --test scripts/tests/prose-review*.test.mjs`: the parser and the prompt,
+#                 offline, always — the half of the prose review that needs no key and no PR
+#   install-matrix cannot run here: Windows and macOS runners only, and this machine is neither.
 #
 # The ledger is shared with `bin/preflight`: a job `bin/receipts.sh` already answered on this tree,
 # under these gates, is printed as `(receipt)` and not started. So `bin/ci` after a preflight costs
@@ -65,7 +72,8 @@ tier|bash scripts/pr-gate.sh --gate tier --body "$CI_BODY"|body|yes
 test-change|bash scripts/pr-gate.sh --gate test-change --body "$CI_BODY"|body|yes
 mission|bash scripts/pr-gate.sh --gate mission --body "$CI_BODY"|body|yes
 install-matrix||-|skip: Windows and macOS runners only, and this machine is neither
-prose-review||-|skip: needs the model API and an open pull request
+prose-review|if [ ! -f .github/scripts/prose-review.mjs ]; then echo "no .github/scripts/prose-review.mjs in this checkout"; exit 125; fi; if ! command -v gh >/dev/null; then echo "gh: not installed"; exit 125; fi; bash "$CI_BIN_DIR/prose-review" --ci --root . "$CI_PR"|pr|yes
+prose-offline|node --test scripts/tests/prose-review.test.mjs scripts/tests/prose-review-diff-paths.test.mjs|-|yes
 TABLE
 }
 
@@ -267,7 +275,7 @@ mkdir -p "$RECEIPT_DIR" 2>/dev/null || RECEIPT_DIR=${TMPDIR:-/tmp}/pi-ci/receipt
 export PI_RECEIPT_DIR=$RECEIPT_DIR
 receipt_init "$CI_CWD" >/dev/null 2>&1 || true
 
-export CI_BODY CI_PR CI_BASH_RULES
+export CI_BODY CI_PR CI_BASH_RULES CI_BIN_DIR=$CI_BIN
 
 ci_last_line() { # <log> — the job's own last word, trimmed for a one-line report
 	local line
@@ -320,6 +328,17 @@ finished=0
 total=${#CI_PLAN[@]}
 wall_start=$(date +%s%N)
 
+ci_fail_detail() { # <slot> — the failing job's own last lines, indented under its FAIL line
+	local slot=$1 line start i
+	local -a lines=()
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		lines+=("$line")
+	done < <(tail -n 20 "${CI_LOG[slot]}" 2>/dev/null)
+	start=$((${#lines[@]} > 8 ? ${#lines[@]} - 8 : 0))
+	for ((i = start; i < ${#lines[@]}; i++)); do printf '     %s\n' "${lines[i]}"; done
+}
+
 ci_print() { # <slot> — the one line a reader acts on
 	local slot=$1 name secs detail from
 	name=${CI_NAME[${CI_PLAN[slot]}]}
@@ -330,7 +349,12 @@ ci_print() { # <slot> — the one line a reader acts on
 	[ "$CI_JSON" = 1 ] && return 0
 	case ${CI_STATUS[slot]} in
 	ok) printf 'ok   %-13s %-46s %4ss%s\n' "$name" "$detail" "$secs" "$from" ;;
-	fail) printf 'FAIL %-13s %4ss  log %s\n' "$name" "$secs" "${CI_LOG[slot]}" ;;
+	fail)
+		printf 'FAIL %-13s %4ss  log %s\n' "$name" "$secs" "${CI_LOG[slot]}"
+		# A red job's own last words, so the reason is on screen and not only in a file: the
+		# finding lines of a prose review are the reason, and they are long.
+		ci_fail_detail "$slot"
+		;;
 	skip) [ -n "$detail" ] || detail="its tool is not installed"
 		printf 'skipped: %s — %s\n' "$name" "$detail" ;;
 	esac

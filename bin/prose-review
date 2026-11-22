@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# prose-review — one pull request's prose review, run by hand, without waiting for CI.
+#
+#   bin/prose-review <pr-number> [--dry-run] [--post] [--diff FILE] [--root DIR] [--ci]
+#
+# Why it exists: `.github/workflows/prose-review.yml` is the second reader for the instruction
+# prose (`agent/AGENTS.md`, `agent/prompts/**/*.md`, `agent/skills/**/SKILL.md`) and its only
+# caller was a GitHub runner, so the findings arrived after the push. The parser and the prompt
+# have always been runnable offline (`--dry-run`, `scripts/tests/prose-review*.test.mjs`); this is
+# the same review for one pull request from a shell, and it is also the command `bin/ci`'s
+# `prose-review` job runs, so the local run and the GitHub run are one program.
+#
+# The diff is `gh pr diff <n>`, filtered to the three prose paths the workflow's `paths:` filter
+# names — the script's 400-line cap counts instruction lines only, and handing it a diff full of
+# source files would refuse a review that is three sentences long. The filtered diff goes to the
+# script with `--diff`, exactly as the workflow hands it over.
+#
+# Exit codes, chosen so `bin/ci` can read them without parsing words:
+#
+#   0    the review ran; the five answers are on stdout (findings are answers, not failures — a
+#        person decides what to do with them)
+#   1    `--ci` only: findings, or the review failed. The job is red.
+#   2    not configured (`PROSE_REVIEW_API_KEY` unset), gh missing, or bad usage — one line
+#   3    refused: the instruction diff is over the script's 400-line cap
+#   5    the endpoint or the configuration failed; nothing was reviewed
+#   125  `--ci` only: skipped, and the last line is the reason `bin/ci` prints after the dash
+#
+# `--post` posts (or updates) the one marked comment the workflow keeps, found by its
+# `<!-- prose-review -->` marker, so a re-run never stacks a second comment.
+#
+#   bin/prose-review 209
+#   bin/prose-review 209 --dry-run
+#   bin/prose-review 209 --post
+set -uo pipefail
+
+prog=prose-review
+say() { printf '%s\n' "$*"; }
+die() { # <code> <line>
+	printf '%s\n' "$2" >&2
+	exit "$1"
+}
+
+usage() {
+	cat >&2 <<'EOF'
+usage: prose-review <pr-number> [--dry-run] [--post] [--diff FILE] [--root DIR] [--ci]
+
+Reviews the instruction prose a pull request changes: five fixed questions, one line per question
+with a file:line citation or the words "no finding".
+
+  --dry-run   print the exact request that would be sent; no network, no key needed
+  --diff FILE review this saved diff instead of a pull request's (--dry-run then touches no net)
+  --post      post the review as the PR's one marker comment (updated in place on a re-run)
+  --root DIR  the tree to read the instructions and the script from (default: this checkout)
+  --ci        bin/ci's mode: exit 125 with a reason line when the job is skipped, 1 when red
+
+Needs `gh` (the diff and the comment) and, for a real review, PROSE_REVIEW_API_KEY.
+A missing key is one line and exit 2: the review did not run, which is not a clean review.
+EOF
+}
+
+pr=""
+dry=0
+post=0
+ci=0
+root_arg=""
+diff_file=""
+while [ "$#" -gt 0 ]; do
+	case $1 in
+	--dry-run) dry=1; shift ;;
+	--post) post=1; shift ;;
+	--ci) ci=1; shift ;;
+	--diff)
+		[ "$#" -ge 2 ] || die 2 "$prog: --diff needs a file"
+		diff_file=$2
+		shift 2
+		;;
+	--root)
+		[ "$#" -ge 2 ] || die 2 "$prog: --root needs a directory"
+		root_arg=$2
+		shift 2
+		;;
+	-h | --help) usage; exit 0 ;;
+	-*) usage; exit 2 ;;
+	*)
+		[ -z "$pr" ] || { usage; exit 2; }
+		pr=$1
+		shift
+		;;
+	esac
+done
+case $pr in '' | *[!0-9]*) usage; exit 2 ;; esac
+
+# The tree the review reads: --root, else the git work tree here when it holds the script, else
+# the checkout this bin/ belongs to. The second case is what lets a test point --root at a stub.
+if [ -n "$root_arg" ]; then
+	root=$root_arg
+else
+	root=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)
+	[ -n "$root" ] && [ -f "$root/.github/scripts/prose-review.mjs" ] ||
+		root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+fi
+[ -d "$root" ] || die 2 "$prog: --root is not a directory: $root"
+script=$root/.github/scripts/prose-review.mjs
+[ -f "$script" ] || die 2 "$prog: no .github/scripts/prose-review.mjs in $root"
+
+command -v node >/dev/null 2>&1 || die 2 "$prog: node is not installed, so the review cannot run"
+if [ -n "$diff_file" ]; then
+	[ -r "$diff_file" ] || die 2 "$prog: --diff is not readable: $diff_file"
+else
+	command -v gh >/dev/null 2>&1 || die 2 "$prog: gh is not installed, so there is no pull request diff to read"
+fi
+
+WORK=$(mktemp -d) || die 2 "$prog: cannot create a temporary directory"
+trap 'rm -rf -- "$WORK"' EXIT
+
+raw=$WORK/pr.diff
+filtered=$WORK/prose.diff
+comment=$WORK/comment.md
+err=$WORK/prose.err
+
+# The diff: a file when one was given (that is what makes `--dry-run` a network-free run on a
+# saved diff), else the pull request's own diff.
+if [ -n "$diff_file" ]; then
+	cp -- "$diff_file" "$raw" || die 2 "$prog: cannot read $diff_file"
+elif ! gh pr diff "$pr" >"$raw" 2>"$err"; then
+	say "$prog: gh pr diff $pr failed: $(head -n 1 "$err")"
+	exit 2
+fi
+
+# The workflow's `paths:` filter, as a filter over a full PR diff: a file's own `diff --git`
+# header decides whether its hunks are kept. `:(glob)` semantics — any depth under prompts/, a
+# SKILL.md at any depth under skills/ — because that is what the workflow's pathspec means.
+fetch_paths() {
+	awk '
+	/^diff --git / {
+		keep = ($0 ~ / b\/agent\/AGENTS\.md$/ ||
+			$0 ~ / b\/agent\/prompts\/.*\.md$/ ||
+			$0 ~ / b\/agent\/skills\/.*\/SKILL\.md$/)
+	}
+	keep
+' "$raw" >"$filtered"
+}
+
+if [ "$dry" = 1 ]; then
+	fetch_paths
+	if [ ! -s "$filtered" ]; then
+		say "$prog: no prose path changed in PR $pr — nothing to review"
+		exit 0
+	fi
+	printf '%s\n' "$prog: the request, as it would be sent (no network):" >&2
+	node "$script" --dry-run --root "$root" --diff "$filtered"
+	exit $?
+fi
+
+# The key is checked before the diff on purpose: "not configured" is a skip that needs no network
+# and no repository, and `bin/ci` must be able to say it on a machine with no `gh` login.
+if [ -z "${PROSE_REVIEW_API_KEY:-}" ]; then
+	if [ "$ci" = 1 ]; then
+		say "no PROSE_REVIEW_API_KEY, the offline parser tests ran instead"
+		exit 125
+	fi
+	say "$prog: not configured — PROSE_REVIEW_API_KEY is unset, so no review ran."
+	exit 2
+fi
+
+fetch_paths
+
+if [ ! -s "$filtered" ]; then
+	if [ "$ci" = 1 ]; then
+		say "no prose path changed"
+		exit 125
+	fi
+	say "$prog: no prose path changed — nothing to review"
+	exit 0
+fi
+
+node "$script" --root "$root" --diff "$filtered" >"$comment" 2>"$err"
+rc=$?
+
+case $rc in
+0) ;;
+3)
+	# The cap is a guard, not a failure: the review is too big to be cheap, so it does not happen.
+	if [ "$ci" = 1 ]; then
+		say "refused: the instruction diff is over the 400-line cap, no review ran"
+		exit 125
+	fi
+	say "$prog: refused — the instruction diff is over the 400-line cap; read it by hand."
+	exit 3
+	;;
+4)
+	# Reached only if the key vanished between the check above and the call.
+	if [ "$ci" = 1 ]; then
+		say "no PROSE_REVIEW_API_KEY, the offline parser tests ran instead"
+		exit 125
+	fi
+	say "$prog: not configured — PROSE_REVIEW_API_KEY is unset, so no review ran."
+	exit 2
+	;;
+5)
+	[ -s "$err" ] && sed "s/^/$prog: /" "$err" >&2
+	say "$prog: the review did not run — the endpoint or its configuration failed."
+	exit 5
+	;;
+*)
+	[ -s "$err" ] && sed "s/^/$prog: /" "$err" >&2
+	say "$prog: the review ran and its answer is not five findings."
+	exit "$rc"
+	;;
+esac
+
+cat -- "$comment"
+
+# `gh` is only needed for a real review (`pr diff`, `pr comment`); --dry-run still reads the diff. The count is what makes the job red:
+# a review that ran and named something is not a green check, whatever GitHub's workflow does.
+findings=$(awk '/^[0-9]+\. \*\*/ && !/— no finding$/ { n += 1 } END { print n + 0 }' "$comment")
+
+if [ "$ci" = 1 ]; then
+	if [ "$findings" -gt 0 ]; then
+		say "$prog: $findings finding(s) — a review that names something is not a green job"
+		exit 1
+	fi
+	say "$prog: five questions, no finding"
+	exit 0
+fi
+
+if [ "$post" = 1 ]; then
+	repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) ||
+		die 2 "$prog: cannot read the repository name; --post needs a gh-authenticated repo"
+	id=$(gh api --paginate "repos/$repo/issues/$pr/comments" \
+		--jq '.[] | select(.body | startswith("<!-- prose-review -->")) | .id' 2>/dev/null | head -n 1)
+	if [ -n "$id" ]; then
+		gh api --method PATCH "repos/$repo/issues/comments/$id" -F body=@"$comment" >/dev/null ||
+			die 2 "$prog: updating comment $id failed"
+		say "$prog: updated comment $id"
+	else
+		gh api --method POST "repos/$repo/issues/$pr/comments" -F body=@"$comment" >/dev/null ||
+			die 2 "$prog: posting the comment failed"
+		say "$prog: posted a new comment"
+	fi
+fi
