@@ -5,6 +5,9 @@
  * the PR app's buttons act inside the space that owns the repository they land on. This file
  * answers that question and says what to do when there is no answer.
  *
+ * The buttons do not start an agent: they send their job to the space's own Boss, whose
+ * terminal `bossTerminal` resolves the same way — purely, from the record and the app's list.
+ *
  * Pure on purpose: records in, a record or a null out — no `herdr` import, no `gpui-*`, no file
  * read. `scripts/tests/test-prs-route.mjs` runs it under plain node.
  */
@@ -36,6 +39,50 @@ export function spaceForFolder(records, folder) {
 		}
 	}
 	return best;
+}
+
+/**
+ * The live space for a record: the app's entry whose id is the record's id, else the one whose
+ * name is the record's name. `null` when the app does not list the space at all — the buttons
+ * then have nothing to type into, and say so instead of starting something.
+ */
+export function liveSpaceFor(record, spaces) {
+	if (!record) return null;
+	const id = String(record.id ?? "").trim();
+	const name = String(record.name ?? "").trim();
+	const list = Array.isArray(spaces) ? spaces : [];
+	if (id) {
+		const byId = list.find((space) => String(space?.id ?? "").trim() === id);
+		if (byId) return byId;
+	}
+	if (!name) return null;
+	return list.find((space) => String(space?.name ?? "").trim() === name) ?? null;
+}
+
+/**
+ * The terminal the buttons talk to: the space's Boss tab, or `null` when none is running.
+ *
+ * The record (`~/.pi/state/spaces/<slug>/space.json`) says which tab is the Boss
+ * (`uberboss_tab`, by id) and what it is called (`boss`, default "Boss"); the live space says
+ * which terminals exist right now. A tab is picked by id first, then by name, and never
+ * invented. Inside it the first terminal an app reports status for (pi) wins, then its first
+ * terminal, then the record's own first terminal. Nothing matches: `null`, and nothing starts.
+ */
+export function bossTerminal(record, liveSpace) {
+	if (!record) return null;
+	const tabId = String(record.uberboss_tab ?? "").trim();
+	const bossName = String(record.boss ?? "Boss").trim() || "Boss";
+	const tabs = Array.isArray(liveSpace?.tabs) ? liveSpace.tabs : [];
+	let tab = tabId ? tabs.find((entry) => String(entry?.id ?? "").trim() === tabId) : null;
+	if (!tab) tab = tabs.find((entry) => String(entry?.name ?? "").trim() === bossName) ?? null;
+	if (!tab) return null;
+	const terminals = Array.isArray(tab.terminals) ? tab.terminals : [];
+	const live = terminals.find((entry) => String(entry?.terminal ?? "").trim() && String(entry?.app ?? "").trim());
+	if (live) return live.terminal;
+	const first = terminals.find((entry) => String(entry?.terminal ?? "").trim());
+	if (first) return first.terminal;
+	const recorded = (Array.isArray(record.terminals) ? record.terminals : []).map((term) => String(term ?? "").trim()).filter(Boolean);
+	return recorded[0] ?? null;
 }
 
 /** The one line the view shows: where the buttons will land. */

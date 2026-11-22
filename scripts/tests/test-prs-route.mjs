@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { noSpaceMessage, routeLabel, spaceForFolder, spaceName } from "../../herdr-mods/prs/route.mjs";
+import { bossTerminal, liveSpaceFor, noSpaceMessage, routeLabel, spaceForFolder, spaceName } from "../../herdr-mods/prs/route.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const SOURCE = readFileSync(`${HERE}../../herdr-mods/prs/main.js`, "utf8");
@@ -87,5 +87,71 @@ test("the mod never creates a space itself: no space.new, no BOSS_SPACE", () => 
 	assert.doesNotMatch(SOURCE, /["']harness["']|boss_space/i, "main.js still points at one hardcoded space");
 	// And the route it does take is the pure module, not a second copy of the rule.
 	assert.match(SOURCE, /spaceForFolder/);
-	assert.match(SOURCE, /tab\.new/);
+});
+
+// --- The boss terminal: which running terminal a button's message goes into. ---
+
+const bossTab = (terminals, id = "tab-boss") => ({ id, name: "Boss", terminals });
+const live = (tabs, id = "id-site", name = "site") => ({ id, name, tabs });
+const record = (extra) => ({ name: "site", id: "id-site", project: "/home/someone/projects/site", ...extra });
+
+test("the uberboss_tab tab's terminal wins when the live space has it", () => {
+	const space = live([
+		bossTab([{ terminal: "t-other", app: "bash" }], "tab-other"),
+		{ id: "tab-uber", name: "Boss", terminals: [{ terminal: "t-boss", app: "pi", status: "done" }] },
+	]);
+	assert.equal(bossTerminal(record({ uberboss_tab: "tab-uber", boss: "Boss" }), space), "t-boss");
+});
+
+test("the tab named boss is the fallback when the recorded id is gone", () => {
+	const space = live([bossTab([{ terminal: "t-boss", app: "pi" }])]);
+	assert.equal(bossTerminal(record({ uberboss_tab: "tab-gone" }), space), "t-boss");
+	// A record with no boss name at all still looks for the tab called "Boss".
+	assert.equal(bossTerminal(record({}), space), "t-boss");
+});
+
+test("inside the tab: a terminal an app reports for beats one that reports nothing", () => {
+	const space = live([bossTab([{ terminal: "t-shell", app: "" }, { terminal: "t-pi", app: "pi" }])]);
+	assert.equal(bossTerminal(record({}), space), "t-pi");
+	// No app anywhere: its first terminal.
+	assert.equal(bossTerminal(record({}), live([bossTab([{ terminal: "t-only" }])])), "t-only");
+});
+
+test("a Boss tab that lists no terminal falls back to the record's own terminal", () => {
+	const space = live([bossTab([])]);
+	assert.equal(bossTerminal(record({ terminals: ["t-recorded", "t-second"] }), space), "t-recorded");
+});
+
+test("no boss terminal is invented: null for every space that has none", () => {
+	// The app does not list the space at all, even though the record has a terminal.
+	assert.equal(bossTerminal(record({ terminals: ["t-recorded"], uberboss_tab: "tab-boss" }), null), null);
+	// A live space with no tabs.
+	assert.equal(bossTerminal(record({ terminals: ["t-recorded"] }), live([])), null);
+	// A record with none of the boss fields, and no matching tab.
+	assert.equal(bossTerminal({ name: "site", project: "/home/someone/projects/site" }, live([{ id: "t", name: "work", terminals: [{ terminal: "t-1" }] }])), null);
+	// Nothing at all.
+	assert.equal(bossTerminal(null, live([bossTab([{ terminal: "t-boss" }])])), null);
+});
+
+test("the live space is matched by the record's id, then by its name", () => {
+	const one = live([bossTab([{ terminal: "t-boss" }])], "id-site", "site");
+	const two = live([], "id-other", "other");
+	assert.equal(liveSpaceFor({ id: "id-site", name: "site" }, [two, one]), one);
+	// A record written without an id is matched by name, never guessed.
+	assert.equal(liveSpaceFor({ name: "site" }, [two, one]), one);
+	assert.equal(liveSpaceFor({ id: "id-gone", name: "gone" }, [one, two]), null);
+	assert.equal(liveSpaceFor({ id: "id-site" }, []), null);
+});
+
+test("the mod sends its job to the boss instead of starting an agent", () => {
+	// A second agent in a second tab was the bug this pins against, on purpose.
+	assert.doesNotMatch(SOURCE, /tab\.new/, "main.js starts a new agent tab again");
+	assert.doesNotMatch(SOURCE, /space\.new/, "main.js creates a space again");
+	// It sends one message, into the terminal the record resolves — never a new terminal.
+	assert.match(SOURCE, /hc\(\["send", terminal, text\]\)/);
+	assert.match(SOURCE, /bossTerminal\(/);
+	assert.match(SOURCE, /liveSpaceFor\(/);
+	// And it says which space it told, or which one has no Boss running.
+	assert.match(SOURCE, /told the boss of space/);
+	assert.match(SOURCE, /no Boss tab is running in space/);
 });
