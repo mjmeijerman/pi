@@ -78,6 +78,10 @@ describe("merge-guard: decision", () => {
 		"git push origin HEAD:feat/x",
 		"git log --oneline trunk..HEAD",
 		"git fetch origin trunk",
+		// A pull writes nothing and merges no reviewed change: it is not a landing.
+		"git pull",
+		"git pull --ff-only",
+		"git pull origin trunk",
 		"git push --dry-run origin trunk",
 		"gh pr merge --help",
 		`echo "gh pr merge 4"`,
@@ -154,6 +158,19 @@ describe("merge-guard: branch rules", () => {
 		]) {
 			assert.match(trunkCommitReason(command, "trunk") ?? "", /a commit on trunk/, command);
 		}
+	});
+
+	test("a pull on trunk is free, and its reason never says merge", () => {
+		// The false positive this pins: `git pull --ff-only` was refused as a trunk merge,
+		// so a boss told to pull the merged trunk was stuck behind its own guard.
+		for (const command of ["git pull", "git pull --ff-only", "git pull origin trunk", "git pull --rebase"]) {
+			assert.equal(trunkCommitReason(command, "trunk"), null, command);
+			assert.equal(mergeReason(command), null, command);
+		}
+		// The verbs that do land a change stay blocked on the same branch.
+		assert.ok(trunkCommitReason("git merge origin/trunk", "trunk"));
+		assert.ok(trunkCommitReason("git push", "trunk"));
+		assert.ok(trunkCommitReason('git commit -m "x"', "trunk"));
 	});
 
 	test("a git command with no subcommand is not a commit", () => {
@@ -281,6 +298,8 @@ describe("merge-guard: handler", () => {
 		assert.equal(result?.block, true);
 		assert.match(result.reason, /user's explicit go-ahead/);
 		assert.match(result.reason, /protected branch/);
+		// The refusal offers the way forward a blocked pull used to deny.
+		assert.match(result.reason, /pull the remote instead: git pull --ff-only/);
 		assert.equal(notices.at(-1)?.message, "merge-guard: blocked a merge — ask the user first");
 		assert.equal(notices.at(-1)?.level, "warning");
 	});

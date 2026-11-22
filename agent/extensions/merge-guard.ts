@@ -7,6 +7,11 @@
  * git and gh stays available: branching, committing on a feature branch,
  * pushing it, opening a PR.
  *
+ * A pull is not a landing. `git pull` fetches and fast-forwards; it writes nothing
+ * to the remote and merges no reviewed change into trunk, so it stays open on
+ * trunk — and the merge refusal says so, because pulling the remote is exactly
+ * what a boss waiting on a merge should do instead.
+ *
  * Also blocked: `git stash` in its saving and deleting forms. A stash empties a
  * tree another session is still working in, and `delegate` tells the agent to
  * run exactly that when it refuses a spawn on a dirty trunk — the clean trunk it
@@ -232,6 +237,7 @@ export function trunkCommitReason(
 	if (/--help\b/.test(unquoted(command))) return null;
 	for (const { segment, dir } of gitSegments(command)) {
 		const sub = gitSubcommand(segment);
+		// `pull` is deliberately not here: it fetches and fast-forwards, it lands nothing.
 		if (sub !== "commit" && sub !== "merge" && sub !== "push") continue;
 		const namesDirectory = dir !== null;
 		const target = namesDirectory ? absolutePath(dir, cwd) : cwd ? resolve(cwd) : null;
@@ -285,7 +291,9 @@ export default function mergeGuard(pi: ExtensionAPI) {
 		ctx.ui.notify("merge-guard: blocked a merge — ask the user first", "warning");
 		return {
 			block: true,
-			reason: `merge-guard: ${reason} lands a change on a protected branch, which needs the user's explicit go-ahead. Ask them, then run /mergeguard allow and retry.`,
+			reason:
+				`merge-guard: ${reason} lands a change on a protected branch, which needs the user's explicit go-ahead. ` +
+				"Ask them, then run /mergeguard allow and retry — or pull the remote instead: git pull --ff-only.",
 		};
 	});
 
