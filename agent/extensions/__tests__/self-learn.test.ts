@@ -3406,18 +3406,36 @@ describe("what the person said", () => {
 		assert.deepEqual(quotes.map((quote) => quote.phrase), ["again", "still"]);
 	});
 
-	test("two lines fire the gate, one does not", () => {
-		const one = frustrationQuotes(transcriptOf([{ role: "user", text: "you keep doing this" }]));
-		assert.equal(decideLearner(evidence({ frustration: one })).spawn, false, "one sentence is not a pattern");
-		const two = frustrationQuotes(
+	test("the person's words are quoted, never a reason to start a learner", () => {
+		// learn-10-48 fired on two lines that matched "again", one of them "I stopped the
+		// workers, told you that it should wait for tomorrow, will kick tomorrow again" — a
+		// sentence that repeats nothing. Both lines stay in the evidence file for whoever
+		// judges it, and neither is a signal.
+		const quotes = frustrationQuotes(
+			transcriptOf([
+				{ role: "user", text: "a lot of going back and forth again making the change very slow" },
+				{
+					role: "user",
+					text: "I stopped the workers, told you that it should wait for tomorrow, will kick tomorrow again",
+				},
+			]),
+		);
+		assert.equal(quotes.length, 2, "both lines are still quoted for the evidence file");
+		const decision = decideLearner(evidence({ frustration: quotes }));
+		assert.equal(decision.spawn, false, "a word inside a sentence is not a repetition the gate can act on");
+		assert.doesNotMatch(decision.reason, /session transcript/, "and the reason does not name the quotes as evidence");
+		// A phrase that does read as a complaint is quoted the same way and is still not a
+		// signal: the gate acts on what a script can count, and `/suggest` is the channel the
+		// person has for saying it deliberately.
+		const repeated = frustrationQuotes(
 			transcriptOf([
 				{ role: "user", text: "you keep doing this" },
 				{ role: "user", text: "you keep ignoring the report" },
+				{ role: "user", text: "you keep closing the pull request" },
 			]),
 		);
-		const decision = decideLearner(evidence({ frustration: two }));
-		assert.equal(decision.spawn, true);
-		assert.match(decision.reason, /2× "you keep" in the session transcript/);
+		assert.equal(repeated.length, 3);
+		assert.equal(decideLearner(evidence({ frustration: repeated })).spawn, false);
 	});
 
 	test("a pasted transcript is not the person's own words", () => {
