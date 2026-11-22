@@ -1,0 +1,435 @@
+#!/usr/bin/env bash
+# ci — the checks GitHub runs, run here, all at once, so a push is not the first verdict.
+#
+#   bin/ci [--jobs N] [--timeout S] [--only JOB]... [--skip JOB]... [--pr N] [--body FILE]
+#          [--cwd DIR] [--table FILE] [--dry-run] [--json]
+#
+# Why it exists: a branch that passes `delegate finish` can still be red on GitHub, and the news
+# arrives minutes later, one job at a time, in a browser tab. Three branches did exactly that in one
+# night. Every one of those verdicts was reachable here in seconds or minutes — the jobs are local
+# commands, and they do not depend on each other, so the cost of knowing is the slowest job, not the
+# sum of them.
+#
+# Radar basis: #29 harness quality evaluation (a gate whose passing case was never run goes dead
+# quietly — this is the local runner for the gates) and #38 CI hardening (the pipeline is the
+# contract; a local copy of it must be the same commands, not a paraphrase).
+#
+# How it decides: one table below names each job GitHub runs, the command that reproduces it, what
+# it needs (`--pr` / `--body`), and whether it can run on this machine at all. The workflows are the
+# source of truth for a command — `.github/workflows/*.yml` — and the table quotes them; a job whose
+# tool is not installed exits 125, which is a skip with its reason, never a green.
+#
+#   harness       .github/workflows/test.yml (agent) / harness-check.yml: `bash scripts/harness-check.sh`
+#   offline       harness-check.yml step "offline gate tests": `bash scripts/ci-offline.sh`
+#   scripts-test  harness-check.yml step "scripts tests": `make scripts-test`
+#   shell         test.yml job `shell`: `bash -n` + `shellcheck --severity=error` over `git ls-files '*.sh'`
+#   semgrep       test.yml job `security-scan`, step "semgrep": p/default, p/typescript and the bash
+#                 ruleset pinned by SEMGREP_RULES_SHA, with --error, over tracked source
+#   secret-scan   secret-scan.yml: `gitleaks detect --redact --no-banner --verbose --source .`
+#   zizmor        zizmor.yml: `uvx --from zizmor==1.32.0 zizmor --pedantic --no-progress .`
+#   mutation      test.yml job `mutation-changed`: `scripts/mutate-changed.sh` (a branch diff → --pr)
+#   tier, test-change, mission   pr-tier.yml: `scripts/pr-gate.sh --gate ... --body FILE` → --body
+#   install-matrix, prose-review cannot run here: a runner matrix, and a model plus an open PR.
+#
+# The ledger is shared with `bin/preflight`: a job `bin/receipts.sh` already answered on this tree,
+# under these gates, is printed as `(receipt)` and not started. So `bin/ci` after a preflight costs
+# the jobs preflight did not run, and a job this run answers is not re-run by preflight.
+#
+# Exit status: 0 when every runnable job passed. A skip is printed with its reason and is never
+# counted green; a failure prints its job's log path and exits 1; bad usage exits 2.
+
+set -uo pipefail
+
+CI_BIN=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+CI_ROOT=$(cd -- "$CI_BIN/.." && pwd)
+# shellcheck source=/dev/null
+. "$CI_BIN/receipts.sh"
+
+usage() { sed -n '/^# ci — the checks/,/^# Exit status:/p' "${BASH_SOURCE[0]}" | sed -e 's/^# \{0,1\}//'; }
+
+# --- the table ----------------------------------------------------------------------------------
+# name | command | needs (`-`, `pr`, `body`) | runnable (`yes`, or `skip: <why>`).
+# A command is run by `bash -c` in --cwd, so it may be a compound; no field may contain a `|`.
+# A job whose tool is missing exits 125 and is reported as a skip that names the tool.
+ci_table() {
+	cat <<'TABLE'
+harness|bash scripts/harness-check.sh|-|yes
+offline|bash scripts/ci-offline.sh|-|yes
+scripts-test|make --no-print-directory scripts-test|-|yes
+shell|mapfile -t sh_files < <(git ls-files '*.sh'); printf '%s file(s)\n' "${#sh_files[@]}"; for sh_file in "${sh_files[@]}"; do if ! bash -n "$sh_file"; then exit 1; fi; done; if ! command -v shellcheck >/dev/null; then echo "shellcheck: not installed"; exit 125; fi; shellcheck --severity=error "${sh_files[@]}"|-|yes
+semgrep|if ! command -v semgrep >/dev/null; then echo "semgrep: not installed"; exit 125; fi; mapfile -t sg_files < <(git ls-files '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs' '*.sh'); printf 'semgrep targets: %d file(s)\n' "${#sg_files[@]}"; semgrep scan --config p/default --config p/typescript $CI_BASH_RULES --metrics=off --disable-version-check --error "${sg_files[@]}"|-|yes
+secret-scan|if ! command -v gitleaks >/dev/null; then echo "gitleaks: not installed"; exit 125; fi; gitleaks detect --redact --no-banner --verbose --source .|-|yes
+zizmor|if command -v zizmor >/dev/null; then zizmor --pedantic --no-progress .; exit; fi; if ! uvx --from zizmor==1.32.0 zizmor --help >/dev/null 2>&1; then echo "zizmor: not installed"; exit 125; fi; uvx --from zizmor==1.32.0 zizmor --pedantic --no-progress .|-|yes
+mutation|bash scripts/mutate-changed.sh|pr|yes
+tier|bash scripts/pr-gate.sh --gate tier --body "$CI_BODY"|body|yes
+test-change|bash scripts/pr-gate.sh --gate test-change --body "$CI_BODY"|body|yes
+mission|bash scripts/pr-gate.sh --gate mission --body "$CI_BODY"|body|yes
+install-matrix||-|skip: Windows and macOS runners only, and this machine is neither
+prose-review||-|skip: needs the model API and an open pull request
+TABLE
+}
+
+# --- options ------------------------------------------------------------------------------------
+CI_JOBS=$(nproc 2>/dev/null || echo 4)
+CI_TIMEOUT=1200 # seconds, per job: 20 minutes, the ceiling a single CI job gets here
+CI_CWD=$CI_ROOT
+CI_TABLE_FILE=""
+CI_BODY=""
+CI_PR=""
+CI_DRY=0
+CI_JSON=0
+CI_ONLY=()
+CI_SKIP=()
+
+while [ "$#" -gt 0 ]; do
+	case $1 in
+	--jobs)
+		[ "$#" -ge 2 ] || { printf 'ci: --jobs needs a number\n' >&2; exit 2; }
+		CI_JOBS=$2
+		shift 2
+		;;
+	--timeout)
+		[ "$#" -ge 2 ] || { printf 'ci: --timeout needs seconds\n' >&2; exit 2; }
+		CI_TIMEOUT=$2
+		shift 2
+		;;
+	--only)
+		[ "$#" -ge 2 ] || { printf 'ci: --only needs a job name\n' >&2; exit 2; }
+		CI_ONLY+=("$2")
+		shift 2
+		;;
+	--skip)
+		[ "$#" -ge 2 ] || { printf 'ci: --skip needs a job name\n' >&2; exit 2; }
+		CI_SKIP+=("$2")
+		shift 2
+		;;
+	--pr)
+		[ "$#" -ge 2 ] || { printf 'ci: --pr needs a number\n' >&2; exit 2; }
+		CI_PR=$2
+		shift 2
+		;;
+	--body)
+		[ "$#" -ge 2 ] || { printf 'ci: --body needs a file\n' >&2; exit 2; }
+		CI_BODY=$2
+		shift 2
+		;;
+	--cwd)
+		[ "$#" -ge 2 ] || { printf 'ci: --cwd needs a directory\n' >&2; exit 2; }
+		CI_CWD=$2
+		shift 2
+		;;
+	--table)
+		[ "$#" -ge 2 ] || { printf 'ci: --table needs a file\n' >&2; exit 2; }
+		CI_TABLE_FILE=$2
+		shift 2
+		;;
+	--dry-run) CI_DRY=1; shift ;;
+	--json) CI_JSON=1; shift ;;
+	-h | --help) usage; exit 0 ;;
+	*)
+		printf 'ci: unknown argument: %s\n' "$1" >&2
+		exit 2
+		;;
+	esac
+done
+
+case $CI_JOBS in '' | *[!0-9]* | 0) printf 'ci: --jobs takes a positive number, not %s\n' "$CI_JOBS" >&2; exit 2 ;; esac
+case $CI_TIMEOUT in '' | *[!0-9]* | 0) printf 'ci: --timeout takes a positive number of seconds, not %s\n' "$CI_TIMEOUT" >&2; exit 2 ;; esac
+[ -d "$CI_CWD" ] || { printf 'ci: --cwd is not a directory: %s\n' "$CI_CWD" >&2; exit 2; }
+if [ -n "$CI_BODY" ]; then
+	[ -r "$CI_BODY" ] || { printf 'ci: --body is not readable: %s\n' "$CI_BODY" >&2; exit 2; }
+	CI_BODY=$(cd -- "$(dirname -- "$CI_BODY")" && pwd)/$(basename -- "$CI_BODY")
+fi
+
+# --- the semgrep bash ruleset -------------------------------------------------------------------
+# test.yml pins SEMGREP_RULES_SHA and scans with `${SEMGREP_RULES}/bash`; the same rules text is
+# unpacked once per SHA into the cache preflight already uses, so a semgrep job here scans what CI
+# scans. An unreachable or unwritable cache drops that one config and says so, rather than
+# quietly scanning less: the line goes into the job's own log, so a green run can be read back.
+CI_BASH_RULES=""
+ci_bash_rules() {
+	local sha cache dir url
+	sha=$(sed -nE 's/^[[:space:]]*SEMGREP_RULES_SHA:[[:space:]]*([0-9a-f]{40}).*/\1/p' "$CI_CWD/.github/workflows/test.yml" 2>/dev/null | head -n 1)
+	[ -n "$sha" ] || return 0
+	cache=${PI_SEMGREP_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/pi/semgrep-rules}
+	dir=$cache/$sha
+	if [ ! -d "$dir/bash" ]; then
+		mkdir -p "$cache" 2>/dev/null || return 0
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/ci-semgrep-rules.XXXXXX") || return 0
+		url="https://github.com/semgrep/semgrep-rules/archive/$sha.tar.gz"
+		if curl -sSfL "$url" 2>/dev/null | tar -xz -C "$tmp" 2>/dev/null; then
+			mv -- "$tmp/semgrep-rules-$sha" "$dir" 2>/dev/null || true
+		fi
+		rm -rf -- "$tmp"
+	fi
+	[ -d "$dir/bash" ] && CI_BASH_RULES="--config $dir/bash"
+	return 0
+}
+ci_bash_rules
+
+# --- read the table -----------------------------------------------------------------------------
+CI_NAME=()
+CI_CMD=()
+CI_NEEDS=()
+CI_RUNNABLE=()
+while IFS='|' read -r name cmd needs runnable extra; do
+	[ -n "$name" ] || continue
+	case $name in '#'*) continue ;; esac
+	if [ -n "${extra:-}" ]; then
+		printf 'ci: job %s has a `|` in its command — the table is pipe-separated, use ; or if\n' "$name" >&2
+		exit 2
+	fi
+	CI_NAME+=("$name")
+	CI_CMD+=("$cmd")
+	CI_NEEDS+=("${needs:--}")
+	CI_RUNNABLE+=("$runnable")
+done < <(if [ -n "$CI_TABLE_FILE" ]; then cat -- "$CI_TABLE_FILE"; else ci_table; fi)
+
+if [ "${#CI_NAME[@]}" -eq 0 ]; then
+	printf 'ci: the job table is empty — nothing to run is not a pass\n' >&2
+	exit 2
+fi
+
+ci_index() { # <name> -> index, or -1
+	local i
+	for ((i = 0; i < ${#CI_NAME[@]}; i++)); do
+		[ "${CI_NAME[i]}" = "$1" ] && {
+			printf '%s' "$i"
+			return 0
+		}
+	done
+	printf '%s' -1
+}
+
+for want in ${CI_ONLY[*]+"${CI_ONLY[@]}"} ${CI_SKIP[*]+"${CI_SKIP[@]}"}; do
+	[ "$(ci_index "$want")" -ge 0 ] || {
+		printf 'ci: no job named %s (known: %s)\n' "$want" "${CI_NAME[*]}" >&2
+		exit 2
+	}
+done
+
+ci_wanted() { # <name> — --only narrows, --skip removes
+	local want
+	if [ "${#CI_ONLY[@]}" -gt 0 ]; then
+		local hit=0
+		for want in "${CI_ONLY[@]}"; do [ "$want" = "$1" ] && hit=1; done
+		[ "$hit" = 1 ] || return 1
+	fi
+	for want in ${CI_SKIP[*]+"${CI_SKIP[@]}"}; do [ "$want" = "$1" ] && return 1; done
+	return 0
+}
+
+# --- plan: what runs, what is skipped, and why --------------------------------------------------
+# A skip is decided before anything starts, so the plan and the run say the same thing.
+CI_PLAN=() # indexes that will run
+CI_SKIPPED=() # "job — why"
+for ((i = 0; i < ${#CI_NAME[@]}; i++)); do
+	name=${CI_NAME[i]}
+	ci_wanted "$name" || continue
+	case ${CI_RUNNABLE[i]} in
+	yes) ;;
+	'skip: '*) CI_SKIPPED+=("$name — ${CI_RUNNABLE[i]#skip: }") && continue ;;
+	*) printf 'ci: job %s has an unknown runnable field: %s\n' "$name" "${CI_RUNNABLE[i]}" >&2; exit 2 ;;
+	esac
+	case ${CI_NEEDS[i]} in
+	- | pr | body) ;;
+	*) printf 'ci: job %s needs an unknown thing: %s\n' "$name" "${CI_NEEDS[i]}" >&2; exit 2 ;;
+	esac
+	case ${CI_NEEDS[i]} in
+	body)
+		[ -n "$CI_BODY" ] || { CI_SKIPPED+=("$name — needs --body <file>, the pull request body it reads"); continue; }
+		;;
+	pr)
+		[ -n "$CI_PR" ] || { CI_SKIPPED+=("$name — needs --pr <n>, the branch diff it mutates"); continue; }
+		;;
+	esac
+	CI_PLAN+=("$i")
+done
+
+if [ "$CI_DRY" = 1 ]; then
+	for i in "${CI_PLAN[@]}"; do printf 'plan: %-14s %s\n' "${CI_NAME[i]}" "${CI_CMD[i]}"; done
+	for s in ${CI_SKIPPED[*]+"${CI_SKIPPED[@]}"}; do printf 'skipped: %s\n' "$s"; done
+	printf 'ci: %d runnable, %d skipped, at most %d at a time (dry run, nothing started)\n' \
+		"${#CI_PLAN[@]}" "${#CI_SKIPPED[@]}" "$CI_JOBS"
+	exit 0
+fi
+
+# --- run ----------------------------------------------------------------------------------------
+for s in ${CI_SKIPPED[*]+"${CI_SKIPPED[@]}"}; do printf 'skipped: %s\n' "$s"; done
+
+RUN=${TMPDIR:-/tmp}/pi-ci/$(date -u +%Y%m%dT%H%M%SZ)-$$
+mkdir -p "$RUN" || { printf 'ci: cannot create %s\n' "$RUN" >&2; exit 2; }
+
+# The ledger is shared with `bin/preflight`, so a job this run answers is not run again there. A
+# test pins PI_RECEIPT_DIR, so a scratch job table never writes receipts into a real checkout.
+RECEIPT_DIR=${PI_RECEIPT_DIR:-$CI_CWD/state/preflight}
+mkdir -p "$RECEIPT_DIR" 2>/dev/null || RECEIPT_DIR=${TMPDIR:-/tmp}/pi-ci/receipts
+export PI_RECEIPT_DIR=$RECEIPT_DIR
+receipt_init "$CI_CWD" >/dev/null 2>&1 || true
+
+export CI_BODY CI_PR CI_BASH_RULES
+
+ci_last_line() { # <log> — the job's own last word, trimmed for a one-line report
+	local line
+	line=$(grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -n 1)
+	line=${line#"${line%%[![:space:]]*}"}
+	line=${line#== }
+	line=${line%"${line##*[![:space:]]}"}
+	if [ "${#line}" -gt 64 ]; then line=${line:0:61}...; fi
+	printf '%s' "$line"
+}
+
+ci_body_hash() { sha256sum -- "$CI_BODY" 2>/dev/null | cut -d' ' -f1; }
+
+CI_STATUS=() # per plan slot: ok | fail | skip
+CI_MS=()
+CI_LOG=()
+CI_DETAIL=()
+CI_FROM_RECEIPT=()
+CI_RC=()
+CI_UNIT=()
+CI_PID=()
+CI_START=()
+
+# Ask the ledger for every job before starting any: an answer reached on this tree, under these
+# gates, is a file read. A body job's key carries the body's own hash, so an edited body never
+# reuses the verdict of the one before it.
+for slot in "${!CI_PLAN[@]}"; do
+	i=${CI_PLAN[slot]}
+	CI_LOG[slot]=$RUN/${CI_NAME[i]}.log
+	CI_FROM_RECEIPT[slot]=""
+	CI_DETAIL[slot]=""
+	CI_MS[slot]=0
+	unit=$(receipt_unit_name "${CI_CMD[i]}")
+	case ${CI_NEEDS[i]} in body) unit="$unit body:$(ci_body_hash)" ;; esac
+	CI_UNIT[slot]=$unit
+	if receipt_lookup "$unit" "${CI_LOG[slot]}"; then
+		CI_RC[slot]=$RECEIPT_RC
+		CI_MS[slot]=$RECEIPT_MS
+		CI_FROM_RECEIPT[slot]=$RECEIPT_AGE
+	fi
+done
+
+# One background process per job, at most CI_JOBS at a time, each under `timeout` (which makes the
+# command its own process group, so a timeout kills what the job started, not only its shell). A slot
+# is freed the moment its status file appears, and its line is printed then: a reader watching the
+# run can tell a slow job from a stuck one, and the whole run costs the slowest job, not the sum.
+next=0
+running=0
+finished=0
+total=${#CI_PLAN[@]}
+wall_start=$(date +%s%N)
+
+ci_print() { # <slot> — the one line a reader acts on
+	local slot=$1 name secs detail from
+	name=${CI_NAME[${CI_PLAN[slot]}]}
+	secs=$((CI_MS[slot] / 1000))
+	detail=${CI_DETAIL[slot]:-}
+	from=""
+	[ -z "${CI_FROM_RECEIPT[slot]}" ] || from=" (receipt)"
+	[ "$CI_JSON" = 1 ] && return 0
+	case ${CI_STATUS[slot]} in
+	ok) printf 'ok   %-13s %-46s %4ss%s\n' "$name" "$detail" "$secs" "$from" ;;
+	fail) printf 'FAIL %-13s %4ss  log %s\n' "$name" "$secs" "${CI_LOG[slot]}" ;;
+	skip) [ -n "$detail" ] || detail="its tool is not installed"
+		printf 'skipped: %s — %s\n' "$name" "$detail" ;;
+	esac
+}
+
+ci_finished() { # <slot> — the job wrote its status file: verdict, receipt, one line
+	local slot=$1 rc
+	read -r rc <"${CI_LOG[slot]}.rc" 2>/dev/null || rc=1
+	CI_MS[slot]=$((($(date +%s%N) - CI_START[slot]) / 1000000))
+	CI_RC[slot]=$rc
+	case $rc in
+	0) CI_STATUS[slot]=ok ;;
+	125) CI_STATUS[slot]=skip ;;
+	*) CI_STATUS[slot]=fail ;;
+	esac
+	CI_DETAIL[slot]=$(ci_last_line "${CI_LOG[slot]}")
+	unset 'CI_START[slot]'
+	running=$((running - 1))
+	finished=$((finished + 1))
+	# A verdict reached here is one the other gate may reuse; a skip is not a verdict, so it is not
+	# written — the next run asks again rather than reading "installed it later" as green.
+	[ "${CI_STATUS[slot]}" = skip ] ||
+		receipt_write "${CI_UNIT[slot]}" "$rc" "${CI_MS[slot]}" "${CI_LOG[slot]}"
+	ci_print "$slot"
+}
+
+while [ "$finished" -lt "$total" ]; do
+	while [ "$running" -lt "$CI_JOBS" ] && [ "$next" -lt "$total" ]; do
+		slot=$next
+		next=$((next + 1))
+		i=${CI_PLAN[slot]}
+		if [ -n "${CI_FROM_RECEIPT[slot]}" ]; then
+			if [ "${CI_RC[slot]}" = 0 ]; then CI_STATUS[slot]=ok; else CI_STATUS[slot]=fail; fi
+			CI_DETAIL[slot]=$(ci_last_line "${CI_LOG[slot]}")
+			finished=$((finished + 1))
+			ci_print "$slot"
+			continue
+		fi
+		CI_START[slot]=$(date +%s%N)
+		(
+			cd -- "$CI_CWD" || exit 1
+			timeout --kill-after=5 "${CI_TIMEOUT}s" bash -c "${CI_CMD[i]}" >"${CI_LOG[slot]}" 2>&1
+			printf '%s\n' "$?" >"${CI_LOG[slot]}.rc"
+		) &
+		CI_PID[slot]=$!
+		running=$((running + 1))
+	done
+
+	[ "$running" -gt 0 ] || break
+
+	# Poll rather than `wait -n`, which bash 4.3 has none of: the status file is the signal, so a
+	# job that finished is reported immediately instead of at the end of its batch.
+	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+		moved=0
+		for ((slot = 0; slot < total; slot++)); do
+			[ -n "${CI_START[slot]:-}" ] || continue
+			[ -f "${CI_LOG[slot]}.rc" ] || continue
+			wait "${CI_PID[slot]}" 2>/dev/null || true
+			ci_finished "$slot"
+			moved=1
+		done
+		[ "$moved" = 0 ] || break
+		sleep 0.1
+	done
+done
+wall_end=$(date +%s%N)
+wall=$(((wall_end - wall_start) / 1000000000))
+
+# --- summary ------------------------------------------------------------------------------------
+green=0
+failed=0
+skips=${#CI_SKIPPED[@]}
+for slot in "${!CI_PLAN[@]}"; do
+	case ${CI_STATUS[slot]:-fail} in
+	ok) green=$((green + 1)) ;;
+	fail) failed=$((failed + 1)) ;;
+	skip) skips=$((skips + 1)) ;;
+	esac
+done
+
+if [ "$CI_JSON" = 1 ]; then
+	printf '{"ok":%s,"runnable":%d,"passed":%d,"failed":%d,"skipped":%d,"seconds":%d,"jobs":[' \
+		"$([ "$failed" -eq 0 ] && printf true || printf false)" "$total" "$green" "$failed" "$skips" "$wall"
+	sep=""
+	for slot in "${!CI_PLAN[@]}"; do
+		printf '%s{"name":"%s","status":"%s","seconds":%d,"exit":%s,"receipt":%s,"log":"%s","detail":"%s"}' \
+			"$sep" "${CI_NAME[${CI_PLAN[slot]}]}" "${CI_STATUS[slot]:-fail}" "$((CI_MS[slot] / 1000))" \
+			"${CI_RC[slot]:-1}" \
+			"$([ -n "${CI_FROM_RECEIPT[slot]}" ] && printf true || printf false)" \
+			"${CI_LOG[slot]}" "$(printf '%s' "${CI_DETAIL[slot]:-}" | tr -d '"\\')"
+		sep=,
+	done
+	printf ']}\n'
+else
+	printf 'ci: %d/%d runnable green, %d skipped, %d failed\n' "$green" "$total" "$skips" "$failed"
+	printf 'ci: real %ss (at most %d at a time), logs %s\n' "$wall" "$CI_JOBS" "$RUN"
+	for slot in "${!CI_PLAN[@]}"; do
+		[ "${CI_STATUS[slot]:-fail}" = fail ] && printf 'ci: failing log: %s\n' "${CI_LOG[slot]}"
+	done
+fi
+
+[ "$failed" -eq 0 ]
