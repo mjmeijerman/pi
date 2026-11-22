@@ -1,6 +1,6 @@
 ---
 name: jev
-description: "Decision model for harness questions that should not be guesses — how many workers a task needs, which sandbox mode to run a worker in, yes-no-unsure calls, and sandbox permission requests. TypeSafe's Jev over HTTPS: needs TYPESAFE_API_KEY and network, costs money per call, answers in about 200 ms. Use before spawning workers, before choosing a sandbox mode, when a sandboxed worker asks for a permission, and anytime the safe answer is not obvious."
+description: "Decision model for harness questions that should not be guesses — which sandbox mode to run a worker in, yes-no-unsure calls, and sandbox permission requests. TypeSafe's Jev over HTTPS: needs TYPESAFE_API_KEY and network, costs money per call, answers in about 200 ms. Use before spawning workers, before choosing a sandbox mode, when a sandboxed worker asks for a permission, and anytime the safe answer is not obvious."
 ---
 
 # jev
@@ -20,7 +20,7 @@ Env overrides: `JEV_MODEL` (default `jev-latest`, currently `jev-1.14.0`), `JEV_
 | `jev ask "<question>"` | Should this go ahead? | `yes` / `no` / `unsure` |
 | `jev permit "<request>"` | Allow this sandbox permission request? | `yes` (allow) / `no` (refuse) / `unsure` (ask the human) |
 | `jev mode "<worker task>"` | Which sandbox mode should this worker run in? | `bare` / `sandboxed` / `no-net` |
-| `jev count "<task>"` | How many parallel workers does this need? | `1`–`4` |
+| `jev count "<task>"` | How many parallel workers one task would need, if a person asks | `1`–`4` |
 | `jev route "<task>"` | Local or remote at all? | `local` (exit 0) / `remote` (exit 1) |
 | `jev thinking "<task>"` | How much thinking effort does this worker need? | `low` / `medium` / `high` |
 | `jev plan "<task>"` | count, mode, route and thinking for one spawn | all four on one line, one request |
@@ -44,7 +44,6 @@ Env overrides: `JEV_MODEL` (default `jev-latest`, currently `jev-1.14.0`), `JEV_
 
 ## When to use it
 
-- **How many workers** a task needs, before fanning out. Never more than 4; past 4 the human cannot review the output.
 - **Which mode** a worker gets, before spawning it.
 - **How much thinking** a worker needs, before spawning it. Jev answers an abstract effort, never a pi level name, because it cannot know which levels the model supports: the caller maps `low`/`medium`/`high` onto the levels that model actually has (`bin/delegate` reads `thinkingLevelMap` from the pi model catalogue and picks the nearest supported level, ties to the lower one).
 - **Yes-no-unsure** questions where guessing would be a policy violation or a costly mistake.
@@ -56,16 +55,9 @@ Env overrides: `JEV_MODEL` (default `jev-latest`, currently `jev-1.14.0`), `JEV_
 - A worker that needs a model cannot run `no-net`. No network means no model. `no-net` is only for executing untrusted repository scripts.
 - `sandboxed` is the default: read-only analysis, small edits, tests in a normal repository.
 - `bare` only when the work needs host access the sandbox refuses — Herdr control sockets, a GUI, docker, the ssh agent, or paths the sandbox does not mount.
-- At most 4 parallel workers. Answer 4 and say why when a task looks bigger.
+- A space runs one worker and the boss spawns it, so a count is never negotiated: `plan` still answers one, and nothing fans out on it. The mode is the decision that changes a spawn.
 
 ## Examples
-
-Let it fill in the worker count, then spawn:
-
-```
-jev count "audit three unrelated repos for leaked secrets" --json
-→ {"count":3,"reason":"count 0.98","confidence":0.98}
-```
 
 Check a mode before delegating:
 
