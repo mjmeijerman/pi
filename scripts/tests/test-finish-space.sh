@@ -494,6 +494,69 @@ else
 fi
 if has 'the worker is still open'; then fail 'it claims a closed worker is still open' "$OUT"; else pass 'it does not claim the worker is still open'; fi
 
+# ------------------------------------------- wipe finds a worker that lives in a space --
+# cmd_wipe read $DELEGATIONS — the pre-space state/delegations.json — without resolving the
+# worker's space first, so it answered "no such worker" for a worker `delegate list` was showing,
+# and `close` then refused for want of a wipe row: the standard finish path could not close a
+# worker in a space at all. Measured twice on radar-gate and radar-gate-boot, both closed by hand.
+WIPE_DIR="$WORK/wipe"
+mkdir -p "$WIPE_DIR/bin" "$SPACE_DIR/state"
+cp "$DELEGATE" "$ROOT/bin/space-lib.sh" "$ROOT/bin/records-lib.sh" "$WIPE_DIR/bin/"
+WIPE_DECISIONS="$SPACE_DIR/state/decisions.jsonl"
+rm -f "$WIPE_DECISIONS"
+
+new_case 'wipe finds a worker whose record is in its own space'
+# A tab-kind worker: `close` needs the tab it owns, and herdr is stubbed here so the close is a
+# record operation and nothing touches a real window.
+HERDR_STUB="$WORK/herdr-stub"
+mkdir -p "$HERDR_STUB"
+cat >"$HERDR_STUB/herdr-app" <<'STUB'
+#!/usr/bin/env bash
+printf '{"tabs":[],"spaces":[],"terminals":[]}\n'
+STUB
+chmod +x "$HERDR_STUB/herdr-app"
+cat >"$SPACE_DIR/delegations.json" <<JSON
+{"w1": {"cwd": "$PRJ", "branch": "w1", "spec": "$SPACE_DIR/specs/w1.md"},
+ "s1": {"cwd": "$PRJ", "branch": "s1-absent", "kind": "tab", "tab": "tab-s1", "spec": "$SPACE_DIR/specs/s1.md"}}
+JSON
+run "$WIPE_DIR/bin/delegate" wipe s1 --skip 'no feature landed, so there is nothing to consolidate'
+if [ "$RC" -eq 0 ]; then pass 'the wipe accepts a worker the space tracks'; else fail 'the wipe said no such worker for a tracked worker' "$OUT"; fi
+if has 'close goes through'; then pass 'it prints the close line'; else fail 'it does not say the close goes through' "$OUT"; fi
+if [ -f "$WIPE_DECISIONS" ] && grep -q '"command":"wipe"' "$WIPE_DECISIONS" &&
+	grep -q '"slug":"s1"' "$WIPE_DECISIONS"; then
+	pass 'the decision landed in the space own decisions file'
+else
+	fail 'no wipe decision for s1 in the space decisions file' "$(cat "$WIPE_DECISIONS" 2>/dev/null)"
+fi
+
+new_case 'close then succeeds and drops the record the wipe could not find'
+cat >"$SPACE_DIR/reports/s1.md" <<'REPORT'
+Mission: a worker in a space is wiped and closed without a person
+
+Review tier: low
+
+## Evidence
+
+Command: bin/delegate list
+
+```
+s1  sp  sandboxed  low  reported
+```
+REPORT
+PATH="$HERDR_STUB:$PATH" run "$WIPE_DIR/bin/delegate" close s1 --nothing 'the brief was withdrawn before any commit landed'
+if [ "$RC" -eq 0 ]; then pass 'the close succeeds'; else fail 'the close was refused' "$OUT"; fi
+if grep -q '"s1"' "$SPACE_DIR/delegations.json"; then
+	fail 'the record is still in the space' "$(cat "$SPACE_DIR/delegations.json")"
+else
+	pass 'the record is gone, so the worker is closed'
+fi
+
+new_case 'a wipe on a slug no space tracks is still refused'
+run "$WIPE_DIR/bin/delegate" wipe ghost --skip 'no feature landed, so there is nothing to consolidate'
+if [ "$RC" -eq 1 ]; then pass 'the wipe exits 1'; else fail "the wipe exited $RC" "$OUT"; fi
+if has 'no such worker: ghost'; then pass 'the refusal names the slug'; else fail 'the refusal does not say no such worker' "$OUT"; fi
+if has 'close goes through'; then fail 'a refused wipe still claimed the close goes through' "$OUT"; else pass 'nothing was recorded for a slug that is not a worker'; fi
+
 # ------------------------------------------- verdict --
 printf '\n%s passed, %s failed\n' "$PASS_N" "$FAIL_N"
 [ "$FAIL_N" -eq 0 ]
