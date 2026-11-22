@@ -85,6 +85,7 @@ for arg in "$@"; do
 	case $arg in
 	*comments*) f=$GH_COMMENTS ;;
 	*statusCheckRollup*) f=$GH_FIXTURE ;;
+	*files*) f=$GH_FILES ;;
 	esac
 done
 n=$(( $(cat "$GH_COUNT" 2>/dev/null || printf 0) + 1 ))
@@ -190,14 +191,32 @@ run_pr_ready() { # <fixture> [args...]
 	shift
 	OUT=$(env -i PATH="$WORK/stub:/usr/bin:/bin" HOME="$WORK/home" TMPDIR="$WORK" \
 		GH_FIXTURE="$fixture" GH_COMMENTS="${COMMENTS_FIXTURE:-$WORK/comments-none.json}" \
+		GH_FILES="${FILES_FIXTURE:-$WORK/files-code.json}" \
 		GH_COUNT="$WORK/count" \
 		bash "$PR_READY" "$@" 2>&1)
 	RC=$?
 	rm -f "$WORK/count"
 }
 
-# The default: a pull request whose instructions nobody had to read, so nobody wrote a review.
+# write_files <file> <path>... — the PR's changed files, as `gh pr view <n> --json files` returns them.
+write_files() {
+	local file=$1 first=1 path
+	shift
+	printf '{"files":[' >"$file"
+	for path in "$@"; do
+		[ "$first" = 1 ] || printf ',' >>"$file"
+		first=0
+		printf '{"path":%s}' "$(printf '%s' "$path" | jq -Rs .)" >>"$file"
+	done
+	printf ']}\n' >>"$file"
+}
+
+# The default: a pull request whose instructions nobody had to read, so nobody wrote a review. Its
+# changed files are code, so the review was never going to run: the workflow's `paths:` filter says
+# so, and `pr-ready` reads that filter instead of waiting for a comment nobody posts.
 write_comments "$WORK/comments-none.json"
+write_files "$WORK/files-code.json" bin/ci scripts/ci-offline.sh
+write_files "$WORK/files-prose.json" agent/AGENTS.md
 
 # ---------------------------------------------------------------------------
 case_start "an empty rollup is not a green one"
@@ -401,9 +420,11 @@ out_has "prose review: clean (5 checks)" "the pass counts the questions the revi
 case_start "no prose-review comment is nothing to answer"
 write_comments "$WORK/comments-chatter.json" "looks good to me" "1. **contradiction** — a finding in a comment that is not the review"
 COMMENTS_FIXTURE=$WORK/comments-chatter.json
+FILES_FIXTURE=$WORK/files-prose.json
 run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
 COMMENTS_FIXTURE=""
-expect_rc "an ordinary PR with no review comment passes" 0
+FILES_FIXTURE=""
+expect_rc "a prose diff with no review comment yet passes" 0
 out_has "prose review: none yet" "the pass says there was no review to answer"
 
 # ---------------------------------------------------------------------------
@@ -516,5 +537,57 @@ expect_rc "a skipped review does not block a green rollup" 0
 out_has "prose review: skipped" "the run says the rule was skipped, not that it passed"
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# The workflow's `paths:` filter, read instead of guessed. Measured: a boss ran `pr-ready <n> --wait`
+# on a branch that touched only bin/ and scripts/, and waited the full 90s for a prose review that
+# the workflow's filter had ruled out before it started. Waiting is not free, and the line said
+# `none yet` about a comment nobody was going to post.
+case_start "a diff that touches no prose path is not waiting for a review"
+start=$(date +%s)
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL" --wait --interval 5 --max 60
+end=$(date +%s)
+expect_rc "a green rollup on a code-only diff passes" 0
+out_has "prose review: not expected — this diff touches no prose path" "the line says why there is no review"
+out_lacks "none yet" "it does not claim a review is still coming"
+elapsed=$((end - start))
+if [ "$elapsed" -lt 5 ]; then pass "it returned without sleeping ($elapsed s)"
+else fail "it waited $elapsed s for a comment the filter rules out"; fi
+
+# ---------------------------------------------------------------------------
+case_start "a diff that touches agent/AGENTS.md is still waiting for one"
+FILES_FIXTURE=$WORK/files-prose.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
+FILES_FIXTURE=""
+expect_rc "no review comment is nothing to answer" 0
+out_has "prose review: none yet" "it keeps the old words for a review that is coming"
+out_lacks "not expected" "it does not claim the review was ruled out"
+# ...and --wait polls it, with the same --max, instead of exiting on the first green rollup.
+FILES_FIXTURE=$WORK/files-prose.json
+start=$(date +%s)
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL" --wait --interval 1 --max 2
+FILES_FIXTURE=""
+end=$(date +%s)
+expect_rc "a wait for a review that never comes gives up" nonzero
+out_has "gave up after --max 2s without a prose review comment" "it says what it waited for and that it gave up"
+elapsed=$((end - start))
+if [ "$elapsed" -ge 1 ]; then pass "it polled for the review ($elapsed s)"
+else fail "it exited after $elapsed s, so it never waited"; fi
+
+# ---------------------------------------------------------------------------
+case_start "the same prose diff with a posted review keeps the existing verdicts"
+write_comments "$WORK/prose-clean.json" "$(prose_comment "no finding" "no finding" "no finding" "no finding" "no finding")"
+write_thread "$WORK/thread-prose-answered.json" \
+	github-actions "$T1" "$(prose_comment "agent/AGENTS.md:16 makes --wait required" "no finding" "no finding" "no finding" "no finding")" \
+	octocat "$T2" "Finding 1: fixed in cff5699, --wait is optional again."
+FILES_FIXTURE=$WORK/files-prose.json
+COMMENTS_FIXTURE=$WORK/prose-clean.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
+COMMENTS_FIXTURE=$WORK/thread-prose-answered.json
+run_pr_ready "$WORK/prose-green.json" 209 --sha "$FULL"
+FILES_FIXTURE=""
+COMMENTS_FIXTURE=""
+expect_rc "an answered finding is a pass" 0
+out_has "prose review: 1 finding(s) answered by octocat" "the answered verdict is unchanged"
+
 printf '\n%d passed, %d failed in %d cases\n'  "$PASS_N" "$FAIL_N" "$CASE_N"
 [ "$FAIL_N" -eq 0 ]

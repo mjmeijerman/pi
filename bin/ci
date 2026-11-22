@@ -2,7 +2,7 @@
 # ci — the checks GitHub runs, run here, all at once, so a push is not the first verdict.
 #
 #   bin/ci [--jobs N] [--timeout S] [--only JOB]... [--skip JOB]... [--pr N] [--body FILE]
-#          [--cwd DIR] [--table FILE] [--dry-run] [--json]
+#          [--cwd DIR] [--space SLUG] [--table FILE] [--no-cache] [--receipts] [--dry-run] [--json]
 #
 # Why it exists: a branch that passes `delegate finish` can still be red on GitHub, and the news
 # arrives minutes later, one job at a time, in a browser tab. Three branches did exactly that in one
@@ -42,6 +42,16 @@
 # under these gates, is printed as `(receipt)` and not started. So `bin/ci` after a preflight costs
 # the jobs preflight did not run, and a job this run answers is not re-run by preflight.
 #
+# A receipt is keyed by the *content* of the working tree (`bin/receipts.sh`), so a second worktree
+# of the same content is not a second run. Inside a space the ledger is the space's
+# `cache/ci/` — one cache for every worktree of that project — and the line says which tier
+# answered: `ok offline (receipt, shared)` or `ok offline (receipt, tree)`.
+#
+# Not every job may be cached. A receipt keyed by content cannot see what is gitignored (`state/`,
+# `.env`, a nested worktree), and cannot see git history or the network. Those rows carry `no: <why>`
+# in the table and are never answered by a receipt; `--no-cache` ignores both tiers for a whole run,
+# and `--receipts` prints the key each job would use.
+#
 # Exit status: 0 when every runnable job passed. A skip is printed with its reason and is never
 # counted green; a failure prints its job's log path and exits 1; bad usage exits 2.
 
@@ -52,10 +62,18 @@ CI_ROOT=$(cd -- "$CI_BIN/.." && pwd)
 # shellcheck source=/dev/null
 . "$CI_BIN/receipts.sh"
 
+# The space record, so `--cwd`'s space can name the shared tier. Its default root is the harness
+# home (`$PI_STATE`, or `$HOME/.pi`), never "the checkout this file sits in": bin/ci runs inside a
+# worktree, and a worktree has no state/ of its own — the ledger a worktree reads is the space's.
+PI_SPACE_ROOT=${PI_SPACE_ROOT:-${PI_STATE:-$HOME/.pi}}
+# shellcheck source=/dev/null
+. "$CI_BIN/space-lib.sh"
+
 usage() { sed -n '/^# ci — the checks/,/^# Exit status:/p' "${BASH_SOURCE[0]}" | sed -e 's/^# \{0,1\}//'; }
 
 # --- the table ----------------------------------------------------------------------------------
-# name | command | needs (`-`, `pr`, `body`) | runnable (`yes`, or `skip: <why>`).
+# name | command | needs (`-`, `pr`, `body`) | runnable (`yes`, or `skip: <why>`) | cache
+# (`-`/absent = cacheable, `no: <why>` = never answered by a receipt).
 # A command is run by `bash -c` in --cwd, so it may be a compound; no field may contain a `|`.
 # A job whose tool is missing exits 125 and is reported as a skip that names the tool.
 ci_table() {
@@ -65,14 +83,14 @@ offline|bash scripts/ci-offline.sh|-|yes
 scripts-test|make --no-print-directory scripts-test|-|yes
 shell|mapfile -t sh_files < <(git ls-files '*.sh'); printf '%s file(s)\n' "${#sh_files[@]}"; for sh_file in "${sh_files[@]}"; do if ! bash -n "$sh_file"; then exit 1; fi; done; if ! command -v shellcheck >/dev/null; then echo "shellcheck: not installed"; exit 125; fi; shellcheck --severity=error "${sh_files[@]}"|-|yes
 semgrep|if ! command -v semgrep >/dev/null; then echo "semgrep: not installed"; exit 125; fi; mapfile -t sg_files < <(git ls-files '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs' '*.sh'); printf 'semgrep targets: %d file(s)\n' "${#sg_files[@]}"; semgrep scan --config p/default --config p/typescript $CI_BASH_RULES --metrics=off --disable-version-check --error "${sg_files[@]}"|-|yes
-secret-scan|if ! command -v gitleaks >/dev/null; then echo "gitleaks: not installed"; exit 125; fi; gitleaks detect --redact --no-banner --verbose --source .|-|yes
-zizmor|if command -v zizmor >/dev/null; then zizmor --pedantic --no-progress .; exit; fi; if ! uvx --from zizmor==1.32.0 zizmor --help >/dev/null 2>&1; then echo "zizmor: not installed"; exit 125; fi; uvx --from zizmor==1.32.0 zizmor --pedantic --no-progress .|-|yes
-mutation|bash scripts/mutate-changed.sh|pr|yes
-tier|bash scripts/pr-gate.sh --gate tier --body "$CI_BODY"|body|yes
-test-change|bash scripts/pr-gate.sh --gate test-change --body "$CI_BODY"|body|yes
-mission|bash scripts/pr-gate.sh --gate mission --body "$CI_BODY"|body|yes
+secret-scan|if ! command -v gitleaks >/dev/null; then echo "gitleaks: not installed"; exit 125; fi; gitleaks detect --redact --no-banner --verbose --source .|-|yes|no: gitleaks scans the whole workdir, .env and ignored files included
+zizmor|if command -v zizmor >/dev/null; then zizmor --pedantic --no-progress .; exit; fi; if ! uvx --from zizmor==1.32.0 zizmor --help >/dev/null 2>&1; then echo "zizmor: not installed"; exit 125; fi; uvx --from zizmor==1.32.0 zizmor --pedantic --no-progress .|-|yes|no: it reads the checkout, not only the files the content hash sees
+mutation|bash scripts/mutate-changed.sh|pr|yes|no: the changed lines come from the branch's history, not from its content
+tier|bash scripts/pr-gate.sh --gate tier --body "$CI_BODY"|body|yes|no: judged from the branch diff and the body, one level above content
+test-change|bash scripts/pr-gate.sh --gate test-change --body "$CI_BODY"|body|yes|no: judged from the branch diff and the body, one level above content
+mission|bash scripts/pr-gate.sh --gate mission --body "$CI_BODY"|body|yes|no: judged from the branch diff and the body, one level above content
 install-matrix||-|skip: Windows and macOS runners only, and this machine is neither
-prose-review|if [ ! -f .github/scripts/prose-review.mjs ]; then echo "no .github/scripts/prose-review.mjs in this checkout"; exit 125; fi; if ! command -v gh >/dev/null; then echo "gh: not installed"; exit 125; fi; bash "$CI_BIN_DIR/prose-review" --ci --root . "$CI_PR"|pr|yes
+prose-review|if [ ! -f .github/scripts/prose-review.mjs ]; then echo "no .github/scripts/prose-review.mjs in this checkout"; exit 125; fi; if ! command -v gh >/dev/null; then echo "gh: not installed"; exit 125; fi; bash "$CI_BIN_DIR/prose-review" --ci --root . "$CI_PR"|pr|yes|no: a model call and a network read of the pull request
 prose-offline|node --test scripts/tests/prose-review.test.mjs scripts/tests/prose-review-diff-paths.test.mjs|-|yes
 TABLE
 }
@@ -88,6 +106,9 @@ CI_DRY=0
 CI_JSON=0
 CI_ONLY=()
 CI_SKIP=()
+CI_SPACE=""
+CI_NOCACHE=0
+CI_RECEIPTS=0
 
 while [ "$#" -gt 0 ]; do
 	case $1 in
@@ -131,6 +152,13 @@ while [ "$#" -gt 0 ]; do
 		CI_TABLE_FILE=$2
 		shift 2
 		;;
+	--space)
+		[ "$#" -ge 2 ] || { printf 'ci: --space needs a space name\n' >&2; exit 2; }
+		CI_SPACE=$2
+		shift 2
+		;;
+	--no-cache) CI_NOCACHE=1; shift ;;
+	--receipts) CI_RECEIPTS=1; shift ;;
 	--dry-run) CI_DRY=1; shift ;;
 	--json) CI_JSON=1; shift ;;
 	-h | --help) usage; exit 0 ;;
@@ -144,6 +172,24 @@ done
 case $CI_JOBS in '' | *[!0-9]* | 0) printf 'ci: --jobs takes a positive number, not %s\n' "$CI_JOBS" >&2; exit 2 ;; esac
 case $CI_TIMEOUT in '' | *[!0-9]* | 0) printf 'ci: --timeout takes a positive number of seconds, not %s\n' "$CI_TIMEOUT" >&2; exit 2 ;; esac
 [ -d "$CI_CWD" ] || { printf 'ci: --cwd is not a directory: %s\n' "$CI_CWD" >&2; exit 2; }
+
+# --- the shared tier: the space's cache, when there is a space -----------------------------------
+# `--space` names it; otherwise it is the space whose project contains --cwd (bin/space-lib.sh's
+# rule, the one bin/delegate and bin/preflight use). A folder no space claims keeps the per-tree
+# ledger, so bin/ci still works in a plain checkout. `--no-cache` is decided later, in the ledger.
+CI_SPACE_SLUG=""
+if [ -n "$CI_SPACE" ]; then
+	CI_SPACE_SLUG=$(space_pick "$CI_SPACE" "$CI_CWD") || exit 2
+else
+	CI_SPACE_SLUG=$(space_pick "" "$CI_CWD" 2>/dev/null || true)
+fi
+if [ -n "$CI_SPACE_SLUG" ]; then
+	# Deliberately not exported: a job that starts its own gate (`bin/preflight`, a nested
+	# `bin/ci`) keeps the directory it is told to write, never a tier it did not ask for. The
+	# directory itself is exported below, as PI_RECEIPT_DIR, so a child reads and writes it too.
+	PI_RECEIPT_SHARED=$(space_dir "$CI_SPACE_SLUG")/cache/ci
+fi
+[ "$CI_NOCACHE" = 0 ] || export PI_RECEIPT_NOCACHE=1
 if [ -n "$CI_BODY" ]; then
 	[ -r "$CI_BODY" ] || { printf 'ci: --body is not readable: %s\n' "$CI_BODY" >&2; exit 2; }
 	CI_BODY=$(cd -- "$(dirname -- "$CI_BODY")" && pwd)/$(basename -- "$CI_BODY")
@@ -180,13 +226,22 @@ CI_NAME=()
 CI_CMD=()
 CI_NEEDS=()
 CI_RUNNABLE=()
-while IFS='|' read -r name cmd needs runnable extra; do
+CI_CACHE=()
+while IFS='|' read -r name cmd needs runnable cache extra; do
 	[ -n "$name" ] || continue
 	case $name in '#'*) continue ;; esac
 	if [ -n "${extra:-}" ]; then
 		printf 'ci: job %s has a `|` in its command — the table is pipe-separated, use ; or if\n' "$name" >&2
 		exit 2
 	fi
+	case ${cache:-} in
+	'' | -) CI_CACHE+=("") ;;
+	no:\ *) CI_CACHE+=("${cache#no: }") ;;
+	*)
+		printf 'ci: job %s has an unknown cache field: %s (use - or `no: <why>`)\n' "$name" "$cache" >&2
+		exit 2
+		;;
+	esac
 	CI_NAME+=("$name")
 	CI_CMD+=("$cmd")
 	CI_NEEDS+=("${needs:--}")
@@ -270,8 +325,16 @@ mkdir -p "$RUN" || { printf 'ci: cannot create %s\n' "$RUN" >&2; exit 2; }
 
 # The ledger is shared with `bin/preflight`, so a job this run answers is not run again there. A
 # test pins PI_RECEIPT_DIR, so a scratch job table never writes receipts into a real checkout.
-RECEIPT_DIR=${PI_RECEIPT_DIR:-$CI_CWD/state/preflight}
-mkdir -p "$RECEIPT_DIR" 2>/dev/null || RECEIPT_DIR=${TMPDIR:-/tmp}/pi-ci/receipts
+# The shared tier when a space named one, else the per-tree ledger. A directory this cannot create
+# falls back to $TMPDIR and says so, and the shared claim is withdrawn with it: a receipt written
+# somewhere the next run will not look is a receipt that pretends to be a cache.
+if [ -n "${PI_RECEIPT_SHARED:-}" ]; then RECEIPT_DIR=$PI_RECEIPT_SHARED; else RECEIPT_DIR=${PI_RECEIPT_DIR:-$CI_CWD/state/preflight}; fi
+if ! mkdir -p "$RECEIPT_DIR" 2>/dev/null; then
+	printf 'ci: cannot write %s, so the ledger is %s\n' "$RECEIPT_DIR" "${TMPDIR:-/tmp}/pi-ci/receipts" >&2
+	RECEIPT_DIR=${TMPDIR:-/tmp}/pi-ci/receipts
+	PI_RECEIPT_SHARED=""
+	unset PI_RECEIPT_SHARED
+fi
 export PI_RECEIPT_DIR=$RECEIPT_DIR
 receipt_init "$CI_CWD" >/dev/null 2>&1 || true
 
@@ -294,6 +357,8 @@ CI_MS=()
 CI_LOG=()
 CI_DETAIL=()
 CI_FROM_RECEIPT=()
+CI_TIER=()
+CI_NOCACHED=()
 CI_RC=()
 CI_UNIT=()
 CI_PID=()
@@ -306,15 +371,25 @@ for slot in "${!CI_PLAN[@]}"; do
 	i=${CI_PLAN[slot]}
 	CI_LOG[slot]=$RUN/${CI_NAME[i]}.log
 	CI_FROM_RECEIPT[slot]=""
+	CI_TIER[slot]=""
+	CI_NOCACHED[slot]=""
 	CI_DETAIL[slot]=""
 	CI_MS[slot]=0
 	unit=$(receipt_unit_name "${CI_CMD[i]}")
 	case ${CI_NEEDS[i]} in body) unit="$unit body:$(ci_body_hash)" ;; esac
 	CI_UNIT[slot]=$unit
+	if [ "$CI_RECEIPTS" = 1 ]; then
+		printf 'receipt %-13s %-28s %s (%s)\n' "${CI_NAME[i]}" "$unit" "$(receipt_key "$unit")" "${RECEIPT_TIER_NAME:-tree}"
+	fi
+	if [ -n "${CI_CACHE[i]}" ]; then
+		CI_NOCACHED[slot]=${CI_CACHE[i]}
+		continue
+	fi
 	if receipt_lookup "$unit" "${CI_LOG[slot]}"; then
 		CI_RC[slot]=$RECEIPT_RC
 		CI_MS[slot]=$RECEIPT_MS
 		CI_FROM_RECEIPT[slot]=$RECEIPT_AGE
+		CI_TIER[slot]=${RECEIPT_TIER:-tree}
 	fi
 done
 
@@ -345,7 +420,7 @@ ci_print() { # <slot> — the one line a reader acts on
 	secs=$((CI_MS[slot] / 1000))
 	detail=${CI_DETAIL[slot]:-}
 	from=""
-	[ -z "${CI_FROM_RECEIPT[slot]}" ] || from=" (receipt)"
+	[ -z "${CI_FROM_RECEIPT[slot]}" ] || from=" (receipt, ${CI_TIER[slot]:-tree})"
 	[ "$CI_JSON" = 1 ] && return 0
 	case ${CI_STATUS[slot]} in
 	ok) printf 'ok   %-13s %-46s %4ss%s\n' "$name" "$detail" "$secs" "$from" ;;
@@ -376,8 +451,9 @@ ci_finished() { # <slot> — the job wrote its status file: verdict, receipt, on
 	finished=$((finished + 1))
 	# A verdict reached here is one the other gate may reuse; a skip is not a verdict, so it is not
 	# written — the next run asks again rather than reading "installed it later" as green.
-	[ "${CI_STATUS[slot]}" = skip ] ||
+	if [ "${CI_STATUS[slot]}" != skip ] && [ -z "${CI_NOCACHED[slot]}" ]; then
 		receipt_write "${CI_UNIT[slot]}" "$rc" "${CI_MS[slot]}" "${CI_LOG[slot]}"
+	fi
 	ci_print "$slot"
 }
 
