@@ -65,6 +65,11 @@ in a reply, and judge each one. One review claimed `bin/pr-ready` did not exist 
 tree; it does — a false finding is rebutted, not obeyed. A finding left open is not
 green.
 
+A finding is judged before it is obeyed: answer it with the verification — the `path:line` you
+checked, the byte count, the command's output — rebut a false one in a reply comment, and never
+reword the diff to fit it. False findings have claimed a file that exists was missing and a command
+that is in the tree did not exist; both were answered, neither changed the change.
+
 The local gate is the pipeline, not a sample of it: `bin/preflight --ci` runs `bin/ci`, which runs
 every job `gh pr checks` prints — in parallel, so it costs the slowest job. `delegate finish` refuses
 to publish while any of them is red. Jobs that cannot run here (`install-matrix`'s Windows and macOS
@@ -76,6 +81,11 @@ rollup is green, `gh pr view <n> --json mergeable` until it says MERGEABLE, then
 review above until nothing is open. Those are the only two exits — green, mergeable and
 answered, or the person decides. A boss that stops before the last step has handed over
 a PR with work still in it.
+
+A hand-rolled poll loop is a missing `--wait`: `bin/delegate wait <slug> --forever` and
+`bin/pr-ready <n> --sha <sha> --wait` already block until there is something to read, and
+`bin/delegate land <slug>` walks the whole tail in one command. A `sleep` in a loop is not progress;
+`delegate wait` and `land` are.
 
 ## Proof, sized to the diff
 
