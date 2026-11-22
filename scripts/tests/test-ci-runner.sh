@@ -198,5 +198,99 @@ else
 	fail "the job started $first_starts then $second_starts time(s), expected 1 then 1" "$OUT"
 fi
 
+# --- prose-review: three states, and no silent green ---------------------------------------------
+# The prose job reads a PR's diff and a model key, so these cases drive the real job row out of the
+# real table (`--only prose-review`, no `--table`) against a fake root: a stub review script that
+# prints one finding, and a `gh` on PATH that answers `pr diff`. Every case is red on a runner with
+# no such row, because `--only` refuses a job name the table does not have.
+prose_root() { # <dir> [prose|none] — a tree with the machinery, a stub review and a stub gh
+	mkdir -p "$1/.github/scripts" "$1/ghbin"
+	cat >"$1/.github/scripts/prose-review.mjs" <<'STUB'
+process.argv.slice(2);
+process.stdout.write(
+	"<!-- prose-review -->\n**prose-review** — five questions (stub).\n\n" +
+		"1. **contradiction** — agent/AGENTS.md:12 says wait forever, agent/AGENTS.md:20 says sleep.\n" +
+		"2. **missing command** — no finding\n3. **uncheckable rule** — no finding\n" +
+		"4. **duplicated rule** — no finding\n5. **older sentence now false** — no finding\n",
+);
+STUB
+	if [ "${2:-prose}" = prose ]; then
+		cat >"$1/ghbin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+"pr diff")
+	printf '%s\n' \
+		'diff --git a/agent/AGENTS.md b/agent/AGENTS.md' \
+		'--- a/agent/AGENTS.md' \
+		'+++ b/agent/AGENTS.md' \
+		'@@ -1,2 +1,2 @@' \
+		'-old sentence' \
+		'+new sentence'
+	;;
+*) printf 'gh stub: unhandled %s\n' "$*" >&2; exit 1 ;;
+esac
+STUB
+	else
+		cat >"$1/ghbin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+"pr diff")
+	printf '%s\n' \
+		'diff --git a/README.md b/README.md' \
+		'--- a/README.md' \
+		'+++ b/README.md' \
+		'@@ -1,2 +1,2 @@' \
+		'-old line' \
+		'+new line'
+	;;
+*) printf 'gh stub: unhandled %s\n' "$*" >&2; exit 1 ;;
+esac
+STUB
+	fi
+	chmod +x "$1/ghbin/gh"
+}
+
+case_start "prose finding"
+LEDGER_OFF=1 # the receipt case above turned the ledger on; these cases read a live job
+prose_root "$WORK/prose-found"
+REAL_PATH=$PATH
+export PATH="$WORK/prose-found/ghbin:$PATH"
+export PROSE_REVIEW_API_KEY=dummy-key-for-a-stub
+run_ci --only prose-review --cwd "$WORK/prose-found" --pr 7
+expect_rc nonzero "a prose finding fails the job"
+out_has "FAIL prose-review" "the prose job is the one that is red"
+out_has "agent/AGENTS.md:12" "the finding line is printed, not only logged"
+prose_log=$(printf '%s\n' "$OUT" | sed -nE 's/^FAIL +prose-review +[0-9]+s +log (.+)$/\1/p' | head -n 1)
+if [ -n "$prose_log" ] && [ -f "$prose_log" ]; then
+	pass "the failing job's log exists ($prose_log)"
+else
+	fail "the failing job named no log that exists" "log: ${prose_log:-none}" "$OUT"
+fi
+
+case_start "prose no key"
+unset PROSE_REVIEW_API_KEY
+run_ci --only prose-review --cwd "$WORK/prose-found" --pr 7
+expect_rc 0 "a missing key skips the job and fails nothing"
+out_has "skipped: prose-review — no PROSE_REVIEW_API_KEY, the offline parser tests ran instead" \
+	"the skip names the key and what ran instead"
+out_has "0/1 runnable green, 1 skipped, 0 failed" "the skip is not counted green and fails nothing"
+
+case_start "prose paths untouched"
+# A key, so the paths filter is what decides this case instead of the key check above it.
+export PROSE_REVIEW_API_KEY=dummy-key-for-a-stub
+prose_root "$WORK/prose-none" none
+export PATH="$WORK/prose-none/ghbin:$PATH"
+run_ci --only prose-review --cwd "$WORK/prose-none" --pr 7
+unset PROSE_REVIEW_API_KEY
+expect_rc 0 "a diff with no prose path skips the job"
+out_has "skipped: prose-review — no prose path changed" "the skip mirrors the workflow's paths filter"
+
+case_start "prose offline"
+export PATH=$REAL_PATH
+run_ci --only prose-offline --cwd "$BIN/.."
+expect_rc 0 "the offline parser tests pass on this repository"
+out_has "ok   prose-offline" "prose-offline is a green job of its own"
+out_has "1/1 runnable green" "it is counted green, not skipped"
+
 printf '\n%s: %d case(s), %d passed, %d failed\n' "test-ci-runner" "$CASE_N" "$PASS_N" "$FAIL_N"
 [ "$FAIL_N" -eq 0 ]
