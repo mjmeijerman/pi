@@ -222,7 +222,7 @@ if has 'git -C '"$PRJ"' rebase origin/main'; then pass 'the failure names the re
 new_case 'finish runs the programs in its own tree, not the pre-space copies'
 PORTED="$WORK/ported"
 mkdir -p "$PORTED/bin"
-cp "$DELEGATE" "$ROOT/bin/space-lib.sh" "$PORTED/bin/"
+cp "$DELEGATE" "$ROOT/bin/space-lib.sh" "$ROOT/bin/records-lib.sh" "$PORTED/bin/"
 for prog in preflight publish; do
 	cat >"$PORTED/bin/$prog" <<'STUB'
 #!/usr/bin/env bash
@@ -258,7 +258,7 @@ if [ ! -s "$PATH_LOG" ]; then pass 'no copy on PATH was run'; else fail 'finish 
 new_case '--keep-open publishes and does not wipe or close'
 KEEP="$WORK/keepopen"
 mkdir -p "$KEEP/bin"
-cp "$DELEGATE" "$ROOT/bin/space-lib.sh" "$KEEP/bin/"
+cp "$DELEGATE" "$ROOT/bin/space-lib.sh" "$ROOT/bin/records-lib.sh" "$KEEP/bin/"
 cat >"$KEEP/bin/preflight" <<'STUB'
 #!/usr/bin/env bash
 printf 'preflight %s\n' "$*" >>"$PORTED_LOG"
@@ -306,7 +306,7 @@ fi
 # `<slot>` is the directory the stub programs live in, so a case can swap one out.
 CIGATE() { # <dir> — delegate + space-lib from this tree, stub preflight and publish beside them
 	mkdir -p "$1/bin"
-	cp "$DELEGATE" "$ROOT/bin/space-lib.sh" "$1/bin/"
+	cp "$DELEGATE" "$ROOT/bin/space-lib.sh" "$ROOT/bin/records-lib.sh" "$1/bin/"
 	cat >"$1/bin/preflight" <<'STUB'
 #!/usr/bin/env bash
 printf 'preflight %s\n' "$*" >>"$PORTED_LOG"
@@ -386,7 +386,7 @@ fi
 # record is refused before the gate, before publish, and with the space's own paths in the message.
 GONE_DIR="$WORK/gone"
 mkdir -p "$GONE_DIR/bin"
-cp "$DELEGATE" "$ROOT/bin/space-lib.sh" "$GONE_DIR/bin/"
+cp "$DELEGATE" "$ROOT/bin/space-lib.sh" "$ROOT/bin/records-lib.sh" "$GONE_DIR/bin/"
 PUBLISH_MARK="$WORK/publish-called"
 PUBLISH_COUNT="$WORK/publish-count"
 export PUBLISH_MARK PUBLISH_COUNT
