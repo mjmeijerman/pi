@@ -1,8 +1,8 @@
-// The key that makes a durable space: what it runs, and where it is written.
+// The key that makes a durable space: what it opens, and where it is written.
 //
 // Plain node: no herdr-app, no gpui-*, no home folder. The point of the file is that the
 // binding is *data* — the mod's keys.json, the installer and this test all read one
-// module — so a key that drifts from its argv is a red test, not a silent dead key.
+// module — so a key that drifts from its action is a red test, not a silent dead key.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -12,9 +12,9 @@ import test from "node:test";
 import {
 	DURABLE_ACTION,
 	DURABLE_KEY,
-	SPACE_ARGV,
-	durableBinding,
+	DURABLE_MOD,
 	mergeDurableKeys,
+	oldDurableBinding,
 } from "../../herdr-mods/durable/keys.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -23,56 +23,69 @@ const SOURCE = readFileSync(`${HERE}../../herdr-mods/durable/keys.mjs`, "utf8");
 
 const shipped = () => ({ global: { "ctrl-shift-t": "tab.new", "ctrl-shift-p": "app.palette" }, terminal: { "ctrl-shift-c": "terminal.copy" } });
 
-test("the key is alt-shift-n: free in the shipped defaults, and not ctrl-shift-n (space.new)", () => {
+/** What every install before this one wrote: the tab, with the program it resolved. */
+const oldBinding = (program) => ({ command: "terminal.open", args: { argv: [program, "new"], place: "tab" } });
+
+test("the key is alt-shift-n, and it opens the durable mod's own New form", () => {
 	assert.equal(DURABLE_KEY, "alt-shift-n");
 	// ctrl-shift-n is already space.new: the command that makes a space with no record.
 	assert.notEqual(DURABLE_KEY, "ctrl-shift-n");
-	assert.equal(KEYS_FILE.global[DURABLE_KEY].command, "terminal.open");
-	assert.equal(KEYS_FILE.global[DURABLE_KEY].args.place, "tab");
-	assert.deepEqual(KEYS_FILE.global[DURABLE_KEY].args.argv, SPACE_ARGV);
+	assert.equal(DURABLE_MOD, "durable");
+	assert.deepEqual(DURABLE_ACTION, { command: "mod.open", args: { name: "durable" } });
 });
 
-test("the argv runs the prompt itself, in a new tab, and no argument the command does not take", () => {
-	assert.deepEqual(DURABLE_ACTION, { command: "terminal.open", args: { argv: ["space", "new"], place: "tab" } });
-	assert.deepEqual(SPACE_ARGV, ["space", "new"]);
-	// terminal.open takes argv, folder, place and name. `focus` is not one of them, and a
-	// new tab is focused anyway — an unknown argument is a refusal in Herdr, not a nicety.
-	assert.deepEqual(Object.keys(DURABLE_ACTION.args).sort(), ["argv", "place"]);
-	assert.equal(Object.hasOwn(DURABLE_ACTION.args, "focus"), false);
+test("the binding carries no argv and no path, so there is nothing to resolve per platform", () => {
+	// The old binding was `terminal.open` with `[<program>, new]`; the program is what
+	// Windows could not start (os error 193). `mod.open` names a mod and nothing else.
+	assert.deepEqual(Object.keys(DURABLE_ACTION.args), ["name"]);
+	assert.equal(Object.hasOwn(DURABLE_ACTION, "argv"), false);
+	assert.equal(JSON.stringify(DURABLE_ACTION).includes("space"), false);
+	assert.equal(/\/home\/mark/.test(SOURCE), false);
 });
 
 test("the mod's own keys.json says the same thing as the module the installer writes", () => {
 	// One key, two files: the file a person merges by hand and the module install.mjs uses.
 	assert.deepEqual(KEYS_FILE.global[DURABLE_KEY], DURABLE_ACTION);
-	// The mod's own scope keeps its alt-shift-n — a global key and a mod key are different tabs.
+	assert.deepEqual(KEYS_FILE.global["alt-shift-d"], DURABLE_ACTION);
+	// The mod's own scope keeps its alt-shift-n: a global key and a mod key are different
+	// scopes, and inside the open overlay this one is what stops the key re-opening it.
 	assert.equal(KEYS_FILE["mod:durable"][DURABLE_KEY], "durable.new");
 });
 
-test("the installer's binding points at the installed program, on both platforms", () => {
-	const posix = durableBinding({ platform: "linux", binDir: "/home/someone/.local/bin" });
-	assert.equal(posix.command, "terminal.open");
-	assert.equal(posix.args.place, "tab");
-	assert.deepEqual(posix.args.argv, ["/home/someone/.local/bin/space", "new"]);
-
-	const win = durableBinding({ platform: "win32", binDir: "C:\\Users\\mj\\.local\\bin" });
-	assert.deepEqual(win.args.argv, ["C:\\Users\\mj\\.local\\bin\\space.cmd", "new"]);
-	// The .cmd is the point: Windows cannot start the bash wrapper, which is why the
-	// installer writes a shim beside it for every HARNESS_TOOLS name.
-	assert.ok(win.args.argv[0].endsWith("space.cmd"));
+test("the binding an earlier install wrote is recognised, so it can be moved rather than refused", () => {
+	// Every spelling of the program that install ever resolved, from a bare name to the
+	// Windows shim: they are all this key, not somebody else's.
+	for (const program of ["space", "/home/someone/.local/bin/space", "C:\\Users\\mj\\.local\\bin\\space.cmd"]) {
+		assert.equal(oldDurableBinding(oldBinding(program)), true, program);
+	}
+	// A different command, a different argv, a different place, or a plain string is
+	// somebody else's key and is left alone.
+	for (const value of [
+		{ command: "space.new" },
+		{ command: "terminal.open", args: { argv: ["space", "list"], place: "tab" } },
+		{ command: "terminal.open", args: { argv: ["space", "new"], place: "overlay" } },
+		{ command: "terminal.open", args: { argv: ["gh", "new"], place: "tab" } },
+		{ command: "mod.open", args: { name: "durable" } },
+		"space.next",
+		null,
+		[],
+	]) {
+		assert.equal(oldDurableBinding(value), false, JSON.stringify(value));
+	}
 });
 
-test("no binding carries the home folder it was written on", () => {
-	for (const binding of [
-		DURABLE_ACTION,
-		durableBinding({ platform: "linux", binDir: "/home/someone/.local/bin" }),
-		durableBinding({ platform: "win32", binDir: "C:\\Users\\mj\\.local\\bin" }),
-	]) {
-		const text = JSON.stringify(binding);
-		assert.equal(/\/home\/mark|C:\\\\Users\\\\mark/i.test(text), false, text);
-	}
-	// The template in the file is the bare name, resolved by whoever installs it.
-	assert.equal(DURABLE_ACTION.args.argv[0], "space");
-	assert.equal(SOURCE.includes("/home/mark"), false);
+test("a keys.json holding the old binding is moved to the form, and everything else survives", () => {
+	const before = JSON.stringify({ ...shipped(), global: { ...shipped().global, [DURABLE_KEY]: oldBinding("/home/someone/.local/bin/space") } }, null, 2);
+	const { text, state } = mergeDurableKeys(before, DURABLE_ACTION);
+	assert.equal(state, "migrated");
+	const after = JSON.parse(text);
+	assert.deepEqual(after.global[DURABLE_KEY], DURABLE_ACTION);
+	assert.deepEqual(after.global["ctrl-shift-t"], "tab.new");
+	assert.deepEqual(after.terminal, { "ctrl-shift-c": "terminal.copy" });
+	// Moved once: the second install finds the form and keeps the bytes.
+	const again = mergeDurableKeys(text, DURABLE_ACTION);
+	assert.equal(again.state, "kept");
+	assert.equal(again.text, text);
 });
 
 test("a keys.json without the key gets it, and everything else is left alone", () => {

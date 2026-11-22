@@ -261,7 +261,7 @@ variable one of the two engines or `scripts/install-lib.mjs` reads.
 | `pi` itself, sandboxed | a `pi()` wrapper block, marked `# >>> pi sandbox >>>`, in `~/.bashrc` and `~/.zshrc` (Linux and macOS only) |
 | Herdr mods and menu row | `~/.config/herdr-app/mods/`, `~/.config/herdr-app/programs.json` — the config directory is created when herdr-app has not run yet, so a fresh install gets its mods and menu row before the app's first launch; an existing `programs.json` is left alone and the line says what to add by hand |
 | `herdr-app` | Linux and macOS `~/.local/share/herdr-app/herdr-app` (`$XDG_DATA_HOME` when set), Windows `%LOCALAPPDATA%\Programs\herdr-app\herdr-app.exe` — then a bin entry |
-| the durable key | `~/.config/herdr-app/keys.json` — `alt-shift-n` opens a tab running `space new`. Added only to a `keys.json` that is already there: Herdr rewrites only a file whose bytes are one of its own releases, so a key map written before the app's first start would be the whole file and every other shortcut would go. A machine whose app has never run says so, and the next install adds the key |
+| the durable key | `~/.config/herdr-app/keys.json` — `alt-shift-n` opens the durable mod's New form as an overlay (`mod.open` with `{"name": "durable"}`): the name, the project, the clone toggle and the refusals, on all three platforms, with no argv to resolve. A `keys.json` that still carries the older binding (`terminal.open` running `space new`) is moved to the form and says so. Added only to a `keys.json` that is already there: Herdr rewrites only a file whose bytes are one of its own releases, so a key map written before the app's first start would be the whole file and every other shortcut would go. A machine whose app has never run says so, and the next install adds the key |
 | the harness space | `~/.pi/state/spaces/harness/space.json` — `bin/space new --name harness --project ~/.pi --kind harness`, once: a record that is already there is left byte for byte, and without `herdr-app` on PATH the step prints the command to run by hand. On Windows the step runs `bin/space` through Git Bash and prints `space.cmd` as the by-hand command: with no `bash.exe` there is nothing to run it with, and the extensionless script is a text file to Windows |
 | services | Linux `~/.config/systemd/user/`, macOS `~/Library/LaunchAgents/`, Windows a Task Scheduler entry — installed and started on all three by default, so a space a reboot forgets is repaired. `PI_SKIP_SYSTEMD=1` is the one way out |
 
@@ -270,9 +270,14 @@ file you may have edited in place.
 
 ### Make a durable space
 
-Press `alt-shift-n` in Herdr: a new tab asks the three questions — name, folder,
-create it? — and writes the record the guard reopens after a reboot. From a shell,
-the same thing is `space new <name>`.
+Press `alt-shift-n` in Herdr: the durable mod's New form opens as an overlay and asks
+the three questions — name, folder, create it? — and writes the record the guard reopens
+after a reboot. From a shell, the same thing is `space new <name>`.
+
+The form runs `space` itself, and on Windows that is the `space.cmd` the installer writes
+beside the bash wrapper (`%USERPROFILE%\.local\bin\space.cmd`): Windows cannot exec the
+extensionless script, which is the `os error 193` the form used to die with. When neither
+file is there the form says which two paths it looked at instead of failing on a path.
 
 The `+` beside the spaces is not that. It is Herdr's own `space.new`: it opens a
 space with no record, so the guard does not keep it and a reboot takes it.

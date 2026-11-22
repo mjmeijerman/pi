@@ -10,7 +10,11 @@
 #
 # CI_BIN=<path> points the suite at another runner, which is how a new rule is proved red on an
 # older one. PI_RECEIPT_DIR is pinned to a scratch directory, so no case writes a receipt into the
-# checkout it runs in.
+# checkout it runs in, and the two flags that mean "trust nothing on disk" are unpinned: bin/ci
+# exports PI_RECEIPT_NOCACHE into every job it runs, and bin/preflight --fresh exports
+# PI_RECEIPT_FRESH, so a suite started by a gate that bypassed the ledger would otherwise inherit
+# "never reuse" and report the reuse case red for a rule it correctly obeyed. The one case that
+# wants a forged answer sets PI_RECEIPT_FRESH on that command itself.
 #
 # Run it directly, or through scripts/ci-offline.sh, which globs scripts/tests/test-*.sh.
 set -uo pipefail
@@ -26,6 +30,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf -- "$WORK"' EXIT
 export PI_RECEIPT_DIR="$WORK/receipts"
 mkdir -p "$PI_RECEIPT_DIR"
+unset PI_RECEIPT_NOCACHE PI_RECEIPT_FRESH
 
 PASS_N=0
 FAIL_N=0
