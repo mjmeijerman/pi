@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile, chmod, appendFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
@@ -99,7 +100,6 @@ const {
 	noStepRan,
 	parseRuns,
 	readWorkspace,
-	WORKSPACE,
 	judgeOnce,
 	failureLines,
 	MAX_FRUSTRATION,
@@ -3146,9 +3146,28 @@ describe("evidence a proposal already judged", () => {
 		assert.equal(judged.decisions.length, 1);
 	});
 
-	test("the default workspace is this checkout, not the home directory", () => {
-		assert.equal(WORKSPACE, join(homedir(), ".pi"), "self-learn reads ~/.pi; ~/.pi-old must not pass");
-		assert.notEqual(WORKSPACE, homedir(), "a bare home directory is not the workspace");
+	test("readWorkspace() with no argument reads $HOME/.pi, not $HOME", async () => {
+		// A child process, because the workspace is resolved from homedir() at import time:
+		// the only way to give it a different home is a different process.
+		const home = await mkdtemp(join(tmpdir(), "self-learn-home-"));
+		try {
+			await mkdir(join(home, ".pi", "reports"), { recursive: true });
+			await writeFile(join(home, ".pi", "reports", "planted.md"), "a report\n", "utf8");
+			const module = new URL("../self-learn.ts", import.meta.url).href;
+			const script =
+				`const m = await import(${JSON.stringify(module)});` +
+				`const ev = await m.readWorkspace();` +
+				`process.stdout.write(JSON.stringify({ present: ev.present, paths: ev.reports.map((r) => r.path) }));`;
+			const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+				env: { ...process.env, HOME: home, USERPROFILE: home },
+				encoding: "utf8",
+			});
+			const seen = JSON.parse(out) as { present: boolean; paths: string[] };
+			assert.equal(seen.present, true, "the default workspace is under $HOME/.pi");
+			assert.deepEqual(seen.paths, [join(home, ".pi", "reports", "planted.md")]);
+		} finally {
+			await rm(home, { recursive: true, force: true });
+		}
 	});
 
 	test("readWorkspace dates a report from its mtime and a decision row from its ts", async () => {
