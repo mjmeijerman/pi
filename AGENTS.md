@@ -127,8 +127,6 @@ in this session. Ask, wait for a yes, then `/mergeguard allow` and run that one 
 - A space's records, specs, reports and delegations live in
   `~/.pi/state/spaces/<slug>/`. A space is never repointed at another project: its
   reports belong to the folder its record names.
-- `~/pi-master` is never written. Read it as a reference; a change from it lands in this
-  checkout as a branch and a PR, or not at all.
 - `agent/AGENTS.md` is the global rules file every session loads; this file is the
   boss's. Both stay under the 8 KiB docs budget `bin/preflight` measures.
 

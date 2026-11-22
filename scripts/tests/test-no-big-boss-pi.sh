@@ -43,7 +43,6 @@ agent/extensions/big-boss-pi-guard.ts|the delegation-workspace guard is named af
 agent/extensions/__tests__/big-boss-pi-guard.test.ts|the guard's own tests, fixtures named after the guard
 agent/extensions/__tests__/big-boss-pi-guard-mutants.test.ts|the guard's mutant tests, same names
 agent/extensions/__tests__/merge-guard.test.ts|a session path fixture inside the workspace the guard protects
-agent/extensions/__tests__/pi-master-guard-mutants.test.ts|a shell-write fixture path in the retired checkout
 docs/mutation-survivors.md|dated ledger whose rows quote test inputs from the guard's test files
 docs/radar-conformance.md|the 2026-11-18 mutation reading names the six files it scored, two of them guard names
 docs/radar-adoption-brief.md|the brief measures the backlog that lives in that folder, dated
