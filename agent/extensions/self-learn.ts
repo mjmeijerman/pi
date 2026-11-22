@@ -863,7 +863,8 @@ const MAX_REPORT_BYTES = 256 * 1024;
 const MAX_LINES_PER_REPORT = 40;
 // The delegation workspace this checkout replaced: reports/ and state/decisions.jsonl are read
 // from here, and every path built from it is inside this repo now, not the retired checkout.
-const WORKSPACE = join(homedir(), ".pi");
+// Exported because a test names it: nothing else pins where the default resolves to.
+export const WORKSPACE = join(homedir(), ".pi");
 
 /** A report or decision line, with where it came from. */
 export interface ReportText {

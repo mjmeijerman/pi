@@ -99,6 +99,7 @@ const {
 	noStepRan,
 	parseRuns,
 	readWorkspace,
+	WORKSPACE,
 	judgeOnce,
 	failureLines,
 	MAX_FRUSTRATION,
@@ -3143,6 +3144,11 @@ describe("evidence a proposal already judged", () => {
 		assert.equal(judged.stale, 0);
 		assert.equal(judged.reports.length, 1);
 		assert.equal(judged.decisions.length, 1);
+	});
+
+	test("the default workspace is this checkout, not the home directory", () => {
+		assert.equal(WORKSPACE, join(homedir(), ".pi"), "self-learn reads ~/.pi; ~/.pi-old must not pass");
+		assert.notEqual(WORKSPACE, homedir(), "a bare home directory is not the workspace");
 	});
 
 	test("readWorkspace dates a report from its mtime and a decision row from its ts", async () => {
