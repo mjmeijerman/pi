@@ -95,10 +95,14 @@ if [ "$hit_n" -le "$allow_n" ]; then
 else
 	fail "$hit_n file(s) name it, more than the $allow_n allowlisted"
 fi
+# A here-string, not a pipe: under `set -uo pipefail` a reader that exits early
+# (grep -q does, as soon as it matches) is a write error on the writer, so the
+# pipeline's status is 141 and this loop would call a good allowlist entry
+# rotted. A here-string has no writer process, so there is no pipe to break.
 rotted=''
 while IFS= read -r p; do
 	[ -n "$p" ] || continue
-	if ! printf '%s\n' "$hits" | grep -q "^$p:"; then rotted="$rotted $p"; fi
+	if ! grep -q "^$p:" <<<"$hits"; then rotted="$rotted $p"; fi
 done <<<"$(allowed_paths)"
 if [ -z "$rotted" ]; then
 	pass 'every allowlisted path still names it — no entry is stale'
