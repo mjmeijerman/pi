@@ -15,25 +15,40 @@
 #
 # A receipt is never a pass by staleness, so its key is the whole input of the verdict it holds:
 #
-#   the tree    `git rev-parse HEAD` plus `git status --porcelain`, so an unstaged edit — a tree
-#               no receipt was ever written on — invalidates every receipt at once
+#   the tree    the content of the working tree: `git add -A -- ./` into a throwaway index
+#               (`GIT_INDEX_FILE`) and `git write-tree`. One cheap call, and the key is the bytes
+#               the gates will read — an unstaged edit is a different tree, and two worktrees or
+#               two clones of the same content are the same tree, so one verdict answers both.
+#               HEAD is not in the key on purpose: a commit that changes nothing is not new work.
 #   the name    the suite or test, as the command that ran it: `script:scripts/tests/x.test.sh`,
 #               so both gates name the same script the same way and there is one entry for it
-#   the gates   sha256 over bin/preflight, bin/receipts.sh, scripts/ci-local.sh and
+#   the gates   sha256 over bin/preflight, bin/receipts.sh, bin/ci, scripts/ci-local.sh and
 #               scripts/ci-offline.sh, so a changed gate never reuses another gate's verdict, in
 #               either direction. Reuse is therefore symmetric: what ci-offline wrote, preflight
 #               reads, and what preflight wrote, ci-offline reads.
+#
+# The content hash is the tracked content plus the untracked-and-not-ignored files, exactly what
+# `git status` would call the working tree: `.gitignore`d paths (`state/`, `.env`, a worktree) are
+# outside it, so a job whose verdict reads one of those is never answered by a content-keyed
+# receipt — `bin/ci` marks those rows `no-cache` instead.
 #
 # The tree is only a tree when it is this one: `git rev-parse --show-toplevel` walks upward, so a
 # directory that merely sits inside some other checkout (a test fixture, a scratch dir under $HOME)
 # would otherwise be keyed by that enclosing repo — whose dirty state the run itself changes. A
 # toplevel that is not $root and not inside it is not this tree's root, and the tree is then keyed
-# by its own path instead of a commit nobody here asked for.
+# by its own path instead of content nobody here wrote.
 #
-# The ledger lives at $PI_RECEIPT_DIR when a caller pinned one — bin/preflight exports it to every
-# suite it runs, so a gate that runs inside another writes where its parent reads — and otherwise
-# at <checkout>/state/preflight. `state/` is generated and gitignored, so writing a receipt cannot
-# dirty the tree hash it was keyed by.
+# Where the ledger lives is two tiers. A caller that sets PI_RECEIPT_SHARED (bin/ci inside a space)
+# puts every receipt in that shared directory, keyed by content, so every worktree of one space
+# answers from one ledger. A caller that pins PI_RECEIPT_DIR — bin/preflight exports it to every
+# suite it runs, so a gate that runs inside another writes where its parent reads — writes there.
+# Otherwise the receipts are at <checkout>/state/preflight, which is the original per-tree store.
+# `state/` is generated and gitignored, so writing a receipt cannot dirty the tree hash it was
+# keyed by.
+#
+# PI_RECEIPT_NOCACHE (any value) disables both tiers: nothing is read and nothing is written. That
+# is `bin/ci --no-cache`, and it is the only honest answer for a job that would read a file the
+# content hash cannot see.
 #
 # PI_PREFLIGHT_CACHE_TTL (seconds, or Ns/Nm/Nh; default 6h, 0 disables) expires a receipt, and an
 # expired receipt is no receipt at all: the work runs again. A cached FAIL is still a FAIL — it is
@@ -52,21 +67,33 @@ receipt_init() {
 	*) top="" ; RECEIPT_GIT=0 ;;
 	esac
 	RECEIPT_TREE_ROOT=${top:-$root}
-	RECEIPT_DIR=${PI_RECEIPT_DIR:-$RECEIPT_TREE_ROOT/state/preflight}
+	# Two tiers, one active: a shared directory when the caller named one (bin/ci in a space),
+	# else the caller's pinned directory, else this tree's own. RECEIPT_TIER_NAME is what the
+	# caller prints as "which ledger answered".
+	if [ -n "${PI_RECEIPT_SHARED:-}" ]; then
+		RECEIPT_DIR=$PI_RECEIPT_SHARED
+		RECEIPT_TIER_NAME=shared
+	else
+		RECEIPT_DIR=${PI_RECEIPT_DIR:-$RECEIPT_TREE_ROOT/state/preflight}
+		RECEIPT_TIER_NAME=tree
+	fi
 	export PI_RECEIPT_DIR=$RECEIPT_DIR
 	RECEIPT_TREE=""
 	RECEIPT_GATE=""
 	RECEIPT_RC=""
+	RECEIPT_TIER=""
 	RECEIPT_MS=0
 	RECEIPT_TS=0
 	RECEIPT_AGE=0
 	return 0
 }
 
-# receipt_tree — the tree hash, read once per process: HEAD and the working tree, so a dirty tree
-# is its own tree and a receipt written on a clean one cannot answer for it.
+# receipt_tree — the content hash, read once per process: `git add -A -- ./` into a throwaway index
+# and `git write-tree`, so the key is the bytes the gate will read. An unstaged edit is a different
+# tree, and two worktrees of the same content are the same tree. HEAD is deliberately absent: a
+# rebase or a commit that changes nothing is not new work, and the file content already says so.
 receipt_tree() {
-	local head st
+	local idx tree head st
 	[ -n "$RECEIPT_TREE" ] && {
 		printf '%s' "$RECEIPT_TREE"
 		return 0
@@ -78,6 +105,21 @@ receipt_tree() {
 		printf '%s' "$RECEIPT_TREE"
 		return 0
 	fi
+	idx=$(mktemp "${TMPDIR:-/tmp}/pi-receipt-index.XXXXXX" 2>/dev/null || true)
+	if [ -n "$idx" ]; then
+		rm -f -- "$idx"
+		if GIT_INDEX_FILE=$idx git -C "$RECEIPT_TREE_ROOT" add -A -- ./ >/dev/null 2>&1 &&
+			tree=$(GIT_INDEX_FILE=$idx git -C "$RECEIPT_TREE_ROOT" write-tree 2>/dev/null) &&
+			[ -n "$tree" ]; then
+			rm -f -- "$idx"
+			RECEIPT_TREE=$tree
+			printf '%s' "$RECEIPT_TREE"
+			return 0
+		fi
+		rm -f -- "$idx"
+	fi
+	# An index this cannot write (a read-only tree, an odd git) still has a key, and a worse one:
+	# HEAD plus the dirty list, which at least invalidates on any edit.
 	head=$(git -C "$RECEIPT_TREE_ROOT" rev-parse HEAD 2>/dev/null || printf 'no-head')
 	st=$(git -C "$RECEIPT_TREE_ROOT" status --porcelain 2>/dev/null | LC_ALL=C sort)
 	RECEIPT_TREE=$(_receipt_sha "$head"$'\n'"$st")
@@ -93,15 +135,15 @@ receipt_gate() {
 		printf '%s' "$RECEIPT_GATE"
 		return 0
 	}
-	for f in bin/preflight bin/receipts.sh scripts/ci-local.sh scripts/ci-offline.sh; do
+	for f in bin/preflight bin/receipts.sh bin/ci scripts/ci-local.sh scripts/ci-offline.sh; do
 		out="$out$(_receipt_sha "$(sha256sum "$RECEIPT_HOME/$f" 2>/dev/null | cut -d' ' -f1)")-"
 	done
-	RECEIPT_GATE=$(_receipt_sha "receipts-1"$'\n'"$out")
+	RECEIPT_GATE=$(_receipt_sha "receipts-2"$'\n'"$out")
 	printf '%s' "$RECEIPT_GATE"
 }
 
 receipt_key() { # <name>
-	_receipt_sha "receipts-1"$'\n'"$(receipt_tree)"$'\n'"$(receipt_gate)"$'\n'"$1"
+	_receipt_sha "receipts-2"$'\n'"$(receipt_tree)"$'\n'"$(receipt_gate)"$'\n'"$1"
 }
 
 # PI_PREFLIGHT_CACHE_TTL: seconds, or Ns/Nm/Nh. Default six hours; 0 disables the ledger.
@@ -162,6 +204,7 @@ receipt_read() {
 # receipt_write <name> <exit> <elapsed_ms> <transcript-file> — record a verdict that was reached.
 receipt_write() {
 	local key tmp now
+	[ -z "${PI_RECEIPT_NOCACHE:-}" ] || return 0
 	key=$(receipt_key "$1") || return 0
 	[ -f "$4" ] || return 0
 	mkdir -p "$RECEIPT_DIR" 2>/dev/null || return 0
@@ -182,9 +225,13 @@ receipt_write() {
 receipt_lookup() {
 	local ttl stamp
 	RECEIPT_RC=""
+	RECEIPT_TIER=""
 	RECEIPT_MS=0
 	RECEIPT_TS=0
 	RECEIPT_AGE=0
+	# --no-cache and --fresh both mean "do not trust what is on disk", and this is the one place
+	# that decides it for every reader.
+	[ -z "${PI_RECEIPT_NOCACHE:-}" ] || return 1
 	[ -z "${PI_RECEIPT_FRESH:-}" ] || return 1
 	ttl=$(receipt_ttl_seconds)
 	[ "$ttl" -gt 0 ] || return 1
@@ -195,6 +242,7 @@ receipt_lookup() {
 	# A receipt from the future is a clock that moved: treat it as no receipt at all.
 	[ "$RECEIPT_AGE" -ge 0 ] || return 1
 	[ "$RECEIPT_AGE" -le "$ttl" ] || return 1
+	RECEIPT_TIER=${RECEIPT_TIER_NAME:-tree}
 	return 0
 }
 

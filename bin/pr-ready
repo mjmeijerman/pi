@@ -26,11 +26,17 @@
 #      not handed over: one line per finding, quoting the review's own words. A review this reads as
 #      unreadable is not a pass either. No comment is nothing to answer — the review only speaks
 #      when instruction prose changed, and it cannot speak when it was refused or not configured,
-#      which a red on absence would block forever. `--no-prose-review` skips rule 5 for a PR whose
-#      review cannot be answered, and says so by name in the run's own output.
+#      which a red on absence would block forever. The workflow's `paths:` filter is read directly
+#      (`gh pr view <n> --json files`): a diff that touches no prose path prints
+#      `prose review: not expected — this diff touches no prose path` and does not wait, because no
+#      comment is coming. `--no-prose-review` skips rule 5 for a PR whose review cannot be answered,
+#      and says so by name in the run's own output.
 #
 # Exit 0 only when all five hold; otherwise one status line names the numbers and a `not ready:` line
 # per rule that broke, and the exit is non-zero. gh or jq missing is a FAIL, never a pass.
+#
+# With --wait, a `none yet` on a diff that does touch a prose path is a wait and not an answer: the
+# review is still coming, so it keeps polling it too, up to the same --max.
 #
 # `--wait` polls the same rule every --interval seconds (default 15) and stops when EVERY check has
 # a conclusion — pending 0, checks above 0 — then judges once, appending `, finished` to the status
@@ -163,13 +169,44 @@ def norm: if . == null then "" else . end;
   end
 '
 
-# prose_ok — rule 5. Prints one verdict line and returns 0 only when nothing is left to answer. The
-# verdicts are exactly: `prose review: none yet`, `prose review: clean (N checks)`,
-# `prose review: N finding(s) answered by <author>`, and `prose review: N finding(s) open — <the first
-# open finding's label>`, which is a refusal. A review this cannot read, and comments gh could not
-# answer, are refusals with the reason on the line. Cheap by construction: it is only called once the
-# rollup has already said green, so an ordinary poll costs no second gh call and a PR that never
-# touches instruction prose costs one.
+# prose_path_hit <path> — 0 when `.github/workflows/prose-review.yml`'s `paths:` filter would run the
+# review for this file. It is that filter, not a guess: `agent/AGENTS.md`, any `*.md` under
+# `agent/prompts/`, and any `SKILL.md` under `agent/skills/`. In `[[ ]]` a `*` crosses a `/`, so the
+# two arms of each pattern cover a file at that depth and one nested any number of levels.
+prose_path_hit() {
+	case $1 in
+	agent/AGENTS.md) return 0 ;;
+	agent/prompts/*.md | agent/prompts/*/*.md) return 0 ;;
+	agent/skills/*/SKILL.md | agent/skills/*/*/SKILL.md) return 0 ;;
+	esac
+	return 1
+}
+
+# prose_review_expected — 0 when this PR's changed files touch a path the review triggers on. A diff
+# that touches none of them never gets a comment, so `none yet` there is a wait for something nobody
+# is writing: 90s a boss spends on a review that was never coming. An unreadable file list keeps the
+# old behaviour (`none yet`) rather than claiming the review is not expected.
+prose_review_expected() {
+	local json paths path
+	json=$("$gh_cmd" pr view "$pr" --json files 2>&1) || return 0
+	paths=$(printf '%s' "$json" | jq -r '(.files // [])[] | .path // empty' 2>/dev/null) || return 0
+	[ -n "$paths" ] || return 0
+	while IFS= read -r path; do
+		[ -n "$path" ] || continue
+		prose_path_hit "$path" && return 0
+	done <<<"$paths"
+	return 1
+}
+
+# prose_ok — rule 5. Prints one verdict line; 0 means nothing is left to answer, 1 is a refusal, and
+# 2 means "no review yet, and this diff is one the review is still coming for" — a caller running
+# --wait keeps polling on 2, and a caller without it passes, exactly as `none yet` did. The verdicts
+# are exactly: `prose review: none yet`, `prose review: not expected — this diff touches no prose
+# path`, `prose review: clean (N checks)`, `prose review: N finding(s) answered by <author>`, and
+# `prose review: N finding(s) open — <the first open finding's label>`, which is a refusal. A review
+# this cannot read, and comments gh could not answer, are refusals with the reason on the line. Cheap
+# by construction: it is only called once the rollup has already said green, so an ordinary poll costs
+# no second gh call and a PR that never touches instruction prose costs one more.
 prose_ok() {
 	local json out head state rest questions authors line kind label text open_n=0 ans_n=0 first=""
 	local detail=""
@@ -194,7 +231,11 @@ prose_ok() {
 	authors=${rest#*$'\x1f'}
 	case $state in
 	none)
-		say 'prose review: none yet'
+		if prose_review_expected; then
+			say 'prose review: none yet'
+			return 2
+		fi
+		say 'prose review: not expected — this diff touches no prose path'
 		return 0
 		;;
 	unreadable)
@@ -424,9 +465,28 @@ while :; do
 		[ "$wait_for" != 1 ] || finished=', finished'
 		printf 'pr %s: head %s, checks %d, pending %d, fail %d%s\n' \
 			"$pr" "${head:0:7}" "$total" "$pend" "$flr" "$finished"
-		if ! prose_ok; then
+		prose_ok
+		prose_rc=$?
+		if [ "$prose_rc" -eq 1 ]; then
 			[ "$wait_for" != 1 ] || say '  stopping: a finding is answered by a commit, and waiting does not write one'
 			exit 1
+		fi
+		if [ "$prose_rc" -eq 2 ] && [ "$wait_for" = 1 ]; then
+			# The review is genuinely still coming: this diff touches instruction prose and no
+			# comment has been posted. Waiting for it is the point of --wait, up to the same --max.
+			left=$((deadline - $(date +%s)))
+			if [ "$left" -le 0 ]; then
+				printf '  gave up after --max %ss without a prose review comment\n' "$max_wait"
+				exit 1
+			fi
+			if [ "${said_prose_wait:-0}" = 0 ]; then
+				say '  no prose review comment yet, and this diff touches a prose path; waiting for it'
+				said_prose_wait=1
+			fi
+			sleep_s=$interval
+			[ "$left" -ge "$sleep_s" ] || sleep_s=$left
+			sleep "$sleep_s"
+			continue
 		fi
 		exit 0
 	fi

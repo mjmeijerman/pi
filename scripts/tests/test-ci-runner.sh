@@ -191,7 +191,7 @@ first_starts=$(wc -l <"$COUNTER_MARKER" 2>/dev/null || printf 0)
 run_ci --table "$WORK/count.table" --cwd "$WORK" --only counter
 expect_rc 0 "the second run is green"
 second_starts=$(wc -l <"$COUNTER_MARKER" 2>/dev/null || printf 0)
-out_has "(receipt)" "the second run says where its answer came from"
+out_has "(receipt, tree)" "the second run says where its answer came from, and which tier it was"
 if [ "$first_starts" = 1 ] && [ "$second_starts" = 1 ]; then
 	pass "the job started once across two runs (receipt answered the second)"
 else
