@@ -15,8 +15,10 @@
 //                           installed with npm before anything is written
 //   1  agent config: skills, extensions, settings/*.json, dictation, AGENTS.md
 //   1b sandbox/ and scripts/ next to the agent dir (AGENTS.md names them by path)
-//   1c herdr-app mods (never overwrites a folder the person may have edited),
-//      into a config directory created here when the app has not run yet
+//   1c herdr-app mods: a file the person did not touch is updated to the shipped
+//      one (decided per file, from `mods-installed.json`), a file they edited is
+//      kept, and `--update-mods` overrules that; into a config directory created
+//      here when the app has not run yet
 //   2  global git hooks (§core.hooksPath) + the init template layer
 //   3  global gitignore
 //   4  git-vuln-scan, pisandbox, pi-bare (+ their .cmd shims), herdr menu
@@ -47,8 +49,9 @@
 //      and its alias PI_SKIP_SERVICES=1, PI_SKIP_NETWORK=1 (no vendor downloads),
 //      PI_SKIP_PREREQS=1 (never call a package manager), PI_GIT_BASH
 //      (the bash.exe a Windows scheduled task and every .cmd shim run the bash
-//      wrappers with), HERDR_MODS. PI_ENABLE_SERVICES=1 is still accepted and
-//      changes nothing: the login entry is the default now.
+//      wrappers with), HERDR_MODS, PI_UPDATE_MODS=1 (the same as --update-mods).
+//      PI_ENABLE_SERVICES=1 is still accepted and changes nothing: the login
+//      entry is the default now.
 //
 // Step 0 is the prerequisites: git, node and npm, installed with the first
 // package manager this platform has when they are missing. It runs before the
@@ -60,6 +63,7 @@
 // ============================================================================
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -125,6 +129,9 @@ const STATE_DIR =
 	(process.env.PI_SPACE_ROOT ? path.join(process.env.PI_SPACE_ROOT, 'state') : path.join(P.piHome, 'state'));
 const HERDR_MODS = process.env.HERDR_MODS || path.join(P.herdrConfigDir, 'mods');
 let DRY = process.env.PI_DRY_RUN === '1';
+// --update-mods / PI_UPDATE_MODS=1: refresh the herdr mods even where the person
+// edited them, and record what was written.
+let UPDATE_MODS = process.env.PI_UPDATE_MODS === '1';
 const SKIP_NETWORK = process.env.PI_SKIP_NETWORK === '1';
 // One way out of the service step, spelled for the platform that reads it: the
 // original Linux name, and an alias that is honest on macOS and Windows too.
@@ -535,26 +542,185 @@ function ensureHerdrConfigDir() {
 	return 'created';
 }
 
-// --- 1c. herdr-app mods (never overwrite an edited folder) ------------------
+// --- 1c. herdr-app mods (an unedited one is refreshed, an edited one kept) ---
+/**
+ * stepHerdrMods — the mods folder, decided per file, from a record of what this
+ * installer wrote.
+ *
+ * The skip that used to live here ("the folder exists, so keep it") could not
+ * tell its own old copy from an edit, so it treated both as an edit: mod changes
+ * in this repository never reached a running Herdr app, and a copy installed on
+ * 14 November stayed on disk while the tree fixed the same file a week later
+ * (#203). The promise that skip was protecting is real and stays: a mod the
+ * person edited in place is theirs, and an install never overwrites it.
+ *
+ * The record is `mods-installed.json` in the config dir, never inside a mod
+ * folder: the app hashes its own `installed.json` there, so a second record in
+ * that tree would be a foreign file the app reads. Its shape is
+ * `{ "<mod>": { "<relative path>": "<sha256>" } }`.
+ *
+ * A hash in the record is of the bytes the installer wrote, not of what is on
+ * disk now. A file the person edited keeps its old hash on purpose: recording
+ * the edit would make the next run call it untouched and overwrite it.
+ */
+const MODS_RECORD = path.join(P.herdrConfigDir, 'mods-installed.json');
+
+const MODS_RECORD_HINT = 'run install.sh --update-mods to refresh it';
+
+const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+
+/** modHashes — every file in a folder, relative path ('/') -> sha256. */
+function modHashes(dir) {
+	const hashes = {};
+	const walk = (from, prefix) => {
+		for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+			const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+			const full = path.join(from, entry.name);
+			if (entry.isDirectory()) walk(full, rel);
+			else if (entry.isFile()) hashes[rel] = sha256(fs.readFileSync(full));
+		}
+	};
+	walk(dir, '');
+	return hashes;
+}
+
+/**
+ * readModsRecord — the record, `null` when there is none, `false` when the file
+ * is not one. A corrupt record writes nothing at all: every mod folder it would
+ * have described is then a folder nobody can tell an edit inside, and a corrupt
+ * file is not a licence to overwrite one.
+ */
+function readModsRecord() {
+	if (!exists(MODS_RECORD)) return null;
+	try {
+		const parsed = JSON.parse(read(MODS_RECORD));
+		if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+		throw new Error('not a JSON object');
+	} catch (err) {
+		warn(`${MODS_RECORD} is not the record this installer writes (${err.message}) — the herdr mods are left exactly as they are; fix or delete that file, then run this again`);
+		return false;
+	}
+}
+
+/**
+ * writeModFile — one file of one mod, written only when the bytes differ.
+ * `--dry-run` keeps the line and writes nothing, the record included.
+ */
+function writeModFile(srcFile, dstFile) {
+	const bytes = fs.readFileSync(srcFile);
+	if (exists(dstFile) && fs.readFileSync(dstFile).equals(bytes)) return false;
+	if (!DRY) {
+		ensureDir(path.dirname(dstFile));
+		fs.writeFileSync(dstFile, bytes);
+		try {
+			fs.chmodSync(dstFile, fs.statSync(srcFile).mode & 0o777);
+		} catch {
+			/* a filesystem that refuses chmod still got the bytes */
+		}
+	}
+	changed++;
+	return true;
+}
+
+/** writeModsRecord — sorted, so a run that changed nothing writes nothing. */
+function writeModsRecord(record) {
+	const sorted = {};
+	for (const mod of Object.keys(record).sort()) {
+		sorted[mod] = {};
+		for (const rel of Object.keys(record[mod]).sort()) sorted[mod][rel] = record[mod][rel];
+	}
+	// Nothing written is nothing to record: a run that only met folders from
+	// before the record existed leaves no empty record behind.
+	if (Object.keys(sorted).length === 0 && !exists(MODS_RECORD)) return;
+	writeText(MODS_RECORD, `${JSON.stringify(sorted, null, 2)}\n`);
+}
+
 function stepHerdrMods() {
 	const src = path.join(SOURCE_DIR, 'herdr-mods');
 	if (!exists(src)) return;
 	note(`herdr config dir ${ensureHerdrConfigDir()}: ${P.herdrConfigDir}`);
+	const record = readModsRecord();
+	if (record === false) return;
+	// The record after this run: every mod it describes stays described, so a mod
+	// the shipped tree dropped is never forgotten and never deleted.
+	const next = record ? JSON.parse(JSON.stringify(record)) : {};
 	let added = 0;
 	for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
 		if (!entry.isDirectory()) continue;
-		const dst = path.join(HERDR_MODS, entry.name);
-		if (exists(dst)) {
-			say(`== kept existing herdr mod: ${entry.name}`);
+		const name = entry.name;
+		const from = path.join(src, name);
+		const dst = path.join(HERDR_MODS, name);
+		let there = null;
+		try {
+			there = exists(dst) ? fs.lstatSync(dst) : null;
+		} catch {
+			there = null;
+		}
+		if (there && !there.isDirectory()) {
+			say(`== herdr mod ${name} is ${there.isSymbolicLink() ? 'a symlink' : 'not a folder'} — left alone: ${dst}`);
 			continue;
 		}
-		// In a dry run copyTree writes nothing, and the line still prints: the
-		// point of --dry-run is to show what a fresh install would put there.
-		copyTree(path.join(src, entry.name), dst);
-		note(`installed herdr mod: ${entry.name} -> ${dst}`);
-		added++;
+		try {
+			if (!there) {
+				// Case 1: no folder. In a dry run copyTree writes nothing and the line
+				// still prints: the point of --dry-run is to show what a fresh install
+				// would put there.
+				copyTree(from, dst);
+				note(`installed herdr mod: ${name} -> ${dst}`);
+				next[name] = modHashes(from);
+				added++;
+				continue;
+			}
+			const shipped = modHashes(from);
+			if (UPDATE_MODS) {
+				// --update-mods: the person asked for the shipped bytes, edits and all,
+				// and the record is rewritten to say so.
+				for (const rel of Object.keys(shipped)) {
+					if (writeModFile(path.join(from, rel), path.join(dst, rel)))
+						note(`herdr mod ${name}/${rel} overwritten: --update-mods`);
+				}
+				next[name] = shipped;
+				continue;
+			}
+			if (!record || !record[name]) {
+				// Case 3: installed before this record existed. Nothing on disk says
+				// which file is the installer's and which is the person's, so all of it
+				// is theirs — and the one flag that overrules that is named.
+				say(`== kept existing herdr mod: ${name} — installed before the record existed; ${MODS_RECORD_HINT}`);
+				continue;
+			}
+			// Case 2: a record from an earlier install. Per file, three answers.
+			for (const rel of Object.keys(shipped)) {
+				const target = path.join(dst, rel);
+				const onDisk = exists(target) ? sha256(fs.readFileSync(target)) : null;
+				const recorded = record[name][rel];
+				if (recorded === undefined) {
+					// A file this mod did not ship before: new, so write it.
+					if (writeModFile(path.join(from, rel), target)) note(`herdr mod ${name}/${rel} added`);
+					next[name][rel] = shipped[rel];
+					continue;
+				}
+				if (onDisk === null) {
+					say(`== herdr mod ${name}/${rel} kept: you removed it, and this installer never puts one back`);
+					continue;
+				}
+				if (onDisk !== recorded) {
+					// Edited by hand: theirs, byte for byte, and the recorded hash stays
+					// the old one so the next run still sees an edit and not an update.
+					say(`== herdr mod ${name}/${rel} kept: you edited it`);
+					continue;
+				}
+				if (shipped[rel] !== onDisk && writeModFile(path.join(from, rel), target))
+					note(`herdr mod ${name}/${rel} updated`);
+				next[name][rel] = shipped[rel];
+			}
+		} catch (err) {
+			// A folder that will not read is one mod stuck, not an install that stops.
+			warn(`herdr mod ${name}: ${err.message} — left alone`);
+		}
 	}
 	if (added > 0) note(`${added} herdr mod(s) new in ${HERDR_MODS} — in place before herdr-app is first opened`);
+	writeModsRecord(next);
 }
 
 // --- 1d. the key that makes a durable space ---------------------------------
@@ -1280,6 +1446,7 @@ async function main() {
 		DRY = true;
 		process.env.PI_DRY_RUN = '1';
 	}
+	if (OPT.updateMods) UPDATE_MODS = true;
 	// Prerequisites first: git, node and npm through this OS's package manager,
 	// before the pi decision and before the first write. `--skip-prereqs` /
 	// PI_SKIP_PREREQS=1 prints the skip lines and calls no package manager.

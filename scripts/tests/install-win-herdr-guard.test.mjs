@@ -17,6 +17,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -123,7 +124,7 @@ function envFor(home, extra = {}) {
 	};
 	// Either of these would decide the answer before the test does: the host's
 	// platform, and a HOME that is not the throwaway one.
-	for (const name of ['USERPROFILE', 'PI_DRY_RUN', 'PI_AGENT_DIR', 'PI_ENABLE_SERVICES', 'PI_GIT_BASH']) delete env[name];
+	for (const name of ['USERPROFILE', 'PI_DRY_RUN', 'PI_AGENT_DIR', 'PI_ENABLE_SERVICES', 'PI_GIT_BASH', 'PI_UPDATE_MODS', 'HERDR_MODS']) delete env[name];
 	return { ...env, ...extra };
 }
 
@@ -177,10 +178,146 @@ test('a second run keeps the mods and never overwrites programs.json', (t) => {
 	const second = install(home);
 	assert.equal(second.status, 0, second.stderr);
 	assert.match(second.stdout, /^== herdr config dir found: /m);
-	assert.match(second.stdout, /^== kept existing herdr mod: prs$/m);
+	// The behaviour this line used to pin — `kept existing herdr mod: prs` for
+	// every folder, untouched or not — was the bug in #203: no mod change ever
+	// reached the app. An untouched mod that matches the shipped file has nothing
+	// to say now, and a second run still writes neither file.
+	assert.doesNotMatch(second.stdout, /herdr mod prs/m, second.stdout);
 	assert.match(second.stdout, /^== herdr programs\.json exists — add the pi-bare entry/m);
 	assert.equal(fs.statSync(programs).mtimeMs, before);
 	assert.equal(fs.statSync(modFile).mtimeMs, modBefore);
+});
+
+// --- the mods update, decided per file ---------------------------------------
+//
+// `stepHerdrMods` used to skip any mod folder that existed, so it could not tell
+// its own old copy from an edit and treated both as an edit: no mod change in
+// this repository reached a running app (#203: the buttons still created the old
+// hardcoded space). These tests install from a copy of the tree, change the shipped
+// file in that copy and install again — which is what a `git pull` and a second
+// `./install.sh` is: the installed copy came from the old tree, the new tree
+// ships different bytes, and the person's HOME is untouched in between.
+
+/** The parts of this checkout an install reads; a copy is the tree after a fix. */
+const TREE_ENTRIES = ['install.mjs', 'scripts', 'herdr-mods', 'sandbox', 'git-hooks', 'gitignore_global', 'git-vuln-scan', 'systemd', 'bin', 'git-templates'];
+
+function sourceCopy(t) {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-tree-'));
+	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+	for (const name of TREE_ENTRIES) {
+		const from = path.join(ROOT, name);
+		if (fs.existsSync(from)) fs.cpSync(from, path.join(dir, name), { recursive: true });
+	}
+	return dir;
+}
+
+function installFrom(tree, home, args = []) {
+	return spawnSync(process.execPath, [path.join(tree, 'install.mjs'), ...args], {
+		env: envFor(home),
+		encoding: 'utf8',
+		cwd: tree,
+	});
+}
+
+const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+const MAIN = path.join('prs', 'main.js');
+const recordPath = (home) => path.join(home, '.config', 'herdr-app', 'mods-installed.json');
+const modPath = (home, rel) => path.join(home, '.config', 'herdr-app', 'mods', rel);
+
+test('a mod file the person did not touch is updated to the shipped one, and the record follows', (t) => {
+	const home = tempHome(t);
+	const tree = sourceCopy(t);
+	assert.equal(installFrom(tree, home).status, 0);
+
+	// The tree moves on: this is the fix that never used to reach the app.
+	const shipped = path.join(tree, 'herdr-mods', MAIN);
+	const fixed = `${fs.readFileSync(shipped, 'utf8')}\n// the fix from #203\n`;
+	fs.writeFileSync(shipped, fixed);
+
+	const second = installFrom(tree, home);
+	assert.equal(second.status, 0, second.stderr);
+	assert.match(second.stdout, /^== herdr mod prs\/main\.js updated$/m);
+	assert.equal(fs.readFileSync(modPath(home, MAIN), 'utf8'), fixed, 'the installed mod is not the shipped one');
+	// The record is what the next run compares against: the hash of what was written.
+	assert.equal(JSON.parse(fs.readFileSync(recordPath(home), 'utf8')).prs['main.js'], sha256(Buffer.from(fixed)));
+
+	// And a third run has nothing left to do.
+	const third = installFrom(tree, home);
+	assert.equal(third.status, 0, third.stderr);
+	assert.doesNotMatch(third.stdout, /herdr mod prs/m, third.stdout);
+});
+
+test('a mod file the person edited is kept byte for byte, and the line names it', (t) => {
+	const home = tempHome(t);
+	const tree = sourceCopy(t);
+	assert.equal(installFrom(tree, home).status, 0);
+
+	const installed = modPath(home, MAIN);
+	const mine = `${fs.readFileSync(installed, 'utf8')}\n// my own edit\n`;
+	fs.writeFileSync(installed, mine);
+	const before = fs.statSync(installed).mtimeMs;
+	// The tree ships a change too: an edit is kept even when the installer has
+	// something newer to offer — that is the promise the old skip was protecting.
+	fs.appendFileSync(path.join(tree, 'herdr-mods', MAIN), '\n// newer in the tree\n');
+
+	const second = installFrom(tree, home);
+	assert.equal(second.status, 0, second.stderr);
+	assert.match(second.stdout, /^== herdr mod prs\/main\.js kept: you edited it$/m);
+	assert.equal(fs.readFileSync(installed, 'utf8'), mine);
+	assert.equal(fs.statSync(installed).mtimeMs, before);
+});
+
+test('a folder with no record is kept whole, and the line names --update-mods', (t) => {
+	const home = tempHome(t);
+	const tree = sourceCopy(t);
+	assert.equal(installFrom(tree, home).status, 0);
+	// Every install that exists on a machine today is in this state.
+	fs.rmSync(recordPath(home));
+	const installed = modPath(home, MAIN);
+	const before = fs.readFileSync(installed, 'utf8');
+	fs.appendFileSync(path.join(tree, 'herdr-mods', MAIN), '\n// newer in the tree\n');
+
+	const second = installFrom(tree, home);
+	assert.equal(second.status, 0, second.stderr);
+	assert.match(second.stdout, /^== kept existing herdr mod: prs — installed before the record existed; run install\.sh --update-mods to refresh it$/m);
+	assert.equal(fs.readFileSync(installed, 'utf8'), before);
+});
+
+test('--update-mods overwrites an edited file and re-records it', (t) => {
+	const home = tempHome(t);
+	const tree = sourceCopy(t);
+	assert.equal(installFrom(tree, home).status, 0);
+
+	const installed = modPath(home, MAIN);
+	fs.writeFileSync(installed, '// my own edit\n');
+	const shipped = fs.readFileSync(path.join(tree, 'herdr-mods', MAIN), 'utf8');
+
+	const forced = installFrom(tree, home, ['--update-mods']);
+	assert.equal(forced.status, 0, forced.stderr);
+	assert.match(forced.stdout, /^== herdr mod prs\/main\.js overwritten: --update-mods$/m);
+	assert.equal(fs.readFileSync(installed, 'utf8'), shipped);
+	assert.equal(JSON.parse(fs.readFileSync(recordPath(home), 'utf8')).prs['main.js'], sha256(Buffer.from(shipped)));
+	// Fully recorded: the plain run after it has nothing to say, and keeps the file.
+	const after = installFrom(tree, home);
+	assert.equal(after.status, 0, after.stderr);
+	assert.doesNotMatch(after.stdout, /herdr mod prs/m, after.stdout);
+});
+
+test('--dry-run shows the update and writes nothing, not even the record', (t) => {
+	const home = tempHome(t);
+	const tree = sourceCopy(t);
+	assert.equal(installFrom(tree, home).status, 0);
+	fs.appendFileSync(path.join(tree, 'herdr-mods', MAIN), '\n// newer in the tree\n');
+
+	const installed = modPath(home, MAIN);
+	const modBefore = fs.readFileSync(installed);
+	const recordBefore = fs.readFileSync(recordPath(home));
+
+	const dry = installFrom(tree, home, ['--dry-run']);
+	assert.equal(dry.status, 0, dry.stderr);
+	assert.match(dry.stdout, /^== herdr mod prs\/main\.js updated$/m);
+	assert.ok(fs.readFileSync(installed).equals(modBefore), 'a dry run rewrote the mod');
+	assert.ok(fs.readFileSync(recordPath(home)).equals(recordBefore), 'a dry run rewrote the record');
 });
 
 test('--dry-run prints what it would write and writes nothing', (t) => {

@@ -1212,6 +1212,7 @@ export const ENGINE_FLAGS = {
 		{ names: ['--no-install-pi'], key: 'installPi', kind: 'bool', value: false, help: 'never install pi, carry on without it' },
 		{ names: ['--skip-prereqs'], key: 'skipPrereqs', kind: 'bool', value: true, default: false, help: 'never check or install git, node and npm' },
 		{ names: ['--dry-run'], key: 'dryRun', kind: 'bool', value: true, default: false, help: 'print the plan, change nothing' },
+		{ names: ['--update-mods'], key: 'updateMods', kind: 'bool', value: true, default: false, help: 'overwrite the herdr mods you edited in place, and record what was written' },
 		{ names: ['--skills='], key: 'skills', kind: 'list', help: 'only these skills (comma-separated)' },
 		{ names: ['--extensions='], key: 'extensions', kind: 'list', help: 'only these extensions (comma-separated, .ts optional)' },
 		{ names: ['-h', '--help'], key: 'help', kind: 'bool', value: true, help: 'print this text and exit 0' },
