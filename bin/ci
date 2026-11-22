@@ -21,7 +21,7 @@
 #
 #   harness       .github/workflows/test.yml (agent) / harness-check.yml: `bash scripts/harness-check.sh`
 #   offline       harness-check.yml step "offline gate tests": `bash scripts/ci-offline.sh`
-#   scripts-test  harness-check.yml step "scripts tests": `make scripts-test`
+#   scripts-test  test.yml job `scripts tests`: `make scripts-test`
 #   shell         test.yml job `shell`: `bash -n` + `shellcheck --severity=error` over `git ls-files '*.sh'`
 #   semgrep       test.yml job `security-scan`, step "semgrep": p/default, p/typescript and the bash
 #                 ruleset pinned by SEMGREP_RULES_SHA, with --error, over tracked source

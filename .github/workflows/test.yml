@@ -341,6 +341,35 @@ jobs:
             agent/reports/stryker-pr/
           if-no-files-found: warn
 
+  # The gates' own tests: scripts/tests/*.test.mjs and *.test.sh, the passing
+  # case of every gate in this checkout (blip 29 harness quality evaluation —
+  # a gate whose passing case was never run can go dead quietly). It used to be
+  # a step inside harness-check.yml's job, where its 58s made that check two
+  # minutes and a red suite could not be told from a red harness. Its own job
+  # costs one runner and names itself: `scripts tests` red means the tests, only.
+  #
+  # It calls the Makefile target rather than a copy of the node command, so a
+  # local `make scripts-test` and this job cannot disagree (blip 38 CI hardening).
+  # Nothing is installed: the target needs node and bash and nothing else — no
+  # npm install, no action beyond the two pinned below.
+  scripts-tests:
+    name: scripts tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # mise.toml's `node`, projected: setup-node cannot read a TOML file, and
+          # a `node-version:` literal here FAILs the mise-pin check (blip 68).
+          # Relative: setup-node joins node-version-file onto the workspace root.
+          node-version-file: .node-version
+
+      - name: scripts tests (make scripts-test)
+        run: make scripts-test
+
   shell:
     name: shell scripts
     runs-on: ubuntu-latest

@@ -8,6 +8,11 @@
 # PRs: catch a bloated AGENTS.md or skill before merge.
 # Weekly: catch bit-rot the pull request path cannot see — an expired Review:
 # date, an install step someone unset, a doc that lost its owner.
+#
+# The gates' own tests are here (`offline gate tests`) and in test.yml
+# (`scripts tests`), not both here: `make scripts-test` cost this job 58s of its
+# two minutes, and a check that is red because it carries another check's work
+# does not say which one broke. Both are still the same commands a laptop runs.
 name: harness-check
 
 on:
@@ -58,17 +63,6 @@ jobs:
 
       - name: harness-check
         run: bash scripts/harness-check.sh
-
-      # The gates' own tests, run by the same job that gates harness quality
-      # (blip 29 harness quality evaluation): a gate whose passing case was never
-      # run is a gate that can go dead quietly, and until this step existed
-      # scripts/tests/ only ran when a human remembered. It calls the Makefile
-      # target rather than a second copy of the node command, so a local
-      # `make scripts-test` and this job cannot disagree (blip 38 CI hardening).
-      # No action is used here on purpose: a step that runs make needs no new
-      # SHA to pin.
-      - name: scripts tests (make scripts-test)
-        run: make scripts-test
 
       # The offline gate tests: the skill pin in agent/skills.lock and the
       # hidden-codepoint scan in the pre-commit hook. Both build their own temp

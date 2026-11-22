@@ -103,9 +103,15 @@ pr-check:
 # gate that can go dead quietly. Two suites, and both are globbed so a new test
 # file needs no edit here: the node tests (same runner as the extensions, no
 # dependencies), then every plain-bash *.test.sh run through bash, since a fresh
-# clone has no executable bit on them. Fail-fast: the first suite that goes red
-# stops the target with its own exit code, and the echo above each suite names it
-# in the CI log.
+# clone has no executable bit on them.
+#
+# The bash half is `scripts/scripts-test.sh`, which runs the suites in a bounded
+# pool (default nproc, `JOBS=1` for the old serial run, byte for byte). Eleven
+# suites in series cost 58s of CI and 47s locally — a third of what `make
+# scripts-test` was for — and none of them depends on another, so the wall clock
+# is now the slowest suite. A red suite is still named (`== scripts-test: FAILED
+# <suite> (exit N)`) and the rest still run, so one failure cannot hide the next;
+# the exit status is the failure count capped at 1.
 #
 # The runner hands the suite the environment it was started in, inherited slug and
 # all. Each bash test owns its own environment instead: the provenance test clears
@@ -116,11 +122,7 @@ pr-check:
 scripts-test:
 	@echo "== scripts-test: node --test scripts/tests/*.test.mjs"
 	@node --test scripts/tests/*.test.mjs
-	@for t in scripts/tests/*.test.sh; do \
-		[ -e "$$t" ] || continue; \
-		echo "== scripts-test: bash $$t"; \
-		bash "$$t" || { status=$$?; echo "== scripts-test: FAILED $$t (exit $$status)" >&2; exit $$status; }; \
-	done
+	@bash $(CURDIR)/scripts/scripts-test.sh
 	@echo "== scripts-test: every suite passed"
 
 # The gate tests that need no network: the skill pin (agent/skills.lock) and the

@@ -198,6 +198,34 @@ else
 	fail "the job started $first_starts then $second_starts time(s), expected 1 then 1" "$OUT"
 fi
 
+# --- scripts-test: the table row and its citation agree with the workflows ---------------------------------
+# The scripts tests moved out of harness-check.yml's job into test.yml's `scripts tests`. Every claim
+# here is a grep of a file, so a citation that rots — a comment still naming the old workflow, a row
+# that stopped running `make scripts-test` — is red instead of quietly wrong.
+case_start "scripts-test citation"
+run_ci --dry-run --cwd "$BIN/.."
+expect_rc 0 "--dry-run is green"
+out_has "plan: scripts-test   make --no-print-directory scripts-test" \
+	"the scripts-test row still runs make scripts-test"
+if grep -Fq 'scripts-test  test.yml job `scripts tests`: `make scripts-test`' "$CI_BIN"; then
+	pass "bin/ci's header names test.yml, where the job lives now"
+else
+	fail "bin/ci's header does not cite test.yml for the scripts-test row" \
+		"expected: scripts-test  test.yml job \`scripts tests\`: \`make scripts-test\`"
+fi
+if grep -Fq 'make scripts-test' "$BIN/../.github/workflows/test.yml"; then
+	pass "test.yml runs the same target the row does"
+else
+	fail "test.yml has no 'make scripts-test' step" \
+		"the row and the workflow must be the same command, or a local green proves nothing"
+fi
+if grep -Fq 'name: scripts tests (make scripts-test)' "$BIN/../.github/workflows/harness-check.yml"; then
+	fail "the scripts tests are back in harness-check.yml" \
+		"the 58s step was moved out on purpose: a red suite must name itself"
+else
+	pass "harness-check.yml no longer carries the scripts tests step"
+fi
+
 # --- prose-review: three states, and no silent green ---------------------------------------------
 # The prose job reads a PR's diff and a model key, so these cases drive the real job row out of the
 # real table (`--only prose-review`, no `--table`) against a fake root: a stub review script that
