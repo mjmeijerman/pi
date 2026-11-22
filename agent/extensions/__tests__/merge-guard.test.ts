@@ -432,7 +432,9 @@ describe("merge-guard: the repository the command targets", () => {
 		for (const dir of [trunkDir, featureDir, detachedDir, plainDir]) rmSync(dir, { recursive: true, force: true });
 	});
 
-	const session = "/home/mark/big-boss-pi";
+	// The session cwd only has to be a directory that exists: the rule reads it as a
+	// default path, never as a repository.
+	const session = plainDir;
 
 	/** The resolver the handler installs: the branch of the directory, else the session's. */
 	const resolver = (dir: string | null) => currentBranch(dir ?? session);
@@ -617,11 +619,15 @@ describe("merge-guard: command shapes the parser has to survive", () => {
 	});
 
 	test("a relative path ending in / resolves against the session cwd", () => {
-		const session = "/home/mark/big-boss-pi";
-		assert.match(
-			trunkCommitReason("git -C sub/ commit -m x", { [`${session}/sub`]: "trunk" }, session) ?? "",
-			/a commit on trunk/,
-		);
+		const session = mkdtempSync(join(tmpdir(), "pi-merge-guard-session-"));
+		try {
+			assert.match(
+				trunkCommitReason("git -C sub/ commit -m x", { [`${session}/sub`]: "trunk" }, session) ?? "",
+				/a commit on trunk/,
+			);
+		} finally {
+			rmSync(session, { recursive: true, force: true });
+		}
 	});
 
 	test("a path is normalised before the branch lookup", () => {
