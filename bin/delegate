@@ -2812,6 +2812,19 @@ cmd_wipe() {
 		*) die "unknown option $1" ;;
 		esac
 	done
+	# The worker's space comes first: a worker in a space is recorded in state/spaces/<space>/
+	# delegations.json, and the pre-space state/delegations.json the loader starts with holds nobody.
+	# Read without this, the membership check below answered "no such worker" for a worker `delegate
+	# list` was showing, and `close` then refused for want of a wipe row — the finish path could not
+	# close a worker at all. Resolved the way `cmd_tell` and `cmd_close` do it: the record's own
+	# `spaceName`, else the space whose record tracks the slug. The check that follows is unchanged:
+	# the merged document every space's workers appear in, so a slug no space tracks is still refused.
+	DELEGATIONS=$(delegations_all)
+	local worker_space
+	worker_space=$(delegation_field "$slug" spaceName)
+	[ -n "$worker_space" ] || worker_space=$(space_of_slug "$slug")
+	if [ -n "$worker_space" ] && space_exists "$worker_space"; then use_space "$worker_space"; fi
+	DELEGATIONS=$(delegations_all)
 	# A wipe on a slug nobody spawned wipes nothing and records nothing useful, and the answers
 	# would go into a report that does not exist. Refuse it the way close does: loud, nonzero,
 	# and naming the word that was wrong.
