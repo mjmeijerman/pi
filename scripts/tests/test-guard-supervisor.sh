@@ -15,6 +15,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GUARD="$ROOT/bin/guard"
+# `bin/space` is what removes a tab's entry from the record; the guard is what rebuilds from it.
+SPACE="$ROOT/bin/space"
 # The Boss is bare: the argv a resumed Boss tab is opened with starts with this tree's `bin/pi-bare`
 # and never with an interpreter a resume entry remembers.
 BARE="$ROOT/bin/pi-bare"
@@ -244,6 +246,25 @@ clear_log
 run "$GUARD" --once
 if [ -s "$HERDR_LOG" ]; then fail 'a finished worker tab came back' "$(herdr)"; else pass 'no tab was opened for the worker'; fi
 if [ -f "$(sd demo)/reports/w1.md" ]; then pass 'the worker had already reported, which is why its tab stays closed'; else fail 'the fixture has no report'; fi
+
+# --------------------------------------------- a forgotten tab stays closed --
+# The point of `bin/space tab forget`: `tabs[]` is the whole mechanism the guard rebuilds a space
+# from, so the entry removed from the record is the tab that stops coming back. The first pass is the
+# control — it proves the entry would have been rebuilt — and the second pass is the same reboot
+# after the verb, with no `Extra` in it.
+new_case 'a tab forgotten from the record is not rebuilt with the space'
+make_record forgot1 forgot1 "$PROJ" s-forgot1
+set_tabs forgot1 "[{\"name\":\"Boss\",\"folder\":\"$PROJ\",\"argv\":[]},{\"name\":\"Extra\",\"folder\":\"$PROJ\",\"argv\":[]}]"
+spaces '{"spaces":[]}'
+clear_log
+run "$GUARD" --once --space forgot1
+if grep -qF -- '--name Extra' "$HERDR_LOG"; then pass 'the control pass rebuilds Extra from the record'; else fail 'the fixture never rebuilt Extra, so the second pass proves nothing' "$(herdr)"; fi
+run "$SPACE" tab forget forgot1 Extra
+if [ "$RC" -eq 0 ]; then pass 'the verb removes the entry'; else fail 'tab forget failed' "$OUT"; fi
+clear_log
+run "$GUARD" --once --space forgot1
+if grep -qF -- '--name Extra' "$HERDR_LOG"; then fail 'the forgotten tab came back after a reboot' "$(herdr)"; else pass 'the forgotten tab is not re-created'; fi
+if grep -qF -- '--tab Boss' "$HERDR_LOG"; then pass 'the Boss tab is still rebuilt, beside it'; else fail 'the space came back without its Boss tab' "$(herdr)"; fi
 
 # ------------------------------------------------------------ the project folder is gone --
 new_case 'a space whose project folder is gone is skipped with the command that fixes it'

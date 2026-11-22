@@ -76,6 +76,42 @@ space_set_field() {
 	'
 }
 
+# space_tabs <slug> — the record's tab names, one per line, in the order the record holds them.
+# Nothing is printed for a record with no `tabs` (a space `bin/space new` just made: the guard
+# seeds the Boss entry on its first pass), so a caller can read silence as "no entry recorded".
+space_tabs() {
+	SPACE_FILE=$(space_record "${1:-}") node -e '
+		const fs = require("fs");
+		let j = {};
+		try { j = JSON.parse(fs.readFileSync(process.env.SPACE_FILE, "utf8")); } catch { process.exit(0); }
+		for (const t of Array.isArray(j.tabs) ? j.tabs : [])
+			if (t && typeof t === "object" && t.name) process.stdout.write(String(t.name) + "\n");
+	'
+}
+
+# space_remove_tab <slug> <name> — drop the entry called <name> from the record's `tabs` list and
+# leave every other field as it was, through the same temp-file-plus-rename write as
+# `space_set_field`: a reader at the same moment sees the old record or the new one, never half of
+# either. Every entry with that name goes, not the first one — a duplicate left behind would be the
+# one the guard rebuilds the tab from. Exit 0 and print the names that are left; 3 when no entry
+# matches (the record is untouched); 1 when the record cannot be read or written.
+space_remove_tab() {
+	SPACE_FILE=$(space_record "${1:-}") TAB_NAME=${2:-} node -e '
+		const fs = require("fs"), path = require("path");
+		const file = process.env.SPACE_FILE;
+		let j = {};
+		try { j = JSON.parse(fs.readFileSync(file, "utf8")); } catch { process.exit(1); }
+		const tabs = Array.isArray(j.tabs) ? j.tabs : [];
+		const keep = tabs.filter((t) => !(t && typeof t === "object" && String(t.name || "") === process.env.TAB_NAME));
+		if (keep.length === tabs.length) process.exit(3);
+		j.tabs = keep;
+		const tmp = path.join(path.dirname(file), ".space.json.tmp." + process.pid);
+		fs.writeFileSync(tmp, JSON.stringify(j, null, 2) + "\n");
+		fs.renameSync(tmp, file);
+		process.stdout.write(keep.map((t) => String((t && t.name) || "")).filter(Boolean).join("\n"));
+	'
+}
+
 # space_max_open_prs <slug> — how many of this space's pull requests may be open at once, as the
 # record says it: a positive integer, or `unbounded`. Absent reads as `1`, which is the rule every
 # record written before the field existed was made under; a record hand-edited to something that is

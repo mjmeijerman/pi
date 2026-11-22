@@ -172,7 +172,11 @@ A durable space is supervised. `~/.pi/bin/guard` — this repo's `bin/guard`, in
 records in `~/.pi/state/spaces/`: a space that is gone is rebuilt from its record
 (same name, same project folder, same Boss tab name, plus the tabs the record
 lists), and a space whose Boss tab is gone gets that one tab back — from its
-resume entry, so the boss comes back with its conversation. Its worker tabs do
+resume entry, so the boss comes back with its conversation. A tab a person closed
+stays closed once its entry is gone from the record: `bin/space tab forget <slug>
+<name>` removes that one entry (the Boss excepted — a space nobody wants is
+`bin/space forget <slug>`), and `bin/space tab list <slug>` says which ones there
+are. Its worker tabs do
 not come back: a finished worker's tab stays closed, and only
 `delegate wait --forever` restarts a worker. Nothing is ever closed, renamed or
 moved, a space whose project folder is gone is reported with
