@@ -377,6 +377,123 @@ else
 	fail 'the preflight skip and its reason were not recorded' "$(cat "$DECISIONS_FILE" 2>/dev/null)"
 fi
 
+# ------------------------------------------- a finish on a worker whose record is gone --
+# `finish` could not tell "this worker is waiting to be published" from "this worker was published
+# and closed last night": with the delegation record deleted, the space was never resolved, and the
+# publish step ran off the report alone. One second run re-pushed #232, then died on a wipe with
+# nothing to wipe, printed ~/.pi/reports/<slug>.md (a path no space ever wrote) and told a person a
+# closed worker was "still open". The record is what a wipe and a close address, so a finish with no
+# record is refused before the gate, before publish, and with the space's own paths in the message.
+GONE_DIR="$WORK/gone"
+mkdir -p "$GONE_DIR/bin"
+cp "$DELEGATE" "$ROOT/bin/space-lib.sh" "$GONE_DIR/bin/"
+PUBLISH_MARK="$WORK/publish-called"
+PUBLISH_COUNT="$WORK/publish-count"
+export PUBLISH_MARK PUBLISH_COUNT
+cat >"$GONE_DIR/bin/preflight" <<'STUB'
+#!/usr/bin/env bash
+printf 'preflight %s\n' "$*" >>"$PORTED_LOG"
+exit 0
+STUB
+cat >"$GONE_DIR/bin/publish" <<'STUB'
+#!/usr/bin/env bash
+printf 'publish %s\n' "$*" >>"$PORTED_LOG"
+: >"$PUBLISH_MARK"
+printf 'x' >>"$PUBLISH_COUNT"
+printf 'published w1: #41 now at abc1234 (OPEN, MERGEABLE)\n'
+printf 'https://example.invalid/pr/41\n'
+exit 0
+STUB
+chmod +x "$GONE_DIR/bin/"*
+W1_SHA=$(git -C "$PRJ" rev-parse w1)
+# A report a finished worker leaves behind: Evidence with a gate run, the commit it stands for, and
+# the wipe's five answers. Everything close asks for, so the first finish can reach 4/4.
+write_finished_report() {
+	cat >"$1" <<REPORT
+Mission: a finish on a worker whose record is gone refuses instead of publishing again
+
+Review tier: High
+
+Now possible: \`delegate finish\` refuses a closed worker before it pushes anything.
+
+Commit: $W1_SHA
+
+## Evidence
+
+Command: bin/preflight --ci --slug w1
+
+\`\`\`
+preflight: 7/7 passed (0 cached, 7 ran) on w1 in 41s
+\`\`\`
+
+## Thrown away
+
+1. Deleted? nothing — the refusal is a check, no code became unnecessary.
+2. Duplicated? space_with_report is the one place a space is found from a report.
+3. Next feature? a finish that can be given the space by hand could land here in 30 minutes.
+4. Learned? the record is what a wipe and a close address, so publish alone is not a finish.
+5. Rewrite? nothing.
+REPORT
+}
+
+new_case 'finish on a slug with no record refuses before anything is pushed'
+write_finished_report "$REPORT"
+printf '{}\n' >"$SPACE_DIR/delegations.json"
+rm -f "$PUBLISH_MARK" "$PUBLISH_COUNT" "$PI_SPACE_ROOT/state/decisions.jsonl"
+: >"$PORTED_LOG"
+run "$GONE_DIR/bin/delegate" finish w1 --cwd "$PRJ"
+if [ "$RC" -eq 1 ]; then pass 'it exits 1'; else fail "it exited $RC" "$OUT"; fi
+refusal_line=$(printf '%s\n' "$OUT" | head -n 1)
+expected_refusal='finish: refusing w1: it has no delegation record, so there is no worker to publish, wipe or close (it was already closed)'
+if [ "$refusal_line" = "$expected_refusal" ]; then
+	pass 'the first line is the one refusal line'
+else
+	fail 'the first line is not the refusal line' "got: $refusal_line"
+fi
+if [ ! -e "$PUBLISH_MARK" ]; then pass 'publish was never called'; else fail 'it published with no record'; fi
+if grep -q '^publish ' "$PORTED_LOG"; then fail 'the publisher ran' "$(cat "$PORTED_LOG")"; else pass 'the publisher never ran'; fi
+if grep -q '^preflight ' "$PORTED_LOG"; then fail 'the gate ran for a worker that cannot be published' "$(cat "$PORTED_LOG")"; else pass 'the gate did not run either'; fi
+case $OUT in
+*published* | *'now at'*) fail 'it printed a publish verdict' "$OUT" ;;
+*) pass 'no pull-request-shaped output' ;;
+esac
+if has 'delegate list'; then pass 'it says where to see the workers that do exist'; else fail 'it does not point at delegate list' "$OUT"; fi
+
+new_case 'the report path a refused finish prints is the space own'
+if has "$SPACE_DIR/reports/w1.md"; then
+	pass 'it names state/spaces/sp/reports/w1.md'
+else
+	fail 'it does not name the space report path' "$OUT"
+fi
+case $OUT in
+*"$PI_SPACE_ROOT/reports/w1.md"*) fail 'it printed the pre-space reports/ folder' "$OUT" ;;
+*"$HOME/.pi/reports/w1.md"*) fail 'it printed the boss root reports/ folder' "$OUT" ;;
+*) pass 'no fallback path was printed' ;;
+esac
+
+new_case 'finish once, then finish again: the second refuses and publishes nothing'
+cat >"$SPACE_DIR/delegations.json" <<JSON
+{"w1": {"cwd": "$PRJ", "branch": "w1", "space": "sp-old", "spec": "$SPACE_DIR/specs/w1.md"}}
+JSON
+write_finished_report "$REPORT"
+rm -f "$PUBLISH_MARK" "$PUBLISH_COUNT" "$PI_SPACE_ROOT/state/decisions.jsonl"
+: >"$PORTED_LOG"
+run "$GONE_DIR/bin/delegate" finish w1 --cwd "$PRJ"
+if [ "$RC" -eq 0 ]; then pass 'the first finish publishes, wipes and closes'; else fail 'the first finish failed' "$OUT"; fi
+if has 'preflighted, published, wiped, closed'; then pass 'the first finish reached 4/4'; else fail 'the first finish did not reach 4/4' "$OUT"; fi
+if grep -q '"w1"' "$SPACE_DIR/delegations.json"; then fail 'the first finish left the record behind' "$(cat "$SPACE_DIR/delegations.json")"; else pass 'the record is gone, so the worker is closed'; fi
+count_after_first=$(wc -c <"$PUBLISH_COUNT" 2>/dev/null || echo 0)
+OUT=$OUT RC=$RC
+run "$GONE_DIR/bin/delegate" finish w1 --cwd "$PRJ"
+if [ "$RC" -eq 1 ]; then pass 'the second finish refuses (exit 1)'; else fail "the second finish exited $RC" "$OUT"; fi
+if has 'it has no delegation record'; then pass 'it says the record is gone'; else fail 'it does not say why' "$OUT"; fi
+if [ "$(wc -c <"$PUBLISH_COUNT" 2>/dev/null || echo 0)" = "$count_after_first" ]; then
+	pass 'publish ran once across both runs, so nothing was pushed twice'
+else
+	fail 'the second run published again' "publishes: $count_after_first then $(wc -c <"$PUBLISH_COUNT" 2>/dev/null || echo 0)"
+fi
+if has 'the worker is still open'; then fail 'it claims a closed worker is still open' "$OUT"; else pass 'it does not claim the worker is still open'; fi
+
 # ------------------------------------------- verdict --
 printf '\n%s passed, %s failed\n' "$PASS_N" "$FAIL_N"
 [ "$FAIL_N" -eq 0 ]
