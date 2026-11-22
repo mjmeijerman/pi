@@ -44,8 +44,8 @@
  */
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle, Scrollbar, Textarea, TextareaState } from "gpui-base";
-import { appHome, exec, hc, home, nextCommand, props, readTextFile, run, settings, spaces, theme, writeTextFile } from "herdr";
-import { bossTerminal, liveSpaceFor, noSpaceMessage, routeLabel, spaceForFolder, spaceName } from "./route.mjs";
+import { appHome, exec, hc, home, nextCommand, openOverlay, props, readTextFile, settings, spaces, theme, writeTextFile } from "herdr";
+import { bossTerminal, liveSpaceFor, newSpaceSpec, noSpaceMessage, routeLabel, spaceForFolder, spaceName } from "./route.mjs";
 
 /**
  * The search answers one question only: which open pull requests exist. Its index
@@ -827,7 +827,7 @@ export default class PullRequests extends View {
 			// The clone decides the route: the space's project is that clone or its ancestor.
 			const { folder, space } = await this.routeFor(pr);
 			if (!space) {
-				this.needSpace = { name: spaceName(pr.repo), folder };
+				this.needSpace = { name: spaceName(pr.repo), folder, pr };
 				// The line under the buttons says the same thing the message does.
 				this.route = { folder, space: null };
 				this.error = noSpaceMessage(pr.repo, folder);
@@ -868,22 +868,23 @@ export default class PullRequests extends View {
 	}
 
 	/**
-	 * The one way out of "no space owns it": open the durable mod's New form with the name
-	 * and folder already in hand. If that mod is not installed the line says so, with the
-	 * command that works without it.
+	 * The one way out of "no space owns it": open the durable mod's New form as an overlay, with
+	 * the name and the folder or URL already in hand. `<mod>.<command>` reaches shown copies only,
+	 * so a command is not a way to open a form — `openOverlay` is, and it hands the props along.
+	 * If that mod is not installed the line says so, with the command that works without it.
 	 */
 	createSpace(cx) {
 		const need = this.needSpace;
 		if (!need) return;
 		try {
-			run("durable.new", { name: need.name, project: need.folder });
+			openOverlay(newSpaceSpec(need.pr, need.folder));
 			// The next press reads the records again, so the space just made is found.
 			this.recordsCache = null;
 			this.error = "";
 			this.needSpace = null;
-			this.notice = `durable.new is open for ${need.name} — create the space, then press the button again`;
+			this.notice = `durable is open for ${need.name} — press Create space, then the button here again`;
 		} catch (e) {
-			this.error = `durable.new did not open (${e?.message ?? e}) — install herdr-mods/durable, or run: ~/.pi/bin/space new --name ${need.name} --project ${need.folder}`;
+			this.error = `durable did not open (${e?.message ?? e}) — install herdr-mods/durable, or run: ~/.pi/bin/space new --name ${need.name} --project ${need.folder}`;
 		}
 		cx.notify();
 	}

@@ -9,7 +9,7 @@
  * terminal `bossTerminal` resolves the same way — purely, from the record and the app's list.
  *
  * Pure on purpose: records in, a record or a null out — no `herdr` import, no `gpui-*`, no file
- * read. `scripts/tests/test-prs-route.mjs` runs it under plain node.
+ * read. `scripts/tests/test-prs-route.test.mjs` runs it under plain node.
  */
 
 /** A path as it is compared: no surrounding space, no trailing slash (the root keeps its own). */
@@ -93,6 +93,24 @@ export function routeLabel(record) {
 /** The repository's own name, which is the name a space for it would be made with. */
 export function spaceName(repo) {
 	return String(repo ?? "").split("/").filter(Boolean).pop() ?? "";
+}
+
+/**
+ * The overlay spec the "create a space for it" button hands the app: the durable mod's New form,
+ * filled in with the name and either the clone on disk or the URL to clone.
+ *
+ * Not a `<mod>.<command>`: a command reaches shown copies only and carries no props, so the form
+ * arrived empty and the button looked dead. `openOverlay` opens a copy and passes the props —
+ * `{ mod, kind: "dialog", props }` — and the mod closes itself with the id it was given.
+ *
+ * Pure: a pull request, the folder `folderFor` found (or null), and a spec.
+ */
+export function newSpaceSpec(pr, folder) {
+	const name = spaceName(pr?.repo);
+	const clone = path(folder);
+	if (clone) return { mod: "durable", kind: "dialog", props: { view: "new", name, project: clone } };
+	// No clone: the URL is what the form needs, and clone mode is what shows its field.
+	return { mod: "durable", kind: "dialog", props: { view: "new", name, project: "", url: `https://github.com/${String(pr?.repo ?? "")}` } };
 }
 
 /**
