@@ -14,7 +14,7 @@ elif [ -z "${BASH_VERSION:-}" ]; then
 fi
 
 #   delegate spawn <slug> --cwd DIR [--space SLUG] [--mode bare|sandboxed|no-net] [--thinking LEVEL]
-#                  [--acceptance] [--patch FILE]
+#                  [--acceptance] [--patch FILE] [--updates PR]
 #                  [--allow-matrix --reason TEXT]
 #                  [--override-jev --reason TEXT] "<task>"
 #   delegate wait <slug> [--space SLUG] [--timeout SECONDS] [--forever]
@@ -40,6 +40,12 @@ fi
 #
 # A space holds one worker at a time, on a git project only while nothing of its is unmerged.
 # Both are hard refusals, not notes: two workers in one space was the thing spaces exist to stop.
+# The pull-request half is the space's own to set: `max_open_prs` in its record is an integer of 1
+# or more, or `unbounded`, absent meaning 1 (bin/space policy). The gate counts every open pull
+# request of the space and refuses only when the count reaches the limit, naming the count, the
+# limit and the ways out. `spawn --updates <n>` continues one of those pull requests instead of
+# opening a second one: it is exempt from the count, refused when #n is not one of this space's
+# open PRs, and the worker's worktree goes on #n's head branch, so publish refreshes that PR.
 # `--space X` with a `--cwd` that another space claims is refused naming both, because the work in
 # a space is about that space's project.
 #
@@ -397,14 +403,14 @@ space_tracks_worker() {
 		process.exit(j[process.argv[2]]?0:1);' "$file" "${2:-}"
 }
 
-# space_open_pr <space> <project> <remote> — the open pull request that must merge before this
-# space starts another worker: "<number> <branch> <url>", or empty.
+# space_open_pr <space> <project> <remote> — every open pull request of this space, one per line
+# as "<number> <branch> <url>", or nothing.
 #
 # The trailer is what makes a PR this space's: every commit a worker lands carries `Agent-Slug:`,
 # and a slug this space records (or the space's own name) is a trailer of this space. When the
 # trailer cannot be read — the branch is not fetched here — the fallback is the blunter answer:
-# any open PR on the space's remote touched in the last 30 days blocks, because a maybe is not a
-# no when the cost of being wrong is a second worker beside the first. No gh, no remote or no
+# any open PR on the space's remote touched in the last 30 days is this space's, because a maybe is
+# not a no when the cost of being wrong is a second worker beside the first. No gh, no remote or no
 # answer at all is silence: an unreadable service is not a merged PR.
 space_open_pr() {
 	local space=$1 project=$2 remote=${3:-} prs num branch url recent trailer
@@ -437,24 +443,45 @@ space_open_pr() {
 				if [ "$trailer" = "$space" ] || space_tracks_worker "$space" "$trailer" ||
 					[ -f "$(space_specs "$space")/$trailer.md" ] ||
 					[ -f "$(space_specs "$space")/$trailer.spawn.md" ]; then
-					printf '%s %s %s' "$num" "$branch" "$url"
-					return 0
+					printf '%s %s %s\n' "$num" "$branch" "$url"
 				fi
 				continue
 			fi
 		fi
 		# Unreadable trailer (not fetched, or no branch at all): the 30-day fallback.
 		if [ "${recent:-0}" = 1 ]; then
-			printf '%s %s %s' "$num" "${branch:-?}" "$url"
-			return 0
+			printf '%s %s %s\n' "$num" "${branch:-?}" "$url"
 		fi
 	done <<<"$prs"
 	return 0
 }
 
-# space_gate <space> — the two refusals a space keeps. Both are hard, and both name the next move.
+# space_prs_readable <project> <remote> — true when the space's open pull requests can be asked
+# for at all. A space that cannot be asked is silence for the gate and a refusal for --updates:
+# continuing a pull request nobody can read is a claim without an answer behind it.
+space_prs_readable() {
+	command -v gh >/dev/null 2>&1 || return 1
+	[ -n "${2:-}" ] || return 1
+	[ -n "${1:-}" ] || return 1
+	return 0
+}
+
+# space_policy_refusal <space> <project> <prs> <limit> — the refusal in one place, so the count,
+# the limit and the two ways out are one sentence and not three guesses.
+space_policy_refusal() {
+	local space=$1 project=$2 prs=$3 limit=$4 numbers first
+	numbers=$(printf '%s\n' "$prs" | awk '{ printf "%s#%s", (NR>1?", ":""), $1 }')
+	first=$(printf '%s\n' "$prs" | head -1 | awk '{ print $1 }')
+	die "space '$space' has $(printf '%s\n' "$prs" | grep -c .) open pull requests ($numbers); its max_open_prs is $limit
+Merge one, raise the limit, or continue one of them:  $BIN/space policy $space --max-open-prs $(($limit + 1))
+                                                     $BIN/delegate spawn <slug> --cwd $project --updates $first \"<task>\""
+}
+
+# space_gate <space> [<updates-pr>] — the two refusals a space keeps. Both are hard, and both name
+# the next move. A PR the worker continues with --updates is subtracted from the count: continuing
+# one is not opening a second one.
 space_gate() {
-	local space=$1 project git remote live="" s st pr
+	local space=$1 updates=${2:-0} project git remote live="" s st prs
 	project=$(space_field "$space" project)
 	git=$(space_field "$space" git)
 	remote=$(space_field "$space" remote)
@@ -475,18 +502,23 @@ Two workers in one space is the thing spaces exist to prevent. Wait for it, then
   $BIN/delegate wait $live --forever"
 	fi
 	[ "$git" = true ] || return 0
-	pr=$(space_open_pr "$space" "$project" "$remote")
-	if [ -n "$pr" ]; then
-		local prnum prbranch prurl
-		prnum=${pr%% *}
-		pr=${pr#* }
-		prbranch=${pr%% *}
-		prurl=${pr#* }
-		die "space '$space' has an open pull request: PR #$prnum ($prbranch) ${prurl:-no url recorded}
-Merged before the next is the rule, so the next action is asking the person to merge it, not a new worker.
-When it is merged:  $BIN/delegate spawn <slug> --cwd $project \"<task>\""
+	# Every open PR is counted, not the first one: a space that allows more than one must not be
+	# stopped by its own second pull request. `--updates <n>` subtracts the PR the worker continues
+	# — continuing one is not opening a second one — and `unbounded` never refuses here. The live
+	# worker and ceiling refusals above are untouched: this is only the pull-request half.
+	local limit n prs count
+	prs=$(space_open_pr "$space" "$project" "$remote")
+	[ -n "$prs" ] || return 0
+	limit=$(space_max_open_prs "$space")
+	if [ "$updates" != 0 ]; then
+		prs=$(printf '%s\n' "$prs" | awk -v n="$updates" '$1 != n')
+		[ -n "$prs" ] || return 0
 	fi
-	return 0
+	[ "$limit" = unbounded ] && return 0
+	count=$(printf '%s\n' "$prs" | grep -c .)
+	n=$limit
+	[ "$count" -lt "$n" ] && return 0
+	space_policy_refusal "$space" "$project" "$prs" "$limit"
 }
 
 # delegation_field <slug> <field> — a recorded value, empty when the entry or the field is missing.
@@ -1798,8 +1830,8 @@ EOF
 }
 
 cmd_spawn() {
-	local slug="" cwd="" space_opt="" mode="" thinking="" task="" override_jev=0 allow_matrix=0 reason="" runner="" acceptance=0 patch="" patch_given=0
-	[ "$#" -ge 1 ] || die 'usage: delegate spawn <slug> --cwd DIR [--space SLUG] [--mode M] [--thinking LEVEL] [--acceptance] [--allow-matrix --reason TEXT] [--override-jev --reason TEXT] "<task>"'
+	local slug="" cwd="" space_opt="" mode="" thinking="" task="" override_jev=0 allow_matrix=0 reason="" runner="" acceptance=0 patch="" patch_given=0 updates=0
+	[ "$#" -ge 1 ] || die 'usage: delegate spawn <slug> --cwd DIR [--space SLUG] [--mode M] [--thinking LEVEL] [--acceptance] [--patch FILE] [--updates PR] [--allow-matrix --reason TEXT] [--override-jev --reason TEXT] "<task>"'
 	slug=$1; shift
 	local words=()
 	while [ "$#" -gt 0 ]; do
@@ -1810,6 +1842,7 @@ cmd_spawn() {
 		--space) space_opt=${2:-}; shift 2 ;;
 		--acceptance) acceptance=1; shift ;;
 		--patch) patch=${2:-}; patch_given=1; shift 2 ;;
+		--updates) updates=${2:-}; shift 2 ;;
 		--allow-matrix) allow_matrix=1; shift ;;
 		--override-jev) override_jev=1; shift ;;
 		--reason) reason=${2:-}; shift 2 ;;
@@ -1861,9 +1894,45 @@ Or read what space $space_opt is about:
 		process.exit(j[process.argv[2]]?0:1);' "$DELEGATIONS" "$slug"; then
 		die "a worker named '$slug' already exists in space '$(delegation_field "$slug" spaceName)' — a slug names one worker across all spaces, because 'delegate wait <slug>' has no space argument. Pick another slug, or look at it first: $BIN/delegate list"
 	fi
-	# The two refusals a space carries travel together: one live worker, and merged before the
-	# next. Both are about this space, so both run before anything is created or asked.
-	space_gate "$SPACE"
+	# --updates <pr>: this worker continues a pull request the space already has, so the PR is
+	# resolved here — before the gate, because continuing one is not opening a second one — and
+	# its head branch is what the worker's worktree goes on. Refused when the PR cannot be read
+	# at all: "continue #7" with no answer behind it is a claim, not a continuation.
+	local updates_branch="" updates_line="" up_project up_remote up_git up_prs
+	if [ "$updates" != 0 ]; then
+		case $updates in
+		*[!0-9]* | "") die "--updates takes a pull request number: --updates 7, not '$updates'" ;;
+		esac
+		up_git=$(space_field "$SPACE" git)
+		up_project=$(space_field "$SPACE" project)
+		up_remote=$(space_field "$SPACE" remote)
+		if [ "$up_git" != true ]; then
+			die "--updates $updates continues a pull request, and space '$SPACE' has no git project — spawn again without --updates"
+		fi
+		if ! space_prs_readable "$up_project" "$up_remote"; then
+			die "--updates $updates needs this space's open pull requests, and they could not be read (no gh on PATH, or space '$SPACE' records no remote).
+Spawn without --updates to open a new pull request instead."
+		fi
+		up_prs=$(space_open_pr "$SPACE" "$up_project" "$up_remote")
+		if [ -z "$up_prs" ]; then
+			die "space '$SPACE' has no open pull requests on $up_remote, so PR #$updates cannot be one of them — spawn again without --updates"
+		fi
+		updates_line=$(printf '%s\n' "$up_prs" | awk -v n="$updates" '$1 == n' | head -1)
+		if [ -z "$updates_line" ]; then
+			die "PR #$updates is not one of space '$SPACE' open pull requests (saw: $(printf '%s\n' "$up_prs" | awk '{ printf "%s#%s", (NR>1?", ":""), $1 }')).
+--updates continues a pull request this space already has, so the number is one of those:
+  gh pr list --repo $up_remote --state open
+To open a new one instead:  $BIN/delegate spawn <slug> --cwd $up_project \"<task>\""
+		fi
+		updates_branch=$(printf '%s' "$updates_line" | awk '{ print $2 }')
+		if [ -z "$updates_branch" ] || [ "$updates_branch" = "?" ]; then
+			die "PR #$updates of space '$SPACE' names no readable head branch here, so there is nothing to continue on — fetch it first:
+  git -C $up_project fetch origin"
+		fi
+	fi
+	# The two refusals a space carries travel together: one live worker, and the pull requests it
+	# may have open at once. Both are about this space, so both run before anything is created or asked.
+	space_gate "$SPACE" "$updates"
 	case $thinking in
 	"" | off | minimal | low | medium | high | xhigh | max) ;;
 	*) die "thinking must be off, minimal, low, medium, high, xhigh or max: '$thinking'" ;;
@@ -2179,11 +2248,24 @@ PATCH
 	local spawn_slug=$slug spec=$SPECS/$slug.spawn.md hand_spec=$SPECS/$slug.md report=$REPORTS/$slug.md
 	local record_spec=$spec
 	local argv out space tab pane terminal
-	local rule2 rule5 rule7
+	local rule2 rule5 rule7 updates_header=""
+	if [ "$updates" != 0 ]; then
+		# With its own newline, so the spec keeps no blank line where a worker without --updates has
+		# nothing to say.
+		updates_header=$(printf -- '- Updates: you are continuing PR #%s on `%s`; do not open anything, the boss publishes in place.\n' "$updates" "$updates_branch")
+	fi
 	if [ "$is_git" = true ]; then
-		rule2="2. Never switch \`$cwd\` (the boss reads it). Cut a worktree inside the repo:
+		if [ "$updates" != 0 ]; then
+			rule2="2. Never switch \`$cwd\` (the boss reads it). This worker continues PR #$updates, so its
+   worktree goes on that pull request's head branch \`$updates_branch\`:
+   \`git worktree add .worktrees/SLUG -b $updates_branch origin/$updates_branch\` from the repo root
+   (\`git worktree add .worktrees/SLUG $updates_branch\` when that local branch exists and is free).
+   The sandbox binds the repo, not its parent. No \`git checkout\`, \`switch\`, \`stash\` or \`reset\` in it."
+		else
+			rule2="2. Never switch \`$cwd\` (the boss reads it). Cut a worktree inside the repo:
    \`git worktree add .worktrees/SLUG -b BRANCH\` from its root: the sandbox binds the repo, not
    its parent. No \`git checkout\`, \`switch\`, \`stash\` or \`reset\` in it."
+		fi
 		rule5="5. Commit on your branch and stop: no push, no PR, no merge, never on trunk — the boss publishes.
    You stay sandboxed: publishing is the boss's
    job, so it never needs host access from you."
@@ -2221,7 +2303,7 @@ You are the genie. Prove it runs.
 
 - Work in: \`$cwd\`. Report file: \`$report\`.
 - Mode: \`$mode\` ($mode_src$overridden_note), route: $jev_route ($route_src), thinking: \`$jev_level\` ($thinking_src: $jev_effort)
-- Mission: who is better off and what shows it, in one line. Effort counts are cost, not progress.
+$updates_header- Mission: who is better off and what shows it, in one line. Effort counts are cost, not progress.
 - Iteration: expect at least two cycles; you may throw this away.
 - Spec history: read the newest \`specs/archive/\` spec for this area first; it is the previous
   decision, or say there is none.
@@ -2315,14 +2397,15 @@ Open it again, or make a new space and start there:
 	# The record is written once the tab exists, and only the read-modify-write is locked: no
 	# herdr call, no sleep and no `hc send` happens inside the lock.
 	records_mutate "$DELEGATIONS_WRITE" '
-		const fs=require("fs");const [state,slug,space,tab,pane,terminal,cwd,mode,thinking,spec,report,jevEffort,overridden,reason,branch,acceptance,sourceSpec,spaceName]=process.argv.slice(1);
+		const fs=require("fs");const [state,slug,space,tab,pane,terminal,cwd,mode,thinking,spec,report,jevEffort,overridden,reason,branch,acceptance,sourceSpec,spaceName,updates]=process.argv.slice(1);
 		let j={};try{j=JSON.parse(fs.readFileSync(state,"utf8"))}catch{}
 		j[slug]={slug,kind:"tab",space,spaceName,tab,pane,terminal,cwd,mode,thinking,thinkingEffort:jevEffort,spec,report,
 			overridden:overridden==="true",overrideReason:reason||null,branch:branch||null,acceptance:acceptance==="true",
+			updates:updates==="0"?null:Number(updates),
 			acceptanceSpec:sourceSpec||null,started:new Date().toISOString()};
 		process.stdout.write(JSON.stringify(j,null,2)+"\n");' \
 		"$spawn_slug" "$space" "$tab" "$pane" "$terminal" "$cwd" "$mode" "$thinking" "$record_spec" "$report" \
-		"$jev_effort" "$overridden" "$reason" "$base_branch" "$acceptance_bool" "$source_spec" "$SPACE" \
+		"$jev_effort" "$overridden" "$reason" "${updates_branch:-$base_branch}" "$acceptance_bool" "$source_spec" "$SPACE" "$updates" \
 		|| die "$spawn_slug was started in tab ${terminal:-?} but its record could not be written to $DELEGATIONS_WRITE, so nothing tracks it. Close that tab and start the worker again:
   herdr-app do tab.close --id ${tab:-?}
   $BIN/delegate spawn $spawn_slug --cwd $cwd \"<task>\""

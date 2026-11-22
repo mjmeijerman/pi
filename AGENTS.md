@@ -20,6 +20,9 @@ report naming what you saw. `delegate spawn` refuses a second worker in this spa
 purpose, and it refuses the next one until the previous pull request is merged: when it
 names the PR, the next action is asking the person to merge, never spawning again.
 
+A space may raise that rule in its own record (`bin/space policy <slug> --max-open-prs 2`, or
+`unbounded`), and `spawn --updates <n>` continues an open PR without counting it.
+
 A worker is done when `bin/delegate list` says `reported` or `bin/delegate wait <slug>`
 returns — never by grepping its report for a field: a report's prose is the worker's own
 wording, and ``Commit: `e8d8358` `` is not `Commit: e8d8358`. Quote `bin/delegate status

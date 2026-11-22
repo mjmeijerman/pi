@@ -232,5 +232,55 @@ new_case 'forget a space that is not there'
 run "$SPACE" forget never-was --yes
 if [ "$RC" -ne 0 ]; then pass 'it is refused'; else fail 'forget invented a success'; fi
 
+new_case 'forget asks for the name, and a wrong answer keeps the record'
+K="$WORK/kept"
+project "$K"
+run "$SPACE" new --name kept --project "$K"
+if script --version 2>/dev/null | grep -q util-linux; then
+	# script(1) is the terminal this case needs: the question only exists when a person can answer it.
+	printf 'y\n' | script -qec "$SPACE forget kept" /dev/null >"$WORK/tty.out" 2>&1
+	TTY_RC=$?
+	if [ -f "$(record kept)" ]; then pass "a 'y' no longer drops it"; else fail "a 'y' dropped the record" "$(cat "$WORK/tty.out")"; fi
+	if [ "$TTY_RC" -eq 1 ]; then pass 'it exits 1'; else fail "a 'y' exited $TTY_RC, and 0 means dropped" "$(cat "$WORK/tty.out")"; fi
+	case $(cat "$WORK/tty.out") in
+	*"kept — nothing was dropped"*) pass 'it says the space was kept' ;;
+	*) fail 'it does not say the space was kept' "$(cat "$WORK/tty.out")" ;;
+	esac
+	case $(cat "$WORK/tty.out") in
+	*"dropped: its record"*"kept:    reports/"*) pass 'the question says what goes and what stays' ;;
+	*) fail 'the question does not say what goes and what stays' "$(cat "$WORK/tty.out")" ;;
+	esac
+else
+	pass 'skipped the prompt itself (no util-linux script(1) here)'
+fi
+
+new_case 'forget drops it when the name is typed back'
+if script --version 2>/dev/null | grep -q util-linux; then
+	printf 'kept\n' | script -qec "$SPACE forget kept" /dev/null >"$WORK/tty2.out" 2>&1
+	TTY_RC=$?
+	if [ "$TTY_RC" -eq 0 ]; then pass 'it exits 0'; else fail "the typed name exited $TTY_RC" "$(cat "$WORK/tty2.out")"; fi
+	if [ -e "$(record kept)" ]; then fail 'the typed name did not drop the record'; else pass 'the typed name drops the record'; fi
+	case $(cat "$WORK/tty2.out") in
+	*"forgot kept"*) pass 'it says what it dropped' ;;
+	*) fail 'it does not say what it dropped' "$(cat "$WORK/tty2.out")" ;;
+	esac
+else
+	pass 'skipped the prompt itself (no util-linux script(1) here)'
+fi
+
+new_case 'forget --yes answers up front and is never silent'
+D="$WORK/dropped"
+project "$D"
+run "$SPACE" new --name dropped --project "$D"
+SYSERR=$("$SPACE" forget dropped --yes 2>&1 >/dev/null)
+RC=$?
+STDOUT=$("$SPACE" list 2>/dev/null)
+if [ "$RC" -eq 0 ] && [ ! -e "$(record dropped)" ]; then pass 'the record is dropped'; else fail 'forget --yes did not drop it' "$SYSERR"; fi
+case $SYSERR in
+*"dropped: its record"*"kept:    reports/"*) pass 'the explanation goes to stderr, so the destructive path is never silent' ;;
+*) fail 'the explanation is missing from stderr' "$SYSERR" ;;
+esac
+if [ -f "$D/a.txt" ]; then pass 'the folder and its work stay'; else fail 'the folder was touched'; fi
+
 printf '\n%d passed, %d failed\n' "$PASS_N" "$FAIL_N"
 [ "$FAIL_N" -eq 0 ]
