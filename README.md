@@ -241,13 +241,15 @@ it says, and to reply to the comment once it is fixed.
 
 It lives in the `Apps` space, `Pull requests` tab. Rebuild on a new machine:
 `install.sh` copies the folder into `$HOME/.config/herdr-app/mods/` when the app
-is installed, and never overwrites a folder that already exists (you may have
-edited the mod in place). An existing copy is updated by copying the file over
-it:
-```bash
-cp ~/.pi/herdr-mods/prs/main.js ~/.config/herdr-app/mods/prs/main.js
-```
-The app picks the new file up on its own. Then, first time only:
+is installed. A later install keeps it and refreshes it, file by file: a file you
+did not touch is updated to the version in the tree, and a file you edited in
+place is kept exactly as it is, with a line saying which one. What the installer
+wrote is recorded in `$HOME/.config/herdr-app/mods-installed.json`, so it can
+tell its own old copy from your edit. A mod folder written before that record
+existed is kept whole (the install cannot tell which file is yours), and
+`./install.sh --update-mods` refreshes it — that flag overwrites your edits too,
+so it is the one thing to run when you want the tree's version back. There is
+no `cp` to remember. Then, first time only:
 ```bash
 herdr-app do space.new --name Apps --folder "$HOME"
 herdr-app do tab.new --space <space-id> --name "Pull requests" --mod prs

@@ -5,6 +5,7 @@
 #   ./install.sh --no-install-pi     skip pi, install the rest (pi is installed by default)
 #   ./install.sh --skip-prereqs      never check or install git, node and npm
 #   ./install.sh --dry-run           print the plan, change nothing
+#   ./install.sh --update-mods       overwrite the herdr mods you edited, and re-record them
 #   ./install.sh --skills=a,b --extensions=c.ts
 #
 # The engine's step 0 is the prerequisites (git, node, npm) — this shim cannot
