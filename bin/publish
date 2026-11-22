@@ -90,7 +90,8 @@ fi
 # then says `already published` — a verdict over an unmoved branch is not a publish.
 #
 # What it carries from the report into the body: the Mission line (its label reduced to the bare
-# `Mission:` a body gate greps for, the text untouched), the `Now possible:` sentence when the report
+# `Mission:` a body gate greps for, the text untouched), the `Radar:` line when the report has one
+# (a code diff needs a blip, and only the worker knows which one), the `Now possible:` sentence when the report
 # has one, the bare review tier, the Evidence block, the Thrown away section when there is one, and
 # the worker's own `Test change:` line when the report has one (a target repo may require a reason
 # for a test changed beside its source; the worker knows it, so it is carried verbatim and never
@@ -731,6 +732,17 @@ if [ -n "$test_change" ]; then
 	test_change="Test change: $test_change"
 fi
 
+# A code diff needs a Radar citation (agent/AGENTS.md, checked by
+# `scripts/pr-gate.sh --gate radar`). The worker is the only one who knows which
+# blip this answers and how it is measured, so the report's line rides into the
+# body verbatim and nothing is invented here: a report that cites no blip
+# publishes a body the gate refuses, which is the right answer for that report.
+radar=$(grep -m1 -iE '^[[:space:]]*[*_]*[[:space:]]*radar[*_]*:[[:space:]]*[*_]*' "$report" || true)
+if [ -n "$radar" ]; then
+	radar=$(printf '%s' "$radar" | sed -e 's/^[[:space:]]*[*_]*[[:space:]]*[Rr][Aa][Dd][Aa][Rr][*_]*[*[:space:]]*:[[:space:]]*[*_]*[[:space:]]*//')
+	radar="Radar: $radar"
+fi
+
 # Beck's readability gate, in the worker's own words: one sentence on what a person can do now that
 # they could not before. It rides directly under the Mission, above the tier and the diff, because
 # that is the order a reviewer reads in. No LOC, no PR count — those are effort, and effort is cost.
@@ -759,6 +771,9 @@ trap 'rm -f "$body"' EXIT
 	printf 'Review tier: %s\n\n' "$tier"
 	if [ -n "$test_change" ]; then
 		printf '%s\n\n' "$test_change"
+	fi
+	if [ -n "$radar" ]; then
+		printf '%s\n\n' "$radar"
 	fi
 	printf '## Evidence\n\n%s\n' "$evidence"
 	if [ -n "$thrown" ]; then

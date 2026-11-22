@@ -28,7 +28,7 @@
 #   secret-scan   secret-scan.yml: `gitleaks detect --redact --no-banner --verbose --source .`
 #   zizmor        zizmor.yml: `uvx --from zizmor==1.32.0 zizmor --pedantic --no-progress .`
 #   mutation      test.yml job `mutation-changed`: `scripts/mutate-changed.sh` (a branch diff → --pr)
-#   tier, test-change, mission   pr-tier.yml: `scripts/pr-gate.sh --gate ... --body FILE` → --body
+#   tier, test-change, mission, radar   pr-tier.yml: `scripts/pr-gate.sh --gate ... --body FILE` → --body
 #   prose-review  the three states of prose-review.yml's job, never a silent green:
 #                 the PR's diff touches a prose path, PROSE_REVIEW_API_KEY is set and --pr was given
 #                 → the real review runs (`bin/prose-review --ci`), and a finding fails the job; no
@@ -89,6 +89,7 @@ mutation|bash scripts/mutate-changed.sh|pr|yes|no: the changed lines come from t
 tier|bash scripts/pr-gate.sh --gate tier --body "$CI_BODY"|body|yes|no: judged from the branch diff and the body, one level above content
 test-change|bash scripts/pr-gate.sh --gate test-change --body "$CI_BODY"|body|yes|no: judged from the branch diff and the body, one level above content
 mission|bash scripts/pr-gate.sh --gate mission --body "$CI_BODY"|body|yes|no: judged from the branch diff and the body, one level above content
+radar|bash scripts/pr-gate.sh --gate radar --body "$CI_BODY"|body|yes|no: judged from the branch diff and the body, one level above content
 install-matrix||-|skip: Windows and macOS runners only, and this machine is neither
 prose-review|if [ ! -f .github/scripts/prose-review.mjs ]; then echo "no .github/scripts/prose-review.mjs in this checkout"; exit 125; fi; if ! command -v gh >/dev/null; then echo "gh: not installed"; exit 125; fi; bash "$CI_BIN_DIR/prose-review" --ci --root . "$CI_PR"|pr|yes|no: a model call and a network read of the pull request
 prose-offline|node --test scripts/tests/prose-review.test.mjs scripts/tests/prose-review-diff-paths.test.mjs|-|yes

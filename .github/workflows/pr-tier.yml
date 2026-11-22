@@ -156,3 +156,62 @@ jobs:
           fi
 
           bash "$gate" --gate mission --body "$RUNNER_TEMP/pr-body.md"
+
+  # A harness change cites a Thoughtworks Radar blip, with the problem it fixes
+  # and how it is measured: `agent/AGENTS.md` says so, and nothing checked it.
+  # Measured 2026-11-22: none of the last 25 commits on trunk cited one, so the
+  # rule was prose and the prose lost. The gate applies to a diff that changes
+  # code (bin/, scripts/, agent/extensions/, git-hooks/, sandbox/, .github/) and
+  # asks for a `Radar:` line naming a blip in docs/radar-blips.tsv plus the way
+  # the change is measured. Measurement: red on a code diff with no citation,
+  # red on a blip number that is not in the list.
+  radar-cited:
+    name: radar blip cited
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # Both endpoints are already in the clone: no network, no token.
+          fetch-depth: 0
+
+      - name: a code diff cites a Radar blip, and says how it is measured
+        env:
+          # Untrusted input: quoted, and only ever matched in bash below.
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          printf '%s' "$PR_BODY" >"$RUNNER_TEMP/pr-body.md"
+
+          # Same shared script, taken from the base commit for the same reason:
+          # a branch does not get to rewrite its gate — and only this job
+          # narrows that, because a brand-new gate can only be introduced by a
+          # branch whose own copy of the script knows it. The base copy on that
+          # PR exits 2 with `not 'radar'`; that one verdict, and nothing else,
+          # means the base copy predates the gate, so the checkout's own copy is
+          # put in its place and run again. Any other failure is the gate's
+          # verdict and stays red. The moment trunk carries the gate the base
+          # copy answers, so it is preferred again and this fallback goes quiet.
+          gate="$RUNNER_TEMP/pr-gate.sh"
+          if ! git show "${BASE_SHA}:scripts/pr-gate.sh" >"$gate" 2>/dev/null; then
+            cp scripts/pr-gate.sh "$gate"
+          else
+            # Unquoted exit status, so `set -e` must stand aside to read it.
+            set +e
+            out="$(bash "$gate" --gate radar --body "$RUNNER_TEMP/pr-body.md" \
+              --base "$BASE_SHA" --head "$HEAD_SHA" 2>&1)"
+            rc=$?
+            set -e
+            printf '%s\n' "$out"
+            if [[ $rc -eq 2 && $out == *"not 'radar'"* ]]; then
+              cp scripts/pr-gate.sh "$gate"
+            else
+              exit "$rc"
+            fi
+          fi
+
+          bash "$gate" --gate radar --body "$RUNNER_TEMP/pr-body.md" \
+            --base "$BASE_SHA" --head "$HEAD_SHA"

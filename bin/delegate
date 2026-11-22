@@ -106,9 +106,10 @@ fi
 # lands in state/decisions.jsonl, so a matrix is a decision somebody made and can be argued with.
 #
 # The report skeleton is spawn's to write: reports/<slug>.md is created with the five lines every
-# report carries — `Mission:`, `Review tier:`, `Test change:`, `## Evidence` (which asks for
-# `bin/preflight` by name) and `Commit:` — each left as a `<fill …>` placeholder. The worker fills
-# them in or overwrites the file. `delegate close` already refuses a report that still carries a
+# report carries — `Mission:`, `Review tier:`, `Test change:`, `Radar:` (a code diff cites a blip
+# from docs/radar-blips.tsv, which `bin/publish` carries into the body), `## Evidence` (which asks
+# for `bin/preflight` by name) and `Commit:` — each left as a `<fill …>` placeholder. The worker
+# fills them in or overwrites the file. `delegate close` already refuses a report that still carries a
 # placeholder, so a skeleton can never publish; and a report that is only a skeleton is not a
 # report: `delegate wait` keeps waiting, the in-flight block does not count it as unread, and
 # `worker_state` keeps saying `working`. A worker is finished when its report is written.
@@ -1812,6 +1813,8 @@ Review tier: <fill in: High|Medium|Low>
 
 Test change: <fill in: what the test file pins, or "none: no test file changed">
 
+Radar: <fill in: blip <n> — the problem it fixes and how it is measured, or "not applicable: no code changed">
+
 ## Evidence
 
 \`bin/preflight\` ran once on this branch — paste it under the command below, by name, with its
@@ -2333,6 +2336,10 @@ $rule7
      money, deletion). Prose after the word is fine.
    - \`Test change: <why>\` — required when one diff changes a test and the source it tests; say what
      the test now pins. No test can tell it apart: say that instead.
+   - \`Radar: blip <n> — <the problem it fixes and how it is measured>\` — required when your diff
+     changes code (\`bin/\`, \`scripts/\`, \`agent/extensions/\`, \`git-hooks/\`, \`sandbox/\`,
+     \`.github/\`); cite a number that is in \`docs/radar-blips.tsv\`, never an invented one.
+     \`bin/publish\` carries it into the body.
    - \`Now possible: <fill in: what a person can do now that they could not before>\` — one sentence.
      No LOC, no PR count, no "refactor". \`bin/publish\` puts it in the PR body at Medium and High tier.
    - What now works: a command, a path, a passing test.

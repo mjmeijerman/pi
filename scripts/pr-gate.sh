@@ -26,9 +26,9 @@
 #   scripts/pr-gate.sh --body FILE --paths FILE
 #       all gates; changed paths are read from FILE, one per line. An empty
 #       FILE is a gate handed nothing, so the diff gates fail, not pass.
-#   scripts/pr-gate.sh --body FILE --gate mission|tier|test-change
+#   scripts/pr-gate.sh --body FILE --gate mission|tier|test-change|radar
 #       one gate only, the way each CI job runs it. Mission needs no diff;
-#       tier and test-change fail when they cannot see one.
+#       tier, test-change and radar fail when they cannot see one.
 #
 #   make pr-check BODY=pr.md [BRANCH=my-branch] [BASE=origin/trunk] [HEAD=HEAD]
 #                  [PATHS=paths.txt]
@@ -129,8 +129,8 @@ done
 [ -n "$BODY_FILE" ] || die "no --body FILE (see --help)"
 [ -f "$BODY_FILE" ] || die "no such body file: $BODY_FILE"
 case "$GATES" in
-all | mission | tier | test-change) ;;
-*) die "--gate takes all|mission|tier|test-change, not '$GATES'" ;;
+all | mission | tier | test-change | radar) ;;
+*) die "--gate takes all|mission|tier|test-change|radar, not '$GATES'" ;;
 esac
 
 BODY="$(cat -- "$BODY_FILE")"
@@ -494,9 +494,181 @@ gate_test_change() {
 	return 0
 }
 
+# --------------------------------------------------------------------- radar --
+# agent/AGENTS.md: "Harness changes cite a Thoughtworks Radar blip (Vol. 35,
+# Adopt preferred): the problem it fixes and how it is measured." Nothing
+# checked it — measured 2026-11-22, none of the last 25 commits on trunk cited a
+# blip. This gate is that check for a diff that changes code. The code-path list
+# below is `scripts/` and `bin/` on top of exactly the paths gate_tier calls
+# harness paths: move one list and move the other, or the two answers drift.
+# A docs-only diff (docs/, README.md, a report, a spec) needs no citation.
+RADAR_TSV_REL="docs/radar-blips.tsv"
+
+# The body with fenced code blocks dropped and markdown emphasis stripped: a
+# `Radar:` line inside a ``` block is an example, not the body's claim.
+body_unfenced() {
+	local line trimmed fence=0 flat="${BODY//\*/}"
+	while IFS= read -r line; do
+		trimmed="${line#"${line%%[![:space:]]*}"}"
+		case "$trimmed" in
+		'```'* | '~~~'*)
+			fence=$((1 - fence))
+			continue
+			;;
+		esac
+		((fence == 0)) && printf '%s\n' "$line"
+	done <<<"$flat"
+}
+
+# The blip vocabulary, from the repo root when git knows one, else beside this
+# script (a copy in $RUNNER_TEMP still has this repo's file to read), else the
+# working directory. $RADAR_TSV wins, for a test that wants another file.
+radar_tsv() {
+	local cand root=""
+	if [ -n "${RADAR_TSV:-}" ]; then
+		printf '%s\n' "$RADAR_TSV"
+		return 0
+	fi
+	root="$(git rev-parse --show-toplevel 2>/dev/null)" || root=""
+	for cand in "${root:+$root/$RADAR_TSV_REL}" \
+		"$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/$RADAR_TSV_REL" \
+		"$RADAR_TSV_REL"; do
+		if [ -n "$cand" ] && [ -f "$cand" ]; then
+			printf '%s\n' "$cand"
+			return 0
+		fi
+	done
+	return 1
+}
+
+gate_radar() {
+	local path line radar tsv n last tail measured
+	local -a code=() nums=() unknown=()
+
+	require_diff radar || return 1
+
+	for path in "${CHANGED[@]}"; do
+		case "$path" in
+		bin/* | scripts/* | agent/extensions/* | git-hooks/* | sandbox/* | .github/*)
+			code+=("$path")
+			;;
+		esac
+	done
+	echo "code files changed: ${#code[@]} (of ${#CHANGED[@]})"
+
+	if ((${#code[@]} == 0)); then
+		note "radar: not applicable — no code changed, so no blip is required"
+		{
+			echo "## Radar: not applicable"
+			echo ""
+			echo "The diff changes no code path (\`bin/\`, \`scripts/\`," 
+			echo "\`agent/extensions/\`, \`git-hooks/\`, \`sandbox/\`, \`.github/\`), so"
+			echo "no Radar citation is required."
+		} | summary
+		return 0
+	fi
+
+	radar=""
+	while IFS= read -r line; do
+		if [[ $line =~ ^[[:space:]]*radar[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+			radar="${BASH_REMATCH[1]}"
+			break
+		fi
+	done <<<"$(body_unfenced)"
+	radar="$(printf '%s' "$radar" | sed -e 's/[[:space:]]*$//')"
+	echo "radar: ${radar:-<none>}"
+
+	# `blip 20`, `blip #20` and `#20` all name the same blip; a `#` in a heading
+	# is not on this line, so the loose form costs nothing.
+	mapfile -t nums < <(printf '%s\n' "$radar" |
+		grep -oiE '(blip[[:space:]]*#?|#)[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | sort -un)
+
+	if ((${#nums[@]} == 0)); then
+		fail "the PR body states no Radar blip, and this diff changes code (blip 20). Add a line: Radar: blip <n> — <the problem it fixes and how it is measured>"
+		{
+			echo "## Radar: missing"
+			echo ""
+			echo "The diff changes code:"
+			echo ""
+			printf -- '- `%s`\n' "${code[@]}"
+			echo ""
+			echo "Add a line to the PR body, citing a Thoughtworks Radar blip from"
+			echo "\`${RADAR_TSV_REL}\` and how the change is measured:"
+			echo ""
+			echo '`Radar: blip 20 — the guard fails loudly instead of repairing silently, checked by scripts/tests/guard.test.sh`'
+		} | summary
+		return 1
+	fi
+
+	if ! tsv="$(radar_tsv)"; then
+		fail "cannot find ${RADAR_TSV_REL} to check the cited blip against — the allowlist is what makes a citation mean something, so a run without it is not green"
+		{
+			echo "## Radar: unverifiable"
+			echo ""
+			echo "No \`${RADAR_TSV_REL}\` found from the repo root, beside this"
+			echo "script, or in the working directory."
+		} | summary
+		return 1
+	fi
+
+	for n in "${nums[@]}"; do
+		if ! awk -F'\t' -v n="$n" 'NR > 1 && $1 == n { found = 1 } END { exit !found }' "$tsv"; then
+			unknown+=("$n")
+		fi
+	done
+	if ((${#unknown[@]} > 0)); then
+		fail "$(printf 'the Radar line cites blip %s, which is not in %s — a fabricated blip reads well and means nothing; cite a real one or drop the claim' "${unknown[*]}" "$RADAR_TSV_REL")"
+		{
+			echo "## Radar: unknown blip"
+			echo ""
+			echo "Cited but not in \`${RADAR_TSV_REL}\`:"
+			echo ""
+			printf -- '- blip `%s`\n' "${unknown[@]}"
+			echo ""
+			echo "The first column of that file is the list of blips that exist."
+		} | summary
+		return 1
+	fi
+
+	# The measurement: everything after the last number, with punctuation and
+	# whitespace removed, has to say something. "Radar: blip 20" alone names a
+	# blip and no way to see the change working.
+	last="${nums[-1]}"
+	tail=""
+	if [[ $radar =~ ^(.*)(blip[[:space:]]*#?|#)[[:space:]]*${last}(.*)$ ]]; then
+		tail="${BASH_REMATCH[3]}"
+	fi
+	measured="$(printf '%s' "$tail" | sed -e 's/[^[:alnum:]]//g')"
+	echo "radar: blip ${last}, ${#measured} characters of measurement"
+
+	if ((${#measured} < 15)); then
+		fail "the Radar line names blip ${last} but does not say how the change is measured, and at least 15 characters after the number are required. Add: Radar: blip ${last} — <the problem it fixes and how it is measured>"
+		{
+			echo "## Radar: how it is measured, missing"
+			echo ""
+			echo "The line names a blip and stops:"
+			echo ""
+			echo "\`${radar}\`"
+			echo ""
+			echo "At least 15 characters after the last number, excluding"
+			echo "punctuation and whitespace, have to say how the change is measured."
+		} | summary
+		return 1
+	fi
+
+	note "radar blip ${nums[*]} cited, measurement stated"
+	{
+		echo "## Radar: blip ${nums[*]}"
+		echo ""
+		echo "${radar}"
+	} | summary
+	return 0
+}
+
+
 ORDER=()
 case "$GATES" in
-all) ORDER=(mission tier test-change) ;;
+all) ORDER=(mission tier test-change radar) ;;
 *) ORDER=("$GATES") ;;
 esac
 
@@ -504,7 +676,7 @@ esac
 # job, and it must keep working in a checkout with no usable diff.
 for gate in "${ORDER[@]}"; do
 	case "$gate" in
-	tier | test-change)
+	tier | test-change | radar)
 		load_changed
 		break
 		;;
@@ -516,6 +688,7 @@ for gate in "${ORDER[@]}"; do
 	mission) gate_mission || FAILED=1 ;;
 	tier) gate_tier || FAILED=1 ;;
 	test-change) gate_test_change || FAILED=1 ;;
+	radar) gate_radar || FAILED=1 ;;
 	esac
 done
 
