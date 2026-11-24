@@ -14,6 +14,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { after, test } from "node:test";
 
 const script = join(import.meta.dirname, "..", "herdr-resume.mjs");
@@ -299,7 +300,7 @@ function writeFake(sequence, extra = {}) {
 		terminal_name: "worker",
 		session_path: sessionPath,
 		cwd: join(root, "sessions", "app"),
-		argv: [process.execPath, fakePi],
+		argv: extra.entryArgv ?? [process.execPath, fakePi],
 		mode: "plain",
 		restored_boot_id: "an-earlier-boot",
 		labels: {},
@@ -309,8 +310,23 @@ function writeFake(sequence, extra = {}) {
 	writeFileSync(join(fakeDir, "t7.json"), JSON.stringify(entry, null, 2) + "\n");
 }
 
-function runFake(env = {}) {
-	return spawnSync(process.execPath, [script], {
+/**
+ * The platform the restore script is told it runs on: `startedWitness` reads `process.platform`
+ * once, on load, so a module preloaded before it decides which branch answers.
+ */
+const forcePlatform = join(root, "force-platform.mjs");
+function forcePlatformFile(platform) {
+	writeFileSync(forcePlatform, `Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)}, configurable: true });\n`);
+	return forcePlatform;
+}
+
+function runFake(env = {}, options = {}) {
+	// `startedWitness` asks the platform once, on load. A case about the Windows answer can then be
+	// run on a Linux host instead of skipped there — and a skipped case proves nothing.
+	const preload = options.platform
+		? ["--import", pathToFileURL(forcePlatformFile(options.platform)).href]
+		: [];
+	return spawnSync(process.execPath, [...preload, script], {
 		encoding: "utf8",
 		env: {
 			...scratch,
@@ -370,4 +386,104 @@ test("a terminal that never attaches before the deadline is skipped as never-a-s
 	assert.match(out.stdout, /never became a shell within 1200 ms/);
 	assert.doesNotMatch(out.stdout, /busy/, "no program ever appeared: this is not a busy terminal");
 	assert.equal(JSON.parse(readFileSync(join(fakeDir, "t7.json"), "utf8")).restored_at, undefined);
+});
+
+/**
+ * Windows, and the half of it that only Windows has: herdr starts a tab as
+ * `powershell.exe -NoExit -Command "& '<program>'"`, and hc keeps answering that launch
+ * program as the terminal's foreground for as long as the terminal lives — measured
+ * 2026-11-24 on a bash tab running node, which answered `bash.exe` and the same pid on
+ * every poll. So the line was typed, pi was running, and the script called it "nothing
+ * started" and typed the same line a second time into the pi it had just started.
+ */
+const windowsShell = {
+	...attachedShell,
+	address: "t7",
+	argv: ["C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "-NoExit", "-Command", "& 'C:/Program Files/Git/usr/bin/bash.exe'"],
+	foreground: { argv: ["C:\\Program Files\\Git\\usr\\bin\\bash.exe"], name: "bash.exe", pid: process.pid },
+};
+/** The same terminal once the resume line ran: the foreground never changed, but pi reported in. */
+const windowsResumed = { ...windowsShell, status: { app: "pi", state: "working" } };
+
+test("a terminal whose foreground stays the launched shell counts as started when pi reports in", () => {
+	// A Windows answer, run as Windows on whatever host this is: off Windows the same facts must
+	// read "not started" (scripts/tests/herdr-resume-witness.test.mjs pins that pair).
+	writeFake([windowsShell], { afterSend: windowsResumed });
+
+	const out = runFake({}, { platform: "win32" });
+	assert.equal(out.status, 0, out.stderr);
+	assert.match(out.stdout, /restored terminal t7: exec /);
+	// The bug this pins: a second paste into the pi the first paste started.
+	assert.equal(fakeCallLog().filter((call) => call[0] === "send").length, 1, "the line must be typed once, not once per attempt");
+	assert.doesNotMatch(out.stdout, /nothing started/);
+	assert.equal(JSON.parse(readFileSync(join(fakeDir, "t7.json"), "utf8")).restored_at !== undefined, true);
+});
+
+test("a shell that never reports a program is still not a restore", () => {
+	// The other side of the same coin: the foreground stays a shell and nothing ever writes
+	// a status, so the line was typed and nothing can be said about whether it ran.
+	writeFake([windowsShell], { afterSend: windowsShell });
+
+	const out = runFake({ PI_HERDR_RESUME_START_MS: "800" });
+	assert.equal(out.status, 0, out.stderr);
+	assert.match(out.stdout, /nothing started after two attempts, entry left unmarked/);
+	assert.equal(JSON.parse(readFileSync(join(fakeDir, "t7.json"), "utf8")).restored_at, undefined);
+});
+
+/**
+ * The same Windows tab, but recovered as what herdr really hands back: a `powershell.exe` with
+ * hc's prompt hook, not a bash. It has no `exec`, so the POSIX line was a
+ * `CommandNotFoundException` printed in the tab, four times per boot, and the Boss never came
+ * back (measured 2026-11-24: `hc read t15`). The line has to be PowerShell's.
+ */
+const windowsPowerShell = {
+	...attachedShell,
+	address: "t7",
+	argv: [
+		"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+		"-NoExit",
+		"-Command",
+		"$global:__hc_prompt = $function:prompt",
+	],
+	foreground: {
+		argv: ["C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "-NoExit", "-Command", "$global:__hc_prompt = $function:prompt"],
+		name: "powershell.exe",
+		pid: process.pid,
+	},
+};
+/** What `hc get` answers once that line ran: the child is the foreground, and pi reports in. */
+const windowsPowerShellResumed = {
+	...windowsPowerShell,
+	argv: ["C:\\Program Files\\nodejs\\node.exe", "/app/cli.js"],
+	foreground: { argv: ["C:\\Program Files\\nodejs\\node.exe", "/app/cli.js"], name: "node.exe", pid: process.pid },
+	status: { app: "pi", state: "working" },
+};
+
+test("a recovered PowerShell tab is typed a PowerShell line, not a POSIX one", () => {
+	writeFake([windowsPowerShell], {
+		afterSend: windowsPowerShellResumed,
+		// The entry a Windows Boss leaves behind: a script, not a program.
+		entryArgv: ["C:\\Users\\markm\\AppData\\Roaming\\npm\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js"],
+	});
+
+	const out = runFake();
+	assert.equal(out.status, 0, out.stderr);
+	const sent = fakeCallLog().filter((call) => call[0] === "send").map((call) => call[2]);
+	assert.equal(sent.length, 1, "the line must be typed once");
+	assert.match(sent[0], /^& /, "PowerShell gets `&`, because it has no `exec`");
+	assert.doesNotMatch(sent[0], /\bexec\b/, "a POSIX line in a PowerShell tab is a CommandNotFoundException");
+	assert.match(sent[0], /--session/, "the session file still travels with the line");
+	assert.ok(sent[0].includes(process.execPath), "a .js argv[0] is run by an interpreter that exists, not by association");
+	assert.match(out.stdout, /restored terminal t7: & /);
+	assert.equal(JSON.parse(readFileSync(join(fakeDir, "t7.json"), "utf8")).restored_at !== undefined, true);
+});
+
+test("a recovered POSIX shell still gets the exec line", () => {
+	writeFake([attachedShell], { afterSend: startedPi });
+
+	const out = runFake();
+	assert.equal(out.status, 0, out.stderr);
+	const sent = fakeCallLog().filter((call) => call[0] === "send").map((call) => call[2]);
+	assert.equal(sent.length, 1);
+	assert.match(sent[0], /^exec /);
 });
