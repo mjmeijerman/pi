@@ -48,3 +48,4 @@ agent/env.secret
 
 .pi/
 herdr-mods/durable/gpui-kit.d.ts
+herdr-mods/durable/jsconfig.json
