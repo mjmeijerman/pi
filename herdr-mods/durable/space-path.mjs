@@ -49,3 +49,41 @@ export function toolProgram({ home, name, exists } = {}) {
 		`${name} is not where this mod looks: ${tried.join(" and ")} — re-run the installer, which writes ${name}.cmd beside the wrapper on Windows`,
 	);
 }
+
+/**
+ * shimLaunch — the two paths a `.cmd` shim carries: the bash.exe that starts it, and the wrapper
+ * it starts. `cmdShim()` in ~/.pi/scripts/install-lib.mjs writes exactly this line:
+ *
+ *     "C:\Program Files\Git\usr\bin\bash.exe" "C:/Users/mj/.local/bin/space" %*
+ *
+ * and it is the only place this mod can learn where bash is. A `.cmd` is not a program a process
+ * can spawn: measured 2026-11-25, `spawnSync("<shim>.cmd", ["list"])` answers EINVAL on Windows,
+ * and the panel alt-shift-n opens said `no C:\Users\markm\.local\bin\space.cmd — is pi installed?`
+ * while that file was right there. Reading the shim keeps one source for the path: the installer.
+ */
+export function shimLaunch(text) {
+	const m = /^\s*"([^"]*\bbash(?:\.exe)?)"\s+"([^"]+)"/im.exec(String(text ?? ""));
+	if (!m) return null;
+	return { program: m[1], wrapper: m[2] };
+}
+
+/**
+ * toolPlan — what to spawn for a tool name: the `program`, the `prefix` to put in front of the
+ * tool's own argv, and the `shown` path a person reads in the panel.
+ *
+ * Asynchronous because it reads the shim it found. On a POSIX home the prefix is empty and the
+ * program is the wrapper itself; on Windows it is the bash.exe the shim names, and the wrapper
+ * as the first argument — the same process the shim would have started, without cmd.exe.
+ */
+export async function toolPlan({ home, name, exists, read } = {}) {
+	const found = toolProgram({ home, name, exists });
+	if (!/\.(cmd|bat)$/i.test(found)) return { program: found, prefix: [], shown: found };
+	let launch = null;
+	try {
+		launch = shimLaunch(await read?.(found));
+	} catch {
+		launch = null;
+	}
+	if (!launch) return { program: found, prefix: [], shown: found };
+	return { program: launch.program, prefix: [launch.wrapper], shown: found };
+}

@@ -11,16 +11,40 @@
 # as it runs.
 #
 # Nothing here weakens the sandbox: it is the same binary, started without the
-# wrapper. `install.sh` symlinks this into ~/.local/bin so the menu finds it.
+# wrapper. `install.sh` puts this into ~/.local/bin, beside `pi-resolve.sh`, so the menu finds it.
 set -uo pipefail
+
+# A herdr tab on Windows starts with the *Windows* PATH: `C:\Program Files\Git\cmd` is there,
+# `C:\Program Files\Git\usr\bin` is not, so `env`, `dirname` and `readlink` all answer "command
+# not found" and a wrapper that needs them starts nothing. Measured 2026-11-25: the harness Boss
+# tab came back as a prompt with no agent in it, every boot. `command` is a builtin, so this probe
+# itself needs nothing.
+if ! command -v dirname >/dev/null 2>&1; then
+	PATH="/usr/bin:/bin:$PATH"
+fi
 
 # `pi` is a pnpm-installed binary in ~/.local/share/pnpm/bin, which is on an
 # interactive shell's PATH but not on the one Herdr's terminal holder restarts a
-# lost program with. Resolve it here so the menu row launches, not just the
-# absolute path to this script.
-case ":$PATH:" in
-*":$HOME/.local/share/pnpm/bin:"*) ;;
-*) PATH="$HOME/.local/share/pnpm/bin:$PATH" ;;
-esac
+# lost program with. The resolution lives in one file, shared with the two
+# sandboxed modes: this script carries no home directory, so the same wrapper
+# starts pi on Linux, macOS and Git Bash on Windows.
+here=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd)
+# Installed, `pi-resolve.sh` sits beside this file; in the checkout it is one directory over.
+for lib in "$here/pi-resolve.sh" "$here/../bin/pi-resolve.sh"; do
+	if [ -f "$lib" ]; then
+		# shellcheck source=bin/pi-resolve.sh
+		. "$lib"
+		break
+	fi
+done
+command -v pi_resolve >/dev/null 2>&1 || {
+	printf 'pi-bare: no pi-resolve.sh beside %s — that file is what finds pi\n' "$0" >&2
+	exit 127
+}
 
-exec env PI_BARE=1 pi "$@"
+pi_resolve || exit 127
+# Exported, not handed to `env`: `env` is a bare exec, and the PATH a herdr tab gets on Windows is
+# the Windows one, which has no `env` in it at all. Measured 2026-11-25: every boot the harness
+# Boss tab came back as `pi-bare: line 26: exec: env: not found` and a prompt with no agent in it.
+export PI_BARE=1
+pi_exec "$@"
