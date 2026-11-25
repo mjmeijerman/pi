@@ -68,6 +68,26 @@ shell_is_win() {
 	[ -n "${MSYSTEM:-}" ]
 }
 
+# shell_mode_ok <mode> — can a worker be started in this mode on this host? Pure, and it asks
+# shell_is_win and nothing else, so a test answers both ways by stubbing that one predicate
+# instead of needing a Windows machine. Who runs a mode is bin/delegate's question; whether the
+# host can is this one, and it lives beside shell_is_win so the two cannot disagree.
+#   bare      — always: pi with the host's own home and credentials.
+#   sandboxed — needs a Linux kernel sandbox. Native Windows has none, and bin/pi-sandboxed says
+#               so and exits rather than running bare, so a tab that starts it is a dead tab.
+#   no-net    — that sandbox plus the network jail, so it is absent wherever the sandbox is.
+# Returns 0 when the mode can run here, 1 when it cannot, 2 for a name that is not a mode.
+shell_mode_ok() {
+	case ${1:-} in
+	bare) return 0 ;;
+	sandboxed | no-net)
+		if shell_is_win; then return 1; fi
+		return 0
+		;;
+	esac
+	return 2
+}
+
 # shell_real <path> — the file behind the link, or the path itself when there is no link to resolve
 # (a test fixture, a file that is already real, a host without `readlink -f`).
 shell_real() {
@@ -80,6 +100,29 @@ shell_real() {
 		}
 	fi
 	printf '%s\n' "$1"
+}
+
+# shell_win_path <path> — the same file spelled for a Windows program: forward slashes and a
+# drive letter. `cygpath -m` when it is there; a path that is already `C:/...` needs nothing.
+# A path this cannot spell returns 1 instead of printing a `/c/...` slash-path that PowerShell —
+# which resolves the argv a herdr tab is given — would not find. The caller prints the
+# PI_GIT_BASH line, because that is the one thing that fixes it.
+shell_win_path() {
+	local p=${1:-} c
+	[ -n "$p" ] || return 1
+	if command -v cygpath >/dev/null 2>&1; then
+		c=$(cygpath -m -- "$p" 2>/dev/null) && [ -n "$c" ] && {
+			printf '%s\n' "$c"
+			return 0
+		}
+	fi
+	case $p in
+	[A-Za-z]:[\\/]*)
+		printf '%s\n' "$(printf '%s' "$p" | tr '\\' '/')"
+		return 0
+		;;
+	esac
+	return 1
 }
 
 # shell_usable <path> — a file this shell can hand to exec. On Git Bash an .exe runs without the

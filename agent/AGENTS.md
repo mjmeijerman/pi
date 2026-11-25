@@ -4,10 +4,6 @@
 - Use codemode for 2+ tool calls: one script (`tools.read`, `tools.bash`, `Promise.allSettled` when independent) beats separate calls; single calls go direct.
 - ADHD mode is always on (`~/.pi/agent/i-have-adhd.json`); it governs commits, PR bodies, review comments, files. Only the user turns it off.
 
-## Sandbox
-
-- `pi` runs sandboxed by default (`install.sh` wraps it); `pi-bare` quits it; `pisandbox --no-net` is for repo scripts, not agents — no net means no model (blip 1).
-
 ## Landing changes
 
 - Never merge, push to trunk, or commit on trunk without the user's explicit permission in this session. Ask, wait for a yes, then `/mergeguard allow` and run that one command. `merge-guard` blocks all of those; green CI is not permission.
@@ -21,7 +17,6 @@
 
 ## Models
 
-- `local_llm` runs summarize/classify/extract/tidy/translate on the local `qwen3.8:27b` (no API cost); `/local` checks the endpoint.
 - `jev` decides instead of guessing (0 yes, 1 no, 3 unsure). TypeSafe's Jev over HTTPS — a key, network, a cost per call — not local.
 
 ## Harness feedback
@@ -37,5 +32,3 @@
 ## Machine / screens
 
 - X11, DISPLAY `:1`, root window 9840x3840 (multi-monitor, scaled); never grab the whole root.
-- Shotcut: right-hand screen. No hardcoded coordinates: run `xwininfo -root -tree`, pick the largest `Shotcut` window.
-- Screenshot helper: `~/projects/bakmark/scripts/shotcut-window.py [out.png] [width]`.

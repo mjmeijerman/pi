@@ -12,6 +12,14 @@ elif [ -z "${BASH_VERSION:-}" ]; then
 	printf '%s: no shell-resolve.sh next to %s — it is what finds bash: set PI_GIT_BASH or run this under bash\n' "${0##*/}" "$0" >&2
 	exit 127
 fi
+# The argv a worker's tab is started with is built in one place, for the spawn and the restart
+# both: bin/worker-argv.sh picks the first word (PowerShell is what resolves it on Windows, so
+# `sh` is not an answer there) and hands the command line over as one string. A missing copy
+# beside this script is caught where it is used, by the `|| die` on the build.
+if [ -f "$shell_dir/worker-argv.sh" ]; then
+	# shellcheck source=bin/worker-argv.sh
+	. "$shell_dir/worker-argv.sh"
+fi
 
 #   delegate spawn <slug> --cwd DIR [--space SLUG] [--mode bare|sandboxed|no-net] [--thinking LEVEL]
 #                  [--acceptance] [--patch FILE] [--updates PR]
@@ -1689,6 +1697,35 @@ Re-run with --override-jev --reason '<why these defaults are good enough>' to sp
 	fi
 }
 
+# host_mode_reason <mode> — why a mode cannot start on this host, as one clause a refusal and a
+# one-line note are both built from. Only native Windows lacks them, and the runner is what would
+# have said so ten seconds later, in a tab nobody is reading: bin/pi-sandboxed:35.
+host_mode_reason() {
+	case ${1:-} in
+	sandboxed) printf 'native Windows has no sandbox, so bin/pi-sandboxed refuses' ;;
+	no-net) printf 'native Windows has no sandbox and no network jail, so bin/pi-nonet refuses' ;;
+	*) printf 'it cannot run on this host' ;;
+	esac
+}
+
+# host_mode_ok <mode> — whether a worker can be started in that mode here. The answer is
+# shell_mode_ok's (bin/shell-resolve.sh, beside shell_is_win), which is the one place the host is
+# asked. A copy of this script beside a shell-resolve.sh too old to carry it is named rather than
+# read as "cannot run here", because that answer would turn a stale file into a Linux refusal.
+host_mode_ok() {
+	command -v shell_mode_ok >/dev/null 2>&1 ||
+		die "bin/shell-resolve.sh beside $0 does not define shell_mode_ok, so 'can this host run mode ${1:-?}' has no answer — update the harness"
+	shell_mode_ok "${1:-}"
+}
+
+# mode_unavailable_line <mode> — the one line printed when a mode that cannot run here is replaced
+# by bare. One spelling, called by the spawn's fallback and by restart_worker, so the two cannot
+# drift into saying different things about the same host.
+mode_unavailable_line() {
+	printf '%s: note: mode %s cannot run on this host (%s); using mode=bare.\n' \
+		"$prog" "${1:-?}" "$(host_mode_reason "${1:-}")" >&2
+}
+
 # defaults_json <space-separated field names> -- the `defaults` extra for the decision rows, or
 # nothing when no field defaulted. The names are already restricted to the four by plan_jev.
 defaults_json() {
@@ -2199,6 +2236,11 @@ Re-run without --mode to use jev's answer, or re-run with --override-jev --reaso
 	elif [ "$refuse_thinking" = 1 ]; then
 		refusal="--thinking $thinking contradicts jev, which answered effort '$jev_effort' — level '$jev_level' for this task ($thinking_reason).
 Re-run without --thinking to use jev's level, or re-run with --override-jev --reason '<why>' to overturn jev."
+	elif [ -n "$mode" ] && ! host_mode_ok "$mode"; then
+		# Named by the caller and cannot run here: refused before tab.new, so there is no dead tab
+		# to clean up, and the flag that works is in the sentence.
+		refusal="--mode $mode cannot run on this host: $(host_mode_reason "$mode").
+Re-run with --mode bare, which is the mode that works here."
 	elif [ "$refuse_route" = 1 ]; then
 		refusal="jev routes this task local, so a space and an agent are more than it needs ($route_reason).
 Run it here instead:  $BIN/local-run \"<task>\"
@@ -2213,6 +2255,17 @@ Forcing a remote worker needs --override-jev --reason '<why this cannot run loca
 	fi
 
 	if [ -z "$mode" ]; then mode=$jev_mode; fi
+	# The mode that came from jev or from the defaults gets the other half of the host check: bare,
+	# one line saying why, and the reason in the mode decision row. This is the path that bit —
+	# jev's conservative default is `sandboxed`, and on native Windows that was a tab that printed
+	# bin/pi-sandboxed's refusal and exited while the spawn printed a success JSON
+	# (state/spaces/harness/reports/spawn-check.md). Nothing here is an override: jev answered
+	# about the work, the host answered about the mode, and both are recorded.
+	if ! host_mode_ok "$mode"; then
+		mode_unavailable_line "$mode"
+		mode_reason="$mode_reason; fell back to bare because $(host_mode_reason "$mode")"
+		mode=bare
+	fi
 	# A --thinking that survives to here either agrees with jev or was overridden on purpose.
 	if [ -z "$thinking" ] || [ "$refuse_thinking" != 1 ]; then thinking=$jev_level; fi
 	jev_level=$thinking
@@ -2507,8 +2560,9 @@ EOF
 		# gets the same skeleton and two copies of it would drift.
 		write_report_skeleton "$report" "$spawn_slug" "$is_git"
 
-	argv=$(node -e 'process.stdout.write(JSON.stringify(["sh","-lc",process.argv[1]]))' \
-		"cd $(printf '%q' "$cwd") && export AGENT_SLUG=$(printf '%q' "$spawn_slug") && exec $(printf '%q' "$runner") --thinking $(printf '%q' "$jev_level") -a")
+	argv=$(worker_tab_argv "cd $(printf '%q' "$cwd") && export AGENT_SLUG=$(printf '%q' "$spawn_slug") && exec $(printf '%q' "$runner") --thinking $(printf '%q' "$jev_level") -a") ||
+		die "cannot start $spawn_slug: the argv its tab is started with could not be built, so no tab was opened and nothing was sent.
+It is a bash this Windows can spell: install Git for Windows, or set PI_GIT_BASH=C:/Program Files/Git/bin/bash.exe"
 	# The worker arrives as a tab in the space that asked for it: `tab.new` takes the space's id,
 	# which the record may predate (space_id_ensure reads it back from herdr by name, once).
 	# `--focus false` adds the tab last and keeps the shown space and its selected tab, so the
@@ -2548,11 +2602,25 @@ Open it again, or make a new space and start there:
   $BIN/delegate spawn $spawn_slug --cwd $cwd \"<task>\""
 
 	# tab.new's --task can arrive before pi is listening, so send it again once the banner is up.
-	local i
+	# A start that is not witnessed is said out loud: this wait used to end silently and the JSON
+	# still read like success, so nobody learned that the tab had printed a refusal and dropped to a
+	# shell prompt (state/spaces/harness/reports/spawn-check.md). The exit code stays 0 on purpose —
+	# the tab exists and `delegate wait` still watches it; the point is that the failure is visible.
+	local i started=0 last_line
 	for i in $(seq 1 40); do
-		hc read "$terminal" 2>/dev/null | grep -q "escape interrupt" && break
+		if hc read "$terminal" 2>/dev/null | grep -q "escape interrupt"; then
+			started=1
+			break
+		fi
 		sleep 1
 	done
+	if [ "$started" != 1 ]; then
+		# The terminal's own last words, with CR stripped: PowerShell's prompt and pi's refusal line
+		# are what a reader needs, and a blank tail says the tab printed nothing at all.
+		last_line=$(hc read "$terminal" 2>/dev/null | tr -d '\r' | grep -v '^[[:space:]]*$' | tail -n 1)
+		printf '%s: warning: %s did not start in terminal %s (tab %s): %s\n' \
+			"$prog" "$spawn_slug" "${terminal:-?}" "${tab:-?}" "${last_line:-the terminal printed nothing}" >&2
+	fi
 	hc send "$terminal" "Read $spec and do it. Report to $report." >/dev/null 2>&1 \
 		|| printf '%s: warning: could not send the task to %s\n' "$prog" "$terminal" >&2
 
@@ -2575,13 +2643,24 @@ restart_worker() {
 	level=$(delegation_field "$slug" thinking)
 	[ -n "$spec" ] && [ -f "$spec" ] || die "cannot restart $slug: its spec ($spec) is not on disk"
 	[ -n "$cwd" ] && [ -d "$cwd" ] || die "cannot restart $slug: its record names no usable cwd ($cwd)"
+	# The recorded mode is read back and checked, not trusted: a worker recorded as `sandboxed` by a
+	# spawn that predates this check restarts `bare` with the same one line, instead of dying on the
+	# same refusal a second time. The record keeps the mode the spawn chose; the restart row says
+	# how this run actually started.
+	local mode_note=""
+	if ! host_mode_ok "$mode"; then
+		mode_unavailable_line "$mode"
+		mode_note="; on this host that is mode bare, because $(host_mode_reason "$mode")"
+		mode=bare
+	fi
 	case $mode in bare|sandboxed) runner=$(bin_prog "pi-$mode") ;; *) runner=$(bin_prog pi-nonet) ;; esac
 	[ -x "$runner" ] || die "cannot restart $slug: no runner for mode '${mode:-?}' ($runner)"
 
 	printf '\n---\n\nRestart %s: the previous terminal died before the report was written. Same spec,\nsame slug, a fresh tab in the same space.\n' "$attempt" >>"$spec"
 	write_report_skeleton "$report" "$slug" "$(space_field "$SPACE" git)"
-	argv=$(node -e 'process.stdout.write(JSON.stringify(["sh","-lc",process.argv[1]]))' \
-		"cd $(printf '%q' "$cwd") && export AGENT_SLUG=$(printf '%q' "$slug") && exec $(printf '%q' "$runner") --thinking $(printf '%q' "$level") -a")
+	argv=$(worker_tab_argv "cd $(printf '%q' "$cwd") && export AGENT_SLUG=$(printf '%q' "$slug") && exec $(printf '%q' "$runner") --thinking $(printf '%q' "$level") -a") ||
+		die "cannot restart $slug: the argv its tab is started with could not be built, so no tab was opened.
+It is a bash this Windows can spell: install Git for Windows, or set PI_GIT_BASH=C:/Program Files/Git/bin/bash.exe"
 	# A restart is a fresh tab in the space that asked for the worker, not a space of its own: the
 	# worker is the same work in the same project, and `tabs` is where that project's work lives.
 	local space_id
@@ -2614,7 +2693,7 @@ restart_worker() {
 		"$slug" "$space" "$tab" "$terminal" "$attempt" \
 		|| printf '%s: warning: restart %s of %s could not be recorded in %s\n' "$prog" "$attempt" "$slug" "$DELEGATIONS_WRITE" >&2
 
-	record_decision restart "$spec" "restarted" "the terminal was gone before a report; restart $attempt of 3 as $slug-r$attempt" false "$slug"
+	record_decision restart "$spec" "restarted" "the terminal was gone before a report; restart $attempt of 3 as $slug-r$attempt$mode_note" false "$slug"
 	hc send "$terminal" "Read $spec and do it. Report to $report." >/dev/null 2>&1 ||
 		printf '%s: warning: could not send the task to restarted worker %s\n' "$prog" "$terminal" >&2
 	return 0

@@ -82,6 +82,7 @@ import {
 	PI_WRAPPER_END,
 	POSIX_WRAPPERS,
 	PI_HOME_CARRIERS,
+	RESUME_TASK_NAME,
 	SOURCE_LIBS,
 	cmdShim,
 	deepseekApiKey,
@@ -93,11 +94,15 @@ import {
 	herdrInstallCommand,
 	helpText,
 	hiddenLauncher,
+	hcCandidates,
 	homePaths,
 	isRuntimeState,
 	parseFlags,
 	piDiskCandidates,
 	piInstallCommand,
+	resumeLauncher,
+	resumeLauncherPath,
+	resumeTaskCommand,
 	piPreflight,
 	planFor,
 	prereqNodePin,
@@ -152,6 +157,9 @@ let changed = 0;
 // What stepServices registered, so the summary can say it and say how to undo
 // it: a skip must not print a Disable line for an entry that is not there.
 let guardService = null;
+// The resume entry beside it (Windows): the guard repairs the space, this puts each pi
+// session back in its tab. Nul when it was not registered, and the summary says why.
+let resumeService = null;
 // Every unit stepSystemd copied, so the summary's disable lines name what is
 // really there instead of a list that can drift from the directory.
 let systemdInstalled = [];
@@ -1305,7 +1313,72 @@ function stepServices() {
 	guardService = { label: `Task Scheduler entry ${GUARD_TASK_NAME} (hidden: ${launcher})`, remove: task.remove, stop: task.stop };
 	say(`   disable: ${task.remove}`);
 	say(`   disable: ${task.stop}`);
+	// Beside the guard, not inside it: one repairs the space, the other puts the pi
+	// sessions back in the shells herdr hands out. Both are needed after a reboot, and
+	// neither can do the other's job.
+	registerResumeTask();
 	return startGuardNow();
+}
+
+/**
+ * registerResumeTask — the `pi-resume` logon entry, on Windows only.
+ *
+ * It runs `scripts/herdr-resume.sh` hidden through a `.vbs` launcher, the same pattern the
+ * guard uses, because the task must open no console window. Three things can be missing, and
+ * each one is a refusal with the line that fixes it rather than a task that starts nothing:
+ * Git Bash (the script is bash), the script itself (a checkout without it), and `hc.exe` (the
+ * resume run asks hc which terminals came back as shells; with nothing to ask it exits 0 and
+ * the tab stays empty).
+ *
+ * PI_SKIP_SYSTEMD / PI_SKIP_SERVICES never reach here: the whole service step has already
+ * returned with the skip line, which is the one place that promise is kept.
+ */
+function registerResumeTask() {
+	const script = path.join(SOURCE_DIR, 'scripts', 'herdr-resume.sh');
+	if (!exists(script)) {
+		warn(`resume: ${script} missing — nothing puts a pi session back in its tab after a reboot, so no entry was registered`);
+		say('   fix: re-run the install from the pi checkout (scripts/herdr-resume.sh is part of it)');
+		return;
+	}
+	const bash = resolveGitBash();
+	if (!bash) {
+		// The guard branch above already said why; this only says what it costs here.
+		note('resume: not registered — no Git Bash (see the guard line above), so a reboot leaves each tab a plain shell');
+		return;
+	}
+	const hc = resolveHc();
+	if (!hc) {
+		warn('resume: no hc.exe found — the entry would run with nothing to ask, so none was registered');
+		say('   fix: install herdr (hc comes with it), or set PI_HERDR_RESUME_HC to hc.exe, then re-run');
+		return;
+	}
+	const launcher = resumeLauncherPath({ piHome: P.piHome });
+	if (writeText(launcher, resumeLauncher({ bashPath: bash, scriptPath: script, hcPath: hc })))
+		note(`resume launcher (hidden, no console window) -> ${launcher}`);
+	const task = resumeTaskCommand({ launcherPath: launcher });
+	note('resume: registering a Task Scheduler entry at logon (this is what puts each pi session back in its tab)');
+	note(`interpreter: ${bash}   # run hidden by ${launcher}`);
+	note(`hc: ${hc}`);
+	say(`   command: ${task.registered}`);
+	if (DRY) say('   [dry-run] not registered');
+	else {
+		// The status is read, not swallowed: `schtasks /Create /SC ONLOGON` needs an elevated
+		// shell on a stock Windows, and an install run from a normal one is refused (measured
+		// 2026-11-24: `ERROR: Access is denied.`, the same answer for a `cmd /c echo hi` task).
+		// A silent refusal here is a reboot that leaves every tab a plain shell, which is the
+		// failure this entry exists to end.
+		const status = run(task.exe, task.args, { allowFail: true });
+		if (status !== 0) {
+			warn(`resume: Task Scheduler refused to register ${RESUME_TASK_NAME} (exit ${status}) — after a reboot each tab comes back as a plain shell with no pi in it`);
+			say('   fix: run this install from an elevated PowerShell (a logon entry needs it), then check with:');
+			say(`   ${task.registered}`);
+			resumeService = null;
+			return;
+		}
+	}
+	resumeService = { label: `Task Scheduler entry ${RESUME_TASK_NAME} (hidden: ${launcher})`, remove: task.remove, stop: task.stop };
+	say(`   disable: ${task.remove}`);
+	say(`   disable: ${task.stop}`);
 }
 
 /**
@@ -1349,6 +1422,27 @@ function resolveGitBash() {
 	const probe = spawnSync('git', ['--exec-path'], { encoding: 'utf8' });
 	const execPath = probe.status === 0 ? (probe.stdout || '').trim() : '';
 	return resolveGitBashAt({ platform: PLAN.platform, env: process.env, execPath, exists });
+}
+
+/** whereCmd — the first absolute path the OS gives for a name, or ''. `where` on
+ * Windows, `command -v` elsewhere; the POSIX probe is the fallback so
+ * PI_PLATFORM=win32 can be exercised from a Linux host, exactly like hasCmd. */
+function whereCmd(name) {
+	if (PLAN.platform === 'win32') {
+		const r = spawnSync('where', [name], { encoding: 'utf8' });
+		if (r.error === undefined) return r.status === 0 ? (r.stdout || '').split(/\r?\n/)[0].trim() : '';
+	}
+	const r = spawnSync('sh', ['-c', `command -v ${name} 2>/dev/null`], { encoding: 'utf8' });
+	return r.status === 0 ? (r.stdout || '').trim() : '';
+}
+
+/** resolveHc — the absolute `hc.exe` the resume run needs (install-lib
+ * `hcCandidates` does the order and the PI_HERDR_RESUME_HC override). A task gets
+ * no useful PATH, and a resume run with no hc to ask finds nothing and exits 0 —
+ * an entry that looks healthy and does nothing. */
+function resolveHc() {
+	const candidates = hcCandidates({ platform: PLAN.platform, env: process.env, onPath: whereCmd('hc') });
+	return candidates.find((p) => exists(p)) || '';
 }
 
 // The shim resolution, asked for once per run: a run with five wrappers and no
@@ -1530,6 +1624,14 @@ function summary() {
 			// running with no window to close, so the launcher's pid file is named
 			// next to it rather than leaving "deleted, still running" to be found out.
 			if (guardService.stop) say(`Disable: ${guardService.stop}`);
+		}
+		// The second entry, and a second line because it is a second thing a reboot
+		// needs: a space with no conversation in it is not repaired by a guard.
+		if (!resumeService) say('Resume task: not registered — the line above says why, and a reboot leaves each tab a plain shell');
+		else {
+			say(`${DRY ? 'Would install' : 'Installed'}: ${resumeService.label}`);
+			say(`Disable: ${resumeService.remove}`);
+			if (resumeService.stop) say(`Disable: ${resumeService.stop}`);
 		}
 	}
 	say('');

@@ -65,6 +65,27 @@ space_lib() {
 die() { printf '%s: error: %s\n' "$PROG" "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 not found in PATH"; }
 
+# The argv a tab is started with: `bin/worker-argv.sh` is the one spelling, shared with
+# `bin/delegate`, so a tab opened here and a worker started there cannot disagree about the
+# first word. It matters on Windows, where herdr types that argv into PowerShell and `sh` is
+# not a name it knows. Sourced lazily like space_lib: the hidden path never builds one.
+worker_lib() {
+	local dir
+	dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/../bin" 2>/dev/null && pwd) || return 1
+	[ -r "$dir/worker-argv.sh" ] || return 1
+	# shellcheck source=/dev/null
+	. "$dir/worker-argv.sh"
+}
+
+# tab_argv <command line> — the JSON array tab.new and space.new take, or a die naming the
+# fix: a tab given an argv whose first word cannot be run starts nothing, silently.
+tab_argv() {
+	local argv
+	worker_lib || die "bin/worker-argv.sh is not beside this script — it builds the argv a tab is started with"
+	argv=$(worker_tab_argv "$1") || die "no argv for the tab: the line above names the bash it could not find"
+	printf '%s' "$argv"
+}
+
 state_read() { [ -f "$STATE" ] && cat "$STATE" || echo '{}'; }
 state_write() { printf '%s\n' "$1" >"$STATE"; }
 
@@ -182,8 +203,7 @@ cmd_spawn() {
 		local argv space_id
 		space_id=$(space_id_ensure "$space_slug")
 		[ -n "$space_id" ] || die "space $space_slug has no herdr id — is it open? bin/space show $space_slug"
-		argv=$(node -e 'process.stdout.write(JSON.stringify(["sh","-lc",process.argv[1]]))' \
-			"$(runner_line "$spawn_dir" "$sandboxed")")
+		argv=$(tab_argv "$(runner_line "$spawn_dir" "$sandboxed")")
 		out=$(herdr-app do tab.new --name "$name" --space "$space_id" --folder "$spawn_dir" \
 			--argv "$argv" --task "Read $spec and do it" --focus false 2>&1) \
 			|| die "tab.new failed for $name in space $space_slug ($space_id): $out"
@@ -197,8 +217,7 @@ cmd_spawn() {
 		# agents pane, can watch it and can end it. space.new has no hidden mode, so this
 		# is the path that cannot lie about existing.
 		local argv before=""
-		argv=$(node -e 'process.stdout.write(JSON.stringify(["sh","-lc",process.argv[1]]))' \
-			"$(runner_line "$spawn_dir" "$sandboxed")")
+		argv=$(tab_argv "$(runner_line "$spawn_dir" "$sandboxed")")
 		# space.new shows the new space, which takes the person off what they were
 		# reading. Note both ids first, explicitly, and put them back after — the same
 		# pair bin/delegate uses. Nobody should lose their place to a learner.

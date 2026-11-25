@@ -151,3 +151,28 @@ No claim without the output; "not run" names what would run it. Every commit end
 
 A red test from your change is said in the report, first line `DECISION NEEDED: <may
 this test change, and why>` — never answered by weakening the assertion until it fits.
+
+<!-- pi-space:begin -->
+## This space is harness
+
+C:/Users/markm/.pi is the only project this space is about. One project per space, and this is it.
+
+- Every request that arrives in this space is about C:/Users/markm/.pi and nothing else. A request that
+  is really about another project is not answered here: say which space owns it and give the exact
+  command to run there — `cd <that project> && bin/delegate spawn <slug> --cwd <that project> "<task>"`.
+  Never do another project's work in this space, not even the small bit.
+- One worker at a time. Start it with `delegate spawn <slug> --cwd C:/Users/markm/.pi "<task>"`, then poll
+  it with `delegate wait <slug> --forever` until the report file exists. If the worker dies before
+  it reports, restart it with the same spec — three times, then write the report naming what you
+  saw. A second worker in this space is what `delegate spawn` refuses, on purpose.
+- A worker arrives as a tab in this space, and its work is about C:/Users/markm/.pi: the tab is opened
+  `--focus false`, so nobody is moved off what they were reading. A finished worker's tab is
+  closed and never reopened, and this space's Boss tab is never closed by anything but the person.
+- A new worker only after the previous pull request is merged. `delegate spawn` enforces it and
+  names the PR; when it does, the next action is asking the person to merge, not spawning again.
+- The boss never edits files in C:/Users/markm/.pi. Reading is fine; a change is a worker's job, and its
+  report is where the change is described.
+- Learning here writes **C:/Users/markm/.pi's `AGENTS.md`** — on a `learn/<slug>` branch, from a sandboxed
+  learner that cannot touch anything else in the project — and the person merges it. A rule that
+  arrived without them reading it is a rule they will not follow.
+<!-- pi-space:end -->
