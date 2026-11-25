@@ -85,5 +85,14 @@ export async function toolPlan({ home, name, exists, read } = {}) {
 		launch = null;
 	}
 	if (!launch) return { program: found, prefix: [], shown: found };
-	return { program: launch.program, prefix: [launch.wrapper], shown: found };
+	// A login shell, and `exec "$0" "$@"` after it: the app's own PATH is the Windows one, where
+	// `readlink`, `dirname` and `node` are all invisible (measured 2026-11-25: `space` died on line
+	// 52 with "readlink: command not found" under a plain `bash <wrapper> list`), and `/etc/profile`
+	// is what puts Git's bin directories back. Passing the tool through "$0" keeps every argument
+	// out of the shell's parsing.
+	return {
+		program: launch.program,
+		prefix: ["-lc", 'exec "$0" "$@"', launch.wrapper],
+		shown: found,
+	};
 }

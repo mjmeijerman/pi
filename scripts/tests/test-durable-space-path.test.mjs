@@ -115,7 +115,9 @@ test("a .cmd is not spawned: the bash.exe it names starts it, wrapper first", as
 	const plan = await toolPlan({ home: WINDOWS, name: "space", exists: there(SHIM_PATH), read: async () => SHIM });
 	assert.deepEqual(plan, {
 		program: "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
-		prefix: ["C:/Users/mj/.local/bin/space"],
+		// A login shell, because the app's PATH is the Windows one and holds neither `readlink`
+		// nor `node`; "$0" keeps the tool's own arguments out of the shell's parsing.
+		prefix: ["-lc", 'exec "$0" "$@"', "C:/Users/mj/.local/bin/space"],
 		shown: SHIM_PATH,
 	});
 });
