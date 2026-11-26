@@ -55,6 +55,8 @@ const {
 	redact,
 	pickLauncher,
 	learnerSpace,
+	learnerSlug,
+	planLearners,
 	learnerPathRefusal,
 	learnerPaths,
 	HARNESS_PATHS,
@@ -196,8 +198,11 @@ describe("decideLearner", () => {
 		assert.match(decision.reason, /^5× bbbb/);
 	});
 
-	test("two learners per session, ten minutes apart", () => {
-		assert.equal(decideLearner(evidence({ notes: 1, spawnsThisSession: 2 })).spawn, false);
+	test("four learners per session, ten minutes apart", () => {
+		const fifth = decideLearner(evidence({ notes: 1, spawnsThisSession: 4 }));
+		assert.equal(fifth.spawn, false);
+		assert.match(fifth.reason, /already started 4 learners this session/, "the refusal counts what the session spent");
+		assert.equal(decideLearner(evidence({ notes: 1, spawnsThisSession: 3 })).spawn, true, "the fourth still starts");
 		assert.equal(
 			decideLearner(evidence({ notes: 1, spawnsThisSession: 1, lastSpawnAt: NOW - minutes(3) })).spawn,
 			false,
@@ -206,6 +211,56 @@ describe("decideLearner", () => {
 			decideLearner(evidence({ notes: 1, spawnsThisSession: 1, lastSpawnAt: NOW - minutes(11) })).spawn,
 			true,
 		);
+	});
+});
+
+describe("planLearners: one compaction, one or two learners", () => {
+	// The four shapes the spec names, as `node --test` cases: a pure planner is what makes
+	// "one compaction teaches twice" checkable without a real `/om compact`.
+	const harness = { slug: "harness", project: "/home/m/.pi", kind: "harness" };
+	const web = { slug: "web", kind: "project", project: "/home/m/web" };
+
+	test("a project space with a harness record: two learners, the project's paths and HARNESS_PATHS", () => {
+		const plan = planLearners([web, harness], "/home/m/web/src");
+		assert.deepEqual(plan.learners.map((learner) => learner.kind), ["project", "harness"], "project first");
+		assert.deepEqual(plan.learners[0].paths, ["AGENTS.md"], "the project learner writes its rules file");
+		assert.deepEqual(plan.learners[1].paths, [...HARNESS_PATHS], "the harness learner writes the harness");
+		assert.deepEqual(plan.learners[1].space, { slug: "harness", kind: "harness", project: "/home/m/.pi" });
+		assert.equal(plan.note, undefined, "both were planned: nothing to explain");
+		assert.notEqual(plan.learners[0].suffix, plan.learners[1].suffix, "two distinct suffixes");
+	});
+
+	test("the harness space owning the cwd: exactly one learner, the harness one", () => {
+		const plan = planLearners([web, harness], "/home/m/.pi/scripts");
+		assert.equal(plan.learners.length, 1, "a harness session does not start a second learner on the same folder");
+		assert.equal(plan.learners[0].kind, "harness");
+		assert.equal(plan.learners[0].space.slug, "harness");
+		assert.equal(plan.note, undefined);
+	});
+
+	test("no harness record: one project learner, and the sentence naming the gap", () => {
+		const plan = planLearners([web], "/home/m/web");
+		assert.equal(plan.learners.length, 1);
+		assert.equal(plan.learners[0].kind, "project");
+		assert.match(plan.note ?? "", /no space records kind: "harness"/, "never a silent single spawn");
+		assert.match(plan.note ?? "", /web/, "and names the learner it did start");
+	});
+
+	test("a cwd no space owns: none, unchanged", () => {
+		assert.deepEqual(planLearners([web, harness], "/elsewhere").learners, []);
+	});
+
+	test("the two slugs and the two queue files cannot collide", () => {
+		const plan = planLearners([web, harness], "/home/m/web");
+		assert.deepEqual(
+			plan.learners.map((learner) => learnerSlug("10-07", learner.suffix)),
+			["learn-10-07-p", "learn-10-07-h"],
+		);
+		const project = runPaths(NOW, undefined, "-p");
+		const harnessRun = runPaths(NOW, undefined, "-h");
+		assert.ok(project.queue.endsWith("-p.md") && harnessRun.queue.endsWith("-h.md"));
+		assert.notEqual(project.queue, harnessRun.queue);
+		assert.notEqual(project.proposal, harnessRun.proposal);
 	});
 });
 
@@ -906,8 +961,54 @@ describe("wiring", () => {
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		await waitFor(() => started.length === 1);
 		assert.equal(started[0].launcher.cwd, SPACE.project);
-		assert.match(started[0].env.PI_SELF_LEARN_SLUG, /^learn-\d{2}-\d{2}$/);
+		assert.match(started[0].env.PI_SELF_LEARN_SLUG, /^learn-\d{2}-\d{2}-p$/);
 		assert.equal(started[0].launcher.space?.slug, SPACE.slug, "a tab in the space that owns the project");
+	});
+
+	test("a project compaction starts two learners: the project's, then the harness's", async () => {
+		// The launch path, not just the planner: one evidence file and one decision, two tabs.
+		// The fixture gains a harness record for the length of this test, so a real compaction
+		// proves two launches and two queue files; nothing else in this file may see it.
+		const harnessDir = join(scratch, "state", "spaces", "harness");
+		const harnessProject = join(scratch, "pi");
+		await mkdir(harnessDir, { recursive: true });
+		await writeFile(
+			join(harnessDir, "space.json"),
+			JSON.stringify({ name: "harness", project: harnessProject, kind: "harness" }),
+			"utf8",
+		);
+		try {
+			const { emit, ctx, started } = setup();
+			await trip(emit, ctx);
+			await settle();
+			await emit("session_compact", { reason: "threshold" }, ctx);
+			await waitFor(() => started.length === 2, 2000, "a project learner and a harness learner");
+
+			const harnessStart = started.find((entry) => entry.env.PI_SELF_LEARN_SLUG?.endsWith("-h"));
+			const projectStart = started.find((entry) => entry.env.PI_SELF_LEARN_SLUG?.endsWith("-p"));
+			assert.ok(harnessStart, "the harness learner exists and its slug says which it is");
+			assert.ok(projectStart, "and so does the project learner");
+			assert.match(harnessStart!.env.PI_SELF_LEARN_SLUG!, /^learn-\d{2}-\d{2}-h$/);
+			assert.match(projectStart!.env.PI_SELF_LEARN_SLUG!, /^learn-\d{2}-\d{2}-p$/);
+			assert.equal(projectStart!.launcher.cwd, SPACE.project, "the project learner starts in the project");
+			assert.equal(projectStart!.launcher.space?.slug, SPACE.slug);
+			assert.equal(harnessStart!.launcher.cwd, harnessProject, "the harness learner starts in the harness record's project");
+			assert.equal(harnessStart!.launcher.space?.slug, "harness", "a tab in the harness space");
+			assert.ok(
+				!harnessStart!.launcher.argv.includes("--sandbox"),
+				"a harness learner is bare: it may push its own branch",
+			);
+
+			// One queue file each, and each names the paths its own kind may touch.
+			const harnessRow = await waitForRun((row) => row.kind === "spawned" && String(row.slug).endsWith("-h"));
+			const projectRow = await waitForRun((row) => row.kind === "spawned" && String(row.slug).endsWith("-p"));
+			assert.notEqual(harnessRow.queue, projectRow.queue, "two learners, two evidence files");
+			assert.match(await readFile(harnessRow.queue, "utf8"), /Paths you may touch: bin/, "the harness's paths");
+			assert.match(await readFile(projectRow.queue, "utf8"), /Paths you may touch: AGENTS\.md/, "the project's rules file");
+			assert.match(await readFile(harnessRow.queue, "utf8"), /kind: harness/, "and the queue says which kind it is");
+		} finally {
+			await rm(harnessDir, { recursive: true, force: true });
+		}
 	});
 
 	test("a cwd no space claims starts nothing, and says which folder it was", async () => {
@@ -1318,16 +1419,16 @@ describe("wiring", () => {
 			// The row has to name the run it stands in for: `learn-` plus the same
 			// `HH:MM` every other row's slug carries, taken from this row's own stamp
 			// so a clock that moved between the row and the assertion cannot fake it.
-			assert.match(skipped.slug, /^learn-\d{2}-\d{2}$/, "a slug a reader can match to a run");
+			assert.match(skipped.slug, /^learn-\d{2}-\d{2}-p$/, "a slug a reader can match to a run");
 			assert.equal(
 				skipped.slug,
-				`learn-${skipped.ts.slice(11, 16).replace(":", "-")}`,
+				`learn-${skipped.ts.slice(11, 16).replace(":", "-")}-p`,
 				"the run's own `HH-MM`, not an empty string and not the whole stamp",
 			);
 			// No spec for a learner that cannot exist: a queue file nothing will ever
 			// read is the garbage the skip is meant to avoid.
 			assert.equal(
-				existsSync(runPaths(Date.parse(skipped.ts)).queue),
+				existsSync(runPaths(Date.parse(skipped.ts), undefined, "-p").queue),
 				false,
 				"nothing was queued for a learner the sandbox would refuse",
 			);
@@ -1491,7 +1592,7 @@ describe("wiring", () => {
 		const row = await waitForRun((entry) => entry.kind === "spawned" && entry.trigger === "manual");
 		assert.equal(row.trigger, "manual", "the row says the person asked, not that a compaction fired");
 
-		// Two learners is all one session gets, and the second has to clear the ten-minute gap.
+		// Four learners is all one session gets, and each one has to clear the ten-minute gap.
 		now += 11 * minutes(1);
 		await trip(emit, ctx);
 		await command.handler("", ctx);
@@ -1499,10 +1600,18 @@ describe("wiring", () => {
 		now += 11 * minutes(1);
 		await trip(emit, ctx);
 		await command.handler("", ctx);
+		await waitFor(() => started.length === 3, 2000, "a third learner, after the gap");
+		now += 11 * minutes(1);
+		await trip(emit, ctx);
+		await command.handler("", ctx);
+		await waitFor(() => started.length === 4, 2000, "the fourth learner fills the session");
+		now += 11 * minutes(1);
+		await trip(emit, ctx);
+		await command.handler("", ctx);
 		const warning = notices.find((notice) => notice.level === "warning");
-		assert.ok(warning, "a third learner in one session is refused out loud");
-		assert.equal(warning!.message, "learner not started: already started 2 learners this session", "in the gate's own words");
-		assert.equal(started.length, 2, "and nothing new starts");
+		assert.ok(warning, "a fifth learner in one session is refused out loud");
+		assert.equal(warning!.message, "learner not started: already started 4 learners this session", "in the gate's own words");
+		assert.equal(started.length, 4, "and nothing new starts");
 	});
 
 	test("a disabled extension watches the compaction and does nothing", async () => {

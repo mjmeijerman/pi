@@ -122,8 +122,11 @@ export const SPAWN_REQUEST_TTL_MS = 15 * 60 * 1000;
 export const MIN_REPEATS = 2;
 /** At most one learner per session this often. */
 export const MIN_GAP_MS = 10 * 60 * 1000;
-/** A session that keeps failing may teach twice; not more. */
-export const MAX_PER_SESSION = 2;
+/**
+ * A session may start four learners: one compaction now starts two (a project learner and
+ * the harness learner), so a session that keeps failing may teach twice — four learners.
+ */
+export const MAX_PER_SESSION = 4;
 /**
  * How long a failing CI run stays evidence.
  *
@@ -411,8 +414,8 @@ export function noteBaseline(lastCompactIso: string | null, newestProposalMs: nu
  * `diedLearnersFrom` read the empty hyphenated path as a death — which raised
  * the died-learner signal and started another learner (blip 11, blip 36).
  */
-export function runStamp(at: number): string {
-	return new Date(at).toISOString().replace(/[:.]/g, "-").replace("T", "-");
+export function runStamp(at: number, suffix = ""): string {
+	return `${new Date(at).toISOString().replace(/[:.]/g, "-").replace("T", "-")}${suffix}`;
 }
 
 /**
@@ -423,8 +426,8 @@ export function runStamp(at: number): string {
  * checks. `dir` is injectable so a test asserts the shape without the real
  * proposals directory.
  */
-export function runPaths(at: number, dir: string = PROPOSAL_DIR): { queue: string; proposal: string } {
-	const stamp = runStamp(at);
+export function runPaths(at: number, dir: string = PROPOSAL_DIR, suffix = ""): { queue: string; proposal: string } {
+	const stamp = runStamp(at, suffix);
 	return { queue: join(dir, "queue", `${stamp}.md`), proposal: join(dir, `${stamp}.md`) };
 }
 
@@ -2055,6 +2058,74 @@ export function learnerPaths(kind: SpaceKind): string[] {
 	return kind === "harness" ? [...HARNESS_PATHS] : [...PROJECT_PATHS];
 }
 
+/** The slug suffix that names which learner of a compaction this is. */
+export const LEARNER_SUFFIX: Record<SpaceKind, string> = { project: "p", harness: "h" };
+
+/** `learn-<HH-MM>-<suffix>`: one compaction's two learners are `-p` and `-h`, never the same. */
+export function learnerSlug(hhmm: string, suffix: string): string {
+	return `learn-${hhmm}-${suffix}`;
+}
+
+/** One learner a compaction starts: the space it teaches, the kind, and the paths it may touch. */
+export interface LearnerPlan {
+	/** `p` for the project learner, `h` for the harness one. */
+	suffix: string;
+	kind: SpaceKind;
+	/** The space this learner is a tab in, and whose project it starts in. */
+	space: LearnerSpace;
+	/** `learnerPaths(kind)`, resolved once so the queue file and the plan cannot disagree. */
+	paths: string[];
+}
+
+/** What one compaction starts, and what it could not start. */
+export interface LearnerPlanResult {
+	learners: LearnerPlan[];
+	/** One sentence when a learner this compaction wanted could not be planned. */
+	note?: string;
+}
+
+/**
+ * Which learners one compaction starts. Pure: space records plus a cwd in, learners out.
+ *
+ * A project compaction teaches twice — the project it sits in, and this machine's harness —
+ * because the two cannot otherwise be taught by the same session. The harness compaction
+ * teaches once: it *is* the harness, and a second learner would write the same folder. A cwd
+ * no space owns teaches nothing, unchanged, and a project space with no harness record is one
+ * learner plus the sentence saying why, never a silent single spawn.
+ */
+export function planLearners(records: readonly SpaceRecord[], cwd: string): LearnerPlanResult {
+	const owner = learnerSpace(records, cwd);
+	if (!owner) return { learners: [] };
+	const plan = (space: LearnerSpace): LearnerPlan => ({
+		suffix: LEARNER_SUFFIX[space.kind],
+		kind: space.kind,
+		space,
+		paths: learnerPaths(space.kind),
+	});
+	if (owner.kind === "harness") return { learners: [plan(owner)] };
+	const harnessRecord = records.find((record) => record?.kind === "harness" && String(record.project ?? "").trim());
+	if (!harnessRecord) {
+		return {
+			learners: [plan(owner)],
+			note: `no space records kind: "harness" on this machine, so only the project learner (${owner.slug}) was started`,
+		};
+	}
+	const harness: LearnerSpace = {
+		slug: String(harnessRecord.slug ?? ""),
+		kind: "harness",
+		project: trimSlashes(String(harnessRecord.project).trim()),
+	};
+	// Two learners on one folder would write one `AGENTS.md` twice: the folder wins, and the
+	// harness record is the one that teaches it.
+	if (normalisePath(harness.project) === normalisePath(owner.project)) {
+		return {
+			learners: [plan(harness)],
+			note: `the harness record ${harness.slug} is the folder this session sits in, so one learner was started`,
+		};
+	}
+	return { learners: [plan(owner), plan(harness)] };
+}
+
 /**
  * May a learner of this kind write that path? `null` is yes, and a sentence is the refusal.
  *
@@ -3297,25 +3368,51 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		// cwd no space claims teaches nothing at all. `null` is said out loud and stops here,
 		// with no queue file behind it — a spec nothing will read is the garbage this avoids.
 		const sessionCwd = typeof ctx?.cwd === "string" && ctx.cwd.trim() ? ctx.cwd.trim() : process.cwd();
-		const space = learnerSpace(await readSpaceRecords(), sessionCwd);
-		if (!space) {
+		// One gate, one evidence body, up to two learners: the project the compacted session
+		// sits in, and this machine's harness. The planning is pure (`planLearners`), so the
+		// four shapes are `node --test` cases instead of an afternoon of manual compactions.
+		const plan = planLearners(await readSpaceRecords(), sessionCwd);
+		if (plan.learners.length === 0) {
 			const line = `no space owns ${sessionCwd}, so this compaction teaches nothing`;
 			notify(ctx, line, "info");
 			await record({ ts: new Date(at).toISOString(), kind: "spawn-skipped", reason: line, stderr: line });
 			return { spawn: false, reason: line };
 		}
 
-		const stamp = runStamp(at);
-		const slug = `learn-${stamp.slice(11, 16)}`;
-		const { queue: queuePath, proposal: proposalPath } = runPaths(at);
+		const hhmm = runStamp(at).slice(11, 16);
 		await mkdir(QUEUE_DIR, { recursive: true });
-		const evidence = evidenceMarkdown({ trigger, decision, errors, notes, at, proposalPath, slug, external, space });
+		// Same verdict and same evidence for both: they differ only in space, kind, allowed
+		// paths and slug, and each queue file names its own proposal so neither can read the
+		// other's.
+		const runs = plan.learners.map((learner) => {
+			const slug = learnerSlug(hhmm, learner.suffix);
+			const { queue: queuePath, proposal: proposalPath } = runPaths(at, undefined, `-${learner.suffix}`);
+			const evidence = evidenceMarkdown({
+				trigger,
+				decision,
+				errors,
+				notes,
+				at,
+				proposalPath,
+				slug,
+				external,
+				space: learner.space,
+			});
+			return { learner, slug, queuePath, proposalPath, evidence };
+		});
 
-		// Reserve the slot before the launch is verified: two compactions a second
-		// apart must not both spawn while the first is still being checked.
-		spawns += 1;
+		// Reserve the slots before either launch is verified: two compactions a second
+		// apart must not each launch two while the first is still being checked.
+		spawns += runs.length;
 		lastSpawnAt = at;
 		lastCompactIso = new Date(at).toISOString();
+
+		// A learner this compaction wanted but could not plan is said out loud and recorded:
+		// a single spawn that looks like the whole answer is the silence this refuses.
+		if (plan.note) {
+			await record({ ts: new Date(at).toISOString(), kind: "spawn-note", reason: plan.note });
+			notify(ctx, plan.note, "info");
+		}
 
 		// The launch needs a Herdr space, and a sandboxed session cannot make one: a
 		// sandbox never mounts `herdr-app`. It hands the launch to the host session in
@@ -3326,42 +3423,65 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		if (blocked) {
 			if (!sandboxSkipRecorded) {
 				sandboxSkipRecorded = true;
-				const requestPath = join(QUEUE_DIR, `${slug}${SPAWN_SUFFIX}`);
-				await writeFile(
-					requestPath,
-					`${JSON.stringify({
-						slug,
-						trigger,
-						queue: queuePath,
-						proposal: proposalPath,
-						reason: decision.reason,
-						evidence,
+				// One request per learner, each naming its own project: the host reads the kind
+				// from that project's record, so a harness request is never read as a project one.
+				for (const run of runs) {
+					const requestPath = join(QUEUE_DIR, `${run.slug}${SPAWN_SUFFIX}`);
+					await writeFile(
+						requestPath,
+						`${JSON.stringify({
+							slug: run.slug,
+							trigger,
+							queue: run.queuePath,
+							proposal: run.proposalPath,
+							reason: decision.reason,
+							evidence: run.evidence,
+							ts: new Date(at).toISOString(),
+							judged: decision.judged ?? [],
+							cwd: run.learner.space.project,
+						})}\n`,
+						"utf8",
+					);
+					await record({
 						ts: new Date(at).toISOString(),
-						judged: decision.judged ?? [],
-						cwd: space.project,
-					})}\n`,
-					"utf8",
+						kind: "spawn-skipped",
+						slug: run.slug,
+						queue: run.queuePath,
+						proposal: run.proposalPath,
+						reason: decision.reason,
+						stderr: clipDetail(`${blocked} — the launch of ${run.slug} waits for the host session`),
+					});
+				}
+				notify(
+					ctx,
+					`no learner started: ${clipDetail(blocked)} — ${runs.length} request(s) wait for the host session`,
+					"info",
 				);
-				await record({
-					ts: new Date(at).toISOString(),
-					kind: "spawn-skipped",
-					slug,
-					queue: queuePath,
-					proposal: proposalPath,
-					reason: decision.reason,
-					stderr: clipDetail(`${blocked} — the launch of ${slug} waits for the host session`),
-				});
-				notify(ctx, `no learner started: ${clipDetail(blocked)} — the request waits for the host session`, "info");
 			}
 			// Not a launch: the caller must not read this as one.
 			return { spawn: false, reason: blocked };
 		}
 
-		await writeFile(queuePath, evidence, "utf8");
-		void launchLearner({ at, trigger, decision, slug, queuePath, proposalPath, space, ctx }).catch(() => {
-			// A launch that fails in a way not foreseen above is still not allowed to
-			// reach the host session.
-		});
+		for (const run of runs) {
+			await writeFile(run.queuePath, run.evidence, "utf8");
+		}
+		// One failed launch is not allowed to cancel the other: each is its own tab and its own
+		// `spawn-failed` row, written by `launchLearner` itself.
+		for (const run of runs) {
+			void launchLearner({
+				at,
+				trigger,
+				decision,
+				slug: run.slug,
+				queuePath: run.queuePath,
+				proposalPath: run.proposalPath,
+				space: run.learner.space,
+				ctx,
+			}).catch(() => {
+				// A launch that fails in a way not foreseen above is still not allowed to
+				// reach the host session.
+			});
+		}
 		return decision;
 	}
 
