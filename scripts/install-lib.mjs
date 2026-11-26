@@ -447,9 +447,10 @@ export const LEGACY_GUARD = {
  *
  * `PI_GIT_BASH` replaces the whole list instead of joining it: an explicit
  * override is a promise, and a wrong one should say "that is not there" rather
- * than quietly register whichever bash happened to be found instead. The value
- * is returned verbatim — a path outside the default layout is the reason to set
- * it, so normalising it is how it stops matching.
+ * than quietly register whichever bash happened to be found instead. A Windows
+ * value is returned verbatim — a path outside the default layout is the reason
+ * to set it, so normalising it is how it stops matching. A POSIX one is read as
+ * the Windows path it means, and `posixBashCandidates` says why.
  *
  * The order is the one a person would try: the override, then `bash.exe` as
  * PATH has it, then the Git for Windows directories. The WSL launcher
@@ -459,7 +460,12 @@ export const LEGACY_GUARD = {
  */
 export function gitBashCandidates({ platform = process.platform, env = process.env, execPath = '' } = {}) {
 	if (platform !== 'win32') return [];
-	if (env.PI_GIT_BASH) return [env.PI_GIT_BASH];
+	if (env.PI_GIT_BASH) {
+		// The value as written is kept last: under `PI_PLATFORM=win32` on a host that
+		// is not Windows, `/usr/bin/bash` really is a file there, and the fixtures that
+		// pin the Windows branch set exactly that. On Windows it can never exist.
+		return [...posixBashCandidates(env.PI_GIT_BASH, { env, execPath }), env.PI_GIT_BASH];
+	}
 	const win = path.win32;
 	const out = [];
 	const add = (p) => {
@@ -482,14 +488,85 @@ export function gitBashCandidates({ platform = process.platform, env = process.e
 			dir = parent;
 		}
 	}
-	const gitRoots = [win.join(env.ProgramFiles || 'C:\\Program Files', 'Git'), win.join(env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git')];
-	if (env.LOCALAPPDATA) gitRoots.push(win.join(env.LOCALAPPDATA, 'Programs', 'Git'));
 	// `bin` is what Git Bash puts on PATH; `usr\bin` is the same bash one level
 	// down, and the only one there on an install that kept PATH bare.
-	for (const root of gitRoots) {
+	for (const root of gitRoots(env)) {
 		add(win.join(root, 'bin', 'bash.exe'));
 		add(win.join(root, 'usr', 'bin', 'bash.exe'));
 	}
+	return out;
+}
+
+/** gitRoots — the three directories Git for Windows installs into, best guess first. */
+function gitRoots(env) {
+	const win = path.win32;
+	const roots = [
+		win.join(env.ProgramFiles || 'C:\\Program Files', 'Git'),
+		win.join(env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git'),
+	];
+	if (env.LOCALAPPDATA) roots.push(win.join(env.LOCALAPPDATA, 'Programs', 'Git'));
+	return roots;
+}
+
+/**
+ * msysRoots — every directory that may be the root of an MSYS install, deepest first.
+ *
+ * A POSIX path is relative to that root, and the guard's is Git for Windows:
+ * `C:\Program Files\Git\usr\bin\bash.exe` is what `/usr/bin/bash` names. The
+ * root is a git install root, which is what `git --exec-path` already tells this
+ * file, so its ancestors are listed the same way the search above lists them —
+ * no layout encoded, and an ancestor that is not a git root costs one lookup
+ * that `resolveGitBash` throws away.
+ */
+function msysRoots({ env, execPath }) {
+	const win = path.win32;
+	const roots = [];
+	const add = (root) => {
+		if (root && !roots.includes(root)) roots.push(root);
+	};
+	if (execPath) {
+		let dir = win.dirname(win.normalize(execPath));
+		for (let up = 0; up < 5 && dir; up++) {
+			add(dir);
+			const parent = win.dirname(dir);
+			if (!parent || parent === dir) break;
+			dir = parent;
+		}
+	}
+	for (const root of gitRoots(env)) add(root);
+	return roots;
+}
+
+/**
+ * posixBashCandidates — a POSIX `PI_GIT_BASH` read as the Windows paths it may mean.
+ *
+ * `./install.sh` runs in Git Bash, so the shell the installer is started from
+ * prints `/usr/bin/bash` for `which bash` — and setting the override to that is
+ * the first thing a person tries when the search found nothing. The value
+ * crosses into a Windows node process, where nothing converts a POSIX path:
+ * `existsSync('/usr/bin/bash')` is false on a machine that has Git for Windows,
+ * and the guard step then said "no Git Bash found" and registered nothing.
+ *
+ * MSYS itself has the answer — `cygpath -w /usr/bin/bash` is
+ * `<git>\usr\bin\bash.exe` — so the same git install roots are prefixed here,
+ * with the `.exe` MSYS would add. `/c/Users/x/bin/bash.exe` is the other spelling
+ * a POSIX path arrives in, and it needs no root. Nothing here is checked against
+ * the disk and nothing is invented: `resolveGitBash` is the one place that says
+ * yes or no, so a POSIX value that matches nothing still fails as loudly as a
+ * Windows one, and an empty list means the value was not POSIX at all.
+ */
+function posixBashCandidates(value, { env, execPath }) {
+	if (!/^\//.test(value)) return [];
+	const win = path.win32;
+	const out = [];
+	const add = (p) => {
+		if (p && !out.includes(p)) out.push(p);
+	};
+	// `/usr/bin/bash` runs `bash.exe`: the extension is what MSYS fills in.
+	const exe = (p) => (win.extname(p) ? p : `${p}.exe`);
+	const drive = /^\/([A-Za-z])\/(.*)$/.exec(value);
+	if (drive) return [exe(`${drive[1].toUpperCase()}:\\${drive[2].split('/').join('\\')}`)];
+	for (const root of msysRoots({ env, execPath })) add(exe(win.join(root, ...value.slice(1).split('/'))));
 	return out;
 }
 
