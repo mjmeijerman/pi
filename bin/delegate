@@ -3452,10 +3452,19 @@ cmd_close() {
 	# check". So the skip is keyed to "no branch carries this slug", never to --nothing alone — a
 	# worker that did commit keeps the gate — and it is decided once, here, so the general gate below
 	# and --nothing's own gate cannot disagree about it. No other close path is touched.
+	#
+	# The two halves are the two ways a commit is recorded, and both are evidence: the branches that
+	# carry this worker's `Agent-Slug:` trailer, and the `Commit:` field the spawn template asks for.
+	# Prose is not a third way. `report_commit_sha` falls back to "the longest hex on any line holding
+	# the word commit", and the report that defeats it is the honest one: _"No commit, no branch, no
+	# worktree"_ beside the trunk sha it quoted as its evidence — measured on `db6dece`, where the
+	# skip was refused for exactly that report. So the skip asks `report_commit_labeled`, the field
+	# reader, and never the sha reader; that reader keeps its legacy fallback for the reports written
+	# before the label and for publish, which is not this question.
 	local gate_skipped=0 gate_branches=""
-	if [ -n "$nothing_given" ] && [ -s "$report" ] && [ -z "$(report_commit_sha "$report")" ]; then
+	if [ -n "$nothing_given" ] && [ -s "$report" ]; then
 		gate_branches=$(branches_carrying_slug "$cwd" "$slug")
-		[ -n "$gate_branches" ] || gate_skipped=1
+		[ -n "$gate_branches" ] || [ -n "$(report_commit_labeled "$report")" ] || gate_skipped=1
 	fi
 	if [ -s "$report" ]; then
 		if ! report_has_evidence "$report"; then

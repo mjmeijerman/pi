@@ -211,15 +211,40 @@ if [ "$AFTER" = "$((BEFORE + 1))" ]; then pass 'the write landed after the break
 new_case 'the mkdir path: flock hidden from PATH'
 FILE="$WORK/mkdir.json"
 seed_record "$FILE"
+# The writers' own exit status is kept, and their stderr with it. The only silent way this case
+# loses a write is a writer that died — measured on CI 2026-11-26 (harness-check job 140154780368):
+# eight writers, seven entries, and not one other line red to say why. A loss has to name which
+# writer failed and what it said, instead of counting to seven and stopping there.
+WPIDS=()
 for i in 1 2 3 4 5 6 7 8; do
-	PATH="$SHIM" "$WORK/writer-locked.sh" "$FILE" "w$i" &
+	PATH="$SHIM" "$WORK/writer-locked.sh" "$FILE" "w$i" 2>"$WORK/mkdir.w$i.err" &
+	WPIDS+=("$!")
 done
-wait
+WRITER_RCS=""
+WRITER_BAD=0
+for p in "${WPIDS[@]}"; do
+	if wait "$p"; then WRITER_RCS="$WRITER_RCS 0"; else WRITER_RCS="$WRITER_RCS $?"; WRITER_BAD=$((WRITER_BAD + 1)); fi
+done
 COUNT=$(entries "$FILE")
 if [ "$COUNT" = 9 ]; then
 	pass 'the mkdir path keeps all eight writes: 9 of 9'
 else
-	fail "expected 9 entries through the mkdir path, found $COUNT" "$(cat "$FILE")"
+	MISSING=$(node -e '
+		let j = {};
+		try { j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); } catch {}
+		const gone = [];
+		for (let i = 1; i <= 8; i++) if (!j["w" + i]) gone.push("w" + i);
+		process.stdout.write(gone.join(" ") || "none of the eight is missing");' "$FILE")
+	fail "expected 9 entries through the mkdir path, found $COUNT" \
+		"missing entries: $MISSING" \
+		"writer exit codes:$WRITER_RCS" \
+		"$(cat "$WORK"/mkdir.w*.err 2>/dev/null)"
+fi
+if [ "$WRITER_BAD" -eq 0 ]; then
+	pass 'all eight writers exited 0, so no write was dropped on the way in'
+else
+	fail "$WRITER_BAD of 8 writers exited non-zero, so the count above may be theirs to explain" \
+		"$(cat "$WORK"/mkdir.w*.err 2>/dev/null)"
 fi
 if [ -e "$FILE.lock.d" ]; then fail 'the mkdir lock was left behind'; else pass 'the mkdir lock was removed'; fi
 
