@@ -46,7 +46,7 @@
 //   PI_HERDR_RESUME_START_MS   after a send, how long to wait for it to start (15000)
 import { execFileSync } from "node:child_process";
 import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 /** Mirrors `isShellArgv` in agent/extensions/herdr-resume-map.ts. */
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "nu", "pwsh", "powershell", "elvish", "xonsh"]);
@@ -109,18 +109,21 @@ function hcJson(args) {
 
 function isShellArgv(argv) {
 	if (!Array.isArray(argv) || argv.length === 0) return false;
-	return SHELLS.has(
-		basename(String(argv[0]))
-			.toLowerCase()
-			.replace(/\.exe$/, ""),
-	);
+	return SHELLS.has(programName(argv[0]));
 }
 
-/** One word of an argv, as the kernel would name the program: no folder, no `.exe`. */
+/**
+ * One word of an argv, as the kernel would name the program: no folder, no `.exe`.
+ *
+ * Both separators, always, and never `node:path`'s `basename`: that one answers in the *host's*
+ * flavour, so on a Linux host `basename("C:\\WINDOWS\\…\\powershell.exe")` is the whole string and
+ * a Windows tab classified as POSIX — six green cases on Windows and six red ones in CI
+ * (PR #262, job `scripts tests`). The path's own spelling decides, not the host's.
+ */
 function programName(word) {
-	return basename(String(word ?? ""))
-		.toLowerCase()
-		.replace(/\.exe$/, "");
+	const text = String(word ?? "");
+	const name = text.slice(Math.max(text.lastIndexOf("/"), text.lastIndexOf("\\")) + 1);
+	return name.toLowerCase().replace(/\.exe$/, "");
 }
 
 /**
