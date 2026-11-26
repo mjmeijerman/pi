@@ -84,7 +84,11 @@ JSON_ITEMS=()
 BASELINE_KEYS=""
 BASELINE_HITS=""
 
-AGENTS_MD_LIMIT=3072
+# 3072 B held the rules minus the four this file lost on the Windows branch: restoring
+# them with the OS they belong to costs their bytes plus the note saying so, and the
+# person said the budget may grow for a rule rather than a dropped one. 3328 is the
+# smallest round number that fits the four rules back (3229 B) with room for a line.
+AGENTS_MD_LIMIT=3328
 SKILL_LINES_LIMIT=150
 # npm 11 reads a bare min-release-age as DAYS, not minutes: @npmcli/config sets
 # `before = new Date(Date.now() - 86400000 * value)` and documents the hint as
