@@ -25,7 +25,11 @@ const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 /** bashFor the test itself: this host's, named as an absolute path so the builder is what is
  * tested, and so a case that replaces PATH still has a shell to start. */
 function hostBash() {
-	const tries = [process.env.PI_GIT_BASH, process.env.SHELL];
+	// bash first, and not `$SHELL`: the builder is sourced by bash in production
+	// (`bin/delegate`, `scripts/agent-pane.sh`), and a zsh login shell has no `BASH_SOURCE` —
+	// running it under one tested a shell the file never claimed. `$SHELL` and `PI_GIT_BASH`
+	// stay last, as the fallback for a host whose bash is not on the usual PATH.
+	const tries = [];
 	// An absolute path a Windows host can spawn: `command -v bash` answers a POSIX one
 	// (`/usr/bin/bash`), which CreateProcess does not find, so cygpath spells it first.
 	for (const probe of [
@@ -35,6 +39,7 @@ function hostBash() {
 		const r = spawnSync('bash', ['-c', probe], { encoding: 'utf8' });
 		if (r.status === 0 && (r.stdout || '').trim()) tries.push(r.stdout.trim());
 	}
+	tries.push(process.env.PI_GIT_BASH, process.env.SHELL);
 	for (const candidate of tries) {
 		if (!candidate) continue;
 		if (spawnSync(candidate, ['-c', 'exit 0'], { stdio: 'ignore' }).status === 0) return candidate;
@@ -141,6 +146,27 @@ test('no bash is a refusal with the line that fixes it, never a tab that types n
 	assert.notEqual(unspellable.status, 0, 'a POSIX path was handed to PowerShell');
 	assert.equal(unspellable.stdout, '');
 	assert.match(unspellable.stderr, /PI_GIT_BASH/);
+});
+
+test('a shell with no BASH_SOURCE is told to source it from bash, not handed a bad substitution', (t) => {
+	// zsh is the login shell on the Mac and on this box; it parses `BASH_SOURCE` without
+	// complaining and expands it to nothing, so the old `${BASH_SOURCE[0]%/*}` was a "Bad
+	// substitution" from a callback, or a lookup beside `/`. The refusal has to be one line
+	// naming the fix, and the same status 127 the other refusals use.
+	const zsh = spawnSync('command -v zsh', { shell: 'bash', encoding: 'utf8' });
+	const path = (zsh.stdout || '').trim();
+	if (!path) return t.skip('no zsh on this host to source the builder with');
+	const r = spawnSync(path, ['-c', '. bin/worker-argv.sh; worker_tab_argv "exec pi -a"'], {
+		encoding: 'utf8',
+		cwd: ROOT,
+		// The guard is asked before anything is looked up, so a zsh that also has a bash on
+		// its PATH still gets the sentence: the file is sourced by the wrong shell, not by a
+		// shell missing a tool.
+		env: { ...process.env },
+	});
+	assert.equal(r.status, 127, 'a shell without BASH_SOURCE reported success');
+	assert.equal((r.stdout || '').trim(), '', 'it printed an argv anyway');
+	assert.match((r.stderr || '').trim(), /source it from bash/);
 });
 
 test('an empty command line is refused instead of started', (t) => {

@@ -28,6 +28,14 @@
 # already sourced it pays nothing. Resolved from the sourced path with `${x%/*}` and not
 # `dirname`, because this runs before a worker's argv exists and a stripped PATH is exactly the
 # case it is for.
+# `BASH_SOURCE` is bash's. Production sources this file from bash (`bin/delegate`,
+# `scripts/agent-pane.sh`), but a zsh or a plain sh that is handed it answers
+# `${BASH_SOURCE[0]%/*}` with "Bad substitution" and exit 127 — a message about the
+# shell, not about the fix. One clear line instead, and the same 127.
+if [ -z "${BASH_VERSION:-}" ] || [ -z "${BASH_SOURCE[0]:-}" ]; then
+	printf 'worker-argv.sh: source it from bash — bin/delegate and scripts/agent-pane.sh both do, and a shell without BASH_SOURCE cannot find bin/shell-resolve.sh beside it\n' >&2
+	return 127 2>/dev/null || exit 127
+fi
 worker_argv_lib=${BASH_SOURCE[0]%/*}
 if ! command -v shell_is_win >/dev/null 2>&1 && [ -f "$worker_argv_lib/shell-resolve.sh" ]; then
 	# shellcheck source=bin/shell-resolve.sh
