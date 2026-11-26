@@ -153,10 +153,11 @@ test('a shell with no BASH_SOURCE is told to source it from bash, not handed a b
 	// complaining and expands it to nothing, so the old `${BASH_SOURCE[0]%/*}` was a "Bad
 	// substitution" from a callback, or a lookup beside `/`. The refusal has to be one line
 	// naming the fix, and the same status 127 the other refusals use.
-	const zsh = spawnSync('command -v zsh', { shell: 'bash', encoding: 'utf8' });
-	const path = (zsh.stdout || '').trim();
-	if (!path) return t.skip('no zsh on this host to source the builder with');
-	const r = spawnSync(path, ['-c', '. bin/worker-argv.sh; worker_tab_argv "exec pi -a"'], {
+	// `zsh` by name, never through a shell: a `shell: true` spawn is the shape semgrep refuses,
+	// and it is the shape this test exists to stop trusting. A host without zsh runs nothing.
+	const zsh = ['/bin/zsh', '/usr/bin/zsh', '/usr/local/bin/zsh'].find((p) => fs.existsSync(p));
+	if (!zsh) return t.skip('no zsh on this host to source the builder with');
+	const r = spawnSync(zsh, ['-c', '. bin/worker-argv.sh; worker_tab_argv "exec pi -a"'], {
 		encoding: 'utf8',
 		cwd: ROOT,
 		// The guard is asked before anything is looked up, so a zsh that also has a bash on
