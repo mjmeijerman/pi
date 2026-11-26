@@ -117,6 +117,9 @@ const {
 	PUBLISH_WINDOW_MS,
 	PUBLISH_POLL_MS,
 	runOnce,
+	abortedByPerson,
+	evidenceMarkdown,
+	shortSignature,
 } = mod;
 
 // The premise every test in this file shares, asserted at import time: the fixture space
@@ -197,6 +200,30 @@ describe("decideLearner", () => {
 		assert.equal(decideLearner(evidence({ errors: failures({ a: 2 }) })).spawn, true);
 	});
 
+	test("a repeated abort is the person's Escape, not a pattern to learn from", () => {
+		// 2026-11-26: two `bin/pr-ready --wait` calls, two `bin/delegate wait --forever`
+		// calls and one poll loop were aborted, and `5× 0667d68b5374` started a learner
+		// with no failing command anywhere in its evidence.
+		const decision = decideLearner(evidence({ aborts: failures({ ab: 5 }) }));
+		assert.equal(decision.spawn, false);
+		assert.match(decision.reason, /no repeated failure/);
+		// A real failure next to five aborts still fires, on the failure alone.
+		const mixed = decideLearner(evidence({ errors: failures({ a: 2 }), aborts: failures({ ab: 5 }) }));
+		assert.equal(mixed.spawn, true);
+		assert.match(mixed.reason, /2× a/);
+		assert.ok(!/ab/.test(mixed.reason.replace(/2× a/, "")), "the aborts are named in no reason");
+	});
+
+	test("only the shell's own abort wording counts as the person stopping", () => {
+		// The shell tool wraps its answer in the tool result's JSON, so the phrase is matched
+		// inside it, not at the start of the string.
+		assert.equal(abortedByPerson('[{"type":"text","text":"Command aborted"}]'), true);
+		assert.equal(abortedByPerson("Command aborted"), true);
+		assert.equal(abortedByPerson("command not found: zizmor"), false);
+		assert.equal(abortedByPerson("Command timed out after 60 seconds"), false);
+		assert.equal(abortedByPerson("npm ERR! build aborted by the user"), false);
+	});
+
 	test("one /suggest note is enough: the user wrote it on purpose", () => {
 		const decision = decideLearner(evidence({ notes: 1 }));
 		assert.equal(decision.spawn, true);
@@ -236,6 +263,86 @@ describe("decideLearner", () => {
 		// exactly ten is the first one that starts a learner.
 		assert.equal(decideLearner(evidence({ notes: 1, lastSpawnAt: NOW - MIN_GAP_MS + 1, now: NOW })).spawn, false);
 		assert.equal(decideLearner(evidence({ notes: 1, lastSpawnAt: NOW - MIN_GAP_MS, now: NOW })).spawn, true);
+	});
+});
+
+describe("evidenceMarkdown: a stopped command is listed, never a gate signal", () => {
+	const external = {
+		ciFailures: [],
+		workerFailures: [],
+		diedLearners: [],
+		frustration: [],
+		warnings: [],
+		workspacePresent: false,
+		judgedStale: 0,
+	};
+	const space = { slug: "harness", kind: "harness" as const, project: "/home/m/.pi" };
+	const abortsOf = (counts: Record<string, number>) =>
+		new Map(
+			Object.entries(counts).map(([sample, count]) => [
+				signatureOf("bash", sample),
+				{ count, tool: "bash", sample },
+			]),
+		);
+	const render = (over: Record<string, unknown> = {}) =>
+		evidenceMarkdown({
+			trigger: "compact",
+			decision: { spawn: false, reason: "5× 0667d68b5374" },
+			errors: new Map(),
+			notes: 0,
+			at: NOW,
+			proposalPath: join(scratch, "proposals", "2026-11-26-20-25-44-824Z.md"),
+			slug: "learn-20-25",
+			external,
+			space,
+			...over,
+		});
+
+	test("the heading, the table and the sentence that keeps them out of the gate", () => {
+		// One sample with two pipes and a newline, because the row is where a cell has to stay
+		// one line: the escapes and the flattening are the two things a reader of the table
+		// depends on, and `StringLiteral` mutants of them survived the first version of this test.
+		const sample = "Command aborted | while\nwaiting | now";
+		const md = render({ aborts: abortsOf({ [sample]: 5 }) });
+		// The blank line before the heading and the one after it: `lines.push("", heading, "")`.
+		// Without the empty element the section collides with the `None.` above it, and the
+		// heading is no longer a heading.
+		assert.ok(
+			md.includes(
+				"None.\n\n## Commands the person aborted\n\n| signature | tool | count | what it said (redacted) |\n| --- | --- | --- | --- |",
+			),
+			"the section is a table of its own, under its own heading",
+		);
+		const cell = "Command aborted \\| while waiting \\| now";
+		assert.ok(
+			md.includes(`| \`${shortSignature(signatureOf("bash", sample))}\` | bash | 5 | ${cell} |`),
+			"the count the gate ignored is still readable, and a pipe and a newline stay in the cell",
+		);
+		// The empty element in `lines.push("", sentence)` is the blank line that separates the
+		// table from the sentence under it.
+		assert.ok(
+			md.includes(
+				`| bash | 5 | ${cell} |\n\n\`Command aborted\` means the person stopped the command: listed here, never counted as a gate signal.`,
+			),
+			"the sentence sits under a blank line, in full",
+		);
+	});
+
+	test("the loudest abort comes first, like the failed-tool table", () => {
+		const md = render({ aborts: abortsOf({ "Command aborted": 2, "Command aborted while waiting": 7 }) });
+		assert.ok(
+			md.indexOf("| bash | 7 |") < md.indexOf("| bash | 2 |"),
+			"sorted by count, not by insertion",
+		);
+	});
+
+	test("no abort: the section says None rather than vanishing", () => {
+		assert.match(render(), /## Commands the person aborted\n\nNone\./);
+	});
+
+	test("an abort is never in the failed-tool table it sits under", () => {
+		const md = render({ aborts: abortsOf({ "Command aborted": 5 }) });
+		assert.match(md, /## Failed tool calls since the last compaction\n\nNone\./);
 	});
 });
 
@@ -1029,6 +1136,17 @@ describe("wiring", () => {
 		// Counters reset: the same evidence cannot spawn again.
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		assert.equal(started.length, 1);
+	});
+
+	test("five aborted commands start nothing, however often they repeat", async () => {
+		// The 2026-11-26 shape: the person stopped two `bin/pr-ready --wait` calls, two
+		// `bin/delegate wait --forever` calls and a poll loop. The abort signal is what the
+		// shell reports, wrapped the way the tool result carries it.
+		const aborted = { isError: true, toolName: "bash", content: [{ type: "text", text: "Command aborted" }] };
+		const { emit, ctx, started } = setup();
+		for (let i = 0; i < 5; i += 1) await emit("tool_result", aborted, ctx);
+		await emit("session_compact", { reason: "threshold" }, ctx);
+		assert.equal(started.length, 0, "a person's Escape is not a repeated failure");
 	});
 
 	test("the cwd handed to the launch is the space's project, not the queue directory", async () => {

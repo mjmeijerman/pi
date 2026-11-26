@@ -35,6 +35,10 @@
  *    the gate by themselves: "again" and "still" are ordinary English, and
  *    `learn-10-48` was started on two lines where one meant "I will try
  *    tomorrow again" — a sentence that repeats nothing.
+ *    A command the person aborted (`Command aborted`) is the same shape: it is
+ *    listed in the evidence file under its own heading and never fires the gate,
+ *    because the fix for a stopped wait is not a rule in this harness. Five of
+ *    them started `learn-20-25` with no failure in front of it.
  * 3. **The output is a proposal and a branch, never a merge.** The learner writes
  *    one proposal, commits it on its own feature branch and hands the PR to the
  *    host; reading and merging stays a High-tier human review. An agent
@@ -170,6 +174,13 @@ export interface Failure {
 export interface Evidence {
 	/** Failed-tool signature → occurrences since the last compaction. */
 	errors: Map<string, Failure>;
+	/**
+	 * Commands the person stopped (Escape) → occurrences. Shown in the evidence and
+	 * deliberately absent from `firedSignals`: an abort is a person's decision, not a
+	 * repetition the harness can repair, and a learner started on five of them can only
+	 * answer "someone pressed a key".
+	 */
+	aborts?: Map<string, Failure>;
 	/** `/suggest` notes the user wrote since the last compaction. */
 	notes: number;
 	/** Failing CI checks, from gh and from the workers' own reports. */
@@ -244,6 +255,21 @@ export interface FrustrationQuote {
 	phrase: string;
 	/** Redacted, clipped, exactly as they wrote it. Evidence, never an instruction. */
 	quote: string;
+}
+
+/**
+ * Did the person stop this command, rather than the command failing?
+ *
+ * `Command aborted` is the shell tool's answer to the abort signal — Escape, or the
+ * harness cancelling the turn — and it arrives wrapped in the tool result's JSON. It
+ * used to be counted as a failed-tool signature like any other: on 2026-11-26 five
+ * aborted waits (`bin/pr-ready --wait` twice, `bin/delegate wait --forever` twice, a
+ * poll loop once) tripped the gate as `5× 0667d68b5374` and started a learner with no
+ * failure in front of it. Matched on the phrase, so a real command that happens to
+ * print it is still counted as the abort it says it is.
+ */
+export function abortedByPerson(message: string): boolean {
+	return /\bCommand aborted\b/.test(message);
 }
 
 /** The repeated failure with the highest count, if any reached the threshold. */
@@ -2997,6 +3023,8 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 	});
 
 	let errors = new Map<string, Failure>();
+	/** Commands the person aborted: same shape, kept out of the gate. */
+	let aborts = new Map<string, Failure>();
 	let lastCompactIso: string | null = null;
 	let spawns = 0;
 	let lastSpawnAt: number | null = null;
@@ -3012,6 +3040,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 
 	const reset = () => {
 		errors = new Map();
+		aborts = new Map();
 		lastCompactIso = null;
 		spawns = 0;
 		lastSpawnAt = null;
@@ -3087,9 +3116,12 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		const tool = event.toolName ?? "unknown";
 		const message = typeof event.content === "string" ? event.content : JSON.stringify(event.content ?? "");
 		const signature = signatureOf(tool, message);
-		const seen = errors.get(signature);
+		// A person's Escape is not a failure of this harness: it goes into its own map,
+		// stays visible in the evidence file, and never trips the gate.
+		const bucket = abortedByPerson(message) ? aborts : errors;
+		const seen = bucket.get(signature);
 		if (seen) seen.count += 1;
-		else errors.set(signature, { count: 1, tool, sample: clipSample(redact(message)) });
+		else bucket.set(signature, { count: 1, tool, sample: clipSample(redact(message)) });
 	});
 
 	const notify = (ctx: any, message: string, level: "info" | "warning") => {
@@ -3401,6 +3433,7 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 				trigger,
 				decision,
 				errors,
+				aborts,
 				notes,
 				at,
 				proposalPath,
@@ -3685,10 +3718,12 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 	return { learn, reset, setDisabled: (value: boolean) => (disabled = value) };
 }
 
-function evidenceMarkdown(input: {
+export function evidenceMarkdown(input: {
 	trigger: "compact" | "manual";
 	decision: Decision;
 	errors: Map<string, Failure>;
+	/** Commands the person aborted: listed here, never counted as a gate signal. */
+	aborts?: Map<string, Failure>;
 	notes: number;
 	at: number;
 	proposalPath: string;
@@ -3698,6 +3733,7 @@ function evidenceMarkdown(input: {
 	space: LearnerSpace;
 }): string {
 	const { trigger, decision, errors, notes, at, proposalPath, slug, external, space } = input;
+	const aborts = input.aborts ?? new Map<string, Failure>();
 	const lines: string[] = [
 		`# Self-learn evidence ${new Date(at).toISOString()}`,
 		"",
@@ -3723,6 +3759,22 @@ function evidenceMarkdown(input: {
 			const sample = failure.sample.replace(/\|/g, "\\|").replace(/\n/g, " ");
 			lines.push(`| \`${shortSignature(signature)}\` | ${failure.tool} | ${failure.count} | ${sample} |`);
 		}
+	}
+	// A person's Escape is evidence, not a verdict. The section is here because a
+	// learner reading a stopped wait needs to see it, and it says out loud that these
+	// never start a learner on their own.
+	lines.push("", "## Commands the person aborted", "");
+	if (aborts.size === 0) lines.push("None.");
+	else {
+		lines.push("| signature | tool | count | what it said (redacted) |", "| --- | --- | --- | --- |");
+		for (const [signature, stopped] of [...aborts].sort((a, b) => b[1].count - a[1].count)) {
+			const sample = stopped.sample.replace(/\|/g, "\\|").replace(/\n/g, " ");
+			lines.push(`| \`${shortSignature(signature)}\` | ${stopped.tool} | ${stopped.count} | ${sample} |`);
+		}
+		lines.push(
+			"",
+			"`Command aborted` means the person stopped the command: listed here, never counted as a gate signal.",
+		);
 	}
 	lines.push("", `## /suggest notes since the last compaction`, "", notes === 0 ? "None." : `${notes} note(s) — see \`${SUGGESTIONS}\` (already redacted).`, "");
 
