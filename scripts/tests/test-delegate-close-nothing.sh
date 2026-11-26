@@ -26,7 +26,19 @@
 #   4. `finish` on a never-committed worker refuses with the wipe+close commands and never runs
 #      preflight or publish — the answer `close` gives, not a red check to fix;
 #   5. `finish` on a committed worker still runs the gate, publishes and closes: the guard is keyed
-#      to the trailer, not to "finish always refuses".
+#      to the trailer, not to "finish always refuses";
+#   6. the report that defeated the old skip closes: a real probe report that says "No commit, no
+#      branch, no worktree" in prose and quotes the trunk sha in its Evidence block closes with
+#      `--nothing`, because prose is not evidence a commit exists — the labeled `Commit:` field and
+#      a branch carrying the trailer are, and this report has neither;
+#   7. a `Commit:` field puts the gate back on that same prose report: the label is the other half
+#      of the skip's key, so a sha on a `Commit:` line is a commit the gate must check.
+#
+# Case 6 copies its report verbatim from `scripts/tests/fixtures/probe-report-no-commit.md`, which is
+# the probe report measured on trunk `db6dece` (kept at
+# `state/spaces/harness/specs/probe-report-defeating-the-skip.md`). Run this suite against trunk's
+# delegate — `PI_CLOSE_DELEGATE=<trunk>/bin/delegate bash scripts/tests/test-delegate-close-nothing.sh`
+# — and cases 6 is red there while the rest are green.
 #
 # No network, no real herdr, nothing written outside $WORK. Set PI_CLOSE_DELEGATE to another
 # `bin/delegate` (trunk's) to run the same suite against older code, which is how the report shows
@@ -413,6 +425,56 @@ if grep -qF -- '--slug w5' "$PF_LOG"; then pass 'the gate ran: finish is not a b
 if grep -qF 'w5' "$PUB_LOG"; then pass 'it published'; else fail 'nothing was published' "$(cat "$PUB_LOG")"; fi
 if [ "$RC" -eq 0 ]; then pass 'the whole tail finished: publish, wipe, close'; else fail 'the finish stopped short' "$OUT"; fi
 if grep -q '"w5"' "$SPACEDIR/delegations.json"; then fail 'the record survived a successful finish'; else pass 'the record is gone'; fi
+
+# =========== 6. the report that defeated the skip: "no commit" in prose, a sha in Evidence --
+new_case 'a prose "no commit" report that quotes a sha still closes'
+FIXTURE="$ROOT/scripts/tests/fixtures/probe-report-no-commit.md"
+if [ -f "$FIXTURE" ]; then pass 'the probe report fixture is in the tree'; else fail 'the fixture is missing' "$FIXTURE"; fi
+cp "$FIXTURE" "$SPACEDIR/reports/w6.md"
+# The fixture quotes the sha of the trunk it ran on (`db6dece`, /home/mark/.pi's). This throwaway
+# repo's trunk is $BASE, so that one token is re-pointed at it: the shape being reproduced is a sha
+# that resolves here and carries no `Agent-Slug:` trailer — what the probe quoted. Everything else
+# in the report is byte-for-byte what the probe wrote.
+sed -i "s/db6dece/$BASE/g" "$SPACEDIR/reports/w6.md"
+# The trap, said out loud: this report does name a sha, on the evidence line it quotes. A skip that
+# asks "does the report name a sha?" is refused by it; "does any branch carry this worker?" is not.
+if grep -qF "$BASE" "$SPACEDIR/reports/w6.md" && ! grep -qiE '^[ \t]*(-[ \t]+)?[*_]*[ \t]*commit[*_]*[ \t]*:' "$SPACEDIR/reports/w6.md"; then
+	pass 'the report quotes a sha and names no Commit: field — the shape that defeated the skip'
+else
+	fail 'the fixture is not the report this case is about' "$(grep -nF 'commit' "$SPACEDIR/reports/w6.md")"
+fi
+printf '# Worker w6\n\nMission: w6\n' >"$SPACEDIR/specs/w6.md"
+record w6 tb6
+run "$DELEGATE" wipe w6 --skip "nothing landed, so there is no consolidation to answer"
+if [ "$RC" -eq 0 ]; then pass 'the wipe step is recorded'; else fail 'the wipe step was refused' "$OUT"; fi
+run "$DELEGATE" close w6 --nothing "the live probe: nothing landed, so nothing needed a branch"
+if [ "$RC" -eq 0 ]; then pass 'it closes'; else fail 'the prose sentence turned the skip off' "$OUT"; fi
+case $OUT in
+*"preflight evidence is not asked for"*) pass 'the skip is said out loud' ;;
+*) fail 'the skip did not fire and say so' "$OUT" ;;
+esac
+case $OUT in
+*"no branch in $PROJ carries a commit with Agent-Slug: w6"*) pass 'it names the branch lookup, not the sha' ;;
+*) fail 'the skip does not name the lookup it made' "$OUT" ;;
+esac
+if grep -q '"w6"' "$SPACEDIR/delegations.json"; then fail 'the record was kept after a close'; else pass 'the record is gone'; fi
+
+# ========================== 7. a `Commit:` field blocks the skip, on that same report --
+new_case 'a Commit: field on that prose report puts the gate back'
+cp "$FIXTURE" "$SPACEDIR/reports/w7.md"
+printf '\nCommit: %s\n' "$BASE" >>"$SPACEDIR/reports/w7.md"
+printf '# Worker w7\n\nMission: w7\n' >"$SPACEDIR/specs/w7.md"
+record w7 tb7
+run "$DELEGATE" wipe w7 --skip "the consolidation step is not what this case is about"
+if [ "$RC" -eq 0 ]; then pass 'the wipe step is recorded, so only the gate can refuse'; else fail 'the wipe step was refused' "$OUT"; fi
+run "$DELEGATE" close w7 --nothing "the probe says nothing landed, but its report names a Commit: field"
+if [ "$RC" -ne 0 ]; then pass 'it is refused'; else fail 'a report naming a Commit: field closed as a no-op' "$OUT"; fi
+case $OUT in
+*"names no bin/preflight run under ## Evidence"*) pass 'the refusal is the preflight gate' ;;
+*) fail 'the refusal is not the gate this case pins' "$OUT" ;;
+esac
+if grep -qF 'preflight evidence is not asked for' <<<"$OUT"; then fail 'the skip fired over a Commit: field' "$OUT"; else pass 'nothing skipped the gate'; fi
+if grep -q '"w7"' "$SPACEDIR/delegations.json"; then pass 'the record is kept for the report to be fixed'; else fail 'a refused close dropped the record'; fi
 
 printf '\n%d passed, %d failed\n' "$PASS_N" "$FAIL_N"
 [ "$FAIL_N" -eq 0 ]
