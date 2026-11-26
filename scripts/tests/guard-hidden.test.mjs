@@ -209,11 +209,21 @@ test('a Windows install writes the launcher with the bash it resolved and the gu
 	// `C:\Program Files` wins over the LOCALAPPDATA copy, and the launcher carries
 	// exactly that resolved path and the guard — not a `%PI_GIT_BASH%` placeholder
 	// a task with no useful environment could never expand.
-	assert.deepEqual(launcherTargets(fs.readFileSync(launcher, 'utf8')), {
+	// `afb04b1` gave the launcher the absolute programs the logon task has no PATH for. The three
+	// paths are what this file can settle on any host; the exports are checked the way the guard
+	// would: only the three names, and each one a file that exists (an export naming a deleted node
+	// is the same silence in a different file).
+	const targets = launcherTargets(fs.readFileSync(launcher, 'utf8'));
+	assert.deepEqual({ bashPath: targets.bashPath, guardPath: targets.guardPath, pidPath: targets.pidPath }, {
 		bashPath: fake.bash,
 		guardPath: fake.guard,
 		pidPath: path.join(home, '.pi', 'state', GUARD_PID_NAME),
 	});
+	assert.equal(targets.env.PI_GUARD_NODE, process.execPath, 'the logon task names the node that wrote the launcher');
+	for (const [name, value] of Object.entries(targets.env)) {
+		assert.ok(['PI_GUARD_NODE', 'PI_GUARD_HERDR_APP', 'PI_GUARD_HC'].includes(name), `an export nobody reads: ${name}`);
+		assert.ok(fs.existsSync(String(value)), `${name} names a path that is not there: ${value}`);
+	}
 	assert.match(out.stdout, /^== guard launcher \(hidden, no console window\) -> .*guard-hidden\.vbs$/m);
 
 	// The registered task names wscript and that launcher, never bash.exe, and the

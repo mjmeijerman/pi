@@ -62,7 +62,11 @@ test("a path with a quote in it survives the quoting", () => {
 test("a recovered cmd.exe gets cmd quoting", () => {
 	const line = resumeLine(windowsEntry, shellThatIs("C:\\WINDOWS\\system32\\cmd.exe"));
 	assert.doesNotMatch(line, /\bexec\b/);
-	assert.match(line, /^"C:\\Program Files\\nodejs\\node\.exe" /, "the interpreter comes first and is quoted");
+	// The interpreter is the node that runs this test, so its spelling is asked of the host instead
+	// of a `C:\\Program Files` written here: on a Linux runner that path does not exist and the
+	// literal expectation was the only thing that was wrong. cmd quotes what is not a plain word.
+	const interpreter = /[^A-Za-z0-9_+:,./\\-]/.test(process.execPath) ? `"${process.execPath}"` : process.execPath;
+	assert.ok(line.startsWith(`${interpreter} `), `the interpreter comes first and is quoted: ${line}`);
 	assert.match(line, /--session /, "a plain flag is not quoted");
 	assert.match(line, / "C:\\Users\\markm\\AppData.*cli\.js" /, "a path with an `@` in it is quoted");
 });

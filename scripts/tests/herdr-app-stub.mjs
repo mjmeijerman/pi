@@ -57,11 +57,26 @@ export function calls(stub) {
 }
 
 /**
+ * listSeparator — the separator the list in `value` was written with.
+ *
+ * Not `path.delimiter`: `install-win-space.test.mjs` hands its child a *Windows* PATH on a Linux
+ * host (there is no Windows runner here), and splitting that one on `:` turned
+ * `<binDir>;C:\Windows` into a single directory named after both. The list's own spelling decides,
+ * the way `programName` in `scripts/herdr-resume.mjs` lets the path decide and not the host.
+ * A POSIX PATH entry containing a `;` is the one thing this reads wrongly, and no directory here
+ * has one.
+ */
+export function listSeparator(value = '') {
+	return process.platform === 'win32' || String(value).includes(';') ? ';' : ':';
+}
+
+/**
  * pathWithoutHerdr — PATH with every directory that carries a real `herdr-app` removed, plus the
  * vendor install folders the app is known to live in. The absence is the machine without the app,
  * not a mocked one: nothing is renamed and nothing is hidden behind a shim.
  */
 export function pathWithoutHerdr(realPath = process.env.PATH || '', env = process.env) {
+	const separator = listSeparator(realPath);
 	const home = env.HOME || env.USERPROFILE || '';
 	const vendor = [
 		path.join(env.LOCALAPPDATA || '', 'Programs', 'herdr-app'),
@@ -69,11 +84,11 @@ export function pathWithoutHerdr(realPath = process.env.PATH || '', env = proces
 		path.join(home, '.local', 'share', 'herdr-app'),
 	].filter((dir) => dir.length > 0);
 	return realPath
-		.split(path.delimiter)
+		.split(separator)
 		.filter(Boolean)
 		.filter((dir) => !APP_NAMES.some((name) => fs.existsSync(path.join(dir, name))))
 		.filter((dir) => !vendor.some((v) => path.resolve(dir) === path.resolve(v)))
-		.join(path.delimiter);
+		.join(separator);
 }
 
 /**
@@ -85,7 +100,7 @@ export function withStub(env, stub) {
 	const inherited = env.PATH === undefined ? process.env.PATH || '' : env.PATH;
 	return {
 		...env,
-		PATH: [stub.dir, pathWithoutHerdr(inherited, env)].filter(Boolean).join(path.delimiter),
+		PATH: [stub.dir, pathWithoutHerdr(inherited, env)].filter(Boolean).join(listSeparator(inherited)),
 		PI_GUARD_HERDR_APP: env.PI_GUARD_HERDR_APP || stub.app,
 	};
 }

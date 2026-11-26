@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { after, test } from "node:test";
 
@@ -460,10 +460,16 @@ const windowsPowerShellResumed = {
 };
 
 test("a recovered PowerShell tab is typed a PowerShell line, not a POSIX one", () => {
+	// The entry a Windows Boss leaves behind: a script, not a program. The script is real, because
+	// the restore script refuses to type an entry whose argv[0] is not on this host — a
+	// `C:\\…\\cli.js` written here was a Windows path no Linux runner has, so the case proved the
+	// skip and never the line it is named for.
+	const bossScript = join(root, "boss-entry", "npm", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");
+	mkdirSync(dirname(bossScript), { recursive: true });
+	writeFileSync(bossScript, "// a stand-in for the pi bundle the entry points at\n", { mode: 0o755 });
 	writeFake([windowsPowerShell], {
 		afterSend: windowsPowerShellResumed,
-		// The entry a Windows Boss leaves behind: a script, not a program.
-		entryArgv: ["C:\\Users\\markm\\AppData\\Roaming\\npm\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js"],
+		entryArgv: [bossScript],
 	});
 
 	const out = runFake();

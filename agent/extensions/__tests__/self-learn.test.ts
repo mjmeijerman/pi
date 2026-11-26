@@ -2712,13 +2712,17 @@ describe("repeated failing CI checks", () => {
 	test("ghCiRuns drops the branch that was given up on and says so, and an unreadable pull-request list keeps it", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "self-learn-abandoned-wiring-"));
 		try {
+			// Relative to now, because `agedOut` drops a failure older than a week: written as fixed
+			// dates these two runs aged out and the case measured the window instead of the wiring.
+			const ranAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+			const closedAt = new Date(Date.parse(ranAt) + 26 * 60 * 1000).toISOString();
 			const failures = JSON.stringify([
-				{ name: "tests", headBranch: "given-up", conclusion: "failure", databaseId: 1, createdAt: "2026-11-18T09:46:22Z" },
-				{ name: "tests", headBranch: "alive", conclusion: "failure", databaseId: 2, createdAt: "2026-11-18T09:46:22Z" },
+				{ name: "tests", headBranch: "given-up", conclusion: "failure", databaseId: 1, createdAt: ranAt },
+				{ name: "tests", headBranch: "alive", conclusion: "failure", databaseId: 2, createdAt: ranAt },
 			]);
 			const closedPrs = JSON.stringify([
-				{ state: "CLOSED", headRefName: "given-up", closedAt: "2026-11-18T10:12:24Z" },
-				{ state: "MERGED", headRefName: "alive", closedAt: "2026-11-19T10:12:24Z" },
+				{ state: "CLOSED", headRefName: "given-up", closedAt },
+				{ state: "MERGED", headRefName: "alive", closedAt },
 			]);
 			const stub = (answer: string) =>
 				`#!/usr/bin/env bash\ncase "$2$4" in\n  listfailure) printf '%s' '${failures}' ;;\n  listsuccess) printf '%s' '[]' ;;\n  listclosed) ${answer} ;;\n  --paginate--jq) printf '%s\\n' given-up alive ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Run tests"}]}]}' ;;\nesac\n`;
