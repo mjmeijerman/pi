@@ -26,6 +26,8 @@ import { fileURLToPath } from 'node:url';
 
 import { GUARD_TASK_NAME, gitBashCandidates, guardTaskCommand, hiddenLauncher, schtasksExe, spawnPlan } from '../install-lib.mjs';
 
+import { stubHerdrApp, withStub } from './herdr-app-stub.mjs';
+
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
 // --- the guard command -------------------------------------------------------
@@ -125,7 +127,11 @@ function envFor(home, extra = {}) {
 	// Either of these would decide the answer before the test does: the host's
 	// platform, and a HOME that is not the throwaway one.
 	for (const name of ['USERPROFILE', 'PI_DRY_RUN', 'PI_AGENT_DIR', 'PI_ENABLE_SERVICES', 'PI_GIT_BASH', 'PI_UPDATE_MODS', 'HERDR_MODS']) delete env[name];
-	return { ...env, ...extra };
+	// A stub, always: the engine's space step opens a real space in whatever `herdr-app` the
+	// child can reach, and a throwaway HOME does not stop that — it only lets the record die with
+	// the folder and leaves a space behind. `withStub` is the stub on PATH plus the override the
+	// tools read before PATH, with every real app directory taken off PATH.
+	return withStub({ ...env, ...extra }, stubHerdrApp(home));
 }
 
 function install(home, args = [], extra = {}) {

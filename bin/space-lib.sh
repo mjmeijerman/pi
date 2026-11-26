@@ -47,6 +47,31 @@ SPACE_LEGACY_ROOT=${PI_LEGACY_BOSS_ROOT:-}
 SPACE_RULES_TEMPLATE=${PI_SPACE_RULES_TEMPLATE:-$_space_home/agent/space-rules.md}
 SPACE_CEILING=8
 
+# herdr_app_path — the `herdr-app` this tree talks to, or nothing when there is none.
+#
+# One decision, the same one `bin/guard` makes (`tool_path`): the override first, then PATH.
+# PI_GUARD_HERDR_APP is the guard's own variable, read here too, so one environment points
+# every tool in this tree at one app.
+#
+# Why an override at all: `space new` opens a REAL space in the app of whoever runs it, and a test
+# that hands its child a throwaway HOME still finds the app on the user's PATH — the record it
+# writes dies with the temp folder, the space stays behind, owned by nothing, and the person's
+# focus moves mid-run. With the override a stub answers instead, and the real app is unreachable
+# rather than merely outrun. No override and nothing on PATH is an empty answer, never a guess:
+# the callers refuse in words that say what to do.
+#
+# A vendor install folder is deliberately NOT a fallback here. The guard needs one because the
+# logon task runs with no useful PATH; `space new` runs from a person's shell or from the
+# installer, which has just found `herdr-app` on PATH itself — and a silent fall through to
+# `%LOCALAPPDATA%` is exactly the reach a test cannot switch off.
+herdr_app_path() {
+	if [ -n "${PI_GUARD_HERDR_APP:-}" ] && [ -x "${PI_GUARD_HERDR_APP}" ]; then
+		printf '%s' "$PI_GUARD_HERDR_APP"
+		return 0
+	fi
+	command -v herdr-app 2>/dev/null || return 0
+}
+
 space_valid_slug() {
 	case ${1:-} in [a-z0-9]*) ;; *) return 1 ;; esac
 	printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]{0,30}$'
@@ -181,8 +206,10 @@ space_id_ensure() {
 		printf '%s' "$id"
 		return 0
 	fi
-	command -v herdr-app >/dev/null 2>&1 || return 0
-	id=$(herdr-app ls 2>/dev/null | HERDR_SPACE_NAME=$slug node -e '
+	local app
+	app=$(herdr_app_path)
+	[ -n "$app" ] || return 0
+	id=$("$app" ls 2>/dev/null | HERDR_SPACE_NAME=$slug node -e '
 		let d = "";
 		process.stdin.on("data", (c) => (d += c)).on("end", () => {
 			let j = {};

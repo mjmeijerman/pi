@@ -18,6 +18,11 @@
 # and `tab.new` takes that id; a record from before the field is filled in by `delegate` from
 # `herdr-app ls`, by name, once.
 #
+# The app it opens the space in is `herdr_app_path` (space-lib.sh): PI_GUARD_HERDR_APP first, then
+# PATH, and no quiet fall-through to the vendor's install folder. `space new` passes `--focus
+# false` on `space.new`, so creating a space never takes the keyboard from whoever is reading: the
+# app shows a new space at once unless told not to, and showing it is the person's move.
+#
 # `kind` says what learning in the space may change, and the space decides it, never the session
 # that compacted: a `harness` space is this pi checkout and its learner may edit the harness and
 # publish its own branch; a `project` space (the default, and what a record without the field
@@ -306,12 +311,19 @@ cmd_new() {
 
 	# A missing app is a refusal that names the one command to run by hand, before a folder is made:
 	# nothing is recorded and no folder is touched, so the person can run it later and lose nothing.
-	command -v herdr-app >/dev/null 2>&1 ||
-		die "herdr-app is not on PATH — nothing was recorded, nothing was opened; once herdr is back, run it by hand: herdr-app do space.new --name $name --folder $project --tab $tabname --argv $boss_argv"
+	# Resolved once, with the override first (`herdr_app_path`, space-lib.sh): the app this opens a
+	# space in is the app the caller named, never whichever one happens to answer to the name.
+	local app
+	app=$(herdr_app_path)
+	[ -n "$app" ] ||
+		die "herdr-app is not on PATH and PI_GUARD_HERDR_APP is not an executable — nothing was recorded, nothing was opened; once herdr is back, run it by hand: herdr-app do space.new --name $name --folder $project --tab $tabname --argv $boss_argv --focus false"
 
 	mkdir -p "$(space_specs "$name")" "$(space_reports "$name")"
 	local out space tab terminal
-	out=$(herdr-app do space.new --name "$name" --folder "$project" --tab "$tabname" --argv "$boss_argv" 2>&1) ||
+	# `--focus false`: the app shows a new space at once unless it is told not to, so opening one
+	# took the keyboard from whoever was reading — mid-install, mid-test. The space is recorded and
+	# the guard reopens its Boss tab; showing it is the person's move, never this command's.
+	out=$("$app" do space.new --name "$name" --folder "$project" --tab "$tabname" --argv "$boss_argv" --focus false 2>&1) ||
 		die "space.new failed for $name: $out"
 	space=$(json_field space <<<"$out")
 	[ -n "$space" ] || space=$(json_field id <<<"$out")
@@ -383,8 +395,10 @@ cmd_list() {
 		fi
 		return 0
 	fi
-	if command -v herdr-app >/dev/null 2>&1; then
-		snap=$(herdr-app ls 2>/dev/null) || snap=""
+	local app
+	app=$(herdr_app_path)
+	if [ -n "$app" ]; then
+		snap=$("$app" ls 2>/dev/null) || snap=""
 	fi
 	if [ -z "$snap" ]; then
 		unavailable=1

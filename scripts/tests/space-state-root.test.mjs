@@ -25,6 +25,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { PI_HOME_CARRIERS, SOURCE_LIBS, stampPiHome } from '../install-lib.mjs';
+import { stubHerdrApp, withStub } from './herdr-app-stub.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const BIN_DIR = (home) => path.join(home, '.local', 'bin');
@@ -51,7 +52,11 @@ function cleanEnv(home, extra = {}) {
 }
 
 function run(entry, args, home, extra = {}) {
-	return spawnSync(entry, args, { cwd: home, env: cleanEnv(home, extra), encoding: 'utf8' });
+	// Every child here gets the stub `herdr-app`: `space new` opens a REAL space in whatever app the
+	// child can reach, and a throwaway HOME does not stop that — the record dies with the folder
+	// and the space stays. `withStub` is the stub on PATH, the override before PATH, and the real
+	// app off PATH.
+	return spawnSync(entry, args, { cwd: home, env: withStub(cleanEnv(home, extra), stubHerdrApp(home)), encoding: 'utf8' });
 }
 
 /**
@@ -101,26 +106,6 @@ function writeRecord(dir, slug = 'harness', kind = 'harness') {
 	fs.mkdirSync(recordDir, { recursive: true });
 	const record = { name: slug, project: dir, git: false, kind, terminals: [] };
 	fs.writeFileSync(path.join(recordDir, 'space.json'), `${JSON.stringify(record, null, 2)}\n`);
-}
-
-/** stubHerdrApp — a `herdr-app` that opens a space, so `space new` has an app to talk to. */
-function stubHerdrApp(home) {
-	const dir = path.join(home, 'stub-bin');
-	fs.mkdirSync(dir, { recursive: true });
-	fs.writeFileSync(
-		path.join(dir, 'herdr-app'),
-		[
-			'#!/bin/sh',
-			'case "$1 $2" in',
-			'  "do space.new") printf \'{"space":"sp-test","tab":"tab-boss","terminal":"term-1"}\\n\' ;;',
-			'  "ls ") printf \'{"spaces":[]}\\n\' ;;',
-			'  *) exit 1 ;;',
-			'esac',
-			'',
-		].join('\n'),
-		{ mode: 0o755 },
-	);
-	return dir;
 }
 
 // --- the stamp --------------------------------------------------------------
@@ -191,11 +176,8 @@ test('a copied space new writes the rules block into the project', (t) => {
 	const bin = copyInstall(home, co);
 	const project = path.join(home, 'project');
 	fs.mkdirSync(project, { recursive: true });
-	const stub = stubHerdrApp(home);
 
-	const made = run(path.join(bin, 'space'), ['new', 'ruled', '--project', project, '--no-git', '--kind', 'project'], home, {
-		PATH: `${stub}${path.delimiter}${process.env.PATH || ''}`,
-	});
+	const made = run(path.join(bin, 'space'), ['new', 'ruled', '--project', project, '--no-git', '--kind', 'project'], home);
 	assert.equal(made.status, 0, `${made.stdout}${made.stderr}`);
 
 	// The template came from the checkout the copy was stamped with: before this,
@@ -235,7 +217,7 @@ test('copy mode stamps the three entries it copies, and the installed space read
 		PI_SKIP_PREREQS: '1',
 		PI_ALLOW_MISSING_PI: '1',
 	});
-	const installed = spawnSync(process.execPath, [path.join(ROOT, 'install.mjs')], { cwd: ROOT, env, encoding: 'utf8' });
+	const installed = spawnSync(process.execPath, [path.join(ROOT, 'install.mjs')], { cwd: ROOT, env: withStub(env, stubHerdrApp(home)), encoding: 'utf8' });
 	assert.equal(installed.status, 0, `install.mjs exited ${installed.status}:\n${installed.stdout}${installed.stderr}`);
 
 	// The installer, not the test, is what writes the line: the copy on PATH carries
