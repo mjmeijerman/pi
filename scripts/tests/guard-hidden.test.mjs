@@ -55,8 +55,10 @@ test('the launcher is generated from the resolved bash on a fake Program Files l
 	const text = hiddenLauncher({ bashPath, guardPath, pidPath });
 
 	// One VBScript line, both paths quoted, a quote inside a string spelled by
-	// doubling it — the space in `Program Files` is the reason for all of it.
-	assert.ok(text.includes('command = """C:\\Program Files\\Git\\bin\\bash.exe"" ""C:\\Users\\mj\\.pi\\bin\\guard"""'), text);
+	// doubling it — the space in `Program Files` is the reason for all of it, and
+	// the guard is no longer a bare word: it is `exec`ed, so no shell is left
+	// between the task and the guard the pid lookup has to find.
+	assert.ok(text.includes(`"""${bashPath}"" -lc ""exec '${guardPath}'"""`), text);
 	// 0 = hidden, False = do not wait: the guard is a loop and outlives this file.
 	assert.match(text, /^    shell\.Run command, 0, False$/m);
 	// A guard that is already running is not started a second time: the launcher
@@ -82,7 +84,11 @@ test('a path with a space survives the round trip, through the task and the pid'
 	const guardPath = 'C:\\Users\\John Smith\\.pi\\bin\\guard';
 	const pidPath = 'C:\\Users\\John Smith\\.pi\\state\\guard.pid';
 
-	assert.deepEqual(launcherTargets(hiddenLauncher({ bashPath, guardPath, pidPath })), { bashPath, guardPath, pidPath });
+	const targets = launcherTargets(hiddenLauncher({ bashPath, guardPath, pidPath }));
+	assert.equal(targets.bashPath, bashPath);
+	assert.equal(targets.guardPath, guardPath);
+	assert.equal(targets.pidPath, pidPath);
+	assert.deepEqual(targets.env, {}, 'nothing was named for the guard, so nothing is exported');
 
 	// The `/TR` carries two quoted strings, and they are the wscript and the
 	// launcher — not bash, and not a path with its quoting stripped.
@@ -95,6 +101,37 @@ test('a path with a space survives the round trip, through the task and the pid'
 	assert.equal(task.args[task.args.length - 1], task.tr, 'the argv carries the same /TR value');
 	assert.equal(launcherPath.endsWith(GUARD_LAUNCHER_NAME), true, 'next to the installer state, no new top-level dir');
 	assert.equal(path.basename(guardPidPath({ piHome: 'C:\\Users\\John Smith\\.pi' })), GUARD_PID_NAME);
+});
+
+test('the launcher exports the programs the logon task has no PATH for, and reads them back', () => {
+	// The task starts with the Task Scheduler's environment: `herdr-app` and `hc` are on the
+	// *user* PATH only and node is a third case, so a guard started from there found no app and
+	// supervised nothing — for as long as the entry existed, printing its refusal to a hidden
+	// process. The launcher names them, the way `resume-hidden.vbs` names `hc`.
+	const paths = {
+		bashPath: 'C:\\Program Files\\Git\\bin\\bash.exe',
+		guardPath: 'C:\\Users\\John Smith\\.pi\\bin\\guard',
+		pidPath: 'C:\\Users\\John Smith\\.pi\\state\\guard.pid',
+		nodePath: 'C:\\Program Files\\nodejs\\node.exe',
+		herdrAppPath: 'C:\\Users\\John Smith\\AppData\\Local\\Programs\\herdr-app\\herdr-app.exe',
+		hcPath: 'C:\\Users\\John Smith\\AppData\\Local\\Programs\\herdr-core\\hc.exe',
+	};
+	const text = hiddenLauncher(paths);
+	const line = `export PI_GUARD_NODE='${paths.nodePath}'; export PI_GUARD_HERDR_APP='${paths.herdrAppPath}'; export PI_GUARD_HC='${paths.hcPath}'; exec '${paths.guardPath}'`;
+	assert.ok(text.includes(`command = """${paths.bashPath}"" -lc ""${line}"""`), text);
+	assert.deepEqual(launcherTargets(text), {
+		bashPath: paths.bashPath,
+		guardPath: paths.guardPath,
+		pidPath: paths.pidPath,
+		env: { PI_GUARD_NODE: paths.nodePath, PI_GUARD_HERDR_APP: paths.herdrAppPath, PI_GUARD_HC: paths.hcPath },
+	});
+	// The guard still finds itself in the command line — that is what stops a second launcher
+	// from starting a second guard, and the path is now inside `exec '…'` rather than on its own.
+	assert.ok(text.includes(`pid = GuardPid("${paths.guardPath}")`), text);
+	// A value that is not there is omitted, never exported empty: an empty override would shadow
+	// the guard's own resolution with nothing at all.
+	const partial = launcherTargets(hiddenLauncher({ bashPath: paths.bashPath, guardPath: paths.guardPath, pidPath: paths.pidPath, nodePath: paths.nodePath }));
+	assert.deepEqual(partial.env, { PI_GUARD_NODE: paths.nodePath });
 });
 
 test('the disable line can stop the process the task delete does not reach', () => {

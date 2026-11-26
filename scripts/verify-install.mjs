@@ -246,6 +246,14 @@ if (PLAN.service === 'systemd') {
 					else fail('guard launcher interpreter', `${targets.bashPath} does not exist — the task starts wscript, and the launcher starts nothing`);
 					if (fs.existsSync(targets.guardPath)) pass('guard launcher guard', targets.guardPath);
 					else fail('guard launcher guard', `${targets.guardPath} does not exist — nothing repairs a space after the next logon`);
+					// The programs the guard asks every pass, named by absolute path: the logon
+					// task has none of them on its PATH, and a launcher that names a deleted
+					// node is the same silence in a different file.
+					for (const [name, value] of Object.entries(targets.env || {})) {
+						if (fs.existsSync(value)) pass(`guard launcher ${name}`, value);
+						else fail(`guard launcher ${name}`, `${value} does not exist — the guard resolves this one itself, and logs the refusal to ${path.join(P.piHome, 'state', 'guard.log')}`);
+					}
+					if (!targets.env?.PI_GUARD_HERDR_APP) fail('guard launcher PI_GUARD_HERDR_APP', 'the launcher names no herdr-app — the logon task has no PATH that holds it, so the guard starts inert and says so in state/guard.log');
 				}
 			}
 		}

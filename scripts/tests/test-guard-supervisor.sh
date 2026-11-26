@@ -70,12 +70,14 @@ case "$1 $2" in
 *) printf '{}\n' ;;
 esac
 STUB
-# hc: never expected to be asked anything by the guard itself. A line here is a fail below.
+# hc: answers `get <terminal> --json` from $HC_FACTS_FILE, so a case can say what program is in a
+# terminal; a line in $HC_LOG is what the guard asked, and a *write* verb there is a fail below.
 cat >"$WORK/stub/hc" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$HC_LOG"
-printf '{}\n'
+if [ -f "${HC_FACTS_FILE:-/nonexistent}" ]; then cat "$HC_FACTS_FILE"; else printf '{}\n'; fi
 STUB
+export HC_FACTS_FILE="$WORK/hc-facts.json"
 chmod +x "$WORK/stub/"*
 
 PASS_N=0
@@ -135,6 +137,16 @@ worker() { # <slug> <worker> <report?>
 	' "$(sd "$1")" "$2" "${3:-}"
 }
 spaces() { printf '%s\n' "$1" >"$HERDR_SPACES"; }
+# hc_facts <terminal> <shell|pi> — what herdr-core says about one terminal: `shell` is the reboot's
+# empty Boss (a live plain PowerShell), `pi` a live Boss (node in the foreground, `app: pi`).
+hc_facts() {
+	node -e '
+		const fs = require("fs"), [file, terminal, kind] = process.argv.slice(1);
+		const shell = { address: terminal, state: "live", foreground: { argv: ["C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"], pid: 16328 } };
+		const pi = { address: terminal, state: "live", foreground: { argv: ["node.exe", "C:/pi/cli.js"], pid: 4242 }, status: { app: "pi", state: "idle" } };
+		fs.writeFileSync(file, JSON.stringify(kind === "pi" ? pi : shell) + "\n");
+	' "$HC_FACTS_FILE" "$1" "$2"
+}
 resume_entry() { # <terminal> <session>
 	node -e '
 		const fs = require("fs"), [dir, terminal, session] = process.argv.slice(1);
@@ -225,7 +237,99 @@ clear_log
 run "$GUARD" --once
 if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'the pass failed' "$OUT"; fi
 if [ -s "$HERDR_LOG" ]; then fail 'herdr-app was asked to do something to a live space' "$(herdr)"; else pass 'nothing was opened'; fi
-if [ -s "$HC_LOG" ]; then fail 'a terminal was typed into' "$(cat "$HC_LOG")"; else pass 'nothing was typed into any tab'; fi
+if [ -s "$HC_LOG" ]; then
+	if grep -qE '(^| )(send|keys|interrupt|put|kill|rm) ' "$HC_LOG"; then
+		fail 'a terminal was written to, not just read' "$(cat "$HC_LOG")"
+	else
+		pass 'nothing was typed into any tab'
+	fi
+else pass 'nothing was typed into any tab'; fi
+
+# --------------------------------- the Boss tab is there, and the shell is empty --
+# The reboot this whole file is about, in the shape herdr leaves behind: every tab comes back as a
+# plain shell *in the same tab*, in the same folder, so the space and the Boss tab both exist and
+# the record is satisfied. `herdr-app ls` cannot tell those two apart — it names the app a terminal
+# reports and nothing about the program in front of it — so the guard asks herdr-core, and judges
+# the answer with the same two witnesses `scripts/herdr-resume.mjs` uses.
+new_case 'an empty Boss shell is respawned with the session its terminal recorded'
+set_tabs demo "[{\"name\":\"Boss\",\"folder\":\"$PROJ\",\"argv\":[],\"terminals\":[\"t-demo\"]}]"
+spaces '{"spaces":[{"id":"s-boss","name":"demo","tabs":[{"id":"tb-boss","name":"Boss","terminals":[{"terminal":"t-demo"}]}]}]}'
+hc_facts t-demo shell
+clear_log
+run "$GUARD" --once
+if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'the pass failed' "$OUT"; fi
+# The record and the entry are read back rather than rebuilt in the assertion: the fixture writes
+# both through node, so on a Windows host they hold the drive-lettered spelling of the same path.
+rec_project=$(node -e 'console.log(require(process.argv[1]).project)' "$(record demo)")
+entry_session=$(node -e 'console.log(require(process.argv[1]).session_path)' "$PI_HERDR_RESUME_DIR/t-demo.json")
+tab_line=$(grep -F 'do tab.new --name Boss --space s-boss ' "$HERDR_LOG" 2>/dev/null | head -n 1)
+if [ -n "$tab_line" ]; then pass 'a Boss tab is opened again, in the space the record is in'; else fail 'an empty Boss tab was left an empty shell' "$(herdr)"; fi
+if printf '%s' "$tab_line" | grep -qF -- "--folder $rec_project"; then
+	pass "the new tab is put in the record's project folder"
+else
+	fail 'the new tab went somewhere else' "$tab_line"
+fi
+if printf '%s' "$tab_line" | grep -qF -- "\"--session\",\"$entry_session\""; then
+	pass 'it is started on the session the record remembers'
+else
+	fail 'the session was not carried into the new tab' "$tab_line"
+fi
+if printf '%s' "$tab_line" | grep -qF 'pi-bare'; then
+	pass "the Boss comes back bare, from this tree's pi-bare"
+else
+	fail 'the new Boss is not bare' "$tab_line"
+fi
+if printf '%s\n' "$OUT" | grep -qF 'empty shell'; then
+	pass 'the line says the tab was a shell, not a Boss'
+else
+	fail 'the respawn line does not say why it opened a tab' "$OUT"
+fi
+if grep -qF 'get t-demo' "$HC_LOG"; then
+	pass 'the terminal itself was asked what program it holds'
+else
+	fail 'the guard never asked herdr-core about the Boss tab' "$(cat "$HC_LOG")"
+fi
+if grep -qE '(^| )(send|keys|interrupt|put) ' "$HC_LOG"; then
+	fail 'the guard typed into the empty shell: a tab is opened, a shell is never typed into' "$(cat "$HC_LOG")"
+else
+	pass 'nothing was typed into the shell it replaced'
+fi
+
+new_case 'a Boss tab that has pi in it is left alone'
+hc_facts t-demo pi
+clear_log
+run "$GUARD" --once
+if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'the pass failed' "$OUT"; fi
+if [ -s "$HERDR_LOG" ]; then
+	fail 'a Boss that runs was opened a second time: two pi on one session file' "$(herdr)"
+else
+	pass 'no tab was opened for a Boss that runs'
+fi
+if printf '%s\n' "$OUT" | grep -qE 'empty shell|nothing says pi'; then
+	fail 'a running Boss was reported as empty or unreadable' "$OUT"
+else
+	pass 'a Boss that runs is reported as nothing at all'
+fi
+
+new_case 'a terminal nothing answers for is left alone, and the line says so'
+rm -f "$HC_FACTS_FILE"
+clear_log
+run "$GUARD" --once
+if [ -s "$HERDR_LOG" ]; then
+	fail 'a guess opened a second Boss tab on the same session file' "$(herdr)"
+else
+	pass 'no tab was opened on a terminal that did not answer'
+fi
+if printf '%s\n' "$OUT" | grep -qF 'nothing says pi is in it'; then
+	pass 'the line says the tab was left alone and why'
+else
+	fail 'the refusal is missing: silence and a pass with nothing to do read the same' "$OUT"
+fi
+if tail -n 20 "$PI_SPACE_ROOT/state/guard.log" 2>/dev/null | grep -qF 'nothing says pi is in it'; then
+	pass 'the same line is in state/guard.log, which is all a hidden logon run leaves behind'
+else
+	fail 'the line never reached state/guard.log' "$(tail -n 5 "$PI_SPACE_ROOT/state/guard.log" 2>/dev/null)"
+fi
 
 # -------------------------------------------------- a space renamed in the app is the same space --
 new_case 'a space renamed in herdr is found by its id instead of being built again'
@@ -323,6 +427,50 @@ if printf '%s\n' "$OUT" | grep -qF 'herdr-resume restored 1 session(s)'; then
 	pass 'the resume script is called after a rebuild, and its restore is reported'
 else
 	fail 'the resume script was not called after a rebuild' "$OUT"
+fi
+
+# -------------------------------------------- a pass with no herdr-app anywhere says so --
+# The logon entry runs the guard through a hidden `.vbs`, so stdout goes nowhere: a refusal that is
+# only printed is a refusal nobody reads, and the pass used to look identical to one with nothing
+# to do. Measured 2026-11-26: with a machine-only PATH the guard printed "herdr-app did not answer"
+# (a program that was never even found) and supervised nothing, while the live guard left herdr's
+# new space unsupervised for five minutes after the person made it.
+new_case 'a pass that cannot find herdr-app logs a refusal instead of doing nothing in silence'
+LOG_PATH="$PI_SPACE_ROOT/state/guard.log"
+: >"$LOG_PATH"
+: >"$HERDR_LOG"
+# herdr-app is on the real PATH of this machine: the point of the case is the environment the logon
+# task hands over, so the pass gets a PATH with node and bash and no app at all — its own directory,
+# because the `env -i` case above puts a stub app in the one it made.
+mkdir -p "$WORK/min-nohrdr"
+for tool in node bash cat date dirname readlink sleep grep sed printf mkdir; do
+	real=$(command -v "$tool" 2>/dev/null) || continue
+	ln -sf "$real" "$WORK/min-nohrdr/$tool" 2>/dev/null || true
+done
+OUT=$(timeout 60 env -i PATH="$WORK/min-nohrdr:/usr/bin:/bin" HOME="$WORK/home" PI_SPACE_ROOT="$PI_SPACE_ROOT" \
+	HERDR_LOG="$HERDR_LOG" HERDR_LS_LOG="$HERDR_LS_LOG" HERDR_SPACES="$HERDR_SPACES" \
+	PI_HERDR_RESUME_DIR="$PI_HERDR_RESUME_DIR" PI_GUARD_RESUME_SCRIPT="$PI_GUARD_RESUME_SCRIPT" "$GUARD" --once 2>&1)
+RC=$?
+if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'a pass with no app is not an error' "$OUT"; fi
+if printf '%s\n' "$OUT" | grep -qF 'herdr-app was not found'; then
+	pass 'it says the app was not found, not that a found app did not answer'
+else
+	fail 'the refusal is missing' "$OUT"
+fi
+if printf '%s\n' "$OUT" | grep -qF 'PI_GUARD_HERDR_APP'; then
+	pass 'the refusal names the variable that fixes it'
+else
+	fail 'the refusal names no fix' "$OUT"
+fi
+if tail -n 20 "$LOG_PATH" 2>/dev/null | grep -qF 'herdr-app was not found'; then
+	pass 'the same line is in state/guard.log, the only place a hidden run is read'
+else
+	fail 'the refusal never reached state/guard.log: a hidden logon run has nothing to read' "$(cat "$LOG_PATH" 2>/dev/null)"
+fi
+if [ -s "$HERDR_LOG" ]; then
+	fail 'something was opened although no app was found' "$(cat "$HERDR_LOG")"
+else
+	pass 'nothing was opened on a pass that could not see any space'
 fi
 
 # ------------------------------------------------------------------------- --once exits --

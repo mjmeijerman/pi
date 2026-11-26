@@ -1298,8 +1298,13 @@ function stepServices() {
 	const pidFile = guardPidPath({ piHome: P.piHome });
 	// Before the new name is registered: the old entry must not be left running beside it.
 	removeLegacyGuardEntry();
-	if (writeText(launcher, hiddenLauncher({ bashPath: bash, guardPath: guard, pidPath: pidFile })))
+	// The three programs the guard asks every pass, named by absolute path: the task starts with
+	// the Task Scheduler's environment and none of them is on that PATH (see hiddenLauncher).
+	const guardPrograms = { nodePath: resolveNodePath(), herdrAppPath: resolveHerdrApp(), hcPath: resolveHc() };
+	if (writeText(launcher, hiddenLauncher({ bashPath: bash, guardPath: guard, pidPath: pidFile, ...guardPrograms })))
 		note(`guard launcher (hidden, no console window) -> ${launcher}`);
+	if (!guardPrograms.herdrAppPath)
+		warn(`guard: herdr-app was not found from here, so the launcher does not name it — the guard resolves it from PATH and ${P.herdrInstalled} at every pass, and says in ${path.join(P.piHome, 'state', 'guard.log')} when it cannot`);
 	const task = guardTaskCommand({ launcherPath: launcher, pidPath: pidFile });
 	note('guard: registering a Task Scheduler entry at logon (this is what repairs a space and its Boss tab)');
 	note(`interpreter: ${bash}   # run hidden by ${launcher}`);
@@ -1443,6 +1448,24 @@ function whereCmd(name) {
 function resolveHc() {
 	const candidates = hcCandidates({ platform: PLAN.platform, env: process.env, onPath: whereCmd('hc') });
 	return candidates.find((p) => exists(p)) || '';
+}
+
+/** resolveHerdrApp — the absolute `herdr-app` the guard asks every pass. The
+ * launcher the logon task starts gets no useful PATH, and `herdr-app` installs
+ * under the profile (`P.herdrInstalled`) rather than on the machine PATH, so the
+ * guard found no app at all and supervised nothing — for as long as the entry
+ * existed. PI_GUARD_HERDR_APP overrides; then PATH, then the install folder. */
+function resolveHerdrApp() {
+	const onPath = whereCmd('herdr-app');
+	return [process.env.PI_GUARD_HERDR_APP, onPath, P.herdrInstalled].find((p) => p && exists(p)) || '';
+}
+
+/** resolveNodePath — the node running this installer, as an absolute path: the
+ * third program the logon task cannot find, and every matcher in `bin/guard` is a
+ * node one-liner that asks for `node` by name. */
+function resolveNodePath() {
+	const onPath = whereCmd('node');
+	return [process.env.PI_GUARD_NODE, process.execPath, onPath].find((p) => p && exists(p)) || '';
 }
 
 // The shim resolution, asked for once per run: a run with five wrappers and no
