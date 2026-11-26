@@ -1986,6 +1986,20 @@ export const OUTSIDE_HARNESS = "that belongs to a project space";
 const trimSlashes = (path: string): string => (path.length > 1 ? path.replace(/\/+$/, "") : path);
 
 /**
+ * One spelling for a folder, so two spellings of it are the same folder.
+ *
+ * `\` and `/` are one separator (`process.cwd()` on this host prints `C:\\Users\\markm\\.pi`
+ * while a `space.json` in `state/spaces` records `C:/Users/markm/.pi`), repeated separators
+ * collapse, a trailing separator is not part of the name, and a drive-lettered path — `C:`
+ * and `c:` are one drive — ignores case. A POSIX path keeps its case: `/home/m/WEB` and
+ * `/home/m/web` are two folders.
+ */
+const normalisePath = (path: string): string => {
+	const collapsed = trimSlashes(path.replace(/\\/g, "/").replace(/\/{2,}/g, "/"));
+	return /^[A-Za-z]:/.test(collapsed) ? collapsed.toLowerCase() : collapsed;
+};
+
+/**
  * The space that owns `cwd`: the record whose `project` is `cwd` or its nearest ancestor,
  * longest match first. Pure, so the boundary is testable without a filesystem, and it
  * answers `null` instead of guessing — a cwd no space claims teaches nothing at all.
@@ -1996,7 +2010,7 @@ export function learnerSpace(records: readonly SpaceRecord[], cwd: string): Lear
 	// string, and nothing in a record list matches it — `readSpaceRecords` only yields absolute
 	// projects, a record without a project is skipped below, and a `/` project requires a leading
 	// slash the replacement lacks. Every such caller reaches the same `null` either way.
-	const here = trimSlashes(String(cwd ?? "").trim());
+	const here = normalisePath(String(cwd ?? "").trim());
 	// Stryker disable next-line ConditionalExpression: equivalent. An empty `here` matches no
 	// record — a project that trims to empty is skipped two lines below — so falling through
 	// this guard returns null at the end of the loop anyway.
@@ -2007,13 +2021,16 @@ export function learnerSpace(records: readonly SpaceRecord[], cwd: string): Lear
 		// Stryker disable next-line StringLiteral: unreachable. `readSpaceRecords` never returns
 		// a record without a project, and a projectless record in a hand-built array is skipped
 		// by the `!project` guard below with either text: the replacement is not a path.
+		// The record's own spelling is what is returned — `space.json` is not rewritten —
+		// but the comparison is done on the normalised one.
 		const project = trimSlashes(String(record?.project ?? "").trim());
-		if (!project) continue;
-		if (here !== project && !here.startsWith(project === "/" ? "/" : `${project}/`)) continue;
+		const key = normalisePath(project);
+		if (!key) continue;
+		if (here !== key && !here.startsWith(key === "/" ? "/" : `${key}/`)) continue;
 		// Two spaces on one folder cannot both be right: the longer project path wins, and a
 		// tie keeps the first record, which is the order `state/spaces` lists them in.
-		if (project.length <= bestLength) continue;
-		bestLength = project.length;
+		if (key.length <= bestLength) continue;
+		bestLength = key.length;
 		best = {
 			// Stryker disable next-line OptionalChaining,StringLiteral: unreachable. Every record
 			// from this machine has a slug (the directory name) and a project, so a record that

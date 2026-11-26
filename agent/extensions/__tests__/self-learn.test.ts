@@ -401,6 +401,52 @@ describe("which space teaches a compaction", () => {
 		assert.equal(learnerSpace([WEB], "/home/person/projects/web-2"), null);
 	});
 
+	// The rows `agent/proposals/runs.jsonl` is full of: `no space owns C:\\Users\\markm\\.pi, so
+	// this compaction teaches nothing`. Every case below used to answer `null`, because
+	// `process.cwd()` spells a path with backslashes while `space.json` spells it with
+	// forward ones.
+	describe("one folder, two spellings", () => {
+		const HARNESS = { slug: "harness", project: "C:/Users/markm/.pi", kind: "harness" };
+
+		test("a backslash cwd is the forward-slash record", () => {
+			assert.deepEqual(learnerSpace([HARNESS], "C:\\Users\\markm\\.pi"), {
+				slug: "harness",
+				kind: "harness",
+				project: "C:/Users/markm/.pi",
+			});
+		});
+
+		test("a subfolder of it is still that record, and a sibling name is not", () => {
+			assert.equal(learnerSpace([HARNESS], "C:\\Users\\markm\\.pi\\scripts")?.slug, "harness");
+			assert.equal(learnerSpace([HARNESS], "C:\\Users\\markm\\.pi2"), null, "`.pi2` is not inside `.pi`");
+		});
+
+		test("a drive-lettered path ignores case, because `C:` and `c:` are one drive", () => {
+			assert.equal(learnerSpace([HARNESS], "C:/Users/Markm/.Pi")?.slug, "harness");
+			assert.equal(learnerSpace([{ slug: "h", project: "C:/Users/Markm/.Pi" }], "c:\\users\\markm\\.pi")?.slug, "h");
+		});
+
+		test("a POSIX path keeps its case, so two folders stay two", () => {
+			assert.equal(learnerSpace([{ slug: "upper", project: "/home/m/WEB" }], "/home/m/web"), null);
+			assert.equal(learnerSpace([{ slug: "upper", project: "/home/m/WEB" }], "/home/m/WEB")?.slug, "upper");
+		});
+
+		test("repeated separators collapse, on either side", () => {
+			assert.equal(learnerSpace([{ slug: "h", project: "C:/Users//markm/.pi" }], "C:\\Users\\markm\\.pi")?.slug, "h");
+			assert.equal(learnerSpace([HARNESS], "C:\\\\Users\\markm\\.pi\\")?.slug, "harness");
+		});
+
+		test("the longest match still wins across separators", () => {
+			const deep = { slug: "deep", project: "C:/Users/markm/.pi/state" };
+			assert.equal(learnerSpace([HARNESS, deep], "C:\\Users\\markm\\.pi\\state\\spaces")?.slug, "deep");
+			assert.equal(learnerSpace([deep, HARNESS], "C:\\Users\\markm\\.pi\\agent")?.slug, "harness");
+		});
+
+		test("and the drive root owns what is under it", () => {
+			assert.equal(learnerSpace([{ slug: "c", project: "C:/" }], "C:\\Users")?.slug, "c");
+		});
+	});
+
 	test("a null record, or one with no project, is skipped instead of throwing", () => {
 		const withJunk = [null, undefined, { slug: "nope" }, { slug: "", project: "  " }, WEB] as any;
 		assert.equal(learnerSpace(withJunk, "/home/person/projects/web")?.slug, "web", "the junk is skipped, the record is found");
