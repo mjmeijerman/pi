@@ -412,6 +412,15 @@ else
 	fail 'a locked drive is still reported as a gone folder' "$OUT"
 fi
 if printf '%s\n' "$OUT" | grep -qF 'started the unlock watcher'; then pass 'the pass says it started one'; else fail 'the start is not announced' "$OUT"; fi
+# The watcher is a detached node process: the pass exits as soon as it is started, so its first
+# line is not in the log yet when this line runs — a `-s` check on the file raced node's own
+# start and failed in about a millisecond on a loaded machine. Bounded, so a watcher that never
+# says anything still fails: the assertion below is unchanged.
+waited=0
+while [ ! -s "$WATCH_LOG" ] && [ "$waited" -lt 100 ]; do
+	sleep 0.02
+	waited=$((waited + 1))
+done
 if [ "$(wc -l <"$WATCH_LOG" | tr -d ' ')" = 1 ]; then pass 'one watcher was started'; else fail "expected one watcher, got $(cat "$WATCH_LOG")"; fi
 if grep -qF -- '--space watchy' "$WATCH_LOG"; then pass 'the watcher was told which space to fix'; else fail 'the watcher does not know the space' "$(cat "$WATCH_LOG")"; fi
 WATCH_PID_FILE=$WORK/unlockstate/unlock-watch-watchy.pid

@@ -579,10 +579,13 @@ boss_live() {
 		return 0
 	}
 	printf '%s' "$all" | "$NODE" -e '
-		const path = require("path");
 		const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "nu", "pwsh", "powershell", "elvish", "xonsh"]);
 		const LAUNCHERS = new Set(["pi", "pi-bare", "pi-sandboxed", "pisandbox", "pi-sandbox.sh"]);
-		const programName = (w) => path.basename(String(w ?? "")).toLowerCase().replace(/\.exe$/, "");
+		// Both separators, on either platform: a Windows foreground argv read on Linux is one
+		// long word to `path.basename` (the backslashes are not separators there), so a tab
+		// holding `C:\\WINDOWS\\...\\powershell.exe` answered `unknown` and an empty Boss shell was
+		// left alone. The last segment is the program, whichever slash spelled it.
+		const programName = (w) => String(w ?? "").split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "");
 		const isShellArgv = (a) => Array.isArray(a) && a.length > 0 && SHELLS.has(programName(a[0]));
 		const piWitness = (f) => {
 			if (Array.isArray(f?.foreground?.argv) && f.foreground.argv.some((w) => LAUNCHERS.has(programName(w)))) return true;
