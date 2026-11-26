@@ -387,6 +387,51 @@ else
 	fail 'the refusal names no way out' "$OUT"
 fi
 
+# --------------------------------------- a drive that is not readable gets a watcher, once --
+new_case 'a drive that is not readable gets one watcher, not a refusal'
+# `X:/` is a drive root by spelling and unreadable wherever this test runs, which is the shape a
+# BitLocker volume has at logon. The watcher is the stub below: what is under test is that the
+# guard starts exactly one, survives a second pass, and asks herdr for nothing.
+WATCH_LOG=$WORK/unlock-watch-calls.log
+WATCH_STUB=$WORK/unlock-watch-stub.mjs
+cat >"$WATCH_STUB" <<'STUB'
+import { appendFileSync } from "node:fs";
+appendFileSync(process.env.WATCH_STUB_LOG, `${process.argv.slice(2).join(" ")}\n`);
+setInterval(() => {}, 1000);
+STUB
+make_record watchy watchy 'X:/' s-watchy
+clear_log
+: >"$WATCH_LOG"
+export WATCH_STUB_LOG=$WATCH_LOG
+OUT=$(PI_UNLOCK_WATCH_SCRIPT=$WATCH_STUB PI_UNLOCK_WATCH_STATE=$WORK/unlockstate \
+	PI_UNLOCK_LOG=$WORK/unlockstate/unlock-watch.log $GUARD --once --space watchy 2>&1)
+RC=$?
+if printf '%s\n' "$OUT" | grep -qF 'guard: watchy: project folder X:/ is not readable yet'; then
+	pass 'the pass says the drive is not readable, instead of calling the folder gone'
+else
+	fail 'a locked drive is still reported as a gone folder' "$OUT"
+fi
+if printf '%s\n' "$OUT" | grep -qF 'started the unlock watcher'; then pass 'the pass says it started one'; else fail 'the start is not announced' "$OUT"; fi
+if [ "$(wc -l <"$WATCH_LOG" | tr -d ' ')" = 1 ]; then pass 'one watcher was started'; else fail "expected one watcher, got $(cat "$WATCH_LOG")"; fi
+if grep -qF -- '--space watchy' "$WATCH_LOG"; then pass 'the watcher was told which space to fix'; else fail 'the watcher does not know the space' "$(cat "$WATCH_LOG")"; fi
+WATCH_PID_FILE=$WORK/unlockstate/unlock-watch-watchy.pid
+WATCH_PID=$(cat "$WATCH_PID_FILE" 2>/dev/null)
+if [ -n "$WATCH_PID" ] && kill -0 "$WATCH_PID" 2>/dev/null; then pass 'its pid is recorded, so the next pass can find it'; else fail 'no live pid was written to the pid file' "$(ls -l "$WORK/unlockstate" 2>&1)"; fi
+OUT=$(PI_UNLOCK_WATCH_SCRIPT=$WATCH_STUB PI_UNLOCK_WATCH_STATE=$WORK/unlockstate \
+	PI_UNLOCK_LOG=$WORK/unlockstate/unlock-watch.log $GUARD --once --space watchy 2>&1)
+if [ "$(wc -l <"$WATCH_LOG" | tr -d ' ')" = 1 ]; then pass 'a second pass starts no second watcher'; else fail 'a watcher was started twice' "$(cat "$WATCH_LOG")"; fi
+if printf '%s\n' "$OUT" | grep -qiF 'already waiting'; then pass 'the second pass says the watcher is already there'; else fail 'the second pass does not say why nothing started' "$OUT"; fi
+if [ -s "$HERDR_LOG" ]; then fail 'herdr-app was asked about a space whose drive is locked' "$(herdr)"; else pass 'nothing was opened for a space that cannot be read'; fi
+kill "$WATCH_PID" 2>/dev/null
+rm -f "$WATCH_PID_FILE"
+new_case 'the watcher can be turned off, and says so'
+: >"$WATCH_LOG"
+OUT=$(PI_GUARD_UNLOCK_WATCH=0 PI_UNLOCK_WATCH_SCRIPT=$WATCH_STUB PI_UNLOCK_WATCH_STATE=$WORK/unlockstate2 \
+	PI_UNLOCK_LOG=$WORK/unlockstate2/unlock-watch.log $GUARD --once --space watchy 2>&1)
+if [ -s "$WATCH_LOG" ]; then fail 'a watcher was started although PI_GUARD_UNLOCK_WATCH=0' "$(cat "$WATCH_LOG")"; else pass 'PI_GUARD_UNLOCK_WATCH=0 starts nothing'; fi
+if printf '%s\n' "$OUT" | grep -qF 'PI_GUARD_UNLOCK_WATCH=0'; then pass 'the skipped watcher is explained by name'; else fail 'nothing says why no watcher was started' "$OUT"; fi
+unset WATCH_STUB_LOG
+
 # ------------------------------------------------------------- a forgotten space stays gone --
 new_case 'a space with no record is never recreated'
 spaces '{"spaces":[{"id":"s-scratch","name":"scratch","tabs":[]}]}'

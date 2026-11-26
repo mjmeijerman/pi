@@ -183,6 +183,12 @@ not come back: a finished worker's tab stays closed, and only
 moved, a space whose project folder is gone is reported with
 `bin/space forget <slug>` and skipped, and a forgotten space is left alone. `forget` asks on a
 terminal and takes `--yes` from a script, because the record is what the guard reopens from.
+A space on a drive that answers `-d` but not `-r` — a BitLocker volume at logon — is the one
+exception: instead of skipping it, the guard starts `scripts/unlock-watch.mjs` once, which waits
+quietly for `<project>/AGENTS.md` to be readable and then runs that one space's pass and the resume
+sweep, writing one line to `state/unlock-watch.log`. The pid file `state/unlock-watch-<slug>.pid`
+keeps it to one watcher, `PI_GUARD_UNLOCK_WATCH=0` turns it off, and a folder that is simply
+missing still gets the `forget` refusal.
 `bin/guard --once` is one pass, `--space <slug>` one space, `--dry-run` the plan
 with no call to the app. The installer makes the `harness` space itself; the
 guard is what repairs it — and the Boss tab its record names — after a reboot.
