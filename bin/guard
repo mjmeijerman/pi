@@ -62,10 +62,16 @@ fi
 #      words this program knows; `scripts/tests/test-guard-supervisor.sh` asserts it on the argv a
 #      stub `herdr-app` saw.
 #
-#      The Boss tab is recognised by the name the record keeps in `boss` — never by `uberboss_tab`,
-#      which is that tab's herdr id. Reading an id as a name put a tab literally named
-#      `tbe0cd445bff056584e86051e0c782ea74` in this space once, and a tab that is there is recorded
-#      rather than opened a second time.
+#      The Boss tab is recognised by its ids first — `uberboss_tab`, the `terminals[]` the record
+#      remembers, and the tab this program opened a moment ago — and by the name in `boss` only for
+#      a tab no id answers for. A tab that carries the remembered id *is* the Boss whatever it is
+#      called now, so a person renaming it is one `adopted` line and not a second tab: two Boss
+#      tabs are two `pi` processes appending one session. Reading an id as a *name* is the other
+#      half of that rule and still holds: a record with an id where a name belongs falls back to
+#      `Boss` (`record_boss_tab`), so no tab is ever opened named `tbe0cd445bff056584e86051e0c782ea74`.
+#      Adoption is keyed to the remembered id: a tab carrying it under another name is the Boss
+#      renamed, and the record learns the new name. A record that remembers no id cannot tell
+#      "renamed" from "gone", and reading a stranger tab as the Boss is how a dead Boss stays dead.
 #   5. a space whose project folder is gone is reported by name and skipped: a space on a missing
 #      folder would put the boss in a folder `git` cannot resolve. The refusal carries the command
 #      that fixes it, `bin/space forget <slug>`.
@@ -101,6 +107,10 @@ set -uo pipefail
 here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
 # shellcheck source=bin/space-lib.sh
 . "$here/space-lib.sh"
+# The restore path opens the Boss tab under the record lock: two passes that read the same snapshot
+# must not both open one (records-lib.sh says why a record is only ever written under that lock).
+# shellcheck source=bin/records-lib.sh
+. "$here/records-lib.sh"
 
 prog=guard
 INTERVAL=${PI_GUARD_INTERVAL:-20}
@@ -121,6 +131,11 @@ SESSIONS_DIR=${PI_SESSIONS_DIR:-${HOME:-}/.pi/agent/sessions}
 UNLOCK_SCRIPT=${PI_UNLOCK_WATCH_SCRIPT:-$PI_HOME/scripts/unlock-watch.mjs}
 UNLOCK_STATE=${PI_UNLOCK_WATCH_STATE:-${SPACE_STATE:-$PI_HOME/state}}
 UNLOCK_LOG=${PI_UNLOCK_LOG:-$UNLOCK_STATE/unlock-watch.log}
+# How long a Boss tab this program opened answers for its own absence. Two passes in the same second
+# read one snapshot, so the second one's snapshot predates the tab the first one opened; the record
+# keeps that tab as a claim and this is how long the claim is evidence. A claim is a moment, not a
+# fact: a Boss tab that really died a minute after it was opened is still put back.
+BOSS_CLAIM_SECONDS=${PI_GUARD_BOSS_CLAIM_SECONDS:-60}
 ONCE=0
 DRY=0
 ONLY=""
@@ -489,62 +504,135 @@ boss_argv_json() {
 
 # boss_tab <slug> — the record's Boss tab as this pass sees it, as one JSON object:
 #
-#   {"present":"yes"|"no"|"unknown", "terminals":["t15"]}
+#   {"present":"yes"|"adopt:<name>"|"no"|"unknown","terminals":["t15"]}
 #
-# stdin is the live space `space_match` found. One matcher for the two questions the pass asks (is
-# the tab there, and which terminals does it hold), because a second, differently-worded matcher is
-# how two readers of one snapshot start disagreeing:
-#   yes     a tab is there, by the name the record keeps in `boss` — or by a terminal the record
-#           names, when the app gave the tab no name at all
-#   no      the space has tabs and none of them is the Boss tab
-#   unknown the app answered with no tab list, or with tabs whose names and ids say nothing:
-#           a guard that guesses here re-opens the Boss tab every 20 seconds forever
+# stdin is the live space `space_match` found. One matcher for every question the pass asks — is the
+# tab there, what is it called now, which terminals does it hold — because a second, differently
+# worded matcher is how two readers of one snapshot start disagreeing:
+#   yes        the tab is there: by an id the record remembers (`uberboss_tab`, `terminals[]`, or the
+#              tab this program opened itself while its claim lasts), or by the name the record
+#              keeps in `boss`
+#   adopt:<n>  a tab carries an id the record remembers and answers to another name `<n>`: it is the
+#              Boss, renamed by the person, and the caller writes the name down instead of opening one
+#   no         the space has tabs and none of them is the Boss tab
+#   unknown    the app answered with no tab list, or with tabs whose names and ids say nothing:
+#              a guard that guesses here re-opens the Boss tab every 20 seconds forever
 #
-# `terminals` is every terminal of every tab that answered `yes`: the respawned Boss may sit beside
-# the empty shell it replaced, and pi in either one is a Boss that runs.
+# The ids come first and the name last: `uberboss_tab` and `terminals[]` are what herdr said the Boss
+# tab is, and renaming a tab does not change which tab holds the conversation. Reading the name first
+# — and reading an id only for a tab the app gave no name — is what put a second Boss tab beside the
+# first one whenever the record's name and the tab's label drifted apart: two `pi` processes
+# appending one session file.
+#
+# `terminals` is every terminal of every tab that answered `yes` or `adopt`: the respawned Boss may
+# sit beside the empty shell it replaced, and pi in either one is a Boss that runs.
 boss_tab() {
-	RECORD=$(space_record "${1:-}") "$NODE" -e '
+	RECORD=$(space_record "${1:-}") CLAIM_MS=$((${BOSS_CLAIM_SECONDS:-60} * 1000)) "$NODE" -e '
 		const fs = require("fs");
 		let d = "";
 		process.stdin.on("data", (c) => (d += c)).on("end", () => {
 			const out = { present: "unknown", terminals: [] };
 			let s = {};
 			try { s = JSON.parse(d); } catch { process.stdout.write(JSON.stringify(out)); return; }
+			const tabs = Array.isArray(s.tabs) ? s.tabs : null;
+			if (tabs === null) { process.stdout.write(JSON.stringify(out)); return; }
 			let r = {};
 			try { r = JSON.parse(fs.readFileSync(process.env.RECORD, "utf8")); } catch {}
 			const boss = String(r.boss || "Boss");
-			const ids = new Set((Array.isArray(r.terminals) ? r.terminals : []).map(String));
-			const tabs = Array.isArray(s.tabs) ? s.tabs : null;
-			if (tabs === null) { process.stdout.write(JSON.stringify(out)); return; }
-			if (tabs.length === 0) { out.present = "no"; process.stdout.write(JSON.stringify(out)); return; }
-			let identifiable = false;
-			for (const t of tabs) {
-				if (!t || typeof t !== "object") continue;
-				const name = String(t.name ?? t.title ?? "");
-				const own = [t.id, t.tab, t.terminal].filter((v) => typeof v === "string");
-				const terms = [];
+			const claim = r.boss_claim && typeof r.boss_claim === "object" ? r.boss_claim : null;
+			const at = claim ? Date.parse(String(claim.at || "")) : NaN;
+			const claimMs = Number(process.env.CLAIM_MS || 0);
+			const age = Number.isFinite(at) ? Date.now() - at : -1;
+			// The tab this program opened itself is one of the ids that answer for the Boss, while
+			// the claim lasts: an older claim names a dead terminal and says nothing.
+			const fresh = claimMs > 0 && age >= 0 && age <= claimMs;
+			const ids = new Set(
+				[String(r.uberboss_tab || "")]
+					.concat(Array.isArray(r.terminals) ? r.terminals.map(String) : [])
+					.concat(fresh && claim ? [String(claim.tab || ""), String(claim.terminal || "")] : [])
+					.filter(Boolean),
+			);
+			const own = (t) => {
+				const list = [t.id, t.tab, t.terminal].filter((v) => typeof v === "string");
+				if (Array.isArray(t.terminals)) {
+					for (const x of t.terminals) list.push(typeof x === "string" ? x : String(x?.id ?? x?.terminal ?? ""));
+				}
+				return list.filter(Boolean);
+			};
+			const termsOf = (t) => {
+				const list = [];
 				if (Array.isArray(t.terminals)) {
 					for (const x of t.terminals) {
 						const id = typeof x === "string" ? x : String(x?.terminal ?? x?.id ?? "");
-						if (id) { terms.push(id); own.push(id); }
+						if (id) list.push(id);
 					}
 				}
-				if (name || own.length) identifiable = true;
-				// A terminal id only answers for a tab the app gave no name: a named tab that is not
-				// the Boss is not the Boss, whatever id the record still remembers from last boot.
-				const isBoss = Boolean(name) ? name === boss : own.some((v) => ids.has(v));
-				if (!isBoss) continue;
-				out.present = "yes";
-				for (const id of terms) if (!out.terminals.includes(id)) out.terminals.push(id);
+				return list;
+			};
+			let identifiable = false, byName = false, idName = "", idHit = false;
+			const idTerms = [], nameTerms = [];
+			for (const t of tabs) {
+				if (!t || typeof t !== "object") continue;
+				const mine = own(t);
+				const name = String(t.name ?? t.title ?? "");
+				if (name || mine.length) identifiable = true;
+				// 1. an id the record remembers: that tab is the Boss whatever it is called now.
+				if (mine.some((v) => ids.has(v))) {
+					idHit = true;
+					for (const id of termsOf(t)) if (!idTerms.includes(id)) idTerms.push(id);
+					if (name && name !== boss && !idName) idName = name;
+				}
+				// 3. the name the record keeps, for the app that hands us names and no ids.
+				if (name && name === boss) {
+					byName = true;
+					for (const id of termsOf(t)) if (!nameTerms.includes(id)) nameTerms.push(id);
+				}
 			}
-			if (out.present !== "yes") out.present = identifiable ? "no" : "unknown";
+			if (idHit) {
+				out.present = idName ? "adopt:" + idName : "yes";
+				for (const id of idTerms.concat(nameTerms)) {
+					if (!out.terminals.includes(id)) out.terminals.push(id);
+				}
+			} else if (fresh) {
+				// 2. a tab this program opened a moment ago, on a snapshot taken before it existed.
+				out.present = "yes";
+			} else if (tabs.length === 0) {
+				out.present = "no";
+			} else if (byName) {
+				out.present = "yes";
+				out.terminals = nameTerms;
+			} else {
+				// Nothing above answered, so the space has tabs and none of them is the Boss tab:
+				// the Boss tab is gone. A named tab that carries none of the remembered ids is
+				// that same answer — a record which remembers no id cannot tell "renamed" from
+				// "gone", and guessing "renamed" is what keeps a dead Boss dead forever.
+				out.present = identifiable ? "no" : "unknown";
+			}
 			process.stdout.write(JSON.stringify(out));
 		});'
 }
 
-# boss_present <slug> — is the record's Boss tab in this space? stdin is the live space. The answer
-# is the tab, never the program in it: `boss_live` asks that question, and it needs a terminal to ask.
+# boss_present <slug> — is the record's Boss tab in this space? stdin is `space_match`'s answer.
+# The answer is one word (`yes`, `no`, `unknown`, or `adopt:<name>`), and it is about the tab, never
+# the program in it: `boss_live` asks that question, and it needs a terminal to ask.
 boss_present() { boss_tab "${1:-}" | field_of present; }
+
+# boss_claim_fresh <slug> — did this program open the Boss tab within
+# `PI_GUARD_BOSS_CLAIM_SECONDS`? A claim is a moment, not a fact: one from last boot says nothing
+# about a tab now, and `restore_boss` asks this under the record lock so two passes in one second
+# open one tab instead of two.
+boss_claim_fresh() {
+	RECORD=$(space_record "${1:-}") CLAIM_MS=$((${BOSS_CLAIM_SECONDS:-60} * 1000)) "$NODE" -e '
+		const fs = require("fs");
+		let r = {};
+		try { r = JSON.parse(fs.readFileSync(process.env.RECORD, "utf8")); } catch { process.exit(1); }
+		const c = r.boss_claim && typeof r.boss_claim === "object" ? r.boss_claim : null;
+		const at = c ? Date.parse(String(c.at || "")) : NaN;
+		const ms = Number(process.env.CLAIM_MS || 0);
+		const age = Number.isFinite(at) ? Date.now() - at : -1;
+		process.exit(ms > 0 && age >= 0 && age <= ms ? 0 : 1);
+	'
+}
 
 # boss_terminals <slug> — the terminals of the Boss tab(s) in this space, one per line.
 boss_terminals() {
@@ -616,6 +704,49 @@ boss_live() {
 			else if (shells > 0 && other === 0 && unread === 0) process.stdout.write("no");
 			else process.stdout.write("unknown");
 		});'
+}
+
+# adopt_boss_name <slug> <name> — the Boss tab answers to another name now, so the record learns it:
+# `boss`, and the `tabs[]` entry that carried the old name (or the first entry, or a new one). The
+# argv already recorded for the Boss tab is kept — a name is what was renamed, not how it starts.
+adopt_boss_name() {
+	RECORD=$(space_record "${1:-}") NEWNAME=${2:-} node -e '
+		const fs = require("fs");
+		let r = {};
+		try { r = JSON.parse(fs.readFileSync(process.env.RECORD, "utf8")); } catch { process.exit(1); }
+		const name = String(process.env.NEWNAME || "");
+		if (!name) process.exit(1);
+		const old = String(r.boss || "Boss");
+		if (old === name) process.exit(1);
+		r.boss = name;
+		const tabs = Array.isArray(r.tabs) ? r.tabs : [];
+		const at = tabs.findIndex((t) => t && typeof t === "object" && String(t.name || "") === old);
+		if (at >= 0) tabs[at].name = name;
+		else if (tabs.length && tabs[0] && typeof tabs[0] === "object") tabs[0].name = name;
+		else tabs.push({ name, folder: String(r.project || ""), argv: [] });
+		r.tabs = tabs;
+		fs.writeFileSync(process.env.RECORD, JSON.stringify(r, null, 2) + "\n");
+	'
+}
+
+# record_boss_claim <slug> <tab.new's answer> — the Boss tab this pass just opened, and when, so the
+# pass that comes next opens nothing against a snapshot older than the tab. `boss_present` decides
+# how long a claim answers (PI_GUARD_BOSS_CLAIM_SECONDS); the lock in `restore_boss` is what lets the
+# pass that was waiting read this claim instead of its own stale answer.
+record_boss_claim() {
+	RECORD=$(space_record "${1:-}") ANSWER=${2:-} node -e '
+		const fs = require("fs");
+		let r = {};
+		try { r = JSON.parse(fs.readFileSync(process.env.RECORD, "utf8")); } catch { process.exit(0); }
+		let a = {};
+		try { a = JSON.parse(process.env.ANSWER || "{}"); } catch {}
+		r.boss_claim = {
+			tab: typeof a?.tab === "string" ? a.tab : "",
+			terminal: typeof a?.terminal === "string" ? a.terminal : "",
+			at: new Date().toISOString(),
+		};
+		fs.writeFileSync(process.env.RECORD, JSON.stringify(r, null, 2) + "\n");
+	'
 }
 
 # resume_entry <slug> — the newest resume entry that belongs to this space's Boss tab, as JSON
@@ -821,11 +952,35 @@ rebuild_space() {
 	resume_sweep
 }
 
-# restore_boss <slug> <name> <boss> <space> — the space is there and its Boss tab is not.
+# restore_boss <slug> <name> <boss> <space> [missing|respawn] — open the Boss tab: either it is
+# gone (`missing`, the default) or it is there holding an empty shell (`respawn`).
 restore_boss() {
-	local slug=$1 name=$2 boss=$3 space="$4" project spaceid session argv
+	local slug=$1 name=$2 boss=$3 space="$4" why=${5:-missing} project spaceid session argv rec present out rc
 	project=$(space_field "$slug" project)
 	spaceid=$(printf '%s' "$space" | field_of id)
+	rec=$(space_record "$slug")
+	# Two passes in the same second read "no Boss tab" out of one snapshot and would both open one —
+	# two `pi` appending one session, 631 ms apart, is what that looked like. So the decision is
+	# taken under the record lock and re-asked of the record that is there when the lock is ours: the
+	# pass that went first left a claim naming the tab it opened, and a claim inside
+	# `PI_GUARD_BOSS_CLAIM_SECONDS` is that pass's tab while this pass's snapshot predates it. The
+	# claim is asked and not the tab, because this function is reached two ways: a Boss tab that is
+	# gone, and a Boss tab that is there holding an empty shell. The second is a `yes` on the tab and
+	# still a tab to open, so a tab-presence test here would leave the shell empty forever.
+	# The lock is held across `tab.new` on purpose — a lock released before the answer is a lock that
+	# never saw it.
+	if ! records_lock "$rec"; then
+		say "harness: $name: the record stayed locked, so no Boss tab was opened this pass"
+		return 0
+	fi
+	# A claim answers a snapshot that shows no Boss tab: "the one you cannot see is the one I opened".
+	# A tab that is there holding an empty shell is not that question — the shell is this pass's
+	# reason to open one — so `respawn` never asks it, and `respawn_done` is what stops a loop.
+	if [ "$why" != respawn ] && boss_claim_fresh "$slug"; then
+		records_unlock "$rec"
+		say "harness: $name: another pass opened the Boss tab a moment ago, so not a second one"
+		return 0
+	fi
 	# The session is found by the record's project folder, not by the terminal an entry happens to
 	# name: after a reboot the parked tab carries the dead terminal's id, and a stale id is not a
 	# reason to hand the Boss an empty session when the real conversation is on disk.
@@ -837,16 +992,21 @@ restore_boss() {
 	# nothing about the command either. It is only asked for a session path when the folder has none.
 	# One `--session`, and the newest one: the helper drops one the record already carried.
 	argv=$(boss_argv_with_session "$slug" "$boss" "$session")
-	if tab_new "$spaceid" "$boss" "$project" "$argv" >/dev/null 2>&1; then
+	out=$(tab_new "$spaceid" "$boss" "$project" "$argv" 2>&1)
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
 		if [ -n "$session" ]; then
 			say "harness: Boss tab resumed from session $session"
 		else
 			say "harness: Boss tab recreated in $name, no session to resume"
 		fi
 		record_boss_tab "$slug" "$argv"
+		# The tab's own ids, and the second this pass opened it: what the waiting pass reads.
+		record_boss_claim "$slug" "$out"
 	else
 		say "harness: tab.new failed for the Boss tab of $name"
 	fi
+	records_unlock "$rec"
 }
 
 # ---------------------------------------------------------------- the unlock watcher (5b) --
@@ -982,7 +1142,7 @@ one_space() {
 			fi
 			say "$name: Boss tab '$boss' is an empty shell, no pi in it — respawning it with the record's session"
 			respawn_mark "$slug"
-			restore_boss "$slug" "$name" "$boss" "$match"
+			restore_boss "$slug" "$name" "$boss" "$match" respawn
 			return 0
 			;;
 		esac
@@ -993,6 +1153,20 @@ one_space() {
 		;;
 	unknown)
 		say "$name: herdr-app listed no tab names or ids for it, left alone"
+		return 0
+		;;
+	adopt:*)
+		# The tab carries the id the record remembers and answers to another name: the person
+		# renamed it. Writing the name down is the whole repair — opening a Boss tab beside it is
+		# a second `pi` appending the same session.
+		chg=${present#adopt:}
+		if adopt_boss_name "$slug" "$chg"; then
+			say "$name: adopted '$chg' as the Boss tab's name — the tab carries the id the record remembers, so it is the same Boss"
+			boss=$chg
+			record_boss_tab "$slug" ""
+		else
+			say "$name: the Boss tab is called '$chg' now, and the record could not be written"
+		fi
 		return 0
 		;;
 	esac

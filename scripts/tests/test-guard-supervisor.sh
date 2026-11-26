@@ -128,6 +128,22 @@ set_tabs() { # <slug> <tabs-json>
 		fs.writeFileSync(file, JSON.stringify(j, null, 2) + "\n");
 	' "$(record "$1")"
 }
+set_rec() { # <slug> <json-patch-object>
+	PATCH="$2" node -e '
+		const fs = require("fs");
+		const file = process.argv[1];
+		const j = JSON.parse(fs.readFileSync(file, "utf8"));
+		Object.assign(j, JSON.parse(process.env.PATCH));
+		fs.writeFileSync(file, JSON.stringify(j, null, 2) + "\n");
+	' "$(record "$1")"
+}
+rec_field() { # <slug> <expr-on-j>  — one value out of a record, for an assertion
+	EXPR="$2" node -e '
+		const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+		const v = new Function("j", "return (" + process.env.EXPR + ")")(j);
+		process.stdout.write(String(v === undefined || v === null ? "" : v));
+	' "$(record "$1")"
+}
 worker() { # <slug> <worker> <report?>
 	node -e '
 		const fs = require("fs"), [dir, slug, hasReport] = process.argv.slice(1);
@@ -330,6 +346,115 @@ if tail -n 20 "$PI_SPACE_ROOT/state/guard.log" 2>/dev/null | grep -qF 'nothing s
 else
 	fail 'the line never reached state/guard.log' "$(tail -n 5 "$PI_SPACE_ROOT/state/guard.log" 2>/dev/null)"
 fi
+
+# ------------------------------------------ the Boss tab was renamed: same tab, new name --
+# Measured bug: the record said `Boss`, the tab said `Bakker`, `boss_present` read the name only
+# and answered `no`, so the guard opened a second Boss tab and two `pi` appended one session.
+new_case 'a renamed Boss tab is adopted by its id, not opened a second time'
+make_record renamed renamed "$PROJ" s-renamed
+set_rec renamed '{"uberboss_tab":"tb-r1","terminals":["t-r1"]}'
+set_tabs renamed "[{\"name\":\"Boss\",\"folder\":\"$PROJ\",\"argv\":[]}]"
+spaces "{\"spaces\":[{\"id\":\"s-renamed\",\"name\":\"renamed\",\"tabs\":[{\"id\":\"tb-r1\",\"name\":\"Bakker\",\"terminals\":[\"t-r1\"]}]}]}"
+clear_log
+run "$GUARD" --once --space renamed
+if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'the pass failed' "$OUT"; fi
+if [ -s "$HERDR_LOG" ]; then
+	fail 'a second Boss tab was opened for a renamed tab: two pi appending one session' "$(herdr)"
+else
+	pass 'no tab was opened: the id named the tab the name did not'
+fi
+if [ "$(rec_field renamed 'j.boss')" = Bakker ]; then
+	pass 'the record adopted the name the tab answers to'
+else
+	fail 'the record still calls the Boss by its old name' "$(cat "$(record renamed)")"
+fi
+if [ "$(rec_field renamed '(j.tabs&&j.tabs[0]||{}).name')" = Bakker ]; then
+	pass 'tabs[0] carries the adopted name too'
+else
+	fail 'tabs[0] still names the old tab' "$(cat "$(record renamed)")"
+fi
+ADOPT_N=$(printf '%s\n' "$OUT" | grep -c 'adopted')
+if [ "$ADOPT_N" -eq 1 ]; then pass 'exactly one line says the name was adopted'; else fail "the adoption is $ADOPT_N lines, not one" "$OUT"; fi
+# The fixture is gone before the next case: a record left behind is a space the full passes below
+# would rebuild, and their `-s $HERDR_LOG` assertions would be reading this case's argv.
+rm -rf -- "$(sd renamed)"
+
+# ---------------------------------- a Boss tab the app gave no name: its terminal id answers --
+new_case 'a Boss tab with no name is found by the terminal id the record remembers'
+make_record noname noname "$PROJ" s-noname
+set_rec noname '{"uberboss_tab":"","terminals":["t-n1"]}'
+set_tabs noname "[{\"name\":\"Boss\",\"folder\":\"$PROJ\",\"argv\":[]}]"
+spaces "{\"spaces\":[{\"id\":\"s-noname\",\"name\":\"noname\",\"tabs\":[{\"id\":\"tb-n1\",\"terminals\":[\"t-n1\"]}]}]}"
+clear_log
+run "$GUARD" --once --space noname
+if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'the pass failed' "$OUT"; fi
+if [ -s "$HERDR_LOG" ]; then
+	fail 'a tab was opened beside the one the terminal id named' "$(herdr)"
+else
+	pass 'the remembered terminal id found the Boss tab, unnamed or not'
+fi
+if [ -z "$(rec_field noname 'j.boss')" ]; then
+	pass 'a tab with no name adopts nothing'
+else
+	fail 'the record was renamed from a tab that has no name' "$(cat "$(record noname)")"
+fi
+rm -rf -- "$(sd noname)"
+
+# ------------------------------------------- two passes in the same second, one Boss tab --
+# Both read `no Boss tab` out of the same stale snapshot; only the record lock, taken before
+# `tab.new`, tells the second pass that the first one already opened it.
+new_case 'two passes in the same second open exactly one Boss tab'
+make_record dup dup "$PROJ" s-dup
+set_tabs dup "[{\"name\":\"Boss\",\"folder\":\"$PROJ\",\"argv\":[]}]"
+spaces "{\"spaces\":[{\"id\":\"s-dup\",\"name\":\"dup\",\"tabs\":[{\"id\":\"tb-other\",\"name\":\"other\"}]}]}"
+clear_log
+"$GUARD" --once --space dup >"$WORK/dup1.out" 2>&1 &
+DUP1=$!
+"$GUARD" --once --space dup >"$WORK/dup2.out" 2>&1 &
+DUP2=$!
+wait "$DUP1"
+DUP_RC1=$?
+wait "$DUP2"
+DUP_RC2=$?
+if [ "$DUP_RC1" -eq 0 ] && [ "$DUP_RC2" -eq 0 ]; then pass 'both passes exit 0'; else fail 'a pass failed' "$(cat "$WORK/dup1.out")" "$(cat "$WORK/dup2.out")"; fi
+DUP_N=$(grep -c 'do tab.new --name Boss' "$HERDR_LOG" 2>/dev/null || true)
+if [ "${DUP_N:-0}" -eq 1 ]; then
+	pass 'exactly one tab.new for the Boss tab in the stub log'
+else
+	fail "$DUP_N Boss tabs were opened in one second" "$(herdr)"
+fi
+rm -rf -- "$(sd dup)"
+
+# --------------------------------------------- a Boss tab that is genuinely gone comes back --
+# The control for the case above: the lock must not turn a dead Boss tab into a permanent absence.
+new_case 'a Boss tab that is genuinely gone is still recreated'
+make_record gone gone "$PROJ" s-gone
+set_tabs gone "[{\"name\":\"Boss\",\"folder\":\"$PROJ\",\"argv\":[]}]"
+spaces "{\"spaces\":[{\"id\":\"s-gone\",\"name\":\"gone\",\"tabs\":[{\"id\":\"tb-other\",\"name\":\"other\"}]}]}"
+clear_log
+run "$GUARD" --once --space gone
+if grep -q 'do tab.new --name Boss' "$HERDR_LOG"; then
+	pass 'the missing Boss tab was opened'
+else
+	fail 'a space whose Boss tab is gone came back without one' "$(herdr)" "$OUT"
+fi
+if [ "$(rec_field gone 'j.boss')" != other ]; then pass 'the name of an unrelated tab was not adopted'; else fail 'a tab that is not the Boss was adopted as it' "$(cat "$(record gone)")"; fi
+rm -rf -- "$(sd gone)"
+
+# ------------------------------------------ a claim from an old pass is not evidence of a tab --
+new_case 'a claim from an old pass does not keep a dead Boss tab alive'
+make_record stale stale "$PROJ" s-stale
+set_rec stale '{"boss_claim":{"tab":"tb-old","terminal":"t-old","at":"2020-01-01T00:00:00.000Z"}}'
+set_tabs stale "[{\"name\":\"Boss\",\"folder\":\"$PROJ\",\"argv\":[]}]"
+spaces "{\"spaces\":[{\"id\":\"s-stale\",\"name\":\"stale\",\"tabs\":[{\"id\":\"tb-x\",\"name\":\"other\"}]}]}"
+clear_log
+run "$GUARD" --once --space stale
+if grep -q 'do tab.new --name Boss' "$HERDR_LOG"; then
+	pass 'a stale claim is a moment, not a fact: the Boss tab came back'
+else
+	fail 'a claim from 2020 kept the Boss tab from being reopened' "$(herdr)" "$OUT"
+fi
+rm -rf -- "$(sd stale)"
 
 # -------------------------------------------------- a space renamed in the app is the same space --
 new_case 'a space renamed in herdr is found by its id instead of being built again'
