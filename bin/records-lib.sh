@@ -30,11 +30,36 @@
 
 # records_age <path> — whole seconds since <path> was last modified, 0 when it cannot be read, so a
 # lock that cannot be aged is treated as fresh and waited for rather than stolen.
+#
+# No `node` here, on purpose: this runs once per retry of the mkdir lock, and eight workers polling it
+# is dozens of interpreters for one integer. That is the fork storm a four-vCPU CI runner has to
+# survive while it is also running three other suites, and the only silent way this lock loses a
+# write is a writer whose `node` was killed by it — measured 2026-11-26 on harness-check job
+# 140154780368, where eight writers left seven entries and said nothing. `stat`/`date` are forks too,
+# but they are coreutils measured in milliseconds, not an interpreter measured in tens of them.
 records_age() {
-	node -e 'try {
-		const s = require("fs").statSync(process.argv[1]);
-		process.stdout.write(String(Math.max(0, Math.floor((Date.now() - s.mtimeMs) / 1000))));
-	} catch { process.stdout.write("0"); }' "${1:-}" 2>/dev/null
+	local path=${1:-} mtime now
+	[ -n "$path" ] || {
+		printf '0'
+		return 0
+	}
+	# GNU (Linux, CI) first, then BSD/macOS, then `date -r` as git-bash's answer.
+	if mtime=$(stat -c %Y -- "$path" 2>/dev/null) && [ -n "$mtime" ]; then :
+	elif mtime=$(stat -f %m -- "$path" 2>/dev/null) && [ -n "$mtime" ]; then :
+	elif mtime=$(date -r "$path" +%s 2>/dev/null) && [ -n "$mtime" ]; then :
+	else
+		printf '0'
+		return 0
+	fi
+	now=$(date +%s 2>/dev/null) || now=""
+	case $mtime${now:-x} in
+	*[!0-9]*) printf '0'; return 0 ;;
+	esac
+	if [ "$now" -le "$mtime" ]; then
+		printf '0'
+		return 0
+	fi
+	printf '%s' "$((now - mtime))"
 }
 
 # records_lock <file> — take `<file>.lock` with flock where flock is on PATH (Linux, CI), else the
