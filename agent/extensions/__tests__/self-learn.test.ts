@@ -134,6 +134,16 @@ after(async () => {
 });
 
 const NOW = 1_700_000_000_000;
+/**
+ * The clock the CI fixtures are dated from.
+ *
+ * `agedOut` compares every `createdAt` it is handed against `Date.now()`, so a literal
+ * calendar day in a fixture is a sleeper: it passes the day it is written and turns red
+ * exactly seven days later, on trunk and on every branch. One base, read once per run,
+ * keeps the window pinned without a date that expires.
+ */
+const ciBase = Date.now();
+const ciAgo = (hoursAgo: number) => new Date(ciBase - hoursAgo * 3_600_000).toISOString();
 const minutes = (n: number) => n * 60_000;
 const PEM_BEGIN = ["-----BEGIN", "RSA", "PRIVATE", "KEY-----"].join(" ");
 const PEM_END = ["-----END", "RSA", "PRIVATE", "KEY-----"].join(" ");
@@ -2474,21 +2484,23 @@ describe("repeated failing CI checks", () => {
 		// 2026-11-18: gh holds every failure forever, so the gate read `23× pr-tier`
 		// across 23 branches whose newest failure was 18 hours old. The table has to
 		// describe now.
-		const now = Date.parse("2026-11-18T09:00:00Z");
-		const days = (n: number) => new Date(now - n * 24 * 60 * 60 * 1000).toISOString();
+		const now = ciBase;
+		const days = (n: number) => ciAgo(n * 24);
 		const runs = [
 			{ name: "pr-tier", headBranch: "merged-long-ago", conclusion: "failure", createdAt: days(30) },
 			{ name: "tests", headBranch: "trunk", conclusion: "failure", createdAt: days(1) },
 			{ name: "harness-check", headBranch: "no-date", conclusion: "failure" },
 			{ name: "zizmor", headBranch: "garbage", conclusion: "failure", createdAt: "not a date" },
 			{ name: "secret scan", headBranch: "boundary", conclusion: "failure", createdAt: days(7) },
+			{ name: "tests", headBranch: "just-inside", conclusion: "failure", createdAt: new Date(now - (7 * 24 * 60 - 1) * 60_000).toISOString() },
+			{ name: "tests", headBranch: "just-outside", conclusion: "failure", createdAt: new Date(now - (7 * 24 * 60 + 1) * 60_000).toISOString() },
 		];
 		const aged = agedOut(runs, now);
-		assert.equal(aged.aged, 1, "the 30-day-old run is the only one past the window");
+		assert.equal(aged.aged, 2, "the 30-day-old and the minute-past-a-week runs are the ones past the window");
 		assert.deepEqual(
 			aged.runs.map((run) => run.headBranch),
-			["trunk", "no-date", "garbage", "boundary"],
-			"an unreadable or absent date is not an old one, and a week old is still inside",
+			["trunk", "no-date", "garbage", "boundary", "just-inside"],
+			"an unreadable or absent date is not an old one, a week old is still inside, and a minute past it is not",
 		);
 		assert.deepEqual(agedOut([], now), { runs: [], aged: 0 }, "nothing to age is no window");
 		assert.equal(CI_FAILURE_WINDOW_MS, 7 * 24 * 60 * 60 * 1000);
@@ -2531,7 +2543,7 @@ describe("repeated failing CI checks", () => {
 	// query asked for failures only, so the green run that fixed a branch was never
 	// in front of the gate and the red it replaced stayed for the rest of the week.
 	test("a failure a newer green run answered is dropped, and nothing else answers it", () => {
-		const clock = (hours: number) => new Date(Date.parse("2026-11-19T12:00:00Z") + hours * 60 * 60 * 1000).toISOString();
+		const clock = (hours: number) => new Date(ciBase + hours * 60 * 60 * 1000).toISOString();
 		const failed = (headBranch: string, createdAt: string = clock(0)) => ({ name: "tests", headBranch, conclusion: "failure", createdAt });
 		const settled = (headBranch: string, conclusion: string, createdAt?: string, name = "tests") => ({ name, headBranch, conclusion, createdAt });
 		const failures = [
@@ -2626,20 +2638,20 @@ describe("repeated failing CI checks", () => {
 		// `feat/learner-gaps-2`, both branches still on the remote, both pull requests
 		// (131, 128) closed on 2026-11-18 — the work was given up on, not deleted.
 		const failures = [
-			{ name: "tests", headBranch: "given-up", conclusion: "failure", databaseId: 1, createdAt: "2026-11-18T09:55:30Z" },
-			{ name: "tests", headBranch: " given-up ", conclusion: "failure", databaseId: 7, createdAt: "2026-11-18T09:55:30Z" },
-			{ name: "tests", headBranch: "pushed-again", conclusion: "failure", databaseId: 2, createdAt: "2026-11-18T11:00:00Z" },
-			{ name: "tests", headBranch: "still-open", conclusion: "failure", databaseId: 3, createdAt: "2026-11-18T09:55:30Z" },
-			{ name: "tests", headBranch: "same-instant", conclusion: "failure", databaseId: 4, createdAt: "2026-11-18T10:32:12Z" },
+			{ name: "tests", headBranch: "given-up", conclusion: "failure", databaseId: 1, createdAt: ciAgo(3) },
+			{ name: "tests", headBranch: " given-up ", conclusion: "failure", databaseId: 7, createdAt: ciAgo(3) },
+			{ name: "tests", headBranch: "pushed-again", conclusion: "failure", databaseId: 2, createdAt: ciAgo(1) },
+			{ name: "tests", headBranch: "still-open", conclusion: "failure", databaseId: 3, createdAt: ciAgo(3) },
+			{ name: "tests", headBranch: "same-instant", conclusion: "failure", databaseId: 4, createdAt: ciAgo(2) },
 			{ name: "tests", headBranch: "undated", conclusion: "failure", databaseId: 5 },
-			{ name: "tests", conclusion: "failure", databaseId: 6, createdAt: "2026-11-18T09:55:30Z" },
+			{ name: "tests", conclusion: "failure", databaseId: 6, createdAt: ciAgo(3) },
 		];
 		const closed = new Map([
-			["given-up", Date.parse("2026-11-18T10:32:12Z")],
-			["pushed-again", Date.parse("2026-11-18T10:32:12Z")],
-			["same-instant", Date.parse("2026-11-18T10:32:12Z")],
-			["undated", Date.parse("2026-11-18T10:32:12Z")],
-			["Stryker was here!", Date.parse("2026-11-18T10:32:12Z")],
+			["given-up", Date.parse(ciAgo(2))],
+			["pushed-again", Date.parse(ciAgo(2))],
+			["same-instant", Date.parse(ciAgo(2))],
+			["undated", Date.parse(ciAgo(2))],
+			["Stryker was here!", Date.parse(ciAgo(2))],
 		]);
 		const kept = abandonedOut(failures, closed);
 		assert.deepEqual(
@@ -2662,12 +2674,12 @@ describe("repeated failing CI checks", () => {
 		const dir = await mkdtemp(join(tmpdir(), "self-learn-abandoned-gh-"));
 		try {
 			const prs = JSON.stringify([
-				{ state: "MERGED", headRefName: "landed", closedAt: "2026-11-21T09:00:00Z" },
-				{ state: "CLOSED", headRefName: "given-up", closedAt: "2026-11-19T10:32:12Z" },
-				{ state: "CLOSED", headRefName: "given-up", closedAt: "2026-11-18T10:32:12Z" },
-				{ state: "CLOSED", headRefName: " padded ", closedAt: "2026-11-18T10:32:12Z" },
-				{ state: "CLOSED", headRefName: "", closedAt: "2026-11-18T10:32:12Z" },
-				{ state: "CLOSED", closedAt: "2026-11-18T10:32:12Z" },
+				{ state: "MERGED", headRefName: "landed", closedAt: ciAgo(0) },
+				{ state: "CLOSED", headRefName: "given-up", closedAt: ciAgo(24) },
+				{ state: "CLOSED", headRefName: "given-up", closedAt: ciAgo(48) },
+				{ state: "CLOSED", headRefName: " padded ", closedAt: ciAgo(48) },
+				{ state: "CLOSED", headRefName: "", closedAt: ciAgo(48) },
+				{ state: "CLOSED", closedAt: ciAgo(48) },
 				{ state: "CLOSED", headRefName: "no-date" },
 			]);
 			const bin = join(dir, "gh");
@@ -2678,8 +2690,8 @@ describe("repeated failing CI checks", () => {
 			assert.deepEqual(
 				[...(read.closed ?? new Map())],
 				[
-					["given-up", Date.parse("2026-11-19T10:32:12Z")],
-					["padded", Date.parse("2026-11-18T10:32:12Z")],
+					["given-up", Date.parse(ciAgo(24))],
+					["padded", Date.parse(ciAgo(48))],
 				],
 				"merged rows are ignored, the first close seen is the newest because gh lists it first, " +
 					"a row with no branch name is not the empty branch, and a close with no date is not guessed at",
@@ -2713,12 +2725,12 @@ describe("repeated failing CI checks", () => {
 		const dir = await mkdtemp(join(tmpdir(), "self-learn-abandoned-wiring-"));
 		try {
 			const failures = JSON.stringify([
-				{ name: "tests", headBranch: "given-up", conclusion: "failure", databaseId: 1, createdAt: "2026-11-18T09:46:22Z" },
-				{ name: "tests", headBranch: "alive", conclusion: "failure", databaseId: 2, createdAt: "2026-11-18T09:46:22Z" },
+				{ name: "tests", headBranch: "given-up", conclusion: "failure", databaseId: 1, createdAt: ciAgo(3) },
+				{ name: "tests", headBranch: "alive", conclusion: "failure", databaseId: 2, createdAt: ciAgo(3) },
 			]);
 			const closedPrs = JSON.stringify([
-				{ state: "CLOSED", headRefName: "given-up", closedAt: "2026-11-18T10:12:24Z" },
-				{ state: "MERGED", headRefName: "alive", closedAt: "2026-11-19T10:12:24Z" },
+				{ state: "CLOSED", headRefName: "given-up", closedAt: ciAgo(2) },
+				{ state: "MERGED", headRefName: "alive", closedAt: ciAgo(1) },
 			]);
 			const stub = (answer: string) =>
 				`#!/usr/bin/env bash\ncase "$2$4" in\n  listfailure) printf '%s' '${failures}' ;;\n  listsuccess) printf '%s' '[]' ;;\n  listclosed) ${answer} ;;\n  --paginate--jq) printf '%s\\n' given-up alive ;;\n  view) printf '%s' '{"jobs":[{"conclusion":"failure","steps":[{"name":"Run tests"}]}]}' ;;\nesac\n`;
