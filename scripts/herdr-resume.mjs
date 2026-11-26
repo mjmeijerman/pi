@@ -29,12 +29,13 @@
 // the entry for the boot instead of being retried on every pass. It never reads
 // or writes terminal output: no screen capture, no pane history, no scrollback.
 //
-// It also prunes the map instead of walking it forever: the core's terminal
-// list is asked once, and an entry whose terminal the core has never heard of
-// cannot come back as a shell, so the entry is deleted rather than waited on.
-// Entries whose session file is gone go the same way. Both would otherwise sit
-// in `hc get` until the per-entry deadline, every boot, for the life of the
-// folder (`agent/extensions/herdr-resume-map.ts` only ever writes).
+// It also prunes the map instead of walking it forever: an entry whose terminal
+// the core has never heard of cannot come back as a shell, so the entry is
+// deleted rather than waited on. Entries whose session file is gone go the same
+// way. Both would otherwise sit in `hc get` until the per-entry deadline, every
+// boot, for the life of the folder (`agent/extensions/herdr-resume-map.ts` only
+// ever writes). Pruning is two questions, never one: an empty terminal list is
+// not evidence, and a miss the core answers twice is.
 //
 // Usage: herdr-resume.mjs [--dry-run]
 //
@@ -441,6 +442,24 @@ function main() {
 	// core does not know is not a wait, it is a deletion.
 	const known = knownTerminals();
 	if (known === null) log(`skip pruning: ${hcBin} ls did not answer with a terminal list`);
+	else if (known.size === 0) log(`keep every entry: ${hcBin} ls answered with an empty terminal list, which is not evidence that a terminal is gone`);
+
+	// A miss is not a deletion on one read: on 2026-11-26 one `hc ls` answered an empty list while
+	// four Bosses were live, and every entry in the folder was deleted in one pass. So a terminal
+	// the first list does not know is asked about again, and only a second non-empty list that also
+	// lacks it is the core agreeing it is gone. `undefined` is "not asked yet", `null` is "no usable
+	// second answer" — asked at most once, only when an entry is actually missing.
+	let reread;
+	const goneFromCore = (terminal) => {
+		if (known === null || known.size === 0) return false;
+		if (known.has(terminal)) return false;
+		if (reread === undefined) {
+			const again = knownTerminals();
+			reread = again !== null && again.size > 0 ? again : null;
+			if (reread === null) log(`keep every entry: the second ${hcBin} ls did not answer with a non-empty terminal list`);
+		}
+		return reread !== null && !reread.has(terminal);
+	};
 
 	let restored = 0;
 	let pruned = 0;
@@ -457,7 +476,7 @@ function main() {
 			pruned += 1;
 			continue;
 		}
-		if (known !== null && !known.has(terminal)) {
+		if (goneFromCore(terminal)) {
 			forget(path, `${where}: hc does not know this terminal`);
 			pruned += 1;
 			continue;
