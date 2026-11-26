@@ -24,7 +24,9 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { GUARD_TASK_NAME, gitBashCandidates, guardTaskCommand, hiddenLauncher, schtasksExe, spawnPlan } from '../install-lib.mjs';
+import { GUARD_TASK_NAME, gitBashCandidates, guardTaskCommand, hiddenLauncher, resolveGitBash, schtasksExe, spawnPlan, wscriptExe } from '../install-lib.mjs';
+
+import { stubHerdrApp, withStub } from './herdr-app-stub.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -69,8 +71,10 @@ test('the task is registered through schtasks.exe, so cmd.exe never re-quotes /T
 	// The trap: a bare name is wrapped in cmd.exe by spawnPlan (it cannot know the
 	// name is not a .cmd shim), and cmd.exe doubles every `"` inside /TR — the
 	// registered command line would not be the one printed. A .exe path is spawned
-	// directly, argv untouched.
-	assert.equal(spawnPlan('schtasks', task.args, { platform: 'win32' }).file, 'cmd.exe');
+	// directly, argv untouched. The shell is named, not read from `process.env`:
+	// every real Windows sets ComSpec, so a default here made this assertion a
+	// statement about the host rather than about the wrapping.
+	assert.equal(spawnPlan('schtasks', task.args, { platform: 'win32', comspec: 'cmd.exe' }).file, 'cmd.exe');
 	assert.deepEqual(spawnPlan(exe, task.args, { platform: 'win32' }), { file: exe, args: task.args, windowsVerbatimArguments: false });
 });
 
@@ -102,6 +106,30 @@ test('gitBashCandidates finds bash from git --exec-path, and only on win32', () 
 	assert.deepEqual(gitBashCandidates({ platform: 'darwin', env }), []);
 });
 
+test('a POSIX PI_GIT_BASH — what `which bash` prints — is read as the Windows path it means', () => {
+	const env = { ProgramFiles: 'C:\\Program Files', LOCALAPPDATA: 'C:\\Users\\mj\\AppData\\Local' };
+	const execPath = 'C:\\Program Files\\Git\\ucrt64\\libexec\\git-core';
+	const exists = (p) => p === 'C:\\Program Files\\Git\\usr\\bin\\bash.exe';
+
+	// `./install.sh` runs in Git Bash, so `which bash` prints `/usr/bin/bash` and that
+	// is the value the override most often gets. It crosses into a Windows node
+	// process, where no MSYS converts it: before this, a machine WITH Git for Windows
+	// took the "no Git Bash found" branch and registered no task at all.
+	assert.equal(
+		resolveGitBash({ platform: 'win32', env: { ...env, PI_GIT_BASH: '/usr/bin/bash' }, execPath, exists }),
+		'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+	);
+	// MSYS adds the extension, so the value a person copies from `which` works as typed.
+	assert.ok(
+		gitBashCandidates({ platform: 'win32', env: { ...env, PI_GIT_BASH: '/usr/bin/bash' }, execPath }).includes('C:\\Program Files\\Git\\usr\\bin\\bash.exe'),
+	);
+	// `/c/...` is the other spelling a POSIX path arrives in, and it needs no root.
+	const drive = gitBashCandidates({ platform: 'win32', env: { ...env, PI_GIT_BASH: '/c/Program Files/Git/bin/bash.exe' }, execPath });
+	assert.equal(drive[0], 'C:\\Program Files\\Git\\bin\\bash.exe', drive.join('\n'));
+	// A POSIX value that matches nothing is still nothing: translated, never invented.
+	assert.equal(resolveGitBash({ platform: 'win32', env: { ...env, PI_GIT_BASH: '/opt/bash' }, execPath, exists: () => false }), null);
+});
+
 // --- the engine, in a throwaway HOME ----------------------------------------
 
 function tempHome(t, prefix = 'pi-win-herdr-') {
@@ -125,7 +153,11 @@ function envFor(home, extra = {}) {
 	// Either of these would decide the answer before the test does: the host's
 	// platform, and a HOME that is not the throwaway one.
 	for (const name of ['USERPROFILE', 'PI_DRY_RUN', 'PI_AGENT_DIR', 'PI_ENABLE_SERVICES', 'PI_GIT_BASH', 'PI_UPDATE_MODS', 'HERDR_MODS']) delete env[name];
-	return { ...env, ...extra };
+	// A stub, always: the engine's space step opens a real space in whatever `herdr-app` the
+	// child can reach, and a throwaway HOME does not stop that — it only lets the record die with
+	// the folder and leaves a space behind. `withStub` is the stub on PATH plus the override the
+	// tools read before PATH, with every real app directory taken off PATH.
+	return withStub({ ...env, ...extra }, stubHerdrApp(home));
 }
 
 function install(home, args = [], extra = {}) {
@@ -344,8 +376,14 @@ test('the guard task is registered with Git Bash, and the default is the entry i
 	const registered = out.stdout.match(/^   command: (schtasks .*)$/m);
 	assert.ok(registered, 'no registered command line');
 	// The `/TR` names wscript.exe and the hidden launcher, never bash.exe directly.
+	// wscript's path is the one the installer resolves, not this machine's casing of
+	// `%SystemRoot%`: that is `C:\WINDOWS` on the Windows box that found this, and a
+	// `/TR` compared against `C:\Windows` is an assertion about the host. It cannot
+	// be pinned through the child's env either — Windows keeps the inherited
+	// spelling of SystemRoot, so passing one in changes nothing.
 	const launcher = path.join(home, '.pi', 'state', 'guard-hidden.vbs');
-	assert.ok(registered[1].includes(`"\\"C:\\Windows\\System32\\wscript.exe\\" \\"${launcher}\\""`), registered[1]);
+	const wscript = wscriptExe();
+	assert.ok(registered[1].includes(`"\\"${wscript}\\" \\"${launcher}\\""`), registered[1]);
 	assert.doesNotMatch(registered[1], /bash/i, registered[1]);
 
 	// No interpreter: registering the file itself would start nothing, so say so

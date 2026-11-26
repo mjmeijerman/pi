@@ -447,9 +447,10 @@ export const LEGACY_GUARD = {
  *
  * `PI_GIT_BASH` replaces the whole list instead of joining it: an explicit
  * override is a promise, and a wrong one should say "that is not there" rather
- * than quietly register whichever bash happened to be found instead. The value
- * is returned verbatim — a path outside the default layout is the reason to set
- * it, so normalising it is how it stops matching.
+ * than quietly register whichever bash happened to be found instead. A Windows
+ * value is returned verbatim — a path outside the default layout is the reason
+ * to set it, so normalising it is how it stops matching. A POSIX one is read as
+ * the Windows path it means, and `posixBashCandidates` says why.
  *
  * The order is the one a person would try: the override, then `bash.exe` as
  * PATH has it, then the Git for Windows directories. The WSL launcher
@@ -459,7 +460,12 @@ export const LEGACY_GUARD = {
  */
 export function gitBashCandidates({ platform = process.platform, env = process.env, execPath = '' } = {}) {
 	if (platform !== 'win32') return [];
-	if (env.PI_GIT_BASH) return [env.PI_GIT_BASH];
+	if (env.PI_GIT_BASH) {
+		// The value as written is kept last: under `PI_PLATFORM=win32` on a host that
+		// is not Windows, `/usr/bin/bash` really is a file there, and the fixtures that
+		// pin the Windows branch set exactly that. On Windows it can never exist.
+		return [...posixBashCandidates(env.PI_GIT_BASH, { env, execPath }), env.PI_GIT_BASH];
+	}
 	const win = path.win32;
 	const out = [];
 	const add = (p) => {
@@ -482,14 +488,85 @@ export function gitBashCandidates({ platform = process.platform, env = process.e
 			dir = parent;
 		}
 	}
-	const gitRoots = [win.join(env.ProgramFiles || 'C:\\Program Files', 'Git'), win.join(env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git')];
-	if (env.LOCALAPPDATA) gitRoots.push(win.join(env.LOCALAPPDATA, 'Programs', 'Git'));
 	// `bin` is what Git Bash puts on PATH; `usr\bin` is the same bash one level
 	// down, and the only one there on an install that kept PATH bare.
-	for (const root of gitRoots) {
+	for (const root of gitRoots(env)) {
 		add(win.join(root, 'bin', 'bash.exe'));
 		add(win.join(root, 'usr', 'bin', 'bash.exe'));
 	}
+	return out;
+}
+
+/** gitRoots — the three directories Git for Windows installs into, best guess first. */
+function gitRoots(env) {
+	const win = path.win32;
+	const roots = [
+		win.join(env.ProgramFiles || 'C:\\Program Files', 'Git'),
+		win.join(env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git'),
+	];
+	if (env.LOCALAPPDATA) roots.push(win.join(env.LOCALAPPDATA, 'Programs', 'Git'));
+	return roots;
+}
+
+/**
+ * msysRoots — every directory that may be the root of an MSYS install, deepest first.
+ *
+ * A POSIX path is relative to that root, and the guard's is Git for Windows:
+ * `C:\Program Files\Git\usr\bin\bash.exe` is what `/usr/bin/bash` names. The
+ * root is a git install root, which is what `git --exec-path` already tells this
+ * file, so its ancestors are listed the same way the search above lists them —
+ * no layout encoded, and an ancestor that is not a git root costs one lookup
+ * that `resolveGitBash` throws away.
+ */
+function msysRoots({ env, execPath }) {
+	const win = path.win32;
+	const roots = [];
+	const add = (root) => {
+		if (root && !roots.includes(root)) roots.push(root);
+	};
+	if (execPath) {
+		let dir = win.dirname(win.normalize(execPath));
+		for (let up = 0; up < 5 && dir; up++) {
+			add(dir);
+			const parent = win.dirname(dir);
+			if (!parent || parent === dir) break;
+			dir = parent;
+		}
+	}
+	for (const root of gitRoots(env)) add(root);
+	return roots;
+}
+
+/**
+ * posixBashCandidates — a POSIX `PI_GIT_BASH` read as the Windows paths it may mean.
+ *
+ * `./install.sh` runs in Git Bash, so the shell the installer is started from
+ * prints `/usr/bin/bash` for `which bash` — and setting the override to that is
+ * the first thing a person tries when the search found nothing. The value
+ * crosses into a Windows node process, where nothing converts a POSIX path:
+ * `existsSync('/usr/bin/bash')` is false on a machine that has Git for Windows,
+ * and the guard step then said "no Git Bash found" and registered nothing.
+ *
+ * MSYS itself has the answer — `cygpath -w /usr/bin/bash` is
+ * `<git>\usr\bin\bash.exe` — so the same git install roots are prefixed here,
+ * with the `.exe` MSYS would add. `/c/Users/x/bin/bash.exe` is the other spelling
+ * a POSIX path arrives in, and it needs no root. Nothing here is checked against
+ * the disk and nothing is invented: `resolveGitBash` is the one place that says
+ * yes or no, so a POSIX value that matches nothing still fails as loudly as a
+ * Windows one, and an empty list means the value was not POSIX at all.
+ */
+function posixBashCandidates(value, { env, execPath }) {
+	if (!/^\//.test(value)) return [];
+	const win = path.win32;
+	const out = [];
+	const add = (p) => {
+		if (p && !out.includes(p)) out.push(p);
+	};
+	// `/usr/bin/bash` runs `bash.exe`: the extension is what MSYS fills in.
+	const exe = (p) => (win.extname(p) ? p : `${p}.exe`);
+	const drive = /^\/([A-Za-z])\/(.*)$/.exec(value);
+	if (drive) return [exe(`${drive[1].toUpperCase()}:\\${drive[2].split('/').join('\\')}`)];
+	for (const root of msysRoots({ env, execPath })) add(exe(win.join(root, ...value.slice(1).split('/'))));
 	return out;
 }
 
@@ -542,7 +619,7 @@ export const POSIX_WRAPPERS = [
  * a name added to a tool's `source` and not to this list is a tool that starts
  * on Linux and dies on Windows.
  */
-export const SOURCE_LIBS = ['pi-resolve.sh', 'receipts.sh', 'records-lib.sh', 'shell-resolve.sh', 'space-lib.sh'];
+export const SOURCE_LIBS = ['pi-resolve.sh', 'receipts.sh', 'records-lib.sh', 'shell-resolve.sh', 'space-lib.sh', 'worker-argv.sh'];
 
 /**
  * PI_HOME_CARRIERS — the bin entries that find `state/` through space-lib.sh.
@@ -707,13 +784,32 @@ export function guardPidPath({ piHome }) {
  * hangs on a lookup is a window that never closes again. An empty pid file is
  * the honest answer when the guard never appeared, and the disable line then
  * stops at the task delete.
+ *
+ * `nodePath`, `herdrAppPath` and `hcPath` are exported for the guard, by absolute
+ * path, the way `resumeLauncher` exports `PI_HERDR_RESUME_HC`: the task starts
+ * with the Task Scheduler's environment, where herdr-app and herdr-core are on
+ * the *user* PATH only (they install under the profile) and node is a third case.
+ * A guard that asked that PATH found no app, supervised nothing and printed the
+ * reason to a hidden process. Each one is optional; an empty value is left out
+ * rather than exported empty, so the guard's own resolution still runs.
  */
-export function hiddenLauncher({ bashPath, guardPath, pidPath }) {
+export function hiddenLauncher({ bashPath, guardPath, pidPath, nodePath = '', herdrAppPath = '', hcPath = '' }) {
 	if (!bashPath) throw new Error('hiddenLauncher needs the absolute path of bash.exe');
 	if (!guardPath) throw new Error('hiddenLauncher needs the absolute path of bin/guard');
 	if (!pidPath) throw new Error('hiddenLauncher needs the path to write the guard pid to');
 	const vbs = (value) => `"${String(value).replace(/"/g, '""')}"`;
-	const command = `${vbs(bashPath)} ${vbs(guardPath)}`;
+	// One bash line, built here and parsed back by `launcherTargets`: single quotes around each
+	// path (VBScript doubles the double ones), and `exec` so the guard replaces the shell — a
+	// wrapper left around it is a process the pid lookup would name instead of the guard.
+	const exports = [
+		['PI_GUARD_NODE', nodePath],
+		['PI_GUARD_HERDR_APP', herdrAppPath],
+		['PI_GUARD_HC', hcPath],
+	]
+		.filter(([, value]) => value)
+		.map(([name, value]) => `export ${name}='${String(value).replace(/'/g, `'\\''`)}'`);
+	exports.push(`exec '${String(guardPath).replace(/'/g, `'\\''`)}'`);
+	const command = `${vbs(bashPath)} -lc ${vbs(exports.join('; '))}`;
 	return [
 		"' Generated by ~/.pi/install.mjs. Edit the source there and re-run it.",
 		"'",
@@ -759,17 +855,28 @@ export function hiddenLauncher({ bashPath, guardPath, pidPath }) {
 /**
  * launcherTargets — read back what a generated launcher runs.
  *
- * The inverse of `hiddenLauncher` for the two paths that matter, so
+ * The inverse of `hiddenLauncher` for the paths and the environment it names, so
  * `scripts/verify-install.mjs` can assert on the installed file instead of on
  * the string it would have generated: a launcher naming a bash.exe that is not
- * on this machine starts nothing, and the task would still look healthy.
+ * on this machine starts nothing, and the task would still look healthy. The
+ * exported programs are checked the same way, because a `PI_GUARD_NODE` naming a
+ * deleted node is the same silence in a different file.
  */
 export function launcherTargets(text) {
 	const source = String(text);
-	const command = /^command = """([^"]+)"" ""([^"]+)"""\s*$/m.exec(source);
+	const command = /^command = """([^"]+)"" -lc ""(.+)"""\s*$/m.exec(source);
 	if (!command) return null;
+	const dispatch = launcherDispatch(command[2]);
 	const pid = /^pidPath = "([^"]+)"\s*$/m.exec(source)?.[1] || null;
-	return { bashPath: command[1], guardPath: command[2], pidPath: pid };
+	return { bashPath: command[1], guardPath: dispatch.guardPath, pidPath: pid, env: dispatch.env };
+}
+
+/** launcherDispatch — the `export NAME='value'; …; exec 'path'` line inside a guard launcher. */
+function launcherDispatch(line) {
+	const env = {};
+	for (const m of String(line).matchAll(/(?:^|;\s*)export ([A-Z_][A-Z0-9_]*)='([^']*)'/g)) env[m[1]] = m[2];
+	const exec = /(?:^|;\s*)exec '([^']+)'\s*$/.exec(String(line));
+	return { env, guardPath: exec ? exec[1] : '' };
 }
 
 /**
@@ -824,6 +931,131 @@ export function guardTaskCommand({ launcherPath, pidPath = '', wscriptPath = wsc
 		// Two commands, because the task is not the running process: the delete
 		// stops the next logon, the pid from the launcher stops this one.
 		stop: pidPath ? guardStopCommand({ pidPath }) : '',
+	};
+}
+
+// --- the resume task: the second logon entry ---------------------------------
+//
+// The guard repairs a space and its Boss tab. It never types into a terminal, on purpose,
+// and that rule is what leaves the other half of a reboot open: herdr hands each tab back
+// as a plain shell, so the Boss tab opens as a terminal with no conversation and nothing
+// points at the session on disk. On Linux `systemd/herdr-resume.service` runs
+// `scripts/herdr-resume.mjs` once per login and fixes that; on Windows nothing ran it at
+// all — `schtasks /Query` listed `pi-guard` and no resume entry, and the string `resume`
+// did not appear anywhere in the installer. So `pi-resume` sits beside `pi-guard` here.
+//
+export const RESUME_TASK_NAME = 'pi-resume';
+
+/** The hidden launcher's name, in the same state directory as the guard's. */
+export const RESUME_LAUNCHER_NAME = 'resume-hidden.vbs';
+
+/** resumeLauncherPath — `~/.pi/state/resume-hidden.vbs`; no new top-level dir. */
+export function resumeLauncherPath({ piHome }) {
+	if (!piHome) throw new Error('resumeLauncherPath needs ~/.pi');
+	return path.join(piHome, 'state', RESUME_LAUNCHER_NAME);
+}
+
+/**
+ * hcCandidates — where `hc.exe` may be, best guess first, for a task that gets no useful
+ * PATH. The same shape as `gitBashCandidates`: the explicit override replaces the search
+ * instead of joining it, then whatever PATH answers, then herdr's own install directory.
+ *
+ * Why it matters: `scripts/herdr-resume.mjs` talks to hc's core, and a launcher that names
+ * no hc starts a program that finds nothing to resume and exits 0 — a logon entry that
+ * looks healthy and does nothing.
+ */
+export function hcCandidates({ platform = process.platform, env = process.env, onPath = '' } = {}) {
+	if (platform !== 'win32') return [];
+	if (env.PI_HERDR_RESUME_HC) return [env.PI_HERDR_RESUME_HC];
+	const out = [];
+	if (onPath) out.push(onPath);
+	const localAppData = env.LOCALAPPDATA || env.LocalAppData;
+	if (localAppData) out.push(path.win32.join(localAppData, 'Programs', 'herdr-core', 'hc.exe'));
+	return out;
+}
+
+/**
+ * resumeLauncher — the `.vbs` that runs `scripts/herdr-resume.sh` hidden, once.
+ *
+ * Same two reasons as the guard's launcher: `wscript.exe` owns no console, so the task
+ * opens no window, and window style 0 with `False` means hidden and do not wait. Do not
+ * wait is right here for a different reason than the guard's — this program exits when it
+ * is done, and waiting on it would keep wscript alive for the length of a boot.
+ *
+ * `-lc` and not `-c`: the task inherits a thin environment, and the resume wrapper finds
+ * `node` on the PATH a login shell builds (the wrapper hunts a few directories itself, but
+ * the login shell is what makes `command -v node` true on a pnpm or fnm install).
+ * `PI_HERDR_RESUME_HC` is set to the absolute `hc.exe` in the same command line, because
+ * a task's PATH does not reach herdr's install directory.
+ *
+ * A missing bash, script or hc is a refusal, never a launcher: this file has no branch that
+ * says "nothing to do", so a path it cannot see is a task that silently resumes nothing.
+ */
+export function resumeLauncher({ bashPath, scriptPath, hcPath }) {
+	if (!bashPath) throw new Error('resumeLauncher needs the absolute path of bash.exe');
+	if (!scriptPath) throw new Error('resumeLauncher needs the absolute path of scripts/herdr-resume.sh');
+	if (!hcPath) throw new Error('resumeLauncher needs the absolute path of hc.exe');
+	const vbs = (value) => `"${String(value).replace(/"/g, '""')}"`;
+	// bash single quotes: a Windows path holds backslashes and spaces, and neither is
+	// special inside them.
+	const line = `export PI_HERDR_RESUME_HC='${hcPath}'; exec '${scriptPath}'`;
+	const command = `${vbs(bashPath)} -lc ${vbs(line)}`;
+	return [
+		"' Generated by ~/.pi/install.mjs. Edit the source there and re-run it.",
+		"'",
+		"' Task Scheduler runs this file through wscript.exe, which has no console: a task",
+		"' naming bash.exe directly opens a window at every logon.",
+		"' Window style 0 = hidden, False = do not wait; the resume run exits by itself.",
+		"' PI_HERDR_RESUME_HC is the absolute hc.exe — the task gets no useful PATH.",
+		'Option Explicit',
+		'Dim shell, command',
+		'Set shell = CreateObject("WScript.Shell")',
+		`command = ${vbs(command)}`,
+		'shell.Run command, 0, False',
+		'',
+	].join('\r\n');
+}
+
+/**
+ * resumeLauncherTargets — read back what a generated resume launcher runs.
+ *
+ * The inverse of `resumeLauncher`, for `scripts/verify-install.mjs`: the installed file is
+ * what a logon runs, and a launcher naming a bash or a script this machine does not have is
+ * an entry that looks healthy and resumes nothing.
+ */
+export function resumeLauncherTargets(text) {
+	const command = /^command = """([^"]+)"" -lc ""([^"]+)"""\s*$/m.exec(String(text));
+	if (!command) return null;
+	const line = /^export PI_HERDR_RESUME_HC='([^']+)'; exec '([^']+)'$/.exec(command[2]);
+	if (!line) return null;
+	return { bashPath: command[1], hcPath: line[1], scriptPath: line[2] };
+}
+
+/**
+ * resumeTaskCommand — the `schtasks` argv for `pi-resume`, and the lines a person needs.
+ *
+ * Built exactly like `guardTaskCommand`: the `/TR` value is one string holding `wscript.exe`
+ * and the launcher, each quoted (`C:\Program Files` has a space in it, and an unquoted
+ * program path is a task that starts nothing), the argv is passed as argv while `registered`
+ * is the same command quoted for cmd.exe.
+ *
+ * `stop` is `schtasks /End` and not the guard's `taskkill`: the resume run writes no pid file
+ * and exits when it is done, so the task itself is what a person can end.
+ */
+export function resumeTaskCommand({ launcherPath, wscriptPath = wscriptExe(), taskName = RESUME_TASK_NAME }) {
+	if (!launcherPath) throw new Error('resumeTaskCommand needs the absolute path of the hidden launcher');
+	const tr = `"${wscriptPath}" "${launcherPath}"`;
+	const args = ['/Create', '/F', '/SC', 'ONLOGON', '/TN', taskName, '/TR', tr];
+	return {
+		program: 'schtasks',
+		exe: schtasksExe(),
+		args,
+		tr,
+		wscriptPath,
+		launcherPath,
+		registered: `schtasks ${args.map((a) => (a === tr ? pasteArg(a) : a)).join(' ')}`,
+		remove: `schtasks /Delete /TN ${taskName} /F`,
+		stop: `schtasks /End /TN ${taskName}`,
 	};
 }
 
@@ -1074,7 +1306,7 @@ export function filterAgentsMd(text, keep) {
 	const kept = [];
 	for (const item of items) {
 		if (item.kind === 'rule') {
-			if (keep(item.rule)) kept.push(item);
+			if (keepOrSayWhy(item.rule, keep)) kept.push(item);
 			continue;
 		}
 		if (item.kind === 'heading' && item.line.startsWith('## ')) {
@@ -1112,6 +1344,30 @@ export function filterAgentsMd(text, keep) {
 	}
 	while (squeezed.length && squeezed[squeezed.length - 1].trim() === '') squeezed.pop();
 	return `${squeezed.join('\n')}\n`;
+}
+
+/**
+ * keepOrSayWhy — the filter's answer for one rule, or install-lib's own sentence.
+ *
+ * A filter written as "drop the rule I found under ## Sandbox" looks that rule up and
+ * then dereferences it. When the rule is not in the file the lookup is undefined and the
+ * dereference is a TypeError from inside a callback, naming neither the rule nor the file
+ * ("Cannot read properties of undefined (reading 'index')" at the caller's line). That
+ * stack is not a message a person can act on, so the failure is said as one sentence that
+ * names the rule and the two ways out.
+ */
+function keepOrSayWhy(rule, keep) {
+	try {
+		return keep(rule);
+	} catch (error) {
+		const where = `rule ${rule.index} ("${rule.text.length > 60 ? `${rule.text.slice(0, 60)}…` : rule.text}") in section ${rule.section ? `"${rule.section}"` : "(none)"}`;
+		throw new Error(
+			`filterAgentsMd could not decide ${where}: the filter threw ${error instanceof Error ? error.message : String(error)}. ` +
+				"A filter that names a rule to keep or drop reads it out of agent/AGENTS.md first, so it throws when that rule is gone — " +
+				"put the rule back in agent/AGENTS.md, or answer by index/slug instead of by a rule the file no longer has.",
+			{ cause: error },
+		);
+	}
 }
 
 /** ruleAnswer — the recorded answer for a rule, or undefined when never asked. */

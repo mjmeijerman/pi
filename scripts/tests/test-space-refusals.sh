@@ -73,7 +73,11 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$PI_SPACE_ROOT/bin/pi-bare"
 # `finish` runs the programs in the tree it lives in (bin/preflight, bin/publish), never whichever
 # copies PATH happens to hold, so the harness under test is a copy of that tree beside the stubs —
 # the layout a real install has, where $PI_BOSS_ROOT/bin is the delegate's own bin.
-cp "$ROOT/bin/delegate" "$ROOT/bin/space-lib.sh" "$ROOT/bin/records-lib.sh" "$PI_SPACE_ROOT/bin/"
+# Everything `bin/delegate` sources beside itself: shell-resolve.sh (shell_mode_ok, the one place a
+# host's platforms are asked) and worker-argv.sh (worker_tab_argv, the argv a tab is started with).
+# A copy of the tree without them refused every spawn with "command not found".
+cp "$ROOT/bin/delegate" "$ROOT/bin/space-lib.sh" "$ROOT/bin/records-lib.sh" \
+	"$ROOT/bin/shell-resolve.sh" "$ROOT/bin/worker-argv.sh" "$PI_SPACE_ROOT/bin/"
 DELEGATE="$PI_SPACE_ROOT/bin/delegate"
 chmod +x "$WORK/stub/"* "$PI_SPACE_ROOT/bin/"*
 

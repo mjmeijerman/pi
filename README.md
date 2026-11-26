@@ -70,6 +70,7 @@ place: Herdr mods, `herdr-app/programs.json`, anything outside the
 | sandbox (`bubblewrap`) | installed and wraps `pi` | not available — one line, no failure | not available — one line, no failure |
 | bin entries in `~/.local/bin` | symlinks | symlinks | copies (a symlink needs elevation or Developer Mode) |
 | guard service | systemd user unit, enabled | launchd plist, installed by default (`PI_SKIP_SYSTEMD=1` turns it off) | Task Scheduler entry at logon, installed by default, running the guard through the Git for Windows `bash.exe` it resolves |
+| session resume | `systemd/herdr-resume.service` at login | none yet — a reboot leaves each tab a plain shell | Task Scheduler entry `pi-resume` at logon, installed by default, running `scripts/herdr-resume.mjs` hidden through `wscript.exe` |
 | weekly timers (`pi-evals`, `pi-retro`) | systemd timers | skipped, one line | skipped, one line |
 | `herdr-app` | `curl … install.sh \| sh` | same | `irm … install.ps1 \| iex` |
 
@@ -285,8 +286,10 @@ and the tab was empty. Two pieces close that gap, and nothing else:
    reproduces the launch (wrapper, flags, model), the folder, and the space/tab
    labels. It rewrites it on a session switch, and does nothing at all outside a
    Herdr terminal (`$HC_TERMINAL_ID` unset).
-2. `systemd/herdr-resume.service` runs `scripts/herdr-resume.mjs` once per login.
-   It waits for the core, then for each terminal that came back as a *shell* it
+2. `scripts/herdr-resume.mjs` runs once per login: `systemd/herdr-resume.service` on
+   Linux, and the `pi-resume` Task Scheduler entry on Windows (macOS registers no
+   entry yet — there a reboot still leaves each tab a plain shell). It waits for
+   the core, then for each terminal that came back as a *shell* it
    types `exec <the recorded command> --session <the recorded file>` into that
    terminal. Same tab, same folder, same conversation; pi starts idle, waiting
    for you.

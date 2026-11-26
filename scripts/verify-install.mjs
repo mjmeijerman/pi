@@ -28,7 +28,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { GUARD_LABEL, GUARD_LAUNCHER_NAME, GUARD_PID_NAME, GUARD_SPACE_NAME, GUARD_TASK_NAME, GUARD_UNIT_NAME, POSIX_WRAPPERS, homePaths, launcherTargets, planFor, samePath, spaceIdIn } from './install-lib.mjs';
+import { GUARD_LABEL, GUARD_LAUNCHER_NAME, GUARD_PID_NAME, GUARD_SPACE_NAME, GUARD_TASK_NAME, GUARD_UNIT_NAME, POSIX_WRAPPERS, RESUME_TASK_NAME, homePaths, launcherTargets, planFor, resumeLauncherPath, resumeLauncherTargets, samePath, spaceIdIn } from './install-lib.mjs';
 
 const HOME = process.env.HOME || process.env.USERPROFILE;
 let agentDirArg = null;
@@ -246,11 +246,74 @@ if (PLAN.service === 'systemd') {
 					else fail('guard launcher interpreter', `${targets.bashPath} does not exist — the task starts wscript, and the launcher starts nothing`);
 					if (fs.existsSync(targets.guardPath)) pass('guard launcher guard', targets.guardPath);
 					else fail('guard launcher guard', `${targets.guardPath} does not exist — nothing repairs a space after the next logon`);
+					// The programs the guard asks every pass, named by absolute path: the logon
+					// task has none of them on its PATH, and a launcher that names a deleted
+					// node is the same silence in a different file.
+					for (const [name, value] of Object.entries(targets.env || {})) {
+						if (fs.existsSync(value)) pass(`guard launcher ${name}`, value);
+						else fail(`guard launcher ${name}`, `${value} does not exist — the guard resolves this one itself, and logs the refusal to ${path.join(P.piHome, 'state', 'guard.log')}`);
+					}
+					if (!targets.env?.PI_GUARD_HERDR_APP) fail('guard launcher PI_GUARD_HERDR_APP', 'the launcher names no herdr-app — the logon task has no PATH that holds it, so the guard starts inert and says so in state/guard.log');
 				}
 			}
 		}
 	}
+	// The second login entry: the guard repairs a space, this one puts the pi sessions back
+	// in the shells herdr hands out. A guard that is registered over a resume entry that is
+	// not is exactly the reboot this repository keeps being told about.
+	assertResumeTask();
 	assertGuardSpace();
+}
+
+/**
+ * assertResumeTask — is `pi-resume` registered, and does what it runs exist?
+ *
+ * Asked of Task Scheduler and of the installed `.vbs`, never of the string the installer
+ * would have generated: a task naming a launcher, a bash or an `hc.exe` this machine does
+ * not have looks healthy and resumes nothing, and the tab stays a plain shell.
+ */
+function assertResumeTask() {
+	const exe = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'schtasks.exe') : 'schtasks';
+	const query = spawnSync(exe, ['/Query', '/TN', RESUME_TASK_NAME, '/FO', 'LIST'], { encoding: 'utf8' });
+	if (query.error) {
+		pass('resume task', `not checked — no schtasks on this host (${query.error.code || 'unknown'})`);
+		return;
+	}
+	if (query.status !== 0) {
+		fail(
+			'resume task',
+			`schtasks /Query /TN ${RESUME_TASK_NAME} exited ${query.status} — not registered, so after a reboot each tab comes back as a plain shell with no pi in it; register it: node ~/.pi/install.mjs`,
+		);
+		return;
+	}
+	pass('resume task', `${RESUME_TASK_NAME} is registered`);
+	const toRun = (/Task To Run:\s*\r?\n?\s*(.+)/i.exec(query.stdout)?.[1] || '').trim();
+	const named = [...toRun.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+	if (named.length < 2) {
+		fail('resume task program', `the registered command line names no quoted launcher: ${toRun || 'nothing'}`);
+		return;
+	}
+	const [program, argument] = named;
+	if (/wscript\.exe$/i.test(program)) pass('resume task launcher', `${program} — a GUI program, so no console window at logon`);
+	else fail('resume task launcher', `the task runs ${program} directly — a console program opens a window at every logon; it must run wscript.exe "<launcher>"`);
+	const launcher = resumeLauncherPath({ piHome: P.piHome });
+	if (samePath(argument, launcher, PLAN.platform)) pass('resume task launcher file', argument);
+	else fail('resume task launcher file', `${argument || 'nothing'} is not ${launcher}`);
+	mustExist('resume launcher', launcher);
+	if (!fs.existsSync(launcher)) return;
+	const targets = resumeLauncherTargets(fs.readFileSync(launcher, 'utf8'));
+	if (!targets) {
+		fail('resume launcher command', `${launcher} names no quoted bash.exe and herdr-resume.sh`);
+		return;
+	}
+	for (const [label, file] of [
+		['resume launcher interpreter', targets.bashPath],
+		['resume launcher script', targets.scriptPath],
+		['resume launcher hc', targets.hcPath],
+	]) {
+		if (fs.existsSync(file)) pass(label, file);
+		else fail(label, `${file} does not exist — the task starts wscript, and the launcher starts nothing; re-run node ~/.pi/install.mjs`);
+	}
 }
 
 /**

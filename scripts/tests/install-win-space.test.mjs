@@ -22,6 +22,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { SOURCE_LIBS, userPathLine } from '../install-lib.mjs';
+import { stubHerdrApp, withStub } from './herdr-app-stub.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const BIN_DIR = (home) => path.join(home, '.local', 'bin');
@@ -52,35 +53,15 @@ function envFor(home, extra = {}) {
 }
 
 function install(home, extra = {}) {
+	// The stub, always: this file runs the real engine, and the engine's space step opens a REAL
+	// space in the REAL app — a throwaway HOME does not stop that, it only makes the record
+	// disappear with it and leaves the space behind. `withStub` puts a recording stub first on PATH
+	// and names it in PI_GUARD_HERDR_APP, and takes every real `herdr-app` directory off PATH.
 	return spawnSync(process.execPath, [path.join(ROOT, 'install.mjs')], {
 		cwd: ROOT,
-		env: envFor(home, extra),
+		env: withStub(envFor(home, extra), stubHerdrApp(home)),
 		encoding: 'utf8',
 	});
-}
-
-/**
- * stubHerdrApp — a PATH directory with one `herdr-app` that answers `do
- * space.new` and `ls` and nothing else, so the space step has an app to talk to
- * without the desktop app on this machine.
- */
-function stubHerdrApp(t, home) {
-	const dir = path.join(home, 'stub-bin');
-	fs.mkdirSync(dir, { recursive: true });
-	fs.writeFileSync(
-		path.join(dir, 'herdr-app'),
-		[
-			'#!/bin/sh',
-			'case "$1 $2" in',
-			'  "do space.new") printf \'{"space":"sp-test","tab":"tab-boss","terminal":"term-1"}\\n\' ;;',
-			'  "ls ") printf \'{"spaces":[{"id":"sp-test","name":"harness"}]}\\n\' ;;',
-			'  *) exit 1 ;;',
-			'esac',
-			'',
-		].join('\n'),
-		{ mode: 0o755 },
-	);
-	return dir;
 }
 
 /**
@@ -99,8 +80,7 @@ function realBash(t, home) {
 
 test('with no Git Bash the space step is skipped and names the .cmd a person can run', (t) => {
 	const home = tempHome(t);
-	const stub = stubHerdrApp(t, home);
-	const run = install(home, { PATH: `${stub}${path.delimiter}${process.env.PATH || ''}` });
+	const run = install(home);
 	const out = `${run.stdout}${run.stderr}`;
 
 	assert.equal(run.status, 0, `install.mjs exited ${run.status}:\n${out}`);
@@ -118,9 +98,8 @@ test('with no Git Bash the space step is skipped and names the .cmd a person can
 
 test('with Git Bash the space step runs bin/space through it, and the record names pi-bare.cmd', (t) => {
 	const home = tempHome(t);
-	const stub = stubHerdrApp(t, home);
 	const bash = realBash(t, home);
-	const run = install(home, { PATH: `${stub}${path.delimiter}${process.env.PATH || ''}`, PI_GIT_BASH: bash.file });
+	const run = install(home, { PI_GIT_BASH: bash.file });
 	const out = `${run.stdout}${run.stderr}`;
 
 	assert.equal(run.status, 0, `install.mjs exited ${run.status}:\n${out}`);

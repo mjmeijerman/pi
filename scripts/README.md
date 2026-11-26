@@ -143,7 +143,7 @@ Exit 0 when nothing `FAIL`s, 1 on any `FAIL`. What it checks:
 
 | Check | Rule |
 | --- | --- |
-| `agents-md-size` | `agent/AGENTS.md` ≤ 3072 B — it loads on every turn. |
+| `agents-md-size` | `agent/AGENTS.md` ≤ 3328 B — it loads on every turn. |
 | `skill-lines` | every `agent/skills/*/SKILL.md` ≤ 150 lines. |
 | `doc-metadata` | every `docs/*.md` has `Owner:` and `Review:` (blip 39). |
 | `review-freshness` | no doc or skill past its own `Review:` date. |

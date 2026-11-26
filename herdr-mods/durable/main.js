@@ -28,24 +28,29 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { checking, closeOverlay, exec, home, nextCommand, props, readTextFile, run, theme } from "herdr";
 import { NAME_RULE, forgetArgv, nameProblem, newArgv } from "./argv.mjs";
 import { initialForm } from "./prefill.mjs";
-import { toolProgram } from "./space-path.mjs";
+import { toolPlan } from "./space-path.mjs";
 
 /** A file is there when the app can read it: `readTextFile` answers undefined otherwise, and
  * that is the only existence test a mod has. The shims are a few lines, so reading one costs
  * nothing worth caching separately. */
 const fileExists = async (file) => (await readTextFile(file).catch(() => undefined)) !== undefined;
 
-/** The program for a tool name, resolved once: `space-path.mjs` decides which file, and a
- * refusal (neither the `.cmd` nor the wrapper) is thrown at the caller so the overlay can
- * say it instead of running a path that cannot start. */
+/** The plan for a tool name, resolved once: `space-path.mjs` decides which file and, on Windows,
+ * the bash.exe that starts it — a `.cmd` cannot be spawned by a process, only by cmd.exe. A
+ * refusal (neither the `.cmd` nor the wrapper) is thrown at the caller so the overlay can say it
+ * instead of running a path that cannot start. */
 const resolved = new Map();
 async function toolBin(name) {
 	const known = resolved.get(name);
 	if (known) return known;
-	const program = toolProgram({ home: home(), name, exists: fileExists });
-	resolved.set(name, program);
-	return program;
+	const plan = await toolPlan({ home: home(), name, exists: fileExists, read: (file) => readTextFile(file) });
+	resolved.set(name, plan);
+	return plan;
 }
+
+/** A call on a resolved tool: the plan's program, then whatever it puts in front of the argv
+ * (bash.exe and the wrapper on Windows), then the tool's own arguments. */
+const execTool = (plan, args, options) => exec(plan.program, [...plan.prefix, ...args], options);
 
 const defaultProject = (name) => `~/projects/${name}`;
 
@@ -222,15 +227,15 @@ export default class Durable extends View {
 				cx.notify();
 				return;
 			}
-			this.spacePath = space;
-			const result = await exec(space, ["list"], { timeout: 20000 }).catch((e) => ({
+			this.spacePath = space.shown;
+			const result = await execTool(space, ["list"], { timeout: 20000 }).catch((e) => ({
 				code: -1,
 				stdout: "",
 				stderr: String(e?.message ?? e),
 			}));
 			this.loading = false;
 			if (result.code !== 0) {
-				this.error = why(result, space);
+				this.error = why(result, space.shown);
 				this.rows = [];
 			} else {
 				this.rows = parseRows(result.stdout);
@@ -255,10 +260,12 @@ export default class Durable extends View {
 				return;
 			}
 			for (const row of rows) {
-				const result = await exec(guard, ["--dry-run", "--space", row.name], { timeout: 20000 }).catch(
-					(e) => ({ code: -1, stdout: "", stderr: String(e?.message ?? e) }),
-				);
-				this.watching[row.name] = result.code === 0 ? lastLine(result.stdout) : why(result, guard);
+				// `--once`: without it the supervisor runs its 20 second loop forever and the
+				// timeout below kills a call that had already printed the line worth reading.
+				const result = await execTool(guard, ["--dry-run", "--once", "--space", row.name], {
+					timeout: 20000,
+				}).catch((e) => ({ code: -1, stdout: "", stderr: String(e?.message ?? e) }));
+				this.watching[row.name] = result.code === 0 ? lastLine(result.stdout) : why(result, guard.shown);
 				cx.notify();
 			}
 		});
@@ -301,10 +308,10 @@ export default class Durable extends View {
 				cx.notify();
 				return;
 			}
-			this.spacePath = space;
-			this.ran = [space, ...argv].join(" ");
+			this.spacePath = space.shown;
+			this.ran = [space.shown, ...argv].join(" ");
 			cx.notify();
-			const result = await exec(space, argv, { timeout: 600000 }).catch((e) => ({
+			const result = await execTool(space, argv, { timeout: 600000 }).catch((e) => ({
 				code: -1,
 				stdout: "",
 				stderr: String(e?.message ?? e),
@@ -312,7 +319,7 @@ export default class Durable extends View {
 			this.busy = false;
 			if (result.code !== 0) {
 				// stderr first: the refusal's reason is the thing worth reading.
-				this.error = why(result, space);
+				this.error = why(result, space.shown);
 				this.output = [result.stderr, result.stdout].filter((s) => String(s ?? "").trim()).join("\n").trim();
 				cx.notify();
 				return;
@@ -357,15 +364,15 @@ export default class Durable extends View {
 				cx.notify();
 				return;
 			}
-			this.spacePath = space;
-			const result = await exec(space, forgetArgv({ name: row.name }), { timeout: 30000 }).catch((e) => ({
+			this.spacePath = space.shown;
+			const result = await execTool(space, forgetArgv({ name: row.name }), { timeout: 30000 }).catch((e) => ({
 				code: -1,
 				stdout: "",
 				stderr: String(e?.message ?? e),
 			}));
 			this.busy = false;
 			if (result.code !== 0) {
-				this.error = why(result, space);
+				this.error = why(result, space.shown);
 				cx.notify();
 				return;
 			}

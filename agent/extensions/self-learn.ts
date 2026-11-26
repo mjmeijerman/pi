@@ -122,8 +122,11 @@ export const SPAWN_REQUEST_TTL_MS = 15 * 60 * 1000;
 export const MIN_REPEATS = 2;
 /** At most one learner per session this often. */
 export const MIN_GAP_MS = 10 * 60 * 1000;
-/** A session that keeps failing may teach twice; not more. */
-export const MAX_PER_SESSION = 2;
+/**
+ * A session may start four learners: one compaction now starts two (a project learner and
+ * the harness learner), so a session that keeps failing may teach twice — four learners.
+ */
+export const MAX_PER_SESSION = 4;
 /**
  * How long a failing CI run stays evidence.
  *
@@ -330,7 +333,12 @@ export function decideLearner(input: Evidence): Decision {
 	if (spawnsThisSession >= MAX_PER_SESSION) {
 		return { spawn: false, reason: `already started ${spawnsThisSession} learners this session` };
 	}
-	if (lastSpawnAt !== null && now - lastSpawnAt < MIN_GAP_MS) {
+	// A stamp ahead of this clock is not a learner this session started moments ago: the run
+	// log is shared by every session on the machine, and a stamp reads in the future after a
+	// clock step or a suspended box. Refusing on it said "last learner ran -4 min ago — next
+	// in 14 min", held the compaction for a quarter of an hour, and named a sentence that is
+	// not about anything. The debounce is for a learner that really did just run.
+	if (lastSpawnAt !== null && lastSpawnAt <= now && now - lastSpawnAt < MIN_GAP_MS) {
 		const mins = Math.ceil((MIN_GAP_MS - (now - lastSpawnAt)) / 60000);
 		return { spawn: false, reason: `last learner ran ${Math.round((now - lastSpawnAt) / 60000)} min ago — next in ${mins} min` };
 	}
@@ -411,8 +419,8 @@ export function noteBaseline(lastCompactIso: string | null, newestProposalMs: nu
  * `diedLearnersFrom` read the empty hyphenated path as a death — which raised
  * the died-learner signal and started another learner (blip 11, blip 36).
  */
-export function runStamp(at: number): string {
-	return new Date(at).toISOString().replace(/[:.]/g, "-").replace("T", "-");
+export function runStamp(at: number, suffix = ""): string {
+	return `${new Date(at).toISOString().replace(/[:.]/g, "-").replace("T", "-")}${suffix}`;
 }
 
 /**
@@ -423,8 +431,8 @@ export function runStamp(at: number): string {
  * checks. `dir` is injectable so a test asserts the shape without the real
  * proposals directory.
  */
-export function runPaths(at: number, dir: string = PROPOSAL_DIR): { queue: string; proposal: string } {
-	const stamp = runStamp(at);
+export function runPaths(at: number, dir: string = PROPOSAL_DIR, suffix = ""): { queue: string; proposal: string } {
+	const stamp = runStamp(at, suffix);
 	return { queue: join(dir, "queue", `${stamp}.md`), proposal: join(dir, `${stamp}.md`) };
 }
 
@@ -1986,6 +1994,25 @@ export const OUTSIDE_HARNESS = "that belongs to a project space";
 const trimSlashes = (path: string): string => (path.length > 1 ? path.replace(/\/+$/, "") : path);
 
 /**
+ * One spelling for a folder, so two spellings of it are the same folder.
+ *
+ * `\` and `/` are one separator (`process.cwd()` on this host prints `C:\\Users\\markm\\.pi`
+ * while a `space.json` in `state/spaces` records `C:/Users/markm/.pi`), repeated separators
+ * collapse, a trailing separator is not part of the name, and a drive-lettered path — `C:`
+ * and `c:` are one drive — ignores case. A POSIX path keeps its case: `/home/m/WEB` and
+ * `/home/m/web` are two folders.
+ */
+const normalisePath = (path: string): string => {
+	const collapsed = trimSlashes(path.replace(/\\/g, "/").replace(/\/{2,}/g, "/"));
+	// Stryker disable next-line MethodExpression: equivalent. The normalised spelling is only ever
+	// compared with another `normalisePath` result — the cwd against a record's project, the harness
+	// record against the owner — and never handed back to a caller, so folding a drive letter up
+	// instead of down answers every one of those comparisons exactly the same way; the project a
+	// learner is given is the un-normalised one either way.
+	return /^[A-Za-z]:/.test(collapsed) ? collapsed.toLowerCase() : collapsed;
+};
+
+/**
  * The space that owns `cwd`: the record whose `project` is `cwd` or its nearest ancestor,
  * longest match first. Pure, so the boundary is testable without a filesystem, and it
  * answers `null` instead of guessing — a cwd no space claims teaches nothing at all.
@@ -1996,7 +2023,7 @@ export function learnerSpace(records: readonly SpaceRecord[], cwd: string): Lear
 	// string, and nothing in a record list matches it — `readSpaceRecords` only yields absolute
 	// projects, a record without a project is skipped below, and a `/` project requires a leading
 	// slash the replacement lacks. Every such caller reaches the same `null` either way.
-	const here = trimSlashes(String(cwd ?? "").trim());
+	const here = normalisePath(String(cwd ?? "").trim());
 	// Stryker disable next-line ConditionalExpression: equivalent. An empty `here` matches no
 	// record — a project that trims to empty is skipped two lines below — so falling through
 	// this guard returns null at the end of the loop anyway.
@@ -2007,13 +2034,16 @@ export function learnerSpace(records: readonly SpaceRecord[], cwd: string): Lear
 		// Stryker disable next-line StringLiteral: unreachable. `readSpaceRecords` never returns
 		// a record without a project, and a projectless record in a hand-built array is skipped
 		// by the `!project` guard below with either text: the replacement is not a path.
+		// The record's own spelling is what is returned — `space.json` is not rewritten —
+		// but the comparison is done on the normalised one.
 		const project = trimSlashes(String(record?.project ?? "").trim());
-		if (!project) continue;
-		if (here !== project && !here.startsWith(project === "/" ? "/" : `${project}/`)) continue;
+		const key = normalisePath(project);
+		if (!key) continue;
+		if (here !== key && !here.startsWith(key === "/" ? "/" : `${key}/`)) continue;
 		// Two spaces on one folder cannot both be right: the longer project path wins, and a
 		// tie keeps the first record, which is the order `state/spaces` lists them in.
-		if (project.length <= bestLength) continue;
-		bestLength = project.length;
+		if (key.length <= bestLength) continue;
+		bestLength = key.length;
 		best = {
 			// Stryker disable next-line OptionalChaining,StringLiteral: unreachable. Every record
 			// from this machine has a slug (the directory name) and a project, so a record that
@@ -2036,6 +2066,74 @@ export function learnerSpace(records: readonly SpaceRecord[], cwd: string): Lear
  */
 export function learnerPaths(kind: SpaceKind): string[] {
 	return kind === "harness" ? [...HARNESS_PATHS] : [...PROJECT_PATHS];
+}
+
+/** The slug suffix that names which learner of a compaction this is. */
+export const LEARNER_SUFFIX: Record<SpaceKind, string> = { project: "p", harness: "h" };
+
+/** `learn-<HH-MM>-<suffix>`: one compaction's two learners are `-p` and `-h`, never the same. */
+export function learnerSlug(hhmm: string, suffix: string): string {
+	return `learn-${hhmm}-${suffix}`;
+}
+
+/** One learner a compaction starts: the space it teaches, the kind, and the paths it may touch. */
+export interface LearnerPlan {
+	/** `p` for the project learner, `h` for the harness one. */
+	suffix: string;
+	kind: SpaceKind;
+	/** The space this learner is a tab in, and whose project it starts in. */
+	space: LearnerSpace;
+	/** `learnerPaths(kind)`, resolved once so the queue file and the plan cannot disagree. */
+	paths: string[];
+}
+
+/** What one compaction starts, and what it could not start. */
+export interface LearnerPlanResult {
+	learners: LearnerPlan[];
+	/** One sentence when a learner this compaction wanted could not be planned. */
+	note?: string;
+}
+
+/**
+ * Which learners one compaction starts. Pure: space records plus a cwd in, learners out.
+ *
+ * A project compaction teaches twice — the project it sits in, and this machine's harness —
+ * because the two cannot otherwise be taught by the same session. The harness compaction
+ * teaches once: it *is* the harness, and a second learner would write the same folder. A cwd
+ * no space owns teaches nothing, unchanged, and a project space with no harness record is one
+ * learner plus the sentence saying why, never a silent single spawn.
+ */
+export function planLearners(records: readonly SpaceRecord[], cwd: string): LearnerPlanResult {
+	const owner = learnerSpace(records, cwd);
+	if (!owner) return { learners: [] };
+	const plan = (space: LearnerSpace): LearnerPlan => ({
+		suffix: LEARNER_SUFFIX[space.kind],
+		kind: space.kind,
+		space,
+		paths: learnerPaths(space.kind),
+	});
+	if (owner.kind === "harness") return { learners: [plan(owner)] };
+	const harnessRecord = records.find((record) => record?.kind === "harness" && String(record.project ?? "").trim());
+	if (!harnessRecord) {
+		return {
+			learners: [plan(owner)],
+			note: `no space records kind: "harness" on this machine, so only the project learner (${owner.slug}) was started`,
+		};
+	}
+	const harness: LearnerSpace = {
+		slug: String(harnessRecord.slug ?? ""),
+		kind: "harness",
+		project: trimSlashes(String(harnessRecord.project).trim()),
+	};
+	// Two learners on one folder would write one `AGENTS.md` twice: the folder wins, and the
+	// harness record is the one that teaches it.
+	if (normalisePath(harness.project) === normalisePath(owner.project)) {
+		return {
+			learners: [plan(harness)],
+			note: `the harness record ${harness.slug} is the folder this session sits in, so one learner was started`,
+		};
+	}
+	return { learners: [plan(owner), plan(harness)] };
 }
 
 /**
@@ -3280,25 +3378,51 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		// cwd no space claims teaches nothing at all. `null` is said out loud and stops here,
 		// with no queue file behind it — a spec nothing will read is the garbage this avoids.
 		const sessionCwd = typeof ctx?.cwd === "string" && ctx.cwd.trim() ? ctx.cwd.trim() : process.cwd();
-		const space = learnerSpace(await readSpaceRecords(), sessionCwd);
-		if (!space) {
+		// One gate, one evidence body, up to two learners: the project the compacted session
+		// sits in, and this machine's harness. The planning is pure (`planLearners`), so the
+		// four shapes are `node --test` cases instead of an afternoon of manual compactions.
+		const plan = planLearners(await readSpaceRecords(), sessionCwd);
+		if (plan.learners.length === 0) {
 			const line = `no space owns ${sessionCwd}, so this compaction teaches nothing`;
 			notify(ctx, line, "info");
 			await record({ ts: new Date(at).toISOString(), kind: "spawn-skipped", reason: line, stderr: line });
 			return { spawn: false, reason: line };
 		}
 
-		const stamp = runStamp(at);
-		const slug = `learn-${stamp.slice(11, 16)}`;
-		const { queue: queuePath, proposal: proposalPath } = runPaths(at);
+		const hhmm = runStamp(at).slice(11, 16);
 		await mkdir(QUEUE_DIR, { recursive: true });
-		const evidence = evidenceMarkdown({ trigger, decision, errors, notes, at, proposalPath, slug, external, space });
+		// Same verdict and same evidence for both: they differ only in space, kind, allowed
+		// paths and slug, and each queue file names its own proposal so neither can read the
+		// other's.
+		const runs = plan.learners.map((learner) => {
+			const slug = learnerSlug(hhmm, learner.suffix);
+			const { queue: queuePath, proposal: proposalPath } = runPaths(at, undefined, `-${learner.suffix}`);
+			const evidence = evidenceMarkdown({
+				trigger,
+				decision,
+				errors,
+				notes,
+				at,
+				proposalPath,
+				slug,
+				external,
+				space: learner.space,
+			});
+			return { learner, slug, queuePath, proposalPath, evidence };
+		});
 
-		// Reserve the slot before the launch is verified: two compactions a second
-		// apart must not both spawn while the first is still being checked.
-		spawns += 1;
+		// Reserve the slots before either launch is verified: two compactions a second
+		// apart must not each launch two while the first is still being checked.
+		spawns += runs.length;
 		lastSpawnAt = at;
 		lastCompactIso = new Date(at).toISOString();
+
+		// A learner this compaction wanted but could not plan is said out loud: a single spawn
+		// that looks like the whole answer is the silence this refuses. Said in the session and
+		// not in `runs.jsonl`: a run row is something a learner did, and this is about the
+		// learner that was never planned — one compaction still writes one launch row and one
+		// outcome row for the learner it did start.
+		if (plan.note) notify(ctx, plan.note, "info");
 
 		// The launch needs a Herdr space, and a sandboxed session cannot make one: a
 		// sandbox never mounts `herdr-app`. It hands the launch to the host session in
@@ -3309,42 +3433,69 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		if (blocked) {
 			if (!sandboxSkipRecorded) {
 				sandboxSkipRecorded = true;
-				const requestPath = join(QUEUE_DIR, `${slug}${SPAWN_SUFFIX}`);
-				await writeFile(
-					requestPath,
-					`${JSON.stringify({
-						slug,
-						trigger,
-						queue: queuePath,
-						proposal: proposalPath,
-						reason: decision.reason,
-						evidence,
+				// One request per learner, each naming its own project: the host reads the kind
+				// from that project's record, so a harness request is never read as a project one.
+				for (const run of runs) {
+					const requestPath = join(QUEUE_DIR, `${run.slug}${SPAWN_SUFFIX}`);
+					await writeFile(
+						requestPath,
+						`${JSON.stringify({
+							slug: run.slug,
+							trigger,
+							queue: run.queuePath,
+							proposal: run.proposalPath,
+							reason: decision.reason,
+							evidence: run.evidence,
+							ts: new Date(at).toISOString(),
+							judged: decision.judged ?? [],
+							cwd: run.learner.space.project,
+						})}\n`,
+						// Stryker disable next-line StringLiteral: equivalent. Node normalises an empty
+						// encoding to utf8, so the request file's bytes are the same with either text.
+						"utf8",
+					);
+					await record({
 						ts: new Date(at).toISOString(),
-						judged: decision.judged ?? [],
-						cwd: space.project,
-					})}\n`,
-					"utf8",
-				);
-				await record({
-					ts: new Date(at).toISOString(),
-					kind: "spawn-skipped",
-					slug,
-					queue: queuePath,
-					proposal: proposalPath,
-					reason: decision.reason,
-					stderr: clipDetail(`${blocked} — the launch of ${slug} waits for the host session`),
-				});
-				notify(ctx, `no learner started: ${clipDetail(blocked)} — the request waits for the host session`, "info");
+						kind: "spawn-skipped",
+						slug: run.slug,
+						queue: run.queuePath,
+						proposal: run.proposalPath,
+						reason: decision.reason,
+						stderr: clipDetail(`${blocked} — the launch of ${run.slug} waits for the host session`),
+					});
+				}
+				// One request is "the request waits"; two are "2 requests wait". "1 request(s)"
+				// is a template talking, and the person reads this line to decide what to do next.
+				const requests =
+					runs.length === 1 ? "the request waits for the host session" : `${runs.length} requests wait for the host session`;
+				notify(ctx, `no learner started: ${clipDetail(blocked)} — ${requests}`, "info");
 			}
 			// Not a launch: the caller must not read this as one.
 			return { spawn: false, reason: blocked };
 		}
 
-		await writeFile(queuePath, evidence, "utf8");
-		void launchLearner({ at, trigger, decision, slug, queuePath, proposalPath, space, ctx }).catch(() => {
-			// A launch that fails in a way not foreseen above is still not allowed to
-			// reach the host session.
-		});
+		for (const run of runs) {
+			// Stryker disable next-line StringLiteral: equivalent. Node normalises an empty encoding
+			// to utf8, so the evidence file's bytes are the same with either text.
+			await writeFile(run.queuePath, run.evidence, "utf8");
+		}
+		// One failed launch is not allowed to cancel the other: each is its own tab and its own
+		// `spawn-failed` row, written by `launchLearner` itself.
+		for (const run of runs) {
+			void launchLearner({
+				at,
+				trigger,
+				decision,
+				slug: run.slug,
+				queuePath: run.queuePath,
+				proposalPath: run.proposalPath,
+				space: run.learner.space,
+				ctx,
+			}).catch(() => {
+				// A launch that fails in a way not foreseen above is still not allowed to
+				// reach the host session.
+			});
+		}
 		return decision;
 	}
 

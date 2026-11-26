@@ -45,6 +45,15 @@ fi
 #      type twice in one boot" rule, kept by not typing at all. Rebuilding (1) and respawning (2)
 #      build the Boss's argv with the same helper: two paths that drifted apart left a closed space
 #      coming back as an idle Boss while a killed one resumed.
+#   2b. the Boss tab is there and pi is not in it → the same respawn. After a reboot herdr hands
+#      every tab back as a plain shell, in the same tab, in the same folder, so a name test alone
+#      said `boss_present=yes` and the person was left with an empty prompt and no pi. The tab is
+#      the Boss only when a pi launcher is in its terminal's foreground — herdr-core is asked
+#      (`hc get <terminal> --json`) and the answer is judged with the same two witnesses
+#      `scripts/herdr-resume.mjs` uses (the whole foreground argv, and hc's own `app`). Nothing is
+#      typed into that shell: a tab is opened, once per space per guard run, and a terminal that
+#      cannot be read is left alone rather than guessed at, because two pi processes on one session
+#      file are two writers of one conversation.
 #   3. a worker's tab is not the guard's business: a slug in the space's `delegations.json` is
 #      resurrected only by `delegate wait --forever`, so a finished worker's tab stays closed and a
 #      recorded tab carrying a worker's name is never opened here.
@@ -66,6 +75,14 @@ fi
 #   5. a space whose project folder is gone is reported by name and skipped: a space on a missing
 #      folder would put the boss in a folder `git` cannot resolve. The refusal carries the command
 #      that fixes it, `bin/space forget <slug>`.
+#   5b. a project folder that is a drive root (`D:/`) and not readable is not a deleted folder: at
+#      boot BitLocker hands the letter back locked, so the letter answers `-d` and every read on
+#      the volume fails, and the space looks gone for as long as the person leaves it locked. That
+#      space gets one watcher — `scripts/unlock-watch.mjs`, locked by a pid file under `state/` —
+#      which waits for a *file* on the volume, then runs this pass for that space and the resume
+#      sweep: the two commands the person used to type by hand. It is never started twice (the pid
+#      file is the lock) and it is not started for a folder that is not a volume: a deleted folder
+#      still gets the refusal above.
 #   6. a forgotten space is left alone, and so is a space in Herdr with no record — it may be
 #      somebody's scratch space, and recreating what nobody recorded is how a program starts making
 #      spaces for people. Nothing is opened in such a space, not even a Boss tab: the record is the
@@ -76,9 +93,13 @@ fi
 # addition, and it is the only file the guard ever writes. `boss` and `boss_argv` are `bin/space`'s
 # own fields, written when the space is made; a record from before them reads as `Boss` and no argv.
 #
-# The app is asked once per pass (`herdr-app ls`), every action is one line, and `--once` runs
-# exactly one pass so a test costs a second. It runs under `env -i` with `PATH` and `HOME` because
-# the runner and the sandbox both do: no git config, no login shell, no caller's environment.
+# The app is asked once per pass (`herdr-app ls`), every action is one line, and that line is also
+# appended to `state/guard.log`: the Windows logon entry runs this through a hidden `.vbs`
+# (`state/guard-hidden.vbs`), whose stdout goes nowhere, so a pass that supervised nothing used to
+# read exactly like a pass with nothing to do — silence. `--once` runs exactly one pass so a test
+# costs a second. It runs under `env -i` with `PATH` and `HOME` because the runner and the sandbox
+# both do: no git config, no login shell, no caller's environment — which is also why `herdr-app`,
+# `hc` and `node` are resolved here instead of trusted to the PATH (see `tool_path`).
 #
 # Radar Vol. 35: blip 20 (stateful guardrails) — a rule nothing checks is a rule that is gone.
 set -uo pipefail
@@ -93,7 +114,6 @@ here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)
 
 prog=guard
 INTERVAL=${PI_GUARD_INTERVAL:-20}
-HERDR_APP=${PI_GUARD_HERDR_APP:-herdr-app}
 RESUME_DIR=${PI_HERDR_RESUME_DIR:-${HOME:-}/.pi/agent/herdr-resume}
 RESUME_SCRIPT=${PI_GUARD_RESUME_SCRIPT:-${HOME:-}/.pi/scripts/herdr-resume.mjs}
 # The Boss is bare: `bin/pi-bare` in this tree, never a sandboxed wrapper and never a path into
@@ -106,6 +126,11 @@ LEGACY_ROOT=${SPACE_LEGACY_ROOT:-${PI_LEGACY_BOSS_ROOT:-${HOME:-}/big-boss-pi}}
 # Where a session's own folder is written down: the first line of every `*.jsonl` carries `cwd`,
 # so the newest session for a project is found by reading it, not by guessing at the slug.
 SESSIONS_DIR=${PI_SESSIONS_DIR:-${HOME:-}/.pi/agent/sessions}
+# The watcher a locked volume gets (5b). Node runs it, resolved above, and the state folder is
+# space-lib's, so a test writes its pid files and log inside its own `PI_SPACE_ROOT`.
+UNLOCK_SCRIPT=${PI_UNLOCK_WATCH_SCRIPT:-$PI_HOME/scripts/unlock-watch.mjs}
+UNLOCK_STATE=${PI_UNLOCK_WATCH_STATE:-${SPACE_STATE:-$PI_HOME/state}}
+UNLOCK_LOG=${PI_UNLOCK_LOG:-$UNLOCK_STATE/unlock-watch.log}
 # How long a Boss tab this program opened answers for its own absence. Two passes in the same second
 # read one snapshot, so the second one's snapshot predates the tab the first one opened; the record
 # keeps that tab as a claim and this is how long the claim is evidence. A claim is a moment, not a
@@ -115,7 +140,81 @@ ONCE=0
 DRY=0
 ONLY=""
 
-say() { printf '%s: %s\n' "$prog" "$*"; }
+# tool_path <env override> <name> [candidate…] — the absolute path of a program this file needs, or
+# nothing when no answer exists.
+#
+# Why this is not `command -v` and done: the Windows logon entry runs the guard through
+# `state/guard-hidden.vbs`, and the task it starts has the Task Scheduler's environment. `herdr-app`
+# and `hc` live on the *user* PATH only (they install under the profile), and `node` is a third
+# case, so a guard started from there found no app, supervised nothing — and said so to a hidden
+# process. Measured 2026-11-26: with a machine-only PATH, `bin/guard --once` printed "herdr-app did
+# not answer, so no space can be supervised" and adopted nothing, while the same pass from a login
+# shell adopted herdr's new space id in one go. Order, best first: the override install.mjs writes
+# into the launcher (the way `resume-hidden.vbs` passes `PI_HERDR_RESUME_HC`), then PATH, then the
+# vendor's own install folders. An override that is not executable falls through instead of
+# shadowing a working program with a deleted one.
+tool_path() {
+	local override=${1:-} name=${2:-} c
+	shift 2
+	if [ -n "$override" ] && [ -x "$override" ]; then
+		printf '%s' "$override"
+		return 0
+	fi
+	if command -v "$name" >/dev/null 2>&1; then
+		command -v "$name"
+		return 0
+	fi
+	for c in "$@"; do
+		[ -n "$c" ] || continue
+		if [ -x "$c" ]; then
+			printf '%s' "$c"
+			return 0
+		fi
+	done
+	return 0
+}
+NODE=$(tool_path "${PI_GUARD_NODE:-}" node \
+	"${ProgramFiles:-}/nodejs/node.exe" "${HOME:-}/.local/share/pnpm/bin/node" \
+	"/usr/local/bin/node" "/usr/bin/node")
+HERDR_APP=$(tool_path "${PI_GUARD_HERDR_APP:-}" herdr-app \
+	"${LOCALAPPDATA:-}/Programs/herdr-app/herdr-app.exe" \
+	"${HOME:-}/AppData/Local/Programs/herdr-app/herdr-app.exe" \
+	"${HOME:-}/.local/share/herdr-app/herdr-app" "${HOME:-}/.local/bin/herdr-app")
+# herdr-core's CLI: the only thing that answers what program a terminal's foreground holds.
+# `herdr-app ls` names the app a terminal reports and nothing about the program in front of it.
+HC=$(tool_path "${PI_GUARD_HC:-}" hc \
+	"${LOCALAPPDATA:-}/Programs/herdr-core/hc.exe" \
+	"${HOME:-}/AppData/Local/Programs/herdr-core/hc.exe" \
+	"${HOME:-}/.local/share/herdr-core/hc" "${HOME:-}/.local/bin/hc")
+# node is the one program this file cannot do without — every matcher here, and in space-lib, is a
+# node one-liner that asks for `node` by name — so a resolved node that is not on PATH becomes PATH.
+if [ -n "$NODE" ]; then
+	PATH="$(dirname -- "$NODE"):$PATH"
+	export PATH
+fi
+# Where the one line per action goes as well as stdout. `state/guard.log` is the file the install's
+# own "the guard log: …" line points at, and the only place a refusal made by a hidden process can
+# be read. SPACE_STATE is space-lib's (`PI_SPACE_ROOT` in a test), so a test writes its own log.
+LOG=${PI_GUARD_LOG:-${SPACE_STATE:-$PI_HOME/state}/guard.log}
+# A space this run already respawned a Boss tab for. One per space per run: a respawned tab whose pi
+# fails to start looks exactly like the empty shell it replaced, and a guard that opened a tab on
+# every 20-second pass would turn one failed start into a wall of them.
+RESPAWNED=" "
+respawn_done() { case $RESPAWNED in *" ${1:-} "*) return 0 ;; esac; return 1; }
+respawn_mark() { RESPAWNED="$RESPAWNED${1:-} "; }
+
+# say — one line per action: on stdout, and appended to the log. stdout is invisible to the person
+# when the logon entry starts this (window style 0, no console), so `tail -n 20 state/guard.log` is
+# how a pass that refused is told apart from a pass with nothing to do. A pass that finds agreement
+# says nothing and writes nothing.
+say() {
+	local line
+	line=$(printf '%s: %s' "$prog" "$*")
+	printf '%s\n' "$line"
+	[ -n "$LOG" ] || return 0
+	mkdir -p -- "$(dirname -- "$LOG")" 2>/dev/null || return 0
+	printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$line" >>"$LOG" 2>/dev/null || true
+}
 
 usage() {
 	cat >&2 <<'EOF'
@@ -403,9 +502,16 @@ boss_argv_json() {
 	BARE=$PI_BARE node -e 'process.stdout.write(JSON.stringify(process.env.BARE ? [process.env.BARE] : []))'
 }
 
-# boss_present <slug> — is the record's Boss tab in this space? stdin is `space_match`'s answer.
+# boss_tab <slug> — the record's Boss tab as this pass sees it, as one JSON object:
+#
+#   {"present":"yes"|"adopt:<name>"|"no"|"unknown","terminals":["t15"]}
+#
+# stdin is the live space `space_match` found. One matcher for every question the pass asks — is the
+# tab there, what is it called now, which terminals does it hold — because a second, differently
+# worded matcher is how two readers of one snapshot start disagreeing:
 #   yes        the tab is there: by an id the record remembers (`uberboss_tab`, `terminals[]`, or the
-#              tab this program opened a moment ago), or by the name the record keeps in `boss`
+#              tab this program opened itself while its claim lasts), or by the name the record
+#              keeps in `boss`
 #   adopt:<n>  a tab carries an id the record remembers and answers to another name `<n>`: it is the
 #              Boss, renamed by the person, and the caller writes the name down instead of opening one
 #   no         the space has tabs and none of them is the Boss tab
@@ -417,15 +523,19 @@ boss_argv_json() {
 # — and reading an id only for a tab the app gave no name — is what put a second Boss tab beside the
 # first one whenever the record's name and the tab's label drifted apart: two `pi` processes
 # appending one session file.
-boss_present() {
-	RECORD=$(space_record "${1:-}") CLAIM_MS=$((${BOSS_CLAIM_SECONDS:-60} * 1000)) node -e '
+#
+# `terminals` is every terminal of every tab that answered `yes` or `adopt`: the respawned Boss may
+# sit beside the empty shell it replaced, and pi in either one is a Boss that runs.
+boss_tab() {
+	RECORD=$(space_record "${1:-}") CLAIM_MS=$((${BOSS_CLAIM_SECONDS:-60} * 1000)) "$NODE" -e '
 		const fs = require("fs");
 		let d = "";
 		process.stdin.on("data", (c) => (d += c)).on("end", () => {
+			const out = { present: "unknown", terminals: [] };
 			let s = {};
-			try { s = JSON.parse(d); } catch { process.stdout.write("unknown"); return; }
+			try { s = JSON.parse(d); } catch { process.stdout.write(JSON.stringify(out)); return; }
 			const tabs = Array.isArray(s.tabs) ? s.tabs : null;
-			if (tabs === null) { process.stdout.write("unknown"); return; }
+			if (tabs === null) { process.stdout.write(JSON.stringify(out)); return; }
 			let r = {};
 			try { r = JSON.parse(fs.readFileSync(process.env.RECORD, "utf8")); } catch {}
 			const boss = String(r.boss || "Boss");
@@ -433,9 +543,9 @@ boss_present() {
 			const at = claim ? Date.parse(String(claim.at || "")) : NaN;
 			const claimMs = Number(process.env.CLAIM_MS || 0);
 			const age = Number.isFinite(at) ? Date.now() - at : -1;
-			const fresh = claimMs > 0 && age >= 0 && age <= claimMs;
 			// The tab this program opened itself is one of the ids that answer for the Boss, while
 			// the claim lasts: an older claim names a dead terminal and says nothing.
+			const fresh = claimMs > 0 && age >= 0 && age <= claimMs;
 			const ids = new Set(
 				[String(r.uberboss_tab || "")]
 					.concat(Array.isArray(r.terminals) ? r.terminals.map(String) : [])
@@ -449,30 +559,150 @@ boss_present() {
 				}
 				return list.filter(Boolean);
 			};
-			let identifiable = false;
-			// 1. an id the record remembers: that tab is the Boss whatever it is called now.
+			const termsOf = (t) => {
+				const list = [];
+				if (Array.isArray(t.terminals)) {
+					for (const x of t.terminals) {
+						const id = typeof x === "string" ? x : String(x?.terminal ?? x?.id ?? "");
+						if (id) list.push(id);
+					}
+				}
+				return list;
+			};
+			let identifiable = false, byName = false, idName = "", idHit = false;
+			const idTerms = [], nameTerms = [];
 			for (const t of tabs) {
 				if (!t || typeof t !== "object") continue;
 				const mine = own(t);
 				const name = String(t.name ?? t.title ?? "");
 				if (name || mine.length) identifiable = true;
-				if (!mine.some((v) => ids.has(v))) continue;
-				process.stdout.write(!name || name === boss ? "yes" : "adopt:" + name);
-				return;
+				// 1. an id the record remembers: that tab is the Boss whatever it is called now.
+				if (mine.some((v) => ids.has(v))) {
+					idHit = true;
+					for (const id of termsOf(t)) if (!idTerms.includes(id)) idTerms.push(id);
+					if (name && name !== boss && !idName) idName = name;
+				}
+				// 3. the name the record keeps, for the app that hands us names and no ids.
+				if (name && name === boss) {
+					byName = true;
+					for (const id of termsOf(t)) if (!nameTerms.includes(id)) nameTerms.push(id);
+				}
 			}
-			// 2. a tab this program opened a moment ago, on a snapshot taken before it existed.
-			if (fresh) { process.stdout.write("yes"); return; }
-			if (tabs.length === 0) { process.stdout.write("no"); return; }
-			// 3. the name the record keeps, for the app that hands us names and no ids.
-			for (const t of tabs) {
-				if (!t || typeof t !== "object") continue;
-				if (String(t.name ?? t.title ?? "") === boss) { process.stdout.write("yes"); return; }
+			if (idHit) {
+				out.present = idName ? "adopt:" + idName : "yes";
+				for (const id of idTerms.concat(nameTerms)) {
+					if (!out.terminals.includes(id)) out.terminals.push(id);
+				}
+			} else if (fresh) {
+				// 2. a tab this program opened a moment ago, on a snapshot taken before it existed.
+				out.present = "yes";
+			} else if (tabs.length === 0) {
+				out.present = "no";
+			} else if (byName) {
+				out.present = "yes";
+				out.terminals = nameTerms;
+			} else {
+				// Nothing above answered, so the space has tabs and none of them is the Boss tab:
+				// the Boss tab is gone. A named tab that carries none of the remembered ids is
+				// that same answer — a record which remembers no id cannot tell "renamed" from
+				// "gone", and guessing "renamed" is what keeps a dead Boss dead forever.
+				out.present = identifiable ? "no" : "unknown";
 			}
-			// Nothing above answered, so the space has tabs and none of them is the Boss: the Boss
-			// tab is gone. A single named tab that carries none of the remembered ids is that same
-			// answer: a record which remembers no id cannot tell "renamed" from "gone", and guessing
-			// "renamed" is what keeps a dead Boss dead forever.
-			process.stdout.write(identifiable ? "no" : "unknown");
+			process.stdout.write(JSON.stringify(out));
+		});'
+}
+
+# boss_present <slug> — is the record's Boss tab in this space? stdin is `space_match`'s answer.
+# The answer is one word (`yes`, `no`, `unknown`, or `adopt:<name>`), and it is about the tab, never
+# the program in it: `boss_live` asks that question, and it needs a terminal to ask.
+boss_present() { boss_tab "${1:-}" | field_of present; }
+
+# boss_claim_fresh <slug> — did this program open the Boss tab within
+# `PI_GUARD_BOSS_CLAIM_SECONDS`? A claim is a moment, not a fact: one from last boot says nothing
+# about a tab now, and `restore_boss` asks this under the record lock so two passes in one second
+# open one tab instead of two.
+boss_claim_fresh() {
+	RECORD=$(space_record "${1:-}") CLAIM_MS=$((${BOSS_CLAIM_SECONDS:-60} * 1000)) "$NODE" -e '
+		const fs = require("fs");
+		let r = {};
+		try { r = JSON.parse(fs.readFileSync(process.env.RECORD, "utf8")); } catch { process.exit(1); }
+		const c = r.boss_claim && typeof r.boss_claim === "object" ? r.boss_claim : null;
+		const at = c ? Date.parse(String(c.at || "")) : NaN;
+		const ms = Number(process.env.CLAIM_MS || 0);
+		const age = Number.isFinite(at) ? Date.now() - at : -1;
+		process.exit(ms > 0 && age >= 0 && age <= ms ? 0 : 1);
+	'
+}
+
+# boss_terminals <slug> — the terminals of the Boss tab(s) in this space, one per line.
+boss_terminals() {
+	boss_tab "${1:-}" | "$NODE" -e 'let d="";process.stdin.on("data",(c)=>(d+=c)).on("end",()=>{let j={};try{j=JSON.parse(d)}catch{};for(const t of Array.isArray(j.terminals)?j.terminals:[])process.stdout.write(String(t)+"\n")})'
+}
+
+# boss_live <terminal…> — is pi in the Boss tab? Answered from herdr-core, the only witness of what
+# program a terminal's foreground holds, with the same two tests `scripts/herdr-resume.mjs` uses:
+# the *whole* foreground argv (a sandboxed Boss reads as `bash …/pi-sandbox.sh -- pi …`, so `argv[0]`
+# alone calls a live Boss a shell) and hc's own `app` (a Windows pi is `node …/cli.js`, and neither
+# word is a launcher).
+#
+#   yes     a pi launcher is in one of those terminals, by either witness
+#   no      every terminal that answered is a live plain shell — the reboot's empty Boss
+#   unknown hc is not here, nothing answered, a terminal is not `live`, or the foreground is some
+#           other program. Only `no` opens anything: two pi processes on one session file are two
+#           writers of one conversation, so an unreadable terminal is left alone and said out loud.
+boss_live() {
+	local t facts all=""
+	[ -n "$HC" ] || {
+		printf 'unknown'
+		return 0
+	}
+	for t in "$@"; do
+		[ -n "$t" ] || continue
+		facts=$("$HC" get "$t" --json 2>/dev/null) || facts=""
+		[ -z "$facts" ] || all="$all$facts
+"
+	done
+	[ -n "$all" ] || {
+		printf 'unknown'
+		return 0
+	}
+	printf '%s' "$all" | "$NODE" -e '
+		const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "nu", "pwsh", "powershell", "elvish", "xonsh"]);
+		const LAUNCHERS = new Set(["pi", "pi-bare", "pi-sandboxed", "pisandbox", "pi-sandbox.sh"]);
+		// Both separators, on either platform: a Windows foreground argv read on Linux is one
+		// long word to `path.basename` (the backslashes are not separators there), so a tab
+		// holding `C:\\WINDOWS\\...\\powershell.exe` answered `unknown` and an empty Boss shell was
+		// left alone. The last segment is the program, whichever slash spelled it.
+		const programName = (w) => String(w ?? "").split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "");
+		const isShellArgv = (a) => Array.isArray(a) && a.length > 0 && SHELLS.has(programName(a[0]));
+		const piWitness = (f) => {
+			if (Array.isArray(f?.foreground?.argv) && f.foreground.argv.some((w) => LAUNCHERS.has(programName(w)))) return true;
+			return LAUNCHERS.has(programName(f?.status?.app ?? f?.app ?? ""));
+		};
+		let d = "";
+		process.stdin.on("data", (c) => (d += c)).on("end", () => {
+			let facts = [];
+			try {
+				const one = JSON.parse(d.trim());
+				facts = one && typeof one === "object" ? [one] : [];
+			} catch {
+				facts = d
+					.split("\n")
+					.map((l) => l.trim())
+					.filter(Boolean)
+					.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+					.filter(Boolean);
+			}
+			let pi = false, shells = 0, other = 0, unread = 0;
+			for (const f of facts) {
+				if (f.state !== "live") { unread++; continue; }
+				if (piWitness(f)) { pi = true; continue; }
+				if (isShellArgv(f.foreground?.argv)) { shells++; continue; }
+				other++;
+			}
+			if (pi) process.stdout.write("yes");
+			else if (shells > 0 && other === 0 && unread === 0) process.stdout.write("no");
+			else process.stdout.write("unknown");
 		});'
 }
 
@@ -722,26 +952,33 @@ rebuild_space() {
 	resume_sweep
 }
 
-# restore_boss <slug> <name> <boss> <space> — the space is there and its Boss tab is not.
+# restore_boss <slug> <name> <boss> <space> [missing|respawn] — open the Boss tab: either it is
+# gone (`missing`, the default) or it is there holding an empty shell (`respawn`).
 restore_boss() {
-	local slug=$1 name=$2 boss=$3 space="$4" project spaceid session argv rec present out rc
+	local slug=$1 name=$2 boss=$3 space="$4" why=${5:-missing} project spaceid session argv rec present out rc
 	project=$(space_field "$slug" project)
 	spaceid=$(printf '%s' "$space" | field_of id)
 	rec=$(space_record "$slug")
 	# Two passes in the same second read "no Boss tab" out of one snapshot and would both open one —
 	# two `pi` appending one session, 631 ms apart, is what that looked like. So the decision is
 	# taken under the record lock and re-asked of the record that is there when the lock is ours: the
-	# pass that went first left a claim naming the tab it opened, `boss_present` reads it as `yes`,
-	# and this pass opens nothing. The lock is held across `tab.new` on purpose — a lock released
-	# before the answer is a lock that never saw it.
+	# pass that went first left a claim naming the tab it opened, and a claim inside
+	# `PI_GUARD_BOSS_CLAIM_SECONDS` is that pass's tab while this pass's snapshot predates it. The
+	# claim is asked and not the tab, because this function is reached two ways: a Boss tab that is
+	# gone, and a Boss tab that is there holding an empty shell. The second is a `yes` on the tab and
+	# still a tab to open, so a tab-presence test here would leave the shell empty forever.
+	# The lock is held across `tab.new` on purpose — a lock released before the answer is a lock that
+	# never saw it.
 	if ! records_lock "$rec"; then
 		say "harness: $name: the record stayed locked, so no Boss tab was opened this pass"
 		return 0
 	fi
-	present=$(printf '%s' "$space" | boss_present "$slug")
-	if [ "$present" != no ]; then
+	# A claim answers a snapshot that shows no Boss tab: "the one you cannot see is the one I opened".
+	# A tab that is there holding an empty shell is not that question — the shell is this pass's
+	# reason to open one — so `respawn` never asks it, and `respawn_done` is what stops a loop.
+	if [ "$why" != respawn ] && boss_claim_fresh "$slug"; then
 		records_unlock "$rec"
-		say "harness: $name: another pass has the Boss tab in hand ($present), so not a second one"
+		say "harness: $name: another pass opened the Boss tab a moment ago, so not a second one"
 		return 0
 	fi
 	# The session is found by the record's project folder, not by the terminal an entry happens to
@@ -772,9 +1009,66 @@ restore_boss() {
 	records_unlock "$rec"
 }
 
+# ---------------------------------------------------------------- the unlock watcher (5b) --
+# folder_ready <project> — is there a folder here that can be read at all? A BitLocker-locked
+# volume answers `-d` on its letter and fails `-r`: the person still has to unlock it.
+folder_ready() { [ -n "${1:-}" ] && [ -d "$1" ] && [ -r "$1" ]; }
+
+# unlock_watch_wanted <project> — the shape of a volume, never the shape of a deleted folder:
+# `D:`, `D:/`, `D:\`. Everything else keeps the `bin/space forget` refusal, because a folder that
+# is not there is a record to fix by hand, not a boot to wait out.
+unlock_watch_wanted() {
+	case ${1:-} in
+	[A-Za-z]: | [A-Za-z]:/ | [A-Za-z]:\\) return 0 ;;
+	esac
+	return 1
+}
+
+unlock_watch_pid_alive() { # <pidfile>
+	local pid
+	[ -f "${1:-}" ] || return 1
+	pid=$(cat -- "$1" 2>/dev/null) || return 1
+	case $pid in "" | *[!0-9]*) return 1 ;; esac
+	kill -0 "$pid" 2>/dev/null
+}
+
+# start_unlock_watch <slug> <name> <project> — one line, and at most one watcher.
+#
+# Nothing is typed and nothing is opened here: the watcher calls this same program for one space
+# when the volume can be read, so the repair is `one_space`'s, not a second copy of it.
+start_unlock_watch() {
+	local slug=$1 name=$2 project=$3 marker pidfile pid
+	marker=${PI_UNLOCK_MARKER:-${project%/}/AGENTS.md}
+	if [ "$DRY" = 1 ]; then
+		say "$name: dry-run: project folder $project is not readable, would start the unlock watcher for $marker"
+		return 0
+	fi
+	if [ "${PI_GUARD_UNLOCK_WATCH:-1}" = 0 ]; then
+		say "$name: project folder $project is not readable, skipped — PI_GUARD_UNLOCK_WATCH=0, so no watcher was started (bin/space forget $slug if you mean it)"
+		return 0
+	fi
+	if [ -z "$NODE" ] || [ ! -f "$UNLOCK_SCRIPT" ]; then
+		say "$name: project folder $project is not readable, skipped — no unlock watcher ($UNLOCK_SCRIPT, node: ${NODE:-not found}), so nothing runs this pass when $marker is readable (bin/space forget $slug if you mean it)"
+		return 0
+	fi
+	pidfile=$UNLOCK_STATE/unlock-watch-$slug.pid
+	if unlock_watch_pid_alive "$pidfile"; then
+		say "$name: project folder $project is not readable yet — the unlock watcher is already waiting for $marker (pid $(cat -- "$pidfile"), log: $UNLOCK_LOG)"
+		return 0
+	fi
+	mkdir -p -- "$UNLOCK_STATE" "$(dirname -- "$UNLOCK_LOG")" 2>/dev/null || true
+	# Detached, so a `--once` pass exits and leaves one watcher behind rather than a child that
+	# dies with the pass: the pid file is the lock, and the watcher removes it when it is done.
+	nohup "$NODE" "$UNLOCK_SCRIPT" --space "$slug" --project "$project" --marker "$marker" \
+		--log "$UNLOCK_LOG" --pid-file "$pidfile" --quiet >>"$UNLOCK_LOG" 2>&1 &
+	pid=$!
+	printf '%s\n' "$pid" >"$pidfile" 2>/dev/null || true
+	say "$name: project folder $project is not readable yet — started the unlock watcher (pid $pid): it runs this pass for $slug and the resume sweep once $marker is readable (log: $UNLOCK_LOG)"
+}
+
 # one_space <slug> — everything one pass does about one space.
 one_space() {
-	local slug=$1 name project boss match mid other present chg
+	local slug=$1 name project boss match mid other present chg terms alive
 	if ! space_exists "$slug"; then
 		say "$slug: no record, left alone — bin/space list"
 		return 0
@@ -784,7 +1078,12 @@ one_space() {
 	boss=$(space_field "$slug" boss)
 	[ -n "$boss" ] || boss=Boss
 	project=$(space_field "$slug" project)
-	if [ -z "$project" ] || [ ! -d "$project" ]; then
+	if ! folder_ready "$project"; then
+		# A volume the boot handed back locked is waited for, not forgotten (5b).
+		if unlock_watch_wanted "$project"; then
+			start_unlock_watch "$slug" "$name" "$project"
+			return 0
+		fi
 		say "$name: project folder is gone, skipped — bin/space forget $slug if you mean it"
 		return 0
 	fi
@@ -823,8 +1122,32 @@ one_space() {
 	present=$(printf '%s' "$match" | boss_present "$slug")
 	case $present in
 	yes)
-		# A Boss tab that is there is recorded, never opened again: the next pass must find the
-		# same tab by name, and an empty argv keeps whatever argv the record already has.
+		# The tab is there. That is not the same as pi being in it: after a reboot herdr hands
+		# every tab back as a plain shell in the same tab, in the same folder, so a name test alone
+		# called an empty prompt a live Boss. The terminal itself is asked — and only a terminal
+		# that is *positively* a shell is acted on, because a second pi on the same session file is
+		# two writers of one conversation.
+		terms=$(printf '%s' "$match" | boss_terminals "$slug")
+		# shellcheck disable=SC2086 # terminal ids (t15): a word each, no spaces in one
+		alive=$(boss_live $terms)
+		case $alive in
+		unknown)
+			say "$name: Boss tab '$boss' is there and nothing says pi is in it — left alone (hc: ${HC:-(not found)}, HERDR_APP ls says the tab's names only)"
+			return 0
+			;;
+		no)
+			if respawn_done "$slug"; then
+				say "$name: Boss tab '$boss' is an empty shell again after this guard respawned it once — left alone (close the empty tab, or bin/space forget $slug)"
+				return 0
+			fi
+			say "$name: Boss tab '$boss' is an empty shell, no pi in it — respawning it with the record's session"
+			respawn_mark "$slug"
+			restore_boss "$slug" "$name" "$boss" "$match" respawn
+			return 0
+			;;
+		esac
+		# A Boss tab that is there and running pi is recorded, never opened again: the next pass
+		# must find the same tab by name, and an empty argv keeps whatever argv the record has.
 		record_boss_tab "$slug" ""
 		return 0
 		;;
@@ -853,13 +1176,21 @@ one_space() {
 # pass — one sweep over the records, with the app asked once.
 pass() {
 	local slugs slug
-	if command -v "$HERDR_APP" >/dev/null 2>&1; then
+	if [ -n "$HERDR_APP" ] && command -v "$HERDR_APP" >/dev/null 2>&1; then
 		SNAP=$("$HERDR_APP" ls 2>/dev/null) || SNAP=""
 	else
 		SNAP=""
 	fi
 	if [ "$DRY" = 0 ] && [ -z "$SNAP" ]; then
-		say "harness: herdr-app did not answer, so no space can be supervised — is the app running?"
+		# Two refusals, never one silence: an app that cannot be found at all is a different fix
+		# (`PI_GUARD_HERDR_APP`, the install folder) from an app that is there and not answering
+		# (`is the app running?`). Both land in the log, which is the only place a person can read
+		# them when the logon entry started this with its window hidden.
+		if [ -z "$HERDR_APP" ]; then
+			say "harness: herdr-app was not found on PATH or in herdr's install folder, so no space can be supervised — set PI_GUARD_HERDR_APP to herdr-app.exe (log: $LOG)"
+		else
+			say "harness: herdr-app did not answer ($HERDR_APP ls), so no space can be supervised — is the app running? (log: $LOG)"
+		fi
 		return 0
 	fi
 	slugs=$(space_slugs)
@@ -876,6 +1207,14 @@ pass() {
 		one_space "$slug"
 	done <<<"$slugs"
 }
+
+# node is not optional here: every record read, every matcher and the Boss witness are node
+# one-liners. Said once, in the log, and not looped over: a guard that cannot read a record is a
+# logon entry that would otherwise sit in silence forever.
+if [ -z "$NODE" ]; then
+	say "harness: node was not found on PATH or in its install folder, so no record can be read — set PI_GUARD_NODE to node.exe (PATH: $PATH)"
+	exit 1
+fi
 
 while :; do
 	pass

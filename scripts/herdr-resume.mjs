@@ -46,7 +46,7 @@
 //   PI_HERDR_RESUME_START_MS   after a send, how long to wait for it to start (15000)
 import { execFileSync } from "node:child_process";
 import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 /** Mirrors `isShellArgv` in agent/extensions/herdr-resume-map.ts. */
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "nu", "pwsh", "powershell", "elvish", "xonsh"]);
@@ -109,18 +109,21 @@ function hcJson(args) {
 
 function isShellArgv(argv) {
 	if (!Array.isArray(argv) || argv.length === 0) return false;
-	return SHELLS.has(
-		basename(String(argv[0]))
-			.toLowerCase()
-			.replace(/\.exe$/, ""),
-	);
+	return SHELLS.has(programName(argv[0]));
 }
 
-/** One word of an argv, as the kernel would name the program: no folder, no `.exe`. */
+/**
+ * One word of an argv, as the kernel would name the program: no folder, no `.exe`.
+ *
+ * Both separators, always, and never `node:path`'s `basename`: that one answers in the *host's*
+ * flavour, so on a Linux host `basename("C:\\WINDOWS\\…\\powershell.exe")` is the whole string and
+ * a Windows tab classified as POSIX — six green cases on Windows and six red ones in CI
+ * (PR #262, job `scripts tests`). The path's own spelling decides, not the host's.
+ */
 function programName(word) {
-	return basename(String(word ?? ""))
-		.toLowerCase()
-		.replace(/\.exe$/, "");
+	const text = String(word ?? "");
+	const name = text.slice(Math.max(text.lastIndexOf("/"), text.lastIndexOf("\\")) + 1);
+	return name.toLowerCase().replace(/\.exe$/, "");
 }
 
 /**
@@ -156,9 +159,63 @@ function shellQuote(word) {
 	return `'${String(word).replace(/'/g, `'\\''`)}'`;
 }
 
-function commandLine(entry) {
+/** A word as a recovered PowerShell reads it: `'…'`, and a quote inside is `''`. */
+function psQuote(word) {
+	return `'${String(word).replace(/'/g, "''")}'`;
+}
+
+/** A word as a recovered cmd.exe reads it. */
+function cmdQuote(word) {
+	return `"${String(word).replace(/"/g, '""')}"`;
+}
+
+/**
+ * A word neither shell will take apart: no space, no quote, no `@`, no sigil. Everything else is
+ * quoted, which is what makes a `C:\Program Files\…` path and npm's `@earendil-works` folder work.
+ */
+function plainWord(word) {
+	return /^[A-Za-z0-9_+:,./\\-]+$/.test(String(word));
+}
+
+function psWord(word) {
+	return plainWord(word) ? String(word) : psQuote(word);
+}
+
+function cmdWord(word) {
+	return plainWord(word) ? String(word) : cmdQuote(word);
+}
+
+/**
+ * Which shell owns a recovered terminal. herdr hands out `powershell.exe` on Windows, and
+ * PowerShell has no `exec`: the POSIX line was typed there every boot and every boot it was a
+ * `CommandNotFoundException` in the tab, so the Boss came back as a prompt full of red text
+ * (measured 2026-11-24: `hc read t15`, the same four lines, one pair per attempt).
+ */
+export function shellFamily(argv) {
+	const name = programName(argv?.[0]);
+	if (name === "powershell" || name === "pwsh") return "powershell";
+	if (name === "cmd") return "cmd";
+	return "posix";
+}
+
+/**
+ * resumeLine(entry, facts) — the line typed into the recovered shell, in that shell's own syntax.
+ *
+ * POSIX gets `exec …`: the shell is replaced, so the tab's program *is* pi and a second paste has
+ * nothing to land in. Windows has no `exec`, so there the line runs pi inside the shell (`& …`)
+ * and the prompt returns when pi exits — the only thing PowerShell can promise.
+ *
+ * `argv[0]` is `…/cli.js`, a script and not a program. A POSIX shell runs it through its shebang;
+ * PowerShell and cmd would hand it to the file association, which is whatever that machine happens
+ * to have, so the interpreter already running this script is named explicitly instead.
+ */
+export function resumeLine(entry, facts) {
+	const family = shellFamily(facts?.foreground?.argv);
 	const words = [...entry.argv, "--session", entry.session_path];
-	return words.map(shellQuote).join(" ");
+	if (family === "posix") return `exec ${words.map(shellQuote).join(" ")}`;
+	const program = /\.[cm]?js$/i.test(String(words[0])) ? [process.execPath, ...words] : words;
+	if (family === "powershell") return `& ${program.map(psWord).join(" ")}`;
+	return program.map(cmdWord).join(" ");
 }
 
 function runnable(path) {
@@ -257,18 +314,49 @@ function programAlive(facts) {
 }
 
 /**
+ * The platform this one decision is made for, in one place, so both answers can be
+ * asked on a host that is only one of them. Not a `PI_*` value: this is a fact about
+ * the machine, not a setting to tune.
+ */
+const IS_WIN = process.platform === "win32";
+
+/**
  * Did the line we typed start something? A shell that is still the foreground
  * did not run it: a first-run prompt or a stray keystroke can swallow the start
  * of a pasted line, and without this check that failure would be recorded as a
  * restore. The pid cannot answer this — `exec` replaces the shell in place and
  * keeps its pid — so the check is "not a shell, and that process is alive".
+ *
+ * On Windows that check cannot be trusted alone, so pi announces itself instead.
+ * herdr launches a tab as `powershell.exe -NoExit -Command "& '<program>'"`, and
+ * hc sometimes keeps answering that launch program as the terminal's `foreground`
+ * after the program has replaced the shell — measured 2026-11-24, a bash tab
+ * running node answered `foreground {name: "bash.exe", pid: 5940}` from the first
+ * poll to the last. A Windows pi is launched as `node …/cli.js`, and neither word
+ * is in PI_LAUNCHERS, so a live Boss is recognised by its own report and not by
+ * its argv: `status {app: "pi"}` while the foreground says `node.exe`. Without
+ * that witness a resumed Windows tab read as "nothing started", and the second
+ * attempt was typed into the pi the first attempt had started.
+ *
+ * That second witness is Windows-only, and off Windows it can only hurt: there hc
+ * answers the real foreground, so a tab that came back as a shell whose status
+ * still claims `app: pi` has *not* started — counting it as started would leave
+ * the exec line untyped and the tab a plain shell, the exact failure this service
+ * exists to end. So the platform picks the branch, and off Windows the pi witness
+ * is never consulted. `onWindows` is a parameter only so both answers can be
+ * exercised on one machine (`scripts/tests/herdr-resume-witness.test.mjs`).
  */
+export function startedWitness(facts, onWindows = IS_WIN) {
+	const foreground = facts?.foreground?.argv;
+	const started = Array.isArray(foreground) && foreground.length > 0 && !isShellArgv(foreground) && programAlive(facts);
+	if (onWindows) return started || piWitness(facts) !== "";
+	return facts?.state === "live" && started;
+}
+
 function waitForStart(terminal, deadline) {
 	for (;;) {
 		const facts = hcJson(["get", terminal, "--json"]);
-		if (facts && facts.state === "live" && facts.foreground && !isShellArgv(facts.foreground.argv) && programAlive(facts)) {
-			return facts;
-		}
+		if (facts && facts.state === "live" && startedWitness(facts)) return facts;
 		if (Date.now() >= deadline) return null;
 		sleep(500);
 	}
@@ -428,7 +516,7 @@ function main() {
 			log(`skip ${where}: hc still holds the launch argv (${(facts.argv ?? []).join(" ")}), not a recovered shell`);
 			continue;
 		}
-		const line = `exec ${commandLine(entry)}`;
+		const line = resumeLine(entry, facts);
 		if (dryRun) {
 			log(`would send ${where}: ${line}`);
 			continue;

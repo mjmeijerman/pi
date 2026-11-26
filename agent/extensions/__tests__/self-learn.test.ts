@@ -55,6 +55,8 @@ const {
 	redact,
 	pickLauncher,
 	learnerSpace,
+	learnerSlug,
+	planLearners,
 	learnerPathRefusal,
 	learnerPaths,
 	HARNESS_PATHS,
@@ -104,6 +106,7 @@ const {
 	failureLines,
 	MAX_FRUSTRATION,
 	noteBaseline,
+	MIN_GAP_MS,
 	parsePublishRequest,
 	publishQueue,
 	publishOnce,
@@ -206,8 +209,11 @@ describe("decideLearner", () => {
 		assert.match(decision.reason, /^5× bbbb/);
 	});
 
-	test("two learners per session, ten minutes apart", () => {
-		assert.equal(decideLearner(evidence({ notes: 1, spawnsThisSession: 2 })).spawn, false);
+	test("four learners per session, ten minutes apart", () => {
+		const fifth = decideLearner(evidence({ notes: 1, spawnsThisSession: 4 }));
+		assert.equal(fifth.spawn, false);
+		assert.match(fifth.reason, /already started 4 learners this session/, "the refusal counts what the session spent");
+		assert.equal(decideLearner(evidence({ notes: 1, spawnsThisSession: 3 })).spawn, true, "the fourth still starts");
 		assert.equal(
 			decideLearner(evidence({ notes: 1, spawnsThisSession: 1, lastSpawnAt: NOW - minutes(3) })).spawn,
 			false,
@@ -216,6 +222,114 @@ describe("decideLearner", () => {
 			decideLearner(evidence({ notes: 1, spawnsThisSession: 1, lastSpawnAt: NOW - minutes(11) })).spawn,
 			true,
 		);
+	});
+
+	test("a stamp of null is not a learner that just ran, and the gap is open at exactly ten minutes", () => {
+		// A session that has never started one records `null`, not 0. Read as a number, a clock
+		// near the epoch would make that stamp a learner that ran a moment ago.
+		assert.equal(decideLearner(evidence({ notes: 1, lastSpawnAt: null, now: 1_000 })).spawn, true);
+		// A stamp from this very clock is the same moment, not a stamp ahead of it.
+		const same = decideLearner(evidence({ notes: 1, lastSpawnAt: NOW, now: NOW }));
+		assert.equal(same.spawn, false, "an equal stamp is a learner that just ran");
+		assert.match(same.reason, /0 min ago/);
+		// The gap is ten minutes: one millisecond short is still too soon, and the minute it is
+		// exactly ten is the first one that starts a learner.
+		assert.equal(decideLearner(evidence({ notes: 1, lastSpawnAt: NOW - MIN_GAP_MS + 1, now: NOW })).spawn, false);
+		assert.equal(decideLearner(evidence({ notes: 1, lastSpawnAt: NOW - MIN_GAP_MS, now: NOW })).spawn, true);
+	});
+});
+
+describe("planLearners: one compaction, one or two learners", () => {
+	// The four shapes the spec names, as `node --test` cases: a pure planner is what makes
+	// "one compaction teaches twice" checkable without a real `/om compact`.
+	const harness = { slug: "harness", project: "/home/m/.pi", kind: "harness" };
+	const web = { slug: "web", kind: "project", project: "/home/m/web" };
+
+	test("a project space with a harness record: two learners, the project's paths and HARNESS_PATHS", () => {
+		const plan = planLearners([web, harness], "/home/m/web/src");
+		assert.deepEqual(plan.learners.map((learner) => learner.kind), ["project", "harness"], "project first");
+		assert.deepEqual(plan.learners[0].paths, ["AGENTS.md"], "the project learner writes its rules file");
+		assert.deepEqual(plan.learners[1].paths, [...HARNESS_PATHS], "the harness learner writes the harness");
+		assert.deepEqual(plan.learners[1].space, { slug: "harness", kind: "harness", project: "/home/m/.pi" });
+		assert.equal(plan.note, undefined, "both were planned: nothing to explain");
+		assert.notEqual(plan.learners[0].suffix, plan.learners[1].suffix, "two distinct suffixes");
+	});
+
+	test("the harness space owning the cwd: exactly one learner, the harness one", () => {
+		const plan = planLearners([web, harness], "/home/m/.pi/scripts");
+		assert.equal(plan.learners.length, 1, "a harness session does not start a second learner on the same folder");
+		assert.equal(plan.learners[0].kind, "harness");
+		assert.equal(plan.learners[0].space.slug, "harness");
+		assert.equal(plan.note, undefined);
+	});
+
+	test("no harness record: one project learner, and the sentence naming the gap", () => {
+		const plan = planLearners([web], "/home/m/web");
+		assert.equal(plan.learners.length, 1);
+		assert.equal(plan.learners[0].kind, "project");
+		assert.match(plan.note ?? "", /no space records kind: "harness"/, "never a silent single spawn");
+		assert.match(plan.note ?? "", /web/, "and names the learner it did start");
+	});
+
+	test("a cwd no space owns: none, unchanged", () => {
+		assert.deepEqual(planLearners([web, harness], "/elsewhere").learners, []);
+	});
+
+	test("a junk record is skipped, not fatal: the plan is the records that are records", () => {
+		// `state/spaces` is a directory a person and an interrupted write both touch, so a record
+		// that is not an object is skipped on the way to a learner rather than thrown at.
+		const junk = planLearners([web, null, undefined, { slug: "nope" }] as any, "/home/m/web");
+		assert.deepEqual(junk.learners.map((learner) => learner.kind), ["project"], "the one record that is a record");
+		assert.match(junk.note ?? "", /no space records kind: "harness"/, "and the sentence names the gap, not the junk");
+	});
+
+	test("a harness record with no project, or no slug, is not a harness learner either", () => {
+		// The project is what the learner's cwd is: a record without one has nothing to teach, so
+		// it is skipped — `String(undefined)` would be a folder named "undefined".
+		const projectless = planLearners([web, { slug: "h", kind: "harness" } as any], "/home/m/web");
+		assert.deepEqual(projectless.learners.map((learner) => learner.kind), ["project"]);
+		assert.match(projectless.note ?? "", /no space records kind: "harness"/);
+		// A record whose slug is missing still plans; its slug is empty, not the word "undefined",
+		// which is what a learner and its queue file would be named after.
+		const slugless = planLearners([web, { project: "/home/m/h", kind: "harness" } as any], "/home/m/web");
+		assert.deepEqual(
+			slugless.learners.map((learner) => learner.space.slug),
+			["web", ""],
+			"a missing slug is empty, and the record is still planned",
+		);
+	});
+
+	test("a project that is only padding is no project, and a padded one is the folder without it", () => {
+		// The trim is what tells a folder from a space: without it, `"   "` reads as a harness
+		// record and a learner is planned on a cwd that does not exist.
+		const blank = planLearners([web, { slug: "h", project: "   ", kind: "harness" } as any], "/home/m/web");
+		assert.deepEqual(blank.learners.map((learner) => learner.kind), ["project"]);
+		assert.match(blank.note ?? "", /no space records kind: "harness"/);
+		// And a padded project is the same folder as the cwd is: the padding is not the name.
+		const padded = planLearners([web, { slug: "h", project: "  /home/m/h  ", kind: "harness" } as any], "/home/m/web");
+		assert.equal(padded.learners[1].space.project, "/home/m/h", "a padded project is the folder without the padding");
+	});
+
+	test("the harness record on the session's own folder is the one learner, and the note says which", () => {
+		// Two learners on one folder would write one `AGENTS.md` twice: the folder wins, and it is
+		// the harness record that teaches it. An empty plan here is the silence this refuses.
+		const plan = planLearners([web, { slug: "h", project: "/home/m/web", kind: "harness" }], "/home/m/web");
+		assert.equal(plan.learners.length, 1, "one folder, one learner");
+		assert.equal(plan.learners[0].space.slug, "h", "and it is the harness record's, not the project's");
+		assert.match(plan.note ?? "", /^the harness record h is the folder this session sits in/, "said out loud, with the slug");
+	});
+
+	test("the two slugs and the two queue files cannot collide", () => {
+		const plan = planLearners([web, harness], "/home/m/web");
+		assert.deepEqual(
+			plan.learners.map((learner) => learnerSlug("10-07", learner.suffix)),
+			["learn-10-07-p", "learn-10-07-h"],
+		);
+		const project = runPaths(NOW, undefined, "-p");
+		const harnessRun = runPaths(NOW, undefined, "-h");
+		assert.ok(project.queue.endsWith("-p.md") && harnessRun.queue.endsWith("-h.md"));
+		assert.notEqual(project.queue, harnessRun.queue);
+		assert.notEqual(project.proposal, harnessRun.proposal);
 	});
 });
 
@@ -409,6 +523,59 @@ describe("which space teaches a compaction", () => {
 	test("a project that only looks like a prefix does not own the folder", () => {
 		assert.equal(learnerSpace([WEB], "/home/person/projects/webapp"), null, "`webapp` is not inside `web`");
 		assert.equal(learnerSpace([WEB], "/home/person/projects/web-2"), null);
+	});
+
+	// The rows `agent/proposals/runs.jsonl` is full of: `no space owns C:\\Users\\markm\\.pi, so
+	// this compaction teaches nothing`. Every case below used to answer `null`, because
+	// `process.cwd()` spells a path with backslashes while `space.json` spells it with
+	// forward ones.
+	describe("one folder, two spellings", () => {
+		const HARNESS = { slug: "harness", project: "C:/Users/markm/.pi", kind: "harness" };
+
+		test("a backslash cwd is the forward-slash record", () => {
+			assert.deepEqual(learnerSpace([HARNESS], "C:\\Users\\markm\\.pi"), {
+				slug: "harness",
+				kind: "harness",
+				project: "C:/Users/markm/.pi",
+			});
+		});
+
+		test("a subfolder of it is still that record, and a sibling name is not", () => {
+			assert.equal(learnerSpace([HARNESS], "C:\\Users\\markm\\.pi\\scripts")?.slug, "harness");
+			assert.equal(learnerSpace([HARNESS], "C:\\Users\\markm\\.pi2"), null, "`.pi2` is not inside `.pi`");
+		});
+
+		test("a drive-lettered path ignores case, because `C:` and `c:` are one drive", () => {
+			assert.equal(learnerSpace([HARNESS], "C:/Users/Markm/.Pi")?.slug, "harness");
+			assert.equal(learnerSpace([{ slug: "h", project: "C:/Users/Markm/.Pi" }], "c:\\users\\markm\\.pi")?.slug, "h");
+		});
+
+		test("a POSIX path keeps its case, so two folders stay two", () => {
+			assert.equal(learnerSpace([{ slug: "upper", project: "/home/m/WEB" }], "/home/m/web"), null);
+			assert.equal(learnerSpace([{ slug: "upper", project: "/home/m/WEB" }], "/home/m/WEB")?.slug, "upper");
+		});
+
+		test("repeated separators collapse, on either side", () => {
+			assert.equal(learnerSpace([{ slug: "h", project: "C:/Users//markm/.pi" }], "C:\\Users\\markm\\.pi")?.slug, "h");
+			assert.equal(learnerSpace([HARNESS], "C:\\\\Users\\markm\\.pi\\")?.slug, "harness");
+		});
+
+		test("the longest match still wins across separators", () => {
+			const deep = { slug: "deep", project: "C:/Users/markm/.pi/state" };
+			assert.equal(learnerSpace([HARNESS, deep], "C:\\Users\\markm\\.pi\\state\\spaces")?.slug, "deep");
+			assert.equal(learnerSpace([deep, HARNESS], "C:\\Users\\markm\\.pi\\agent")?.slug, "harness");
+		});
+
+		test("only a leading drive letter folds case, not a colon later in the path", () => {
+			// `C:` is a drive; an `a:` in the middle of a folder name is a letter and a colon. A
+			// POSIX path that happens to hold one still keeps its case, so two folders stay two.
+			assert.equal(learnerSpace([{ slug: "odd", project: "/srv/a:/Beta" }], "/srv/a:/beta"), null);
+			assert.equal(learnerSpace([{ slug: "odd", project: "/srv/a:/Beta" }], "/srv/a:/Beta")?.slug, "odd");
+		});
+
+		test("and the drive root owns what is under it", () => {
+			assert.equal(learnerSpace([{ slug: "c", project: "C:/" }], "C:\\Users")?.slug, "c");
+		});
 	});
 
 	test("a null record, or one with no project, is skipped instead of throwing", () => {
@@ -870,8 +1037,54 @@ describe("wiring", () => {
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		await waitFor(() => started.length === 1);
 		assert.equal(started[0].launcher.cwd, SPACE.project);
-		assert.match(started[0].env.PI_SELF_LEARN_SLUG, /^learn-\d{2}-\d{2}$/);
+		assert.match(started[0].env.PI_SELF_LEARN_SLUG, /^learn-\d{2}-\d{2}-p$/);
 		assert.equal(started[0].launcher.space?.slug, SPACE.slug, "a tab in the space that owns the project");
+	});
+
+	test("a project compaction starts two learners: the project's, then the harness's", async () => {
+		// The launch path, not just the planner: one evidence file and one decision, two tabs.
+		// The fixture gains a harness record for the length of this test, so a real compaction
+		// proves two launches and two queue files; nothing else in this file may see it.
+		const harnessDir = join(scratch, "state", "spaces", "harness");
+		const harnessProject = join(scratch, "pi");
+		await mkdir(harnessDir, { recursive: true });
+		await writeFile(
+			join(harnessDir, "space.json"),
+			JSON.stringify({ name: "harness", project: harnessProject, kind: "harness" }),
+			"utf8",
+		);
+		try {
+			const { emit, ctx, started } = setup();
+			await trip(emit, ctx);
+			await settle();
+			await emit("session_compact", { reason: "threshold" }, ctx);
+			await waitFor(() => started.length === 2, 2000, "a project learner and a harness learner");
+
+			const harnessStart = started.find((entry) => entry.env.PI_SELF_LEARN_SLUG?.endsWith("-h"));
+			const projectStart = started.find((entry) => entry.env.PI_SELF_LEARN_SLUG?.endsWith("-p"));
+			assert.ok(harnessStart, "the harness learner exists and its slug says which it is");
+			assert.ok(projectStart, "and so does the project learner");
+			assert.match(harnessStart!.env.PI_SELF_LEARN_SLUG!, /^learn-\d{2}-\d{2}-h$/);
+			assert.match(projectStart!.env.PI_SELF_LEARN_SLUG!, /^learn-\d{2}-\d{2}-p$/);
+			assert.equal(projectStart!.launcher.cwd, SPACE.project, "the project learner starts in the project");
+			assert.equal(projectStart!.launcher.space?.slug, SPACE.slug);
+			assert.equal(harnessStart!.launcher.cwd, harnessProject, "the harness learner starts in the harness record's project");
+			assert.equal(harnessStart!.launcher.space?.slug, "harness", "a tab in the harness space");
+			assert.ok(
+				!harnessStart!.launcher.argv.includes("--sandbox"),
+				"a harness learner is bare: it may push its own branch",
+			);
+
+			// One queue file each, and each names the paths its own kind may touch.
+			const harnessRow = await waitForRun((row) => row.kind === "spawned" && String(row.slug).endsWith("-h"));
+			const projectRow = await waitForRun((row) => row.kind === "spawned" && String(row.slug).endsWith("-p"));
+			assert.notEqual(harnessRow.queue, projectRow.queue, "two learners, two evidence files");
+			assert.match(await readFile(harnessRow.queue, "utf8"), /Paths you may touch: bin/, "the harness's paths");
+			assert.match(await readFile(projectRow.queue, "utf8"), /Paths you may touch: AGENTS\.md/, "the project's rules file");
+			assert.match(await readFile(harnessRow.queue, "utf8"), /kind: harness/, "and the queue says which kind it is");
+		} finally {
+			await rm(harnessDir, { recursive: true, force: true });
+		}
 	});
 
 	test("a cwd no space claims starts nothing, and says which folder it was", async () => {
@@ -1196,7 +1409,10 @@ describe("wiring", () => {
 			confirm: async () => ({ ok: true, source: "terminal" as const, detail: "t7" }),
 			sessionProofMs: 5_000,
 		});
-		const { queue: queuePath } = runPaths(base);
+		// The project learner of this compaction, and its own queue file: one compaction starts
+		// two learners now (`-p` for the project, `-h` for the harness), so the suffix is part of
+		// the path the session file has to name.
+		const { queue: queuePath } = runPaths(base, undefined, "-p");
 		const dir = join(scratch, "sessions", `--${home.replace(/^\/+/, "").replace(/\//g, "-")}--`);
 		await mkdir(dir, { recursive: true });
 		const file = join(dir, `learn-${process.pid}.jsonl`);
@@ -1282,16 +1498,16 @@ describe("wiring", () => {
 			// The row has to name the run it stands in for: `learn-` plus the same
 			// `HH:MM` every other row's slug carries, taken from this row's own stamp
 			// so a clock that moved between the row and the assertion cannot fake it.
-			assert.match(skipped.slug, /^learn-\d{2}-\d{2}$/, "a slug a reader can match to a run");
+			assert.match(skipped.slug, /^learn-\d{2}-\d{2}-p$/, "a slug a reader can match to a run");
 			assert.equal(
 				skipped.slug,
-				`learn-${skipped.ts.slice(11, 16).replace(":", "-")}`,
+				`learn-${skipped.ts.slice(11, 16).replace(":", "-")}-p`,
 				"the run's own `HH-MM`, not an empty string and not the whole stamp",
 			);
 			// No spec for a learner that cannot exist: a queue file nothing will ever
 			// read is the garbage the skip is meant to avoid.
 			assert.equal(
-				existsSync(runPaths(Date.parse(skipped.ts)).queue),
+				existsSync(runPaths(Date.parse(skipped.ts), undefined, "-p").queue),
 				false,
 				"nothing was queued for a learner the sandbox would refuse",
 			);
@@ -1455,7 +1671,7 @@ describe("wiring", () => {
 		const row = await waitForRun((entry) => entry.kind === "spawned" && entry.trigger === "manual");
 		assert.equal(row.trigger, "manual", "the row says the person asked, not that a compaction fired");
 
-		// Two learners is all one session gets, and the second has to clear the ten-minute gap.
+		// Four learners is all one session gets, and each one has to clear the ten-minute gap.
 		now += 11 * minutes(1);
 		await trip(emit, ctx);
 		await command.handler("", ctx);
@@ -1463,10 +1679,18 @@ describe("wiring", () => {
 		now += 11 * minutes(1);
 		await trip(emit, ctx);
 		await command.handler("", ctx);
+		await waitFor(() => started.length === 3, 2000, "a third learner, after the gap");
+		now += 11 * minutes(1);
+		await trip(emit, ctx);
+		await command.handler("", ctx);
+		await waitFor(() => started.length === 4, 2000, "the fourth learner fills the session");
+		now += 11 * minutes(1);
+		await trip(emit, ctx);
+		await command.handler("", ctx);
 		const warning = notices.find((notice) => notice.level === "warning");
-		assert.ok(warning, "a third learner in one session is refused out loud");
-		assert.equal(warning!.message, "learner not started: already started 2 learners this session", "in the gate's own words");
-		assert.equal(started.length, 2, "and nothing new starts");
+		assert.ok(warning, "a fifth learner in one session is refused out loud");
+		assert.equal(warning!.message, "learner not started: already started 4 learners this session", "in the gate's own words");
+		assert.equal(started.length, 4, "and nothing new starts");
 	});
 
 	test("a disabled extension watches the compaction and does nothing", async () => {
@@ -1519,12 +1743,12 @@ describe("wiring", () => {
 		const body = await readFile(run.queue, "utf8");
 		assert.match(
 			body,
-			/queue\/learn-\d{2}-\d{2}\.publish\.json/,
+			/queue\/learn-\d{2}-\d{2}-p\.publish\.json/,
 			"the spec names the one file the learner writes to ask for publication",
 		);
 		assert.match(
 			body,
-			/"branch":"learn\/learn-\d{2}-\d{2}"/,
+			/"branch":"learn\/learn-\d{2}-\d{2}-p"/,
 			"the request carries the learner's own branch, which is the only one the broker takes",
 		);
 		assert.match(body, /Do not run/, "and says the script is not the learner's to run");
@@ -1620,7 +1844,7 @@ describe("wiring", () => {
 		// The concrete values are what a learner copies out, so the block is read as
 		// a block: the blank lines are part of its layout, and the example has to be
 		// a request the broker would accept, not only a string that looks like one.
-		assert.match(body, /Concrete values for this run:\n\n- slug \/ herdr space: learn-\d{2}-\d{2}\n/);
+		assert.match(body, /Concrete values for this run:\n\n- slug \/ herdr space: learn-\d{2}-\d{2}-p\n/);
 		assert.match(body, /- repo \(never switch this checkout\): .+\n/);
 		assert.match(body, /- proposal: .+\.md\n/);
 		assert.match(body, /- queue file to write: .+\.publish\.json\n\n1\. Cut a worktree: /);
@@ -1925,7 +2149,9 @@ describe("wiring", () => {
 		const before = (await readRuns()).length;
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		const died = await waitForRun((row, index) => index >= before && row.kind === "died");
-		assert.match(died.slug, /^learn-\d{2}-\d{2}$/);
+		// `-p` is the project learner of the pair a project compaction starts; the suffix is
+		// what tells the two apart in `runs.jsonl`, so it is part of the shape a row has.
+		assert.match(died.slug, /^learn-\d{2}-\d{2}-p$/);
 		assert.equal(died.launcher, "pane");
 		assert.match(died.queue, /proposals\/queue\/.*\.md$/);
 		assert.equal(typeof died.elapsedMs, "number", "how long it lived is in the row");
@@ -2724,6 +2950,8 @@ describe("repeated failing CI checks", () => {
 	test("ghCiRuns drops the branch that was given up on and says so, and an unreadable pull-request list keeps it", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "self-learn-abandoned-wiring-"));
 		try {
+			// Relative to now, because `agedOut` drops a failure older than a week: written as fixed
+			// dates these two runs aged out and the case measured the window instead of the wiring.
 			const failures = JSON.stringify([
 				{ name: "tests", headBranch: "given-up", conclusion: "failure", databaseId: 1, createdAt: ciAgo(3) },
 				{ name: "tests", headBranch: "alive", conclusion: "failure", databaseId: 2, createdAt: ciAgo(3) },
@@ -4867,6 +5095,113 @@ describe("a launch handed to the host session", () => {
 				assert.equal(rows.filter((row) => row.kind === "spawn-skipped").length, 1, "and the person is told once");
 			} finally {
 				delete process.env.PI_SANDBOX_MODE;
+				await rm(queueDir(), { recursive: true, force: true });
+			}
+		});
+
+		test("two learners on one compaction: two requests, and the line counts them", async () => {
+			// The project owns the session's cwd and the harness record is on another folder, so one
+			// compaction plans two learners: one request each, because each names its own proposal.
+			// "the request waits" for two is a count the person cannot act on.
+			const harnessDir = join(scratch, "state", "spaces", "harness");
+			const clock = Date.now() + 3 * 60 * 60_000;
+			const { emit, ctx, notices, api } = sandboxed({ now: () => clock });
+			await mkdir(harnessDir, { recursive: true });
+			await writeFile(
+				join(harnessDir, "space.json"),
+				JSON.stringify({ name: "harness", project: join(scratch, "harness"), kind: "harness" }),
+				"utf8",
+			);
+			process.env.PI_SANDBOX_MODE = "bwrap";
+			try {
+				await trip(emit, ctx);
+				await api.learn("compact", ctx);
+				const names = await requestNames();
+				assert.equal(names.length, 2, `one request per learner: ${names.join(", ")}`);
+				assert.deepEqual(
+					names.map((name) => name.replace(/\.spawn\.json$/, "").slice(-2)),
+					["-h", "-p"],
+					"one per kind, named after its own learner",
+				);
+				// One line, and it is the one that counts both: a note with no plan behind it would be
+				// a second notice, and a singular sentence would be a wrong count.
+				assert.equal(notices.length, 1, `the hand-off is said once: ${JSON.stringify(notices)}`);
+				assert.match(notices[0].message, /2 requests wait for the host session/, notices[0].message);
+			} finally {
+				delete process.env.PI_SANDBOX_MODE;
+				await rm(harnessDir, { recursive: true, force: true });
+				await rm(queueDir(), { recursive: true, force: true });
+			}
+		});
+
+		test("the plan's gap is said out loud, and a request with nothing judged carries an empty list", async () => {
+			// The fixture has one project space and no harness record, so the plan is one learner and
+			// one sentence — the sentence a single spawn would otherwise hide. The request's `judged`
+			// is `?? []`: a list of placeholder slugs would tell the host to look at a learner nobody
+			// judged.
+			const clock = Date.now() + 4 * 60 * 60_000;
+			const { emit, ctx, notices, api } = sandboxed({ now: () => clock });
+			process.env.PI_SANDBOX_MODE = "bwrap";
+			try {
+				await trip(emit, ctx);
+				await api.learn("compact", ctx);
+				const [name] = await requestNames();
+				assert.equal(notices.length, 2, `the note and the hand-off, nothing else: ${JSON.stringify(notices)}`);
+				assert.match(
+					notices[0].message,
+					/^no space records kind: "harness"/,
+					"the learner that was not planned is said, not silently dropped",
+				);
+				assert.match(notices[0].message, /proj/, "and it names the one learner that was");
+				assert.match(notices[1].message, /^no learner started: /);
+				const parsed = parseSpawnRequest(await readFile(join(queueDir(), name), "utf8"), { now: Date.now() });
+				assert.equal(parsed.ok, true, name);
+				if (parsed.ok) assert.deepEqual(parsed.request.judged, [], "nothing was judged, so the list is empty");
+			} finally {
+				delete process.env.PI_SANDBOX_MODE;
+				await rm(queueDir(), { recursive: true, force: true });
+			}
+		});
+
+		test("a judged death travels in the request, so the host does not judge it a second time", async () => {
+			// A learner that ran and never wrote a proposal is a death this session judged. The
+			// request carries the slugs: `judged ?? []` is not `judged && []`, which would hand the
+			// host an empty list and make it look again at what this session already answered.
+			const clock = Date.now() + 5 * 60 * 60_000;
+			const before = await readFile(runsLog(), "utf8").catch(() => "");
+			await mkdir(PROPOSALS, { recursive: true });
+			await appendFile(
+				runsLog(),
+				`${JSON.stringify({
+					kind: "spawned",
+					slug: "learn-05-00",
+					queue: join(queueDir(), "learn-05-00.md"),
+					proposal: join(PROPOSALS, "2026-11-18-05-00-00-000Z.md"),
+					launcher: "pi",
+					ts: new Date(clock - 20 * 60_000).toISOString(),
+				})}\n`,
+				"utf8",
+			);
+			// `proposalExists: () => false` is the point of the row: the learner's proposal is
+			// not on disk, which is what makes the spawned row a death instead of a lesson.
+			const { emit, ctx, api } = sandboxed({ now: () => clock, proposalExists: () => false });
+			process.env.PI_SANDBOX_MODE = "bwrap";
+			try {
+				await trip(emit, ctx);
+				await api.learn("compact", ctx);
+				const [name] = await requestNames();
+				const parsed = parseSpawnRequest(await readFile(join(queueDir(), name), "utf8"), { now: Date.now() });
+				assert.equal(parsed.ok, true, name);
+				if (parsed.ok) {
+					// The shared log carries the deaths the tests before this one left behind, so the
+					// claim is that the list is not empty and this session's own death is on it: a
+					// short-circuited `judged && []` would send the host an empty list instead.
+					assert.ok(parsed.request.judged.length > 0, "the judgement rides along, it is not re-made");
+					assert.ok(parsed.request.judged.includes("learn-05-00"), JSON.stringify(parsed.request.judged));
+				}
+			} finally {
+				delete process.env.PI_SANDBOX_MODE;
+				await writeFile(runsLog(), before, "utf8");
 				await rm(queueDir(), { recursive: true, force: true });
 			}
 		});

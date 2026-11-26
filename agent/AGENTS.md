@@ -6,7 +6,7 @@
 
 ## Sandbox
 
-- `pi` runs sandboxed by default (`install.sh` wraps it); `pi-bare` quits it; `pisandbox --no-net` is for repo scripts, not agents — no net means no model (blip 1).
+- `pi` runs sandboxed by default (`install.sh` wraps it); `pi-bare` quits it; `pisandbox --no-net` is for repo scripts, not agents — no net means no model (blip 1). Native Windows has no bwrap, so there `pi` and its workers run bare.
 
 ## Landing changes
 
@@ -37,5 +37,5 @@
 ## Machine / screens
 
 - X11, DISPLAY `:1`, root window 9840x3840 (multi-monitor, scaled); never grab the whole root.
-- Shotcut: right-hand screen. No hardcoded coordinates: run `xwininfo -root -tree`, pick the largest `Shotcut` window.
-- Screenshot helper: `~/projects/bakmark/scripts/shotcut-window.py [out.png] [width]`.
+- Shotcut (Linux/X11): right-hand screen. No hardcoded coordinates: run `xwininfo -root -tree`, pick the largest `Shotcut` window.
+- Screenshot helper: `~/projects/bakmark/scripts/shotcut-window.py [out.png] [width]` — `%USERPROFILE%\projects\bakmark\scripts\shotcut-window.py` on native Windows.

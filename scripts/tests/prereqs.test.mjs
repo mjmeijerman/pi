@@ -30,6 +30,7 @@ import {
 	prereqPlan,
 } from '../install-lib.mjs';
 import { PREREQ_SKIP_ENV, prereqsSkipped, stepPrereqs } from '../prereqs.mjs';
+import { stubHerdrApp, withStub } from './herdr-app-stub.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -334,8 +335,11 @@ test('the engine with PI_SKIP_PREREQS=1 installs, and a second run changes nothi
 	t.after(() => fs.rmSync(home, { recursive: true, force: true }));
 	const env = { ...process.env, HOME: home, PI_SKIP_PREREQS: '1', PI_SKIP_NETWORK: '1', PI_SKIP_SYSTEMD: '1', PI_ALLOW_MISSING_PI: '1' };
 	for (const name of ['USERPROFILE', 'PI_AGENT_DIR', 'PI_DRY_RUN', 'CI']) delete env[name];
+	// The engine makes a space, and the space step opens it in whatever `herdr-app` the child can
+	// reach — this box's real one. The stub answers instead; the real app is off PATH.
+	const childEnv = withStub(env, stubHerdrApp(home));
 	const run = () => {
-		const r = spawnSync(process.execPath, [path.join(ROOT, 'install.mjs')], { env, encoding: 'utf8', cwd: ROOT });
+		const r = spawnSync(process.execPath, [path.join(ROOT, 'install.mjs')], { env: childEnv, encoding: 'utf8', cwd: ROOT });
 		assert.equal(r.status, 0, `install.mjs exited ${r.status}:\n${r.stdout}${r.stderr}`);
 		return r.stdout;
 	};
