@@ -333,7 +333,12 @@ export function decideLearner(input: Evidence): Decision {
 	if (spawnsThisSession >= MAX_PER_SESSION) {
 		return { spawn: false, reason: `already started ${spawnsThisSession} learners this session` };
 	}
-	if (lastSpawnAt !== null && now - lastSpawnAt < MIN_GAP_MS) {
+	// A stamp ahead of this clock is not a learner this session started moments ago: the run
+	// log is shared by every session on the machine, and a stamp reads in the future after a
+	// clock step or a suspended box. Refusing on it said "last learner ran -4 min ago — next
+	// in 14 min", held the compaction for a quarter of an hour, and named a sentence that is
+	// not about anything. The debounce is for a learner that really did just run.
+	if (lastSpawnAt !== null && lastSpawnAt <= now && now - lastSpawnAt < MIN_GAP_MS) {
 		const mins = Math.ceil((MIN_GAP_MS - (now - lastSpawnAt)) / 60000);
 		return { spawn: false, reason: `last learner ran ${Math.round((now - lastSpawnAt) / 60000)} min ago — next in ${mins} min` };
 	}
@@ -3407,12 +3412,12 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		lastSpawnAt = at;
 		lastCompactIso = new Date(at).toISOString();
 
-		// A learner this compaction wanted but could not plan is said out loud and recorded:
-		// a single spawn that looks like the whole answer is the silence this refuses.
-		if (plan.note) {
-			await record({ ts: new Date(at).toISOString(), kind: "spawn-note", reason: plan.note });
-			notify(ctx, plan.note, "info");
-		}
+		// A learner this compaction wanted but could not plan is said out loud: a single spawn
+		// that looks like the whole answer is the silence this refuses. Said in the session and
+		// not in `runs.jsonl`: a run row is something a learner did, and this is about the
+		// learner that was never planned — one compaction still writes one launch row and one
+		// outcome row for the learner it did start.
+		if (plan.note) notify(ctx, plan.note, "info");
 
 		// The launch needs a Herdr space, and a sandboxed session cannot make one: a
 		// sandbox never mounts `herdr-app`. It hands the launch to the host session in
@@ -3452,11 +3457,11 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 						stderr: clipDetail(`${blocked} — the launch of ${run.slug} waits for the host session`),
 					});
 				}
-				notify(
-					ctx,
-					`no learner started: ${clipDetail(blocked)} — ${runs.length} request(s) wait for the host session`,
-					"info",
-				);
+				// One request is "the request waits"; two are "2 requests wait". "1 request(s)"
+				// is a template talking, and the person reads this line to decide what to do next.
+				const requests =
+					runs.length === 1 ? "the request waits for the host session" : `${runs.length} requests wait for the host session`;
+				notify(ctx, `no learner started: ${clipDetail(blocked)} — ${requests}`, "info");
 			}
 			// Not a launch: the caller must not read this as one.
 			return { spawn: false, reason: blocked };

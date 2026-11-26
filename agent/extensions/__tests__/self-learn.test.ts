@@ -1333,7 +1333,10 @@ describe("wiring", () => {
 			confirm: async () => ({ ok: true, source: "terminal" as const, detail: "t7" }),
 			sessionProofMs: 5_000,
 		});
-		const { queue: queuePath } = runPaths(base);
+		// The project learner of this compaction, and its own queue file: one compaction starts
+		// two learners now (`-p` for the project, `-h` for the harness), so the suffix is part of
+		// the path the session file has to name.
+		const { queue: queuePath } = runPaths(base, undefined, "-p");
 		const dir = join(scratch, "sessions", `--${home.replace(/^\/+/, "").replace(/\//g, "-")}--`);
 		await mkdir(dir, { recursive: true });
 		const file = join(dir, `learn-${process.pid}.jsonl`);
@@ -1664,12 +1667,12 @@ describe("wiring", () => {
 		const body = await readFile(run.queue, "utf8");
 		assert.match(
 			body,
-			/queue\/learn-\d{2}-\d{2}\.publish\.json/,
+			/queue\/learn-\d{2}-\d{2}-p\.publish\.json/,
 			"the spec names the one file the learner writes to ask for publication",
 		);
 		assert.match(
 			body,
-			/"branch":"learn\/learn-\d{2}-\d{2}"/,
+			/"branch":"learn\/learn-\d{2}-\d{2}-p"/,
 			"the request carries the learner's own branch, which is the only one the broker takes",
 		);
 		assert.match(body, /Do not run/, "and says the script is not the learner's to run");
@@ -1765,7 +1768,7 @@ describe("wiring", () => {
 		// The concrete values are what a learner copies out, so the block is read as
 		// a block: the blank lines are part of its layout, and the example has to be
 		// a request the broker would accept, not only a string that looks like one.
-		assert.match(body, /Concrete values for this run:\n\n- slug \/ herdr space: learn-\d{2}-\d{2}\n/);
+		assert.match(body, /Concrete values for this run:\n\n- slug \/ herdr space: learn-\d{2}-\d{2}-p\n/);
 		assert.match(body, /- repo \(never switch this checkout\): .+\n/);
 		assert.match(body, /- proposal: .+\.md\n/);
 		assert.match(body, /- queue file to write: .+\.publish\.json\n\n1\. Cut a worktree: /);
@@ -2070,7 +2073,9 @@ describe("wiring", () => {
 		const before = (await readRuns()).length;
 		await emit("session_compact", { reason: "threshold" }, ctx);
 		const died = await waitForRun((row, index) => index >= before && row.kind === "died");
-		assert.match(died.slug, /^learn-\d{2}-\d{2}$/);
+		// `-p` is the project learner of the pair a project compaction starts; the suffix is
+		// what tells the two apart in `runs.jsonl`, so it is part of the shape a row has.
+		assert.match(died.slug, /^learn-\d{2}-\d{2}-p$/);
 		assert.equal(died.launcher, "pane");
 		assert.match(died.queue, /proposals\/queue\/.*\.md$/);
 		assert.equal(typeof died.elapsedMs, "number", "how long it lived is in the row");
