@@ -37,6 +37,27 @@ case "$1 $2" in
 "do space.new") printf '{"space":"s-boss","tab":"tb-boss","pane":"p-boss","terminal":"t-boss"}\n' ;;
 "do tab.new") printf '{"space":"s-boss","tab":"tb2","pane":"p2","terminal":"t2"}\n' ;;
 "do space.close") printf '{}\n' ;;
+"do tab.close")
+	# The app's own hand, seen twice on 2026-11-26: the tab closes and an unnamed shell tab is left
+	# behind in the space. HERDR_LEAVES_SKELETON models that leftover; HERDR_LEAVES_NAMED models a
+	# tab that appeared with a name, which is nobody's leftover. The closed tab is dropped from the
+	# listed space, because a stub that still lists it is a close this side cannot confirm.
+	ID=$(printf '%s\n' "$*" | sed -nE 's/.*--id ([^ ]+).*/\1/p')
+	if [ -f "${HERDR_SPACES:-/nonexistent}" ] && [ -n "$ID" ]; then
+		ID="$ID" LEAVES="${HERDR_LEAVES_SKELETON:-}" NAMED="${HERDR_LEAVES_NAMED:-}" node -e '
+			const fs=require("fs");const f=process.argv[1];
+			let j={spaces:[]};try{j=JSON.parse(fs.readFileSync(f,"utf8"))}catch{}
+			for (const s of j.spaces||[]) {
+				s.tabs=(s.tabs||[]).filter((t)=>String(t.id??"")!==process.env.ID);
+				if (process.env.LEAVES && !fs.existsSync(process.env.LEAVES + ".done")) {
+					fs.writeFileSync(process.env.LEAVES + ".done", "1");
+					s.tabs.push({id:"tb-skel",name:"2",terminals:[{id:"t-skel"}]});
+				}
+				if (process.env.NAMED) s.tabs.push({id:"tb-named",name:"not-mine",terminals:[{id:"t-named"}]});
+			}
+			fs.writeFileSync(f,JSON.stringify(j)+"\n");' "$HERDR_SPACES"
+	fi
+	printf '{}\n' ;;
 "do tab.close") printf '{}\n' ;;
 "ls "*) if [ -f "${HERDR_SPACES:-/nonexistent}" ]; then cat "$HERDR_SPACES"; else printf '{"spaces":[]}\n'; fi ;;
 *) printf '{}\n' ;;
@@ -230,6 +251,60 @@ else
 	pass 'the space is never closed'
 fi
 if grep -qF '"tb-boss"' "$HERDR_LOG"; then fail 'the Boss tab was closed' "$(cat "$HERDR_LOG")"; else pass 'the Boss tab is left alone'; fi
+
+new_case 'close leaves the space with the Boss tab and nothing else'
+# The app leaves an unnamed shell tab behind when it is told to close one (measured 2026-11-26:
+# name "2", argv ["/usr/bin/zsh"], once right after a `delegate finish`). The close is finished
+# only when the space holds what it held minus that tab, so the leftover is closed too and the
+# space lists the Boss tab and nothing else — the person never sees a tab they did not open.
+run "$DELEGATE" spawn w4 --cwd "$PROJ" "write four lines in a.txt"
+report "$(sd demo)/reports/w4.md"
+printf 't4\n' >"$WORK/terms"
+HC_TERMS="$WORK/terms"; export HC_TERMS
+printf '{"spaces":[{"id":"s-boss","name":"demo","tabs":[{"id":"tb-boss","name":"Boss"},{"id":"tb2","name":"w4"}]}]}\n' >"$WORK/spaces.json"
+HERDR_SPACES="$WORK/spaces.json"; export HERDR_SPACES
+HERDR_LEAVES_SKELETON="$WORK/skeleton"; export HERDR_LEAVES_SKELETON
+: >"$HERDR_LOG"
+run "$DELEGATE" finish w4
+unset HERDR_SPACES HERDR_LEAVES_SKELETON
+if [ "$RC" -eq 0 ]; then pass 'the worker closes'; else fail 'the close was refused' "$OUT"; fi
+if grep -qF 'do tab.close --id tb2' "$HERDR_LOG"; then pass 'the worker tab is closed'; else fail 'the worker tab was not closed' "$(cat "$HERDR_LOG")"; fi
+if grep -qF 'do tab.close --id tb-skel' "$HERDR_LOG"; then
+	pass 'the unnamed shell tab the close left behind is closed too'
+else
+	fail 'the leftover shell tab was left in the space' "$(cat "$HERDR_LOG")"
+fi
+case $OUT in
+*"closed the unnamed shell tab tb-skel"*) pass 'it says which tab it cleaned up' ;;
+*) fail 'the cleanup is not said out loud' "$OUT" ;;
+esac
+LEFT=$(node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const s=(j.spaces||[]).find((x)=>x.id==="s-boss");process.stdout.write(((s&&s.tabs)||[]).map((t)=>String(t.id)).join(","));' "$WORK/spaces.json")
+if [ "$LEFT" = 'tb-boss' ]; then pass 'the space lists the Boss tab and nothing else'; else fail "the space still holds another tab" "$LEFT"; fi
+
+new_case 'a tab with a name of its own is not swept away by a close'
+# The other half of the same rule: a tab that appeared while a worker closed and carries a name is
+# somebody's, so it is named and left open — a sweep that closes a named tab is a sweep that eats a
+# person's work.
+run "$DELEGATE" spawn w5 --cwd "$PROJ" "write five lines in a.txt"
+report "$(sd demo)/reports/w5.md"
+printf 't5\n' >"$WORK/terms"
+HC_TERMS="$WORK/terms"; export HC_TERMS
+printf '{"spaces":[{"id":"s-boss","name":"demo","tabs":[{"id":"tb-boss","name":"Boss"},{"id":"tb2","name":"w5"}]}]}\n' >"$WORK/spaces.json"
+HERDR_SPACES="$WORK/spaces.json"; export HERDR_SPACES
+HERDR_LEAVES_NAMED=1; export HERDR_LEAVES_NAMED
+: >"$HERDR_LOG"
+run "$DELEGATE" finish w5
+unset HERDR_SPACES HERDR_LEAVES_NAMED
+if [ "$RC" -eq 0 ]; then pass 'the worker still closes'; else fail 'the close was refused over a tab it does not own' "$OUT"; fi
+if grep -qF 'do tab.close --id tb-named' "$HERDR_LOG"; then
+	fail 'a named tab was closed by the sweep' "$(cat "$HERDR_LOG")"
+else
+	pass 'a named tab is never closed by the sweep'
+fi
+case $OUT in
+*"tab tb-named (not-mine)"*) pass 'the named tab is named, with the command to close it by hand' ;;
+*) fail 'the named tab is not reported' "$OUT" ;;
+esac
 
 # --------------------------------------------- a record from before workers were tabs --
 new_case 'an old space-kind record still closes its space'
