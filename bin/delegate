@@ -164,7 +164,12 @@ fi
 # is one edit away instead of lost. The spec and report templates say the same thing to the
 # worker, earlier: "should work", "looks correct" and "tests pass" are banned without the output
 # that shows it. Plausible is not working — the genie is plausible by default, so the harness asks
-# for the transcript.
+# for the transcript. The one report exempt from the preflight half of that gate is a worker that
+# landed nothing: `close <slug> --nothing` skips it only when no branch in the project carries
+# `Agent-Slug: <slug>` (nothing was ever committed for it, so `bin/preflight --slug` could only
+# die "nothing to check"), never on the flag alone — a worker that did commit keeps the gate. The
+# Evidence block itself is still required. `delegate finish` makes the same lookup and says the
+# same thing about the same worker instead of handing back a preflight that cannot run.
 #
 # Provenance is demanded in the shape the commit can still be given it in. A report's commit
 # must carry the `Agent-Slug` trailer, which is one `git commit --amend` away while the branch
@@ -1261,6 +1266,44 @@ commit_carries_slug() {
 			if (v == slug) { found = 1; exit }
 		}
 		END { exit(found ? 0 : 1) }'
+}
+
+# branches_carrying_slug <cwd> <slug> -- the local branches that hold at least one commit carrying
+# `Agent-Slug: <slug>`, one per line, nothing when there is none (or when <cwd> is not a git tree).
+#
+# It is the lookup bin/publish and bin/preflight make — the trailer, over origin/<trunk>..<branch>,
+# written once here so `close` and `finish` cannot disagree with the gate about whether a branch
+# carries this worker's work. A worker that cut its branch and committed nothing is the case this
+# answers: its branch exists, so "the branch is there" is not the question, and preflight finds a
+# branch by this trailer alone — asked about a never-committed worker it can only die "nothing to
+# check", which is not a red check the worker can fix.
+branches_carrying_slug() {
+	local cwd=${1:-} slug=${2:-} trunk candidate range found=""
+	[ -n "$cwd" ] && [ -d "$cwd" ] || return 0
+	[ -n "$slug" ] || return 0
+	git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1 || return 0
+	trunk=$(fresh_trunk_branch "$cwd")
+	for candidate in $(git -C "$cwd" for-each-ref --format='%(refname:short)' refs/heads/ 2>/dev/null); do
+		[ "$candidate" = "$trunk" ] && continue
+		if [ -n "$trunk" ]; then
+			range="refs/remotes/origin/$trunk..$candidate"
+		else
+			# No trunk to compare against: the branch's own history, bounded the way publish bounds
+			# its fallback, so a large repository is not walked to answer one question.
+			range="-n 200 $candidate"
+		fi
+		# $range is unquoted on purpose: with no trunk it is two arguments ("-n 200 <branch>").
+		git -C "$cwd" log --format=%B $range 2>/dev/null | awk -v slug="$slug" '
+			# match() and not a bare pattern rule, for the reason commit_carries_slug gives.
+			match($0, /^Agent-Slug:[ \t]*/) {
+				v = substr($0, RLENGTH + 1)
+				sub(/[ \t\r]+$/, "", v)
+				if (v == slug) { found = 1; exit }
+			}
+			END { exit(found ? 0 : 1) }' || continue
+		found="$found$candidate"$'\n'
+	done
+	printf '%s' "$found"
 }
 
 # rewritten_predecessor <cwd> <branch> <full-sha> -- the commit on that branch's reflog that the
@@ -3401,17 +3444,18 @@ cmd_close() {
 	# closed worker is not coming back to paste the output. Refuse, name what is missing, and
 	# leave the space open — the fix is one edit to the report, then this command again.
 	report=$(report_path "$slug")
-	# A worker that landed nothing has no branch to be gated and no changed file to check: a report
-	# with no `Commit:` line, on a record whose branch does not exist, is exactly that case, and asking
-	# it for a preflight run asks it to prove a branch that was never made. Decided once, here, so the
-	# general gate below and --nothing's own gate cannot disagree about it; no other close path is
-	# touched, and a report that names a commit or a branch that exists still has to show the gate.
-	local gate_skipped=0
+	# A worker that landed nothing has no branch to be gated and no changed file to check: no `Commit:`
+	# line in the report, and no branch in the project carrying this worker's `Agent-Slug:` trailer,
+	# is exactly that case — the worker cut its branch and committed nothing to it. Asking it for a
+	# preflight run then asks it to prove a branch that does not carry a single commit of its own, and
+	# `bin/preflight --slug` cannot answer: it finds the branch by that trailer and dies "nothing to
+	# check". So the skip is keyed to "no branch carries this slug", never to --nothing alone — a
+	# worker that did commit keeps the gate — and it is decided once, here, so the general gate below
+	# and --nothing's own gate cannot disagree about it. No other close path is touched.
+	local gate_skipped=0 gate_branches=""
 	if [ -n "$nothing_given" ] && [ -s "$report" ] && [ -z "$(report_commit_sha "$report")" ]; then
-		if [ -z "$branch" ] || [ -z "$cwd" ] || [ ! -d "$cwd" ] ||
-			! git -C "$cwd" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
-			gate_skipped=1
-		fi
+		gate_branches=$(branches_carrying_slug "$cwd" "$slug")
+		[ -n "$gate_branches" ] || gate_skipped=1
 	fi
 	if [ -s "$report" ]; then
 		if ! report_has_evidence "$report"; then
@@ -3432,8 +3476,8 @@ cmd_close() {
 		# After the placeholders: an unfilled scaffold is an unfinished report, and its own refusal
 		# names the line to fill in. The gate is asked about once the report is a report.
 		if [ "$space_git" = true ] && [ "$gate_skipped" = 1 ]; then
-			printf '%s: closing %s with --nothing: %s names no Commit: line and branch %s does not exist, so there is no branch for the gate to check — preflight evidence is not asked for.\n' \
-				"$prog" "$slug" "$report" "${branch:-<none>}" >&2
+			printf '%s: closing %s with --nothing: %s names no Commit: line and no branch in %s carries a commit with Agent-Slug: %s, so there is no branch for the gate to check — preflight evidence is not asked for.\n' \
+				"$prog" "$slug" "$report" "${cwd:-$slug}" "$slug" >&2
 		elif [ "$space_git" = true ] && ! report_has_preflight_evidence "$report" "$slug"; then
 			printf '%s: refusing to close %s: %s names no bin/preflight run under ## Evidence, so the checks CI would run were never proved here.\n' "$prog" "$slug" "$report" >&2
 			printf 'Fix: run the gate, then paste its last lines into the Evidence block and close again:\n' >&2
@@ -3836,6 +3880,29 @@ cmd_finish() {
 	# A best-effort extra step, before the gates: a finish is where the leftovers can be closed
 	# without a new command to remember. It never changes the exit status and never blocks.
 	reap_finished_learners
+
+	# A worker that never committed has no branch to gate and nothing to publish. `close` answers that
+	# worker with `--nothing`, keyed to "no branch carries Agent-Slug: <slug>" (see its gate), and this
+	# must not promise a different answer: preflight finds a branch by that trailer and dies "nothing to
+	# check", which finish would then hand back as a red check to fix in a worker with nothing to
+	# commit. Same lookup, same condition (no `Commit:` line either), so the two commands agree about
+	# the same worker. Read only once the report is a report: an unfilled skeleton is a worker mid-work
+	# and its own refusals already name what is missing.
+	if [ "$space_git" = true ] && [ -s "$REPORTS/$slug.md" ] && [ -z "$(report_placeholders "$REPORTS/$slug.md")" ] &&
+		[ -z "$(report_commit_sha "$REPORTS/$slug.md")" ]; then
+		local fin_cwd fin_branches
+		fin_cwd=$(delegation_field "$slug" cwd)
+		[ -n "$fin_cwd" ] || fin_cwd=$lookup_cwd
+		fin_branches=$(branches_carrying_slug "$fin_cwd" "$slug")
+		if [ -z "$fin_branches" ]; then
+			printf '%s: refusing to finish %s: no branch in %s carries a commit with Agent-Slug: %s, and its report names no Commit: line, so there is no branch for the gate to check and nothing to publish. That is a worker that landed nothing, and close is what says so:\n' \
+				"$prog" "$slug" "${fin_cwd:-$slug}" "$slug" >&2
+			printf 'Fix: record why the consolidation step does not apply, then close it with the reason nothing landed. Nothing was published, wiped or closed by this run:\n' >&2
+			printf '  %s/delegate wipe %s --skip "<why the five questions do not apply>"\n' "$BIN" "$slug" >&2
+			printf '  %s/delegate close %s --nothing "<why nothing landed>"\n' "$BIN" "$slug" >&2
+			return 1
+		fi
+	fi
 
 	# 0/4. The gate, before anything leaves the machine: the checks CI would run, on this branch,
 	# here. Red CI rounds are what this workspace pays most for — #177 three rebases, #180 three

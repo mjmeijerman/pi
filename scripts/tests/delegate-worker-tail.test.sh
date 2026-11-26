@@ -148,9 +148,12 @@ write_report() { # <commit-line: empty string or "Commit: <sha>">
 	} >"$REPORT"
 }
 
-new_case 'close --nothing, no Commit line and no branch'
+new_case 'close --nothing, no Commit line and no branch carrying it'
 write_record gone-branch
-# This report names no preflight run at all: the case is that a branchless worker is not asked for one.
+# This report names no preflight run at all: the case is that no branch in the project carries this
+# worker's `Agent-Slug:` trailer, so the preflight half of the gate is not asked of it. The sentence
+# that says so names the lookup rather than one recorded branch: a worker that committed nothing has
+# no branch of its own, and a branch ref that happens to exist is not that.
 {
 	printf '# Report — w1\n\nMission: the boss can close a worker that landed nothing\n\n'
 	printf 'Review tier: Low\n\nTest change: none: no test file changed\n\n'
@@ -158,7 +161,7 @@ write_record gone-branch
 } >"$REPORT"
 run "$DELEGATE" close w1 --nothing "short"
 case $OUT in
-*"names no Commit: line"*"does not exist"*) pass 'it says the preflight evidence is not asked for' ;;
+*"names no Commit: line"*"carries a commit with Agent-Slug: w1"*) pass 'it says the preflight evidence is not asked for' ;;
 *) fail 'it still asked a branchless worker for preflight evidence' "$OUT" ;;
 esac
 case $OUT in
