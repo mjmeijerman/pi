@@ -84,6 +84,26 @@ test('a section whose only rule was dropped loses its heading', () => {
 	assert.equal(filtered.includes('\n\n\n'), false, 'no double blank lines left behind');
 });
 
+test('a filter that names a rule the file no longer has says so in one sentence', () => {
+	// The shape a real filter has: it looked a rule up once, kept the reference, and now
+	// decides by it. Delete that rule from agent/AGENTS.md and the reference is undefined —
+	// the old failure was `TypeError: Cannot read properties of undefined (reading 'index')`
+	// raised inside the callback, at a line in the caller, naming neither the rule nor the
+	// file. install.mjs points a person at that stack; it has to point at a sentence.
+	const remembered = { rules: [] };
+	let error;
+	try {
+		filterAgentsMd(AGENTS, (rule) => rule.index !== remembered.rules[0].index);
+	} catch (raised) {
+		error = raised;
+	}
+	assert.ok(error, 'the filter threw nothing, so the missing rule went unnoticed');
+	assert.match(error.message, /filterAgentsMd could not decide rule \d+/);
+	assert.equal(error instanceof TypeError, false, 'a TypeError from inside a callback is not a message');
+	assert.match(error.message, /agent\/AGENTS\.md/, 'the sentence names the file to put the rule back in');
+	assert.match(error.message, /put the rule back/, 'and says what to do');
+});
+
 test('a recorded answer survives a rule inserted above it', () => {
 	const before = parseAgentsMd(AGENTS);
 	const ruffled = AGENTS.replace('# Global rules\n\n', '# Global rules\n\n- A brand new rule nobody has answered yet, inserted at the top.\n');

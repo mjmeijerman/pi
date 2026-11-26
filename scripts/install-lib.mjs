@@ -1306,7 +1306,7 @@ export function filterAgentsMd(text, keep) {
 	const kept = [];
 	for (const item of items) {
 		if (item.kind === 'rule') {
-			if (keep(item.rule)) kept.push(item);
+			if (keepOrSayWhy(item.rule, keep)) kept.push(item);
 			continue;
 		}
 		if (item.kind === 'heading' && item.line.startsWith('## ')) {
@@ -1344,6 +1344,30 @@ export function filterAgentsMd(text, keep) {
 	}
 	while (squeezed.length && squeezed[squeezed.length - 1].trim() === '') squeezed.pop();
 	return `${squeezed.join('\n')}\n`;
+}
+
+/**
+ * keepOrSayWhy — the filter's answer for one rule, or install-lib's own sentence.
+ *
+ * A filter written as "drop the rule I found under ## Sandbox" looks that rule up and
+ * then dereferences it. When the rule is not in the file the lookup is undefined and the
+ * dereference is a TypeError from inside a callback, naming neither the rule nor the file
+ * ("Cannot read properties of undefined (reading 'index')" at the caller's line). That
+ * stack is not a message a person can act on, so the failure is said as one sentence that
+ * names the rule and the two ways out.
+ */
+function keepOrSayWhy(rule, keep) {
+	try {
+		return keep(rule);
+	} catch (error) {
+		const where = `rule ${rule.index} ("${rule.text.length > 60 ? `${rule.text.slice(0, 60)}…` : rule.text}") in section ${rule.section ? `"${rule.section}"` : "(none)"}`;
+		throw new Error(
+			`filterAgentsMd could not decide ${where}: the filter threw ${error instanceof Error ? error.message : String(error)}. ` +
+				"A filter that names a rule to keep or drop reads it out of agent/AGENTS.md first, so it throws when that rule is gone — " +
+				"put the rule back in agent/AGENTS.md, or answer by index/slug instead of by a rule the file no longer has.",
+			{ cause: error },
+		);
+	}
 }
 
 /** ruleAnswer — the recorded answer for a rule, or undefined when never asked. */
