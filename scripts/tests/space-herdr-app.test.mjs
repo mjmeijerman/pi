@@ -122,9 +122,14 @@ test('the override decides, even with the real app on PATH and the stub on none'
 	const opened = calls(stub).filter((line) => line.startsWith('do space.new'));
 	assert.equal(opened.length, 1, `the override was not the app that was asked: ${JSON.stringify(calls(stub))}`);
 	assert.ok(opened[0].includes('--focus false'), opened[0]);
-	// And the stub is nowhere on PATH, so nothing but the override could have found it.
-	const onPath = (env.PATH || '').split(path.delimiter).some((dir) => fs.existsSync(path.join(dir, 'herdr-app')));
-	assert.equal(onPath, false, 'the stub directory is on PATH, so this case proves nothing');
+	// And the stub's own folder is on no PATH entry, so nothing but the override could have found it.
+	// The claim is about the *stub*, not about `herdr-app` being absent everywhere: on a machine with
+	// herdr installed the real app is on PATH, and that is this case's premise rather than a hole in
+	// it. So the question is whether PATH can answer with the stub, which is what the override has to
+	// beat; asking for the app's absence would red the case on the one machine it is about.
+	const dirs = (env.PATH || '').split(path.delimiter).filter(Boolean);
+	const answers = dirs.map((dir) => path.resolve(dir, 'herdr-app')).filter((file) => file === path.resolve(stub.app));
+	assert.deepEqual(answers, [], `PATH answers with the stub at ${answers.join(', ')}, so the override proves nothing`);
 });
 
 test('with no app at all nothing is recorded, and the refusal names the command to run', (t) => {

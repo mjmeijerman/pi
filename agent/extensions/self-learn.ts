@@ -2004,6 +2004,11 @@ const trimSlashes = (path: string): string => (path.length > 1 ? path.replace(/\
  */
 const normalisePath = (path: string): string => {
 	const collapsed = trimSlashes(path.replace(/\\/g, "/").replace(/\/{2,}/g, "/"));
+	// Stryker disable next-line MethodExpression: equivalent. The normalised spelling is only ever
+	// compared with another `normalisePath` result — the cwd against a record's project, the harness
+	// record against the owner — and never handed back to a caller, so folding a drive letter up
+	// instead of down answers every one of those comparisons exactly the same way; the project a
+	// learner is given is the un-normalised one either way.
 	return /^[A-Za-z]:/.test(collapsed) ? collapsed.toLowerCase() : collapsed;
 };
 
@@ -3445,6 +3450,8 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 							judged: decision.judged ?? [],
 							cwd: run.learner.space.project,
 						})}\n`,
+						// Stryker disable next-line StringLiteral: equivalent. Node normalises an empty
+						// encoding to utf8, so the request file's bytes are the same with either text.
 						"utf8",
 					);
 					await record({
@@ -3468,6 +3475,8 @@ export default function selfLearn(pi: ExtensionAPI, deps: SelfLearnDeps = {}) {
 		}
 
 		for (const run of runs) {
+			// Stryker disable next-line StringLiteral: equivalent. Node normalises an empty encoding
+			// to utf8, so the evidence file's bytes are the same with either text.
 			await writeFile(run.queuePath, run.evidence, "utf8");
 		}
 		// One failed launch is not allowed to cancel the other: each is its own tab and its own
