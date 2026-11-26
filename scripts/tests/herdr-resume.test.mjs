@@ -49,9 +49,19 @@ if (args[0] === "server" && args[1] === "status") {
 	process.exit(0);
 }
 if (args[0] === "ls") {
-	// What the core knows: 'known' names the addresses, --all included.
-	const known = state.known ?? Object.keys(state.terminals ?? {});
+	// What the core knows: 'known' names the addresses, --all included. 'knownSequence' is one
+	// answer per read, so a case can say "empty, then a full list" — the read race that deleted
+	// every live entry once.
+	let known = state.known ?? Object.keys(state.terminals ?? {});
+	if (Array.isArray(state.knownSequence)) {
+		const seen = calls.filter((call) => call[0] === "ls").length - 1;
+		known = state.knownSequence[Math.min(seen, state.knownSequence.length - 1)] ?? [];
+	}
 	if (state.lsFails) process.exit(1);
+	if (Array.isArray(state.lsFailsSequence)) {
+		const seen = calls.filter((call) => call[0] === "ls").length - 1;
+		if (state.lsFailsSequence[Math.min(seen, state.lsFailsSequence.length - 1)]) process.exit(1);
+	}
 	process.stdout.write(JSON.stringify({ terminals: known.map((address) => ({ address })) }));
 	process.exit(0);
 }
@@ -381,7 +391,59 @@ test("an entry whose terminal hc does not know is deleted, without a wait", () =
 	assert.match(out, /deleted terminal t3 \(worker\): hc does not know this terminal/);
 	assert.equal(sends().length, 0);
 	assert.equal(calls().filter((call) => call[0] === "get").length, 0, "an unknown terminal is not worth one get");
-	assert.equal(calls().filter((call) => call[0] === "ls").length, 1, "the terminal list is asked once");
+	assert.equal(calls().filter((call) => call[0] === "ls").length, 2, "a miss is one read; the deletion needs the second one");
+});
+
+test("an empty terminal list deletes nothing: it is not evidence a terminal is gone", () => {
+	// Measured 2026-11-26: one `hc ls` answered an empty list while four Bosses were live, and the
+	// whole folder was deleted in one pass. The list that says "no terminals at all" is the read
+	// race, not four closed tabs.
+	writeState(recoveredTerminal(), { known: [], afterSend: runningPi() });
+	const entry = writeEntry();
+
+	const out = run();
+	assert.equal(existsSync(join(stateRoot, "t3.json")), true, "an empty list must not delete the entry");
+	assert.match(out, /empty terminal list, which is not evidence/);
+	assert.equal(JSON.parse(readFileSync(join(stateRoot, "t3.json"), "utf8")).restored_at !== undefined, true, "the entry is still acted on, not just kept");
+	assert.ok(sends().length === 1, out);
+	assert.ok(sends()[0][2].includes(entry.session_path), sends()[0][2]);
+});
+
+test("a terminal the first read misses but the second read names is kept", () => {
+	// The other half of the same race: a list that is *not* empty, taken while the core was still
+	// bringing terminals back, and the entry is a live one. One read says "gone"; the second
+	// read — the same question, a moment later — says the core knows t3.
+	writeState(recoveredTerminal(), { knownSequence: [["t9"], ["t3", "t9"]], afterSend: runningPi() });
+	writeEntry();
+
+	const out = run();
+	assert.equal(existsSync(join(stateRoot, "t3.json")), true, "the entry must survive a read race");
+	assert.doesNotMatch(out, /deleted terminal t3/);
+	assert.equal(calls().filter((call) => call[0] === "ls").length, 2);
+});
+
+test("a second read that answers an empty list keeps the entry", () => {
+	// One non-empty miss, then an empty answer: the core shrank to nothing between two reads, which
+	// is the same read race as an empty first answer. Keeping is the cheap side of that bet.
+	writeState(recoveredTerminal(), { knownSequence: [["t9"], []], afterSend: runningPi() });
+	writeEntry();
+
+	const out = run();
+	assert.equal(existsSync(join(stateRoot, "t3.json")), true, "the entry must survive a shrinking list");
+	assert.doesNotMatch(out, /deleted terminal t3/);
+	assert.match(out, /the second hc ls did not answer with a non-empty terminal list/);
+});
+
+test("a second read that fails keeps the entry", () => {
+	// Silence is not a finding: a confirm read the core did not answer is the reason the entry
+	// stays, and the log says which question failed instead of pretending it was answered.
+	writeState(recoveredTerminal(), { knownSequence: [["t9"]], lsFailsSequence: [false, true], afterSend: runningPi() });
+	writeEntry();
+
+	const out = run();
+	assert.equal(existsSync(join(stateRoot, "t3.json")), true, "a failed confirm read must not delete the entry");
+	assert.doesNotMatch(out, /deleted terminal t3/);
+	assert.match(out, /the second hc ls did not answer with a non-empty terminal list/);
 });
 
 test("an entry whose session file is gone is deleted, not kept", () => {
@@ -395,7 +457,7 @@ test("an entry whose session file is gone is deleted, not kept", () => {
 });
 
 test("--dry-run deletes nothing", () => {
-	writeState(recoveredTerminal(), { known: [] });
+	writeState(recoveredTerminal(), { known: ["t9"] });
 	writeEntry();
 
 	const out = run(["--dry-run"]);

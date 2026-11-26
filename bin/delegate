@@ -3155,22 +3155,139 @@ space_close() {
 	return 1
 }
 
+# space_of_tab <tab-id> — the id of the herdr space that lists <tab-id>, or nothing.
+#
+# The same snapshot as tab_close's own proof, asked a different question: which space holds this
+# tab. No answer (no herdr-app, no list, a shape this side does not own) prints nothing, the same
+# "silence is not a finding" the close follows.
+space_of_tab() {
+	local id=${1:-} spaces
+	[ -n "$id" ] || return 0
+	spaces=$(herdr-app ls 2>/dev/null) || return 0
+	printf '%s' "$spaces" | node -e '
+		let raw = "";
+		process.stdin.on("data", (c) => (raw += c)).on("end", () => {
+			let j = {};
+			try { j = JSON.parse(raw); } catch { return; }
+			const want = String(process.argv[1]);
+			const holds = (t) => {
+				if (!t || typeof t !== "object") return false;
+				const here = [t.id, t.tab].filter((v) => typeof v === "string");
+				if (here.includes(want)) return true;
+				const terms = Array.isArray(t.terminals) ? t.terminals : [];
+				return terms.some((x) => String(x?.terminal ?? x?.id ?? x) === want);
+			};
+			for (const s of Array.isArray(j.spaces) ? j.spaces : []) {
+				if (!s) continue;
+				if ((Array.isArray(s.tabs) ? s.tabs : []).some(holds)) {
+					process.stdout.write(String(s.id ?? ""));
+					return;
+				}
+			}
+		});' "$id"
+}
+
+# space_tabs <space-id> — one "<tab id>\t<name>" line per tab herdr lists in that space.
+# Unreadable is empty: nothing is concluded from an answer this side cannot parse.
+space_tabs() {
+	local id=${1:-} spaces
+	[ -n "$id" ] || return 0
+	spaces=$(herdr-app ls 2>/dev/null) || return 0
+	printf '%s' "$spaces" | node -e '
+		let raw = "";
+		process.stdin.on("data", (c) => (raw += c)).on("end", () => {
+			let j = {};
+			try { j = JSON.parse(raw); } catch { return; }
+			const want = String(process.argv[1]);
+			for (const s of Array.isArray(j.spaces) ? j.spaces : []) {
+				if (!s || String(s.id ?? "") !== want) continue;
+				for (const t of Array.isArray(s.tabs) ? s.tabs : []) {
+					if (!t || typeof t !== "object") continue;
+					const tab = String(t.id ?? t.tab ?? "");
+					if (!tab) continue;
+					process.stdout.write(tab + "\t" + String(t.name ?? t.title ?? "") + "\n");
+				}
+				return;
+			}
+		});' "$id"
+}
+
+# unnamed_tab <name> — does this tab carry no name of its own? herdr numbers the tabs nobody named
+# ("1", "2", ...), which is what the shell skeleton left behind by a close looks like; a named tab
+# is a person's or an agent's and is never closed by a sweep.
+unnamed_tab() {
+	case ${1:-} in
+	'') return 0 ;;
+	*[!0-9]*) return 1 ;;
+	esac
+	return 0
+}
+
+# settle_space <space-id> <before> <slug> — leave the space exactly as the close found it, minus
+# the tab that was closed.
+#
+# Proving the id is gone is not proving the space is as it was: on 2026-11-26 twice an unnamed shell
+# tab (name "2", `argv: ["/usr/bin/zsh"]`) appeared in the harness space beside the Boss, once right
+# after a `delegate finish` — a tab nobody opened, left by the app that was told to close one. So
+# the space is read again and any tab that was not in it before the close is closed too, up to three
+# times. Only a tab with no name of its own is closed here; anything named is printed, never touched.
+settle_space() {
+	local id=$1 before=$2 slug=$3 now tab name stray stray_name attempt=0
+	[ -n "$id" ] || return 0
+	while [ "$attempt" -lt 3 ]; do
+		attempt=$((attempt + 1))
+		now=$(space_tabs "$id") || return 0
+		[ -n "$now" ] || return 0
+		stray=""
+		while IFS=$'\t' read -r tab name; do
+			[ -n "$tab" ] || continue
+			if printf '%s\n' "$before" | grep -qxF -- "$tab"; then continue; fi
+			stray=$tab; stray_name=$name
+			break
+		done <<<"$now"
+		[ -n "$stray" ] || return 0
+		if ! unnamed_tab "$stray_name"; then
+			printf '%s: warning: closing %s left tab %s (%s) in space %s — it is not this worker and has a name of its own, so it is left open. Close it by hand if nobody opened it:\n' \
+				"$prog" "$slug" "$stray" "${stray_name:-unnamed}" "$id" >&2
+			printf '  herdr-app do tab.close --id %s\n' "$stray" >&2
+			# The tab is not this side's to close, but the sweep must not spin on it either.
+			before=$(printf '%s\n%s' "$before" "$stray")
+			continue
+		fi
+		if herdr-app do tab.close --id "$stray" >/dev/null 2>&1; then
+			printf '%s: closed the unnamed shell tab %s closing %s left in space %s\n' "$prog" "$stray" "$slug" "$id" >&2
+		else
+			printf '%s: warning: tab %s appeared in space %s while %s was closing and would not close (%s). Close it by hand:\n' \
+				"$prog" "$stray" "$id" "$slug" "${stray_name:-unnamed}" >&2
+			printf '  herdr-app do tab.close --id %s\n' "$stray" >&2
+			return 0
+		fi
+		done
+	return 0
+}
+
 # tab_close <id> <name> — close one herdr tab and prove it is gone.
 #
 # The same "answering 0 is not the thing being gone" as space_close, one level down: a tab that
 # herdr still lists after tab.close is a tab somebody has to close by hand, and the worker's
 # record stays so a retry reads it. The id is matched as a JSON token in `herdr-app ls`, never
 # parsed out of a shape this side does not own. Returns 1, naming the id and the name, only when
-# herdr still lists the tab.
+# herdr still lists the tab. The space it was in is left as it was minus that tab: settle_space
+# closes an unnamed skeleton the app left behind, which is the shell tab a person never opened.
 tab_close() {
-	local id=$1 name=$2 attempt tabs
+	local id=$1 name=$2 attempt tabs space_id before=""
 	[ -n "$id" ] || return 0
 	command -v herdr-app >/dev/null 2>&1 || return 0
+	# Read before the close: once the tab is gone, nothing in the snapshot says which space it was
+	# in, and "as it was minus that tab" needs both halves.
+	space_id=$(space_of_tab "$id")
+	if [ -n "$space_id" ]; then before=$(space_tabs "$space_id" | cut -f1); fi
 	for attempt in 1 2; do
 		herdr-app do tab.close --id "$id" >/dev/null 2>&1 || true
 		tabs=$(herdr-app ls 2>/dev/null) || return 0
 		[ -n "$tabs" ] || return 0
 		if ! printf '%s' "$tabs" | grep -qF "\"$id\""; then
+			settle_space "$space_id" "$before" "$name"
 			return 0
 		fi
 		[ "$attempt" = 1 ] && sleep 1
