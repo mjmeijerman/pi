@@ -71,13 +71,32 @@ case "$1 $2" in
 esac
 STUB
 # hc: answers `get <terminal> --json` from $HC_FACTS_FILE, so a case can say what program is in a
-# terminal; a line in $HC_LOG is what the guard asked, and a *write* verb there is a fail below.
+# terminal; a line in $HC_LOG is what the guard asked, and a *write* verb there is a fail below —
+# except `send`, which one case owns: filling an empty Boss shell is exactly one line typed into a
+# terminal that is positively a quiet shell, and a case that wants that line to *start* something
+# says so with HC_SEND_STARTS (the facts switch to a live pi, the way hc answers a shell that has
+# replaced itself with the program). HC_SEND_SLEEP widens the window a race case needs.
 cat >"$WORK/stub/hc" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$HC_LOG"
+if [ "$1" = send ]; then
+	[ -n "${HC_SEND_SLEEP:-}" ] && sleep "$HC_SEND_SLEEP"
+	if [ -n "${HC_SEND_STARTS:-}" ]; then
+		node -e '
+			const fs = require("fs");
+			// pid 1: `startedWitness` asks whether the foreground pid is still alive, and a made-up
+			// one answers "already exited", which reads as a fill that started nothing.
+			fs.writeFileSync(process.env.HC_FACTS_FILE, JSON.stringify({ address: process.argv[1], state: "live", argv: ["node.exe", "C:/pi/cli.js"], foreground: { argv: ["node.exe", "C:/pi/cli.js"], pid: 1 }, status: { app: "pi", state: "idle" } }) + "\n");
+		' "$2"
+	fi
+	exit 0
+fi
 if [ -f "${HC_FACTS_FILE:-/nonexistent}" ]; then cat "$HC_FACTS_FILE"; else printf '{}\n'; fi
 STUB
 export HC_FACTS_FILE="$WORK/hc-facts.json"
+# The fill waits for the line to start: bounded in the guard at 2-5 s, and 400 ms here so a case that
+# ends in `nothing-started` costs two waits instead of six seconds each.
+export PI_GUARD_FILL_WAIT_MS=400
 chmod +x "$WORK/stub/"*
 
 PASS_N=0
@@ -158,9 +177,16 @@ spaces() { printf '%s\n' "$1" >"$HERDR_SPACES"; }
 hc_facts() {
 	node -e '
 		const fs = require("fs"), [file, terminal, kind] = process.argv.slice(1);
-		const shell = { address: terminal, state: "live", foreground: { argv: ["C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"], pid: 16328 } };
-		const pi = { address: terminal, state: "live", foreground: { argv: ["node.exe", "C:/pi/cli.js"], pid: 4242 }, status: { app: "pi", state: "idle" } };
-		fs.writeFileSync(file, JSON.stringify(kind === "pi" ? pi : shell) + "\n");
+		// `argv` is the launch command hc still holds for the terminal, as real hc answers it: for a
+		// tab herdr handed back, the replacement shell. A fill reads it, because a terminal whose
+		// launch argv is still the program was quit by the person, not lost to a reboot.
+		const shell = { address: terminal, state: "live", argv: ["C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"], foreground: { argv: ["C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"], pid: 16328 } };
+		// A POSIX tab, which is what a Linux/macOS boot hands back and the shell family whose line is
+		// `exec …`: the PowerShell shape above gets `& …`, because PowerShell has no `exec`.
+		const bashShell = { address: terminal, state: "live", argv: ["/bin/bash"], foreground: { argv: ["/bin/bash"], pid: 1 } };
+		const pi = { address: terminal, state: "live", argv: ["node.exe", "C:/pi/cli.js"], foreground: { argv: ["node.exe", "C:/pi/cli.js"], pid: 4242 }, status: { app: "pi", state: "idle" } };
+		const facts = kind === "pi" ? pi : kind === "bash" ? bashShell : shell;
+		fs.writeFileSync(file, JSON.stringify(facts) + "\n");
 	' "$HC_FACTS_FILE" "$1" "$2"
 }
 resume_entry() { # <terminal> <session>
@@ -263,53 +289,137 @@ else pass 'nothing was typed into any tab'; fi
 
 # --------------------------------- the Boss tab is there, and the shell is empty --
 # The reboot this whole file is about, in the shape herdr leaves behind: every tab comes back as a
-# plain shell *in the same tab*, in the same folder, so the space and the Boss tab both exist and
-# the record is satisfied. `herdr-app ls` cannot tell those two apart — it names the app a terminal
-# reports and nothing about the program in front of it — so the guard asks herdr-core, and judges
-# the answer with the same two witnesses `scripts/herdr-resume.mjs` uses.
-new_case 'an empty Boss shell is respawned with the session its terminal recorded'
-set_tabs demo "[{\"name\":\"Boss\",\"folder\":\"$PROJ\",\"argv\":[],\"terminals\":[\"t-demo\"]}]"
-spaces '{"spaces":[{"id":"s-boss","name":"demo","tabs":[{"id":"tb-boss","name":"Boss","terminals":[{"terminal":"t-demo"}]}]}]}'
-hc_facts t-demo shell
+# plain shell *in the same tab*, in the same folder, so the space and the Boss tab both exist and the
+# record is satisfied. `herdr-app ls` cannot tell those two apart — it names the app a terminal
+# reports and nothing about the program in front of it — so the guard asks herdr-core, and judges the
+# answer with `scripts/herdr-terminal.mjs`, the reading `scripts/herdr-resume.mjs` types lines with.
+#
+# Measured 2026-11-27 (the 09:16:33 boot): the guard answered this case by opening a *second* tab
+# with the same name, four times, so the person booted into eight tabs and half of them were shells
+# wearing an agent's name. The tab was already there in the right folder; what it needed was the line.
+new_case 'an empty Boss shell is filled with the record'"'"'s session, and no second tab is opened'
+make_record filled filled "$PROJ" s-filled
+SESSION="$WORK/filled.jsonl"
+printf '{}\n' >"$SESSION"
+PROJ="$PROJ" resume_entry t-filled "$SESSION"
+set_rec filled '{"terminals":["t-filled"]}'
+set_tabs filled "[{\"name\":\"Boss\",\"folder\":\"$PROJ\",\"argv\":[],\"terminals\":[\"t-filled\"]}]"
+spaces '{"spaces":[{"id":"s-filled","name":"filled","tabs":[{"id":"tb-filled","name":"Boss","terminals":[{"terminal":"t-filled"}]}]}]}'
+hc_facts t-filled bash
+# The line, once typed, starts pi: hc then answers the terminal with a live pi in its foreground.
+export HC_SEND_STARTS=1
 clear_log
-run "$GUARD" --once
+run "$GUARD" --once --space filled
 if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'the pass failed' "$OUT"; fi
-# The record and the entry are read back rather than rebuilt in the assertion: the fixture writes
-# both through node, so on a Windows host they hold the drive-lettered spelling of the same path.
-rec_project=$(node -e 'console.log(require(process.argv[1]).project)' "$(record demo)")
-entry_session=$(node -e 'console.log(require(process.argv[1]).session_path)' "$PI_HERDR_RESUME_DIR/t-demo.json")
-tab_line=$(grep -F 'do tab.new --name Boss --space s-boss ' "$HERDR_LOG" 2>/dev/null | head -n 1)
-if [ -n "$tab_line" ]; then pass 'a Boss tab is opened again, in the space the record is in'; else fail 'an empty Boss tab was left an empty shell' "$(herdr)"; fi
-if printf '%s' "$tab_line" | grep -qF -- "--folder $rec_project"; then
-	pass "the new tab is put in the record's project folder"
+FILLED_SESSION=$(node -e 'console.log(require(process.argv[1]).session_path)' "$PI_HERDR_RESUME_DIR/t-filled.json")
+if grep -qF 'do tab.new' "$HERDR_LOG"; then
+	fail 'a second tab was opened beside the shell: one name, two tabs' "$(herdr)"
 else
-	fail 'the new tab went somewhere else' "$tab_line"
+	pass 'no tab was opened: the shell was filled in place'
 fi
-if printf '%s' "$tab_line" | grep -qF -- "\"--session\",\"$entry_session\""; then
-	pass 'it is started on the session the record remembers'
+SEND_N=$(grep -cE '^send t-filled ' "$HC_LOG" 2>/dev/null || true)
+if [ "${SEND_N:-0}" -eq 1 ]; then pass 'exactly one line was typed into the empty shell'; else fail "$SEND_N lines were typed into one shell" "$(cat "$HC_LOG")"; fi
+SEND_LINE=$(grep -E '^send t-filled ' "$HC_LOG" 2>/dev/null | head -n 1)
+if printf '%s' "$SEND_LINE" | grep -qF "exec $BARE --session $FILLED_SESSION"; then
+	pass "the line is this tree's pi-bare on the session the record remembers, run with exec"
 else
-	fail 'the session was not carried into the new tab' "$tab_line"
+	fail 'the typed line is not the bare Boss on its session' "$SEND_LINE"
 fi
-if printf '%s' "$tab_line" | grep -qF 'pi-bare'; then
-	pass "the Boss comes back bare, from this tree's pi-bare"
+if [ "$(rec_field filled 'JSON.stringify((j.tabs[0]||{}).argv||[])')" = "[\"$BARE\",\"--session\",\"$FILLED_SESSION\"]" ]; then
+	pass 'the tab the fill kept is recorded with the argv that started it'
 else
-	fail 'the new Boss is not bare' "$tab_line"
+	fail 'the record does not know how the filled tab starts' "$(cat "$(record filled)")"
 fi
-if printf '%s\n' "$OUT" | grep -qF 'empty shell'; then
-	pass 'the line says the tab was a shell, not a Boss'
+if printf '%s\n' "$OUT" | grep -qF "filled it with the record's session"; then
+	pass 'one line says the tab was filled, not opened'
 else
-	fail 'the respawn line does not say why it opened a tab' "$OUT"
+	fail 'the fill line is missing or does not say what happened' "$OUT"
 fi
-if grep -qF 'get t-demo' "$HC_LOG"; then
-	pass 'the terminal itself was asked what program it holds'
+
+# The pass after a fill must recognise its own work: the tab's id is in the record, the terminal now
+# holds a pi, and the record is written. Nothing is typed and nothing is opened.
+new_case 'the pass after a fill finds the tab by id and does nothing'
+clear_log
+run "$GUARD" --once --space filled
+if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'the pass failed' "$OUT"; fi
+if [ -s "$HERDR_LOG" ]; then fail 'the pass after a fill opened something' "$(herdr)"; else pass 'nothing was opened'; fi
+if grep -qE '^send ' "$HC_LOG"; then fail 'the pass after a fill typed the line again: two pi in one tab' "$(cat "$HC_LOG")"; else pass 'nothing was typed a second time'; fi
+if printf '%s\n' "$OUT" | grep -qE 'empty shell|nothing says pi'; then
+	fail 'the pass after a fill still calls the tab an empty shell' "$OUT"
 else
-	fail 'the guard never asked herdr-core about the Boss tab' "$(cat "$HC_LOG")"
+	pass 'the filled tab is a Boss the pass agrees with'
 fi
-if grep -qE '(^| )(send|keys|interrupt|put) ' "$HC_LOG"; then
-	fail 'the guard typed into the empty shell: a tab is opened, a shell is never typed into' "$(cat "$HC_LOG")"
+rm -rf -- "$(sd filled)"
+
+# A shell that takes the line and starts nothing is the fallback case: the tab stays the single tab
+# it is, nothing is opened beside it and nothing is closed, and one line says so with the way out.
+new_case 'a shell that takes the line and starts nothing leaves one tab, and says why'
+make_record nofill nofill "$PROJ" s-nofill
+set_rec nofill '{"terminals":["t-nofill"]}'
+set_tabs nofill "[{\"name\":\"Boss\",\"folder\":\"$PROJ\",\"argv\":[],\"terminals\":[\"t-nofill\"]}]"
+spaces '{"spaces":[{"id":"s-nofill","name":"nofill","tabs":[{"id":"tb-nofill","name":"Boss","terminals":[{"terminal":"t-nofill"}]}]}]}'
+hc_facts t-nofill shell
+unset HC_SEND_STARTS
+clear_log
+run "$GUARD" --once --space nofill
+if [ "$RC" -eq 0 ]; then pass 'the pass exits 0'; else fail 'the pass failed' "$OUT"; fi
+if grep -qF 'do tab.new' "$HERDR_LOG"; then
+	fail 'a tab was opened beside a shell that did not take the line' "$(herdr)"
 else
-	pass 'nothing was typed into the shell it replaced'
+	pass 'no second tab: one name, one tab'
 fi
+if grep -qF 'do tab.close' "$HERDR_LOG"; then
+	fail 'the tab the person may be looking at was closed' "$(herdr)"
+else
+	pass 'nothing was closed either: the shell stays where it is'
+fi
+NOFILL_N=$(grep -cE '^send t-nofill ' "$HC_LOG" 2>/dev/null || true)
+if [ "${NOFILL_N:-0}" -eq 2 ]; then
+	pass 'the line was typed twice, then given up on, as resume does'
+else
+	fail "expected two attempts, got ${NOFILL_N:-0}" "$(cat "$HC_LOG")"
+fi
+if printf '%s\n' "$OUT" | grep -qF 'the line started nothing in it'; then
+	pass 'the line says the fill failed and where the way out is'
+else
+	fail 'a failed fill is silent: a pass with nothing to do reads the same' "$OUT"
+fi
+rm -rf -- "$(sd nofill)"
+
+# Two passes in the same second, one empty shell: the claim, written under the record lock before
+# the line is typed, is what stops the second pass from typing a second pi into the same terminal.
+new_case 'two passes racing one empty shell fill it once'
+make_record racetab racetab "$PROJ" s-racetab
+set_rec racetab '{"terminals":["t-racetab"]}'
+set_tabs racetab "[{\"name\":\"Boss\",\"folder\":\"$PROJ\",\"argv\":[],\"terminals\":[\"t-racetab\"]}]"
+spaces '{"spaces":[{"id":"s-racetab","name":"racetab","tabs":[{"id":"tb-racetab","name":"Boss","terminals":[{"terminal":"t-racetab"}]}]}]}'
+hc_facts t-racetab shell
+export HC_SEND_STARTS=1
+export HC_SEND_SLEEP=0.3
+clear_log
+"$GUARD" --once --space racetab >"$WORK/race1.out" 2>&1 &
+RACE1=$!
+"$GUARD" --once --space racetab >"$WORK/race2.out" 2>&1 &
+RACE2=$!
+wait "$RACE1"
+RACE_RC1=$?
+wait "$RACE2"
+RACE_RC2=$?
+unset HC_SEND_SLEEP
+if [ "$RACE_RC1" -eq 0 ] && [ "$RACE_RC2" -eq 0 ]; then pass 'both passes exit 0'; else fail 'a pass failed' "$(cat "$WORK/race1.out")" "$(cat "$WORK/race2.out")"; fi
+RACE_SEND=$(grep -cE '^send t-racetab ' "$HC_LOG" 2>/dev/null || true)
+if [ "${RACE_SEND:-0}" -eq 1 ]; then
+	pass 'the empty shell was filled once, not twice'
+else
+	fail "$RACE_SEND lines were typed into one shell by two passes" "$(cat "$HC_LOG")"
+fi
+if grep -qF 'do tab.new' "$HERDR_LOG"; then fail 'a second tab was opened in the race' "$(herdr)"; else pass 'neither pass opened a tab'; fi
+unset HC_SEND_STARTS
+rm -rf -- "$(sd racetab)"
+# The cases that follow are full passes over the shared fixture: put the app's answer for `demo`
+# back the way the empty-shell case of this file left it, since a `--space` case rewrites the whole
+# `herdr-app ls` answer it was given.
+spaces '{"spaces":[{"id":"s-boss","name":"demo","tabs":[{"id":"tb-boss","name":"Boss","terminals":[{"terminal":"t-demo"}]}]}]}'
 
 new_case 'a Boss tab that has pi in it is left alone'
 hc_facts t-demo pi
