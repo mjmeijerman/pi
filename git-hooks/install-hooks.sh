@@ -110,6 +110,10 @@ pre-push)
 	if [ "\$rc" -eq 0 ] && [ -x "\$HOOKS_HOME/scan-mutation.sh" ]; then
 		"\$HOOKS_HOME/scan-mutation.sh" < "\$PUSH_REFS" || rc=\$?
 	fi
+	# Wie pusht er: de sleutel van de eigenaar of die van de agent (blip #17).
+	if [ "\$rc" -eq 0 ] && [ -x "\$HOOKS_HOME/scan-identity.sh" ]; then
+		"\$HOOKS_HOME/scan-identity.sh" "\$1" "\$2" < "\$PUSH_REFS" || rc=\$?
+	fi
 	exit "\$rc"
 	;;
 esac
@@ -133,4 +137,4 @@ fi
 write_wrappers "$DIR"
 git config --global core.hooksPath "$DIR"
 printf 'secret-guard: global core.hooksPath set to %s\n' "$DIR"
-printf 'secret-guard: pre-commit (harness budgets + hidden-codepoint scan + secret scan), commit-msg and pre-push (secret scan, then the mutation gate) active for all repos\n'
+printf 'secret-guard: pre-commit (harness budgets + hidden-codepoint scan + secret scan), commit-msg and pre-push (secret scan, mutation gate, then the identity gate) active for all repos\n'
