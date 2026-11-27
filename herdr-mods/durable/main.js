@@ -628,6 +628,8 @@ export default class Durable extends View {
 		const forget = this.view === "forget";
 		return v_flex()
 			.id(forget ? "durable-forget" : "durable-list")
+			.flex_1()
+			.min_h(0)
 			.gap(4)
 			.child(
 				div()
@@ -644,6 +646,8 @@ export default class Durable extends View {
 			.child(
 				v_flex()
 					.id(forget ? "durable-forget-rows" : "durable-list-rows")
+					.flex_1()
+					.min_h(0)
 					.gap(2)
 					.overflow_y_scrollbar()
 					.children(this.rows.map((row) => this.rowLine(row, t, cx)))
