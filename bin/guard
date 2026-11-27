@@ -45,22 +45,27 @@ fi
 #      type twice in one boot" rule, kept by not typing at all. Rebuilding (1) and respawning (2)
 #      build the Boss's argv with the same helper: two paths that drifted apart left a closed space
 #      coming back as an idle Boss while a killed one resumed.
-#   2b. the Boss tab is there and pi is not in it → the same respawn. After a reboot herdr hands
-#      every tab back as a plain shell, in the same tab, in the same folder, so a name test alone
-#      said `boss_present=yes` and the person was left with an empty prompt and no pi. The tab is
-#      the Boss only when a pi launcher is in its terminal's foreground — herdr-core is asked
-#      (`hc get <terminal> --json`) and the answer is judged with the same two witnesses
-#      `scripts/herdr-resume.mjs` uses (the whole foreground argv, and hc's own `app`). Nothing is
-#      typed into that shell: a tab is opened, once per space per guard run, and a terminal that
-#      cannot be read is left alone rather than guessed at, because two pi processes on one session
-#      file are two writers of one conversation.
+#   2b. the Boss tab is there and pi is not in it → **fill that tab**, in place. After a reboot
+#      herdr hands every tab back as a plain shell, in the same tab, in the same folder, so a name
+#      test alone said `boss_present=yes` and the person was left with an empty prompt and no pi.
+#      The tab is the Boss only when a pi launcher is in its terminal's foreground — herdr-core is
+#      asked (`hc get <terminal> --json`) and the answer is judged by `scripts/herdr-terminal.mjs`,
+#      the same reading of argv `scripts/herdr-resume.mjs` types lines with (the whole foreground
+#      argv, and hc's own `app`). A terminal that is positively a plain shell with nothing in front
+#      of it is filled: `scripts/herdr-fill.mjs` sends the record's launch argv into it and waits a
+#      bounded moment (PI_GUARD_FILL_WAIT_MS, 2-5 s) for it to start, and the tab is kept. Opening
+#      a tab beside it is what made one boot hand the person eight tabs, four of them shells wearing
+#      an agent's name, so it is not done: a fill that starts nothing leaves the shell alone and says
+#      so, and a terminal that cannot be read is left alone rather than guessed at, because two pi
+#      processes on one session file are two writers of one conversation.
 #   3. a worker's tab is not the guard's business: a slug in the space's `delegations.json` is
 #      resurrected only by `delegate wait --forever`, so a finished worker's tab stays closed and a
 #      recorded tab carrying a worker's name is never opened here.
 #   4. nothing is ever closed, renamed or moved. A supervisor that closes things is a machine that
 #      deletes someone's work, so `space.close`, `tab.close`, `space.move` and any rename are not
 #      words this program knows; `scripts/tests/test-guard-supervisor.sh` asserts it on the argv a
-#      stub `herdr-app` saw.
+#      stub `herdr-app` saw. A fill that starts nothing is part of that rule: the shell stays the tab
+#      it is, and no second tab is opened beside it, so one name never answers for two tabs.
 #
 #      The Boss tab is recognised by its ids first — `uberboss_tab`, the `terminals[]` the record
 #      remembers, and the tab this program opened a moment ago — and by the name in `boss` only for
@@ -120,6 +125,15 @@ RESUME_SCRIPT=${PI_GUARD_RESUME_SCRIPT:-${HOME:-}/.pi/scripts/herdr-resume.mjs}
 # the retired checkout below. A record that names either is rewritten on the pass that reads it.
 PI_HOME=${PI_HOME:-$(cd -- "$here/.." && pwd)}
 PI_BARE=${PI_GUARD_PI_BARE:-$PI_HOME/bin/pi-bare}
+# The fill: `scripts/herdr-fill.mjs` reads a terminal, judges it with `scripts/herdr-terminal.mjs`
+# and types the record's argv into it when it is a quiet shell. One script for both halves — the
+# judgement and the line — because a second copy of either is how the guard and resume start
+# disagreeing about what a shell is.
+FILL_SCRIPT=${PI_GUARD_FILL_SCRIPT:-$PI_HOME/scripts/herdr-fill.mjs}
+# How long a fill waits for the line it typed to become a program: a shell that has not started
+# anything in this long did not take the line. Bounded on purpose, and per attempt.
+FILL_WAIT_MS=${PI_GUARD_FILL_WAIT_MS:-3000}
+export PI_GUARD_FILL_WAIT_MS=$FILL_WAIT_MS
 # Kept for records written before the retired checkout was removed, not for anything live: a
 # record that still carries its path is rewritten to this tree on the pass that reads it.
 LEGACY_ROOT=${SPACE_LEGACY_ROOT:-${PI_LEGACY_BOSS_ROOT:-${HOME:-}/big-boss-pi}}
@@ -639,71 +653,27 @@ boss_terminals() {
 	boss_tab "${1:-}" | "$NODE" -e 'let d="";process.stdin.on("data",(c)=>(d+=c)).on("end",()=>{let j={};try{j=JSON.parse(d)}catch{};for(const t of Array.isArray(j.terminals)?j.terminals:[])process.stdout.write(String(t)+"\n")})'
 }
 
-# boss_live <terminal…> — is pi in the Boss tab? Answered from herdr-core, the only witness of what
-# program a terminal's foreground holds, with the same two tests `scripts/herdr-resume.mjs` uses:
-# the *whole* foreground argv (a sandboxed Boss reads as `bash …/pi-sandbox.sh -- pi …`, so `argv[0]`
-# alone calls a live Boss a shell) and hc's own `app` (a Windows pi is `node …/cli.js`, and neither
-# word is a launcher).
+# boss_live <terminal…> — is pi in the Boss tab? Answered by `scripts/herdr-fill.mjs --judge`, whose
+# reading of the terminal is `scripts/herdr-terminal.mjs`'s: the *whole* foreground argv (a sandboxed
+# Boss reads as `bash …/pi-sandbox.sh -- pi …`, so `argv[0]` alone calls a live Boss a shell) and hc's
+# own `app` (a Windows pi is `node …/cli.js`, and neither word is a launcher). That file is the only
+# reading of a terminal's argv in this tree — `scripts/herdr-resume.mjs` imports the same one — so the
+# question "is pi in there" and the line a fill types can never be answered by two different rules.
 #
 #   yes     a pi launcher is in one of those terminals, by either witness
 #   no      every terminal that answered is a live plain shell — the reboot's empty Boss
 #   unknown hc is not here, nothing answered, a terminal is not `live`, or the foreground is some
-#           other program. Only `no` opens anything: two pi processes on one session file are two
-#           writers of one conversation, so an unreadable terminal is left alone and said out loud.
+#           other program. Only `no` lets a fill type anything: two pi processes on one session file
+#           are two writers of one conversation, so an unreadable terminal is left alone and said out
+#           loud.
 boss_live() {
-	local t facts all=""
-	[ -n "$HC" ] || {
+	local answer
+	if [ -z "$HC" ] || [ -z "$NODE" ] || [ ! -f "$FILL_SCRIPT" ]; then
 		printf 'unknown'
 		return 0
-	}
-	for t in "$@"; do
-		[ -n "$t" ] || continue
-		facts=$("$HC" get "$t" --json 2>/dev/null) || facts=""
-		[ -z "$facts" ] || all="$all$facts
-"
-	done
-	[ -n "$all" ] || {
-		printf 'unknown'
-		return 0
-	}
-	printf '%s' "$all" | "$NODE" -e '
-		const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "nu", "pwsh", "powershell", "elvish", "xonsh"]);
-		const LAUNCHERS = new Set(["pi", "pi-bare", "pi-sandboxed", "pisandbox", "pi-sandbox.sh"]);
-		// Both separators, on either platform: a Windows foreground argv read on Linux is one
-		// long word to `path.basename` (the backslashes are not separators there), so a tab
-		// holding `C:\\WINDOWS\\...\\powershell.exe` answered `unknown` and an empty Boss shell was
-		// left alone. The last segment is the program, whichever slash spelled it.
-		const programName = (w) => String(w ?? "").split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, "");
-		const isShellArgv = (a) => Array.isArray(a) && a.length > 0 && SHELLS.has(programName(a[0]));
-		const piWitness = (f) => {
-			if (Array.isArray(f?.foreground?.argv) && f.foreground.argv.some((w) => LAUNCHERS.has(programName(w)))) return true;
-			return LAUNCHERS.has(programName(f?.status?.app ?? f?.app ?? ""));
-		};
-		let d = "";
-		process.stdin.on("data", (c) => (d += c)).on("end", () => {
-			let facts = [];
-			try {
-				const one = JSON.parse(d.trim());
-				facts = one && typeof one === "object" ? [one] : [];
-			} catch {
-				facts = d
-					.split("\n")
-					.map((l) => l.trim())
-					.filter(Boolean)
-					.map((l) => { try { return JSON.parse(l); } catch { return null; } })
-					.filter(Boolean);
-			}
-			let pi = false, shells = 0, other = 0, unread = 0;
-			for (const f of facts) {
-				if (f.state !== "live") { unread++; continue; }
-				if (piWitness(f)) { pi = true; continue; }
-				if (isShellArgv(f.foreground?.argv)) { shells++; continue; }
-				other++;
-			}
-			if (pi) process.stdout.write("yes");
-			else if (shells > 0 && other === 0 && unread === 0) process.stdout.write("no");
-			else process.stdout.write("unknown");
-		});'
+	fi
+	answer=$(PI_GUARD_FILL_HC=$HC "$NODE" "$FILL_SCRIPT" --judge "$@" 2>/dev/null) || answer=""
+	printf '%s' "${answer:-unknown}"
 }
 
 # adopt_boss_name <slug> <name> — the Boss tab answers to another name now, so the record learns it:
@@ -952,10 +922,86 @@ rebuild_space() {
 	resume_sweep
 }
 
-# restore_boss <slug> <name> <boss> <space> [missing|respawn] — open the Boss tab: either it is
-# gone (`missing`, the default) or it is there holding an empty shell (`respawn`).
+# fill_boss <slug> <name> <boss> <space> <terminal…> — the Boss tab is there holding a plain shell:
+# type the record's launch argv into that terminal and keep the tab.
+#
+# This is the case a boot creates. herdr's own layout restore hands every tab back as a shell in the
+# same tab, in the same folder, so the space and the Boss tab both exist and `boss_present` answers
+# `yes`; only `boss_live` can tell that nothing is running in it. What the person needed was the line
+# `scripts/herdr-resume.mjs` types into every other recovered tab, and what they got instead was a
+# second tab with the same name beside the empty one — four of those in one boot on 2026-11-27.
+#
+#   - the argv is the record's, through `boss_argv_with_session`, never a resume entry's: an entry
+#     written before the bare-Boss rule carries `["pi"]`, and that is a sandboxed Boss on every boot
+#     (`specs/archive/boss-bare-resume.md`);
+#   - the record lock is taken for the claim and *not* held across the send. A claim written before
+#     the line is typed is what stops the pass waiting behind this one from typing it a second time,
+#     and `bin/records-lib.sh` says a lock is never held across an `hc send`;
+#   - a terminal that answers `busy` is never typed into, and one that is already a program is left
+#     alone: `exec …` into a live Boss is #222's class of bug, and that refusal is a case in
+#     `scripts/tests/test-guard-supervisor.sh`;
+#   - a fill that starts nothing leaves the shell where it is. Opening a tab beside it would be two
+#     tabs with one name — the damage this function exists to end — and closing the tab the person
+#     may be looking at is not this program's to do, so the shell stays and one line says what fixed
+#     it will take.
+fill_boss() {
+	local slug=$1 name=$2 boss=$3 space=$4 rec project session argv t out outcome
+	shift 4
+	project=$(space_field "$slug" project)
+	rec=$(space_record "$slug")
+	if [ -z "$NODE" ] || [ -z "$FILL_SCRIPT" ] || [ ! -f "$FILL_SCRIPT" ]; then
+		say "$name: Boss tab '$boss' is an empty shell and there is no fill script ($FILL_SCRIPT) — left alone (start pi in that tab)"
+		return 0
+	fi
+	# The session the tab would have been opened on: the same helper `restore_boss` uses, so a fill
+	# and a respawn of one record start the same conversation.
+	session=$(boss_session "$slug" "$project")
+	argv=$(boss_argv_with_session "$slug" "$boss" "$session")
+	if ! records_lock "$rec"; then
+		say "$name: the record stayed locked, so the empty Boss tab was left alone this pass"
+		return 0
+	fi
+	if boss_claim_fresh "$slug"; then
+		records_unlock "$rec"
+		say "$name: another pass filled the Boss tab a moment ago, so not a second one"
+		return 0
+	fi
+	record_boss_claim "$slug" "{\"terminal\":\"${1:-}\"}"
+	records_unlock "$rec"
+	for t in "$@"; do
+		[ -n "$t" ] || continue
+		out=$(PI_GUARD_FILL_HC=$HC "$NODE" "$FILL_SCRIPT" --terminal "$t" --argv "$argv" 2>/dev/null) || out=""
+		outcome=$(printf '%s' "$out" | field_of outcome)
+		case $outcome in
+		filled)
+			record_boss_tab "$slug" "$argv"
+			say "$name: Boss tab '$boss' was an empty shell in terminal $t — filled it with the record's session, no second tab"
+			return 0
+			;;
+		busy)
+			# A pi turned up between the judgement and this line: nothing was typed, and the tab is
+			# the Boss, so the record keeps it instead of another being opened beside it.
+			record_boss_tab "$slug" ""
+			say "$name: Boss tab '$boss' has a pi in terminal $t after all — left alone"
+			return 0
+			;;
+		not-a-shell | still-launch | send-failed)
+			say "$name: Boss tab '$boss' in terminal $t was not filled ($outcome: $(printf '%s' "$out" | field_of reason)) — left alone"
+			return 0
+			;;
+		esac
+		# `unreadable` or `nothing-started`: the tab's next terminal may still take the line.
+	done
+	record_boss_tab "$slug" ""
+	say "$name: Boss tab '$boss' is an empty shell and the line started nothing in it — left alone (start pi in that tab, or bin/space forget $slug)"
+}
+
+# restore_boss <slug> <name> <boss> <space> — open the Boss tab, because it is gone.
+#
+# The tab is never here holding an empty shell: that is `fill_boss`'s case, and it fills the tab
+# rather than opening a second one beside it.
 restore_boss() {
-	local slug=$1 name=$2 boss=$3 space="$4" why=${5:-missing} project spaceid session argv rec present out rc
+	local slug=$1 name=$2 boss=$3 space="$4" project spaceid session argv out rc
 	project=$(space_field "$slug" project)
 	spaceid=$(printf '%s' "$space" | field_of id)
 	rec=$(space_record "$slug")
@@ -974,9 +1020,9 @@ restore_boss() {
 		return 0
 	fi
 	# A claim answers a snapshot that shows no Boss tab: "the one you cannot see is the one I opened".
-	# A tab that is there holding an empty shell is not that question — the shell is this pass's
-	# reason to open one — so `respawn` never asks it, and `respawn_done` is what stops a loop.
-	if [ "$why" != respawn ] && boss_claim_fresh "$slug"; then
+	# A fill writes the same claim before it types, so a pass that was waiting behind it reads
+	# "another pass is in that terminal" instead of typing a second pi into it.
+	if boss_claim_fresh "$slug"; then
 		records_unlock "$rec"
 		say "harness: $name: another pass opened the Boss tab a moment ago, so not a second one"
 		return 0
@@ -1137,12 +1183,14 @@ one_space() {
 			;;
 		no)
 			if respawn_done "$slug"; then
-				say "$name: Boss tab '$boss' is an empty shell again after this guard respawned it once — left alone (close the empty tab, or bin/space forget $slug)"
+				say "$name: Boss tab '$boss' is an empty shell again after this guard filled it once — left alone (start pi in that tab, or bin/space forget $slug)"
 				return 0
 			fi
-			say "$name: Boss tab '$boss' is an empty shell, no pi in it — respawning it with the record's session"
+			# The tab is there, in the right folder, with a shell in it: fill that tab. A second tab
+			# beside it is the same name twice, which is what the 2026-11-27 boot left the person with.
 			respawn_mark "$slug"
-			restore_boss "$slug" "$name" "$boss" "$match" respawn
+			# shellcheck disable=SC2086 # terminal ids (t15): a word each, no spaces in one
+			fill_boss "$slug" "$name" "$boss" "$match" $terms
 			return 0
 			;;
 		esac
