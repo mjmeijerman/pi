@@ -4,6 +4,14 @@
 - Use codemode for 2+ tool calls: one script (`tools.read`, `tools.bash`, `Promise.allSettled` when independent) beats separate calls; single calls go direct.
 - ADHD mode is always on (`~/.pi/agent/i-have-adhd.json`); it governs commits, PR bodies, review comments, files. Only the user turns it off.
 
+## Every turn says what to do
+
+- End every turn with one line: `Do: <the exact command, key, or word>` — or `Do: nothing` when
+  nothing is asked of them.
+- Every other sentence is what happened, what broke, or a choice only they can make. Cut the rest.
+- A turn that is neither explaining something nor pasting evidence is ≤ 60 words. Explaining and
+  evidence are unlimited; nothing else gets room.
+
 ## Sandbox
 
 - `pi` runs sandboxed by default (`install.sh` wraps it); `pi-bare` quits it; `pisandbox --no-net` is for repo scripts, not agents — no net means no model (blip 1). Native Windows has no bwrap, so there `pi` and its workers run bare.
