@@ -9,7 +9,7 @@
 # hash, - for git), where it is installed, date resolved (UTC). Radar: #72
 # agent package manager, #7 plugin marketplace — a package from elsewhere is
 # pinned like a dependency.
-https://github.com/ayghri/i-have-adhd	git	1ecea1993b7fce257ffbd686c070948b5e07eda6	-	agent/git/github.com/ayghri/i-have-adhd	2026-11-18
-npm:pi-web-access	npm	0.48.0	sha512-9+B5e2kLtN0qYs2LZ6D8yOI9TbjQTnf4AKON/Qy2nseE//fH71u60Icul6Ua7Pp7R5Ro1oPJpiDqdUut730UOg==	agent/npm/node_modules/pi-web-access	2026-11-18
-git:https://github.com/michielpapenhove/pi-observational-memory.git	git	d2ca018157b4f604df03004717d7779ab0a7f71d	-	agent/git/github.com/michielpapenhove/pi-observational-memory	2026-11-18
-git:github.com/michielpapenhove/pi-prompt-snippets	git	23f8f299f0353400d82b385a134a34e51c5eec5b	-	agent/git/github.com/michielpapenhove/pi-prompt-snippets	2026-11-18
+https://github.com/ayghri/i-have-adhd	git	f3e783bae5f4820416492091b3abeb670616c23a	-	agent/git/github.com/ayghri/i-have-adhd	2026-11-28
+npm:pi-web-access	npm	0.48.0	sha512-9+B5e2kLtN0qYs2LZ6D8yOI9TbjQTnf4AKON/Qy2nseE//fH71u60Icul6Ua7Pp7R5Ro1oPJpiDqdUut730UOg==	agent/npm/node_modules/pi-web-access	2026-11-28
+git:https://github.com/michielpapenhove/pi-observational-memory.git	git	d2ca018157b4f604df03004717d7779ab0a7f71d	-	agent/git/github.com/michielpapenhove/pi-observational-memory	2026-11-28
+git:github.com/michielpapenhove/pi-prompt-snippets	git	23f8f299f0353400d82b385a134a34e51c5eec5b	-	agent/git/github.com/michielpapenhove/pi-prompt-snippets	2026-11-28
