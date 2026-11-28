@@ -416,6 +416,13 @@ Commit: $W5SHA
 REPORT
 printf '# Worker w5\n\nMission: w5\n' >"$SPACEDIR/specs/w5.md"
 record w5 tb5
+# A GitHub remote, so the publish row can carry `owner/name` beside the number: `open-work`'s
+# probe asks `gh -R`, and a row with no repo is a row it has to skip (blip 20).
+node -e '
+	const fs=require("fs");const f=process.argv[1];
+	const j=JSON.parse(fs.readFileSync(f,"utf8"));
+	j.remote="git@github.com:acme/demo.git";
+	fs.writeFileSync(f,JSON.stringify(j,null,2)+"\n");' "$SPACEDIR/space.json"
 : >"$PF_LOG"
 : >"$PUB_LOG"
 HERDR_SPACES="$WORK/spaces.json"
@@ -425,6 +432,16 @@ if grep -qF -- '--slug w5' "$PF_LOG"; then pass 'the gate ran: finish is not a b
 if grep -qF 'w5' "$PUB_LOG"; then pass 'it published'; else fail 'nothing was published' "$(cat "$PUB_LOG")"; fi
 if [ "$RC" -eq 0 ]; then pass 'the whole tail finished: publish, wipe, close'; else fail 'the finish stopped short' "$OUT"; fi
 if grep -q '"w5"' "$SPACEDIR/delegations.json"; then fail 'the record survived a successful finish'; else pass 'the record is gone'; fi
+if node -e '
+	const fs=require("fs");
+	const rows=fs.readFileSync(process.argv[1],"utf8").split("\n").filter((l)=>l.trim())
+		.map((l)=>{try{return JSON.parse(l)}catch{return null}})
+		.filter((j)=>j&&j.command==="publish"&&j.slug==="w5");
+	process.exit(rows.length===1&&rows[0].repo==="acme/demo"?0:1);' "$SPACEDIR/state/decisions.jsonl" 2>/dev/null; then
+	pass 'the publish row carries the repo beside the PR number, so the probe can ask -R'
+else
+	fail 'the publish row names no repo' "$(grep publish "$SPACEDIR/state/decisions.jsonl")"
+fi
 
 # =========== 6. the report that defeated the skip: "no commit" in prose, a sha in Evidence --
 new_case 'a prose "no commit" report that quotes a sha still closes'
