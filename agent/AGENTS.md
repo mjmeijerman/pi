@@ -8,7 +8,7 @@
 
 - End every turn with one line: `Do: <the exact command, key, or word>` — or `Do: nothing` when
   nothing is asked of them.
-- Every other sentence is what happened, what broke, or a choice only they can make. Cut the rest.
+- Read each sentence back and file it: what happened, what broke, or a choice only they can make. A sentence you cannot file is deleted.
 - A turn that is neither explaining something nor pasting evidence is ≤ 60 words. Explaining and
   evidence are unlimited; nothing else gets room.
 
