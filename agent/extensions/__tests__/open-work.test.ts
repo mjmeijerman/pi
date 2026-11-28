@@ -26,6 +26,7 @@ const openWork = mod.default;
 const {
 	cacheFile,
 	decisionFiles,
+	decisionSources,
 	defaultProbe,
 	delegationFiles,
 	mergeableWord,
@@ -188,6 +189,20 @@ describe("open-work: the root", () => {
 		const probe = defaultProbe();
 		assert.equal(probe.run("/bin/echo", ["hi"]), "hi\n");
 	});
+
+	test("the probe's child reads /dev/null on stdin and is piped on both outputs", () => {
+		// What the stdio list is for: a child that cannot wait on input, and text that reaches this
+		// process instead of the pane. The child reports its own descriptors, because that is the
+		// only place the difference is visible — an inherited stderr and a piped one both print
+		// nothing when nobody reads the pipe.
+		const code = [
+			'const { fstatSync } = require("node:fs");',
+			'const kind = (fd) => { const s = fstatSync(fd);',
+			'  return s.isCharacterDevice() ? "null" : s.isSocket() || s.isFIFO() ? "pipe" : "other"; };',
+			"process.stdout.write([0, 1, 2].map(kind).join(','));",
+		].join("\n");
+		assert.equal(defaultProbe().run(process.execPath, ["-e", code]), "null,pipe,pipe");
+	});
 });
 
 describe("open-work: reading a record", () => {
@@ -227,6 +242,20 @@ describe("open-work: reading a record", () => {
 			join(state, "spaces", "a", "delegations.json"),
 			join(state, "spaces", "b", "delegations.json"),
 		]);
+	});
+
+	test("the state's own decisions file is a source with no space, not a space called ''", () => {
+		const state = join(tmp("decision-sources"), "state");
+		assert.deepEqual(decisionSources(state), [{ file: join(state, "decisions.jsonl"), space: "" }]);
+	});
+
+	test("the state's own decisions file does not borrow a space's remote", () => {
+		// `spaces/space.json` is a directory's name away from `spaces/<space>/space.json`: a guard
+		// that stops asking when the space is empty is what keeps the two apart.
+		const state = join(tmp("own-file-no-remote"), "state");
+		write(join(state, "decisions.jsonl"), `${JSON.stringify({ pr: 5 })}\n`);
+		write(join(state, "spaces", "space.json"), `${JSON.stringify({ remote: "git@github.com:acme/demo.git" })}\n`);
+		assert.deepEqual(prCandidates(state), []);
 	});
 
 	test("the decisions records are the state's own and then one per space, by name", () => {
@@ -418,6 +447,21 @@ describe("open-work: which pull requests are open", () => {
 		assert.equal(repoSlug("/home/mark/projects/demo"), "");
 		assert.equal(repoSlug("acme"), "");
 		assert.equal(repoSlug("acme/demo/deep"), "");
+	});
+
+	test("whitespace, a slash run and a .git-ish name keep their own answer", () => {
+		// A remote copied out of a config file carries the whitespace around it; a name that only
+		// looks like a suffix (`demo.gitx`) is the repository's name, not a suffix to drop.
+		assert.equal(repoSlug("  acme/demo  "), REPO);
+		assert.equal(repoSlug("acme/demo.git//"), REPO);
+		assert.equal(repoSlug("https://github.com/acme/demo//"), REPO);
+		assert.equal(repoSlug("acme/demo.gitx"), "acme/demo.gitx");
+		assert.equal(repoSlug("git@github.com:acme/demo/.git"), REPO);
+		assert.equal(repoSlug("https://github.com/acme/demo/deep"), "");
+		// An `@` with no colon after it is neither the scp form nor a slug, and a slug with an
+		// empty half (`/demo`) is not `owner/name`.
+		assert.equal(repoSlug("@acme/demo"), "");
+		assert.equal(repoSlug("/demo"), "");
 	});
 });
 

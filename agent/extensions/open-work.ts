@@ -151,20 +151,21 @@ interface PrCandidate {
  * that lands in the pane.
  */
 export function repoSlug(remote: unknown): string {
-	let url = typeof remote === "string" ? remote.trim() : "";
-	url = url.replace(/\/+$/, "").replace(/\.git$/i, "");
+	if (typeof remote !== "string") return "";
+	// A `.git` suffix and the slashes around it are not part of `owner/name`.
+	let url = remote.trim().replace(/\.git\/*$/i, "").replace(/\/+$/, "");
 	if (url.includes("://")) {
+		// The scheme and the authority — `user@`, a port, the host — are both before the first
+		// "/" that follows the scheme, so what follows that slash is the owner/name.
 		url = url.slice(url.indexOf("://") + 3);
-		const at = url.indexOf("@");
-		if (at >= 0) url = url.slice(at + 1);
-		const slash = url.indexOf("/");
-		url = slash >= 0 ? url.slice(slash + 1) : "";
+		url = url.slice(url.indexOf("/") + 1);
 	} else if (url.includes("@")) {
-		url = url.slice(url.indexOf("@") + 1);
+		// The scp form, `git@host:owner/name`: the owner/name follows the colon, and an `@` with
+		// no colon at all names no repository.
 		const colon = url.indexOf(":");
-		url = colon >= 0 ? url.slice(colon + 1) : "";
+		if (colon === -1) return "";
+		url = url.slice(colon + 1);
 	}
-	url = url.replace(/\/+$/, "");
 	const parts = url.split("/");
 	if (parts.length !== 2 || !parts[0] || !parts[1]) return "";
 	return url;
@@ -194,6 +195,9 @@ function spaceRepo(state: string, space: string): string {
 	if (!space) return "";
 	try {
 		const record = JSON.parse(readText(join(state, "spaces", space, "space.json")));
+		// `JSON.parse("null")` answers `null`, and the property read that throws lands in the catch
+		// below that answers the same `""`.
+		// Stryker disable next-line OptionalChaining: equivalent, see above
 		return repoSlug(record?.remote);
 	} catch {
 		return "";
