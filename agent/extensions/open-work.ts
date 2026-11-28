@@ -8,7 +8,12 @@
  * nothing is open.
  *
  *   worker <slug>: <word>, report at <path> — next: bin/delegate finish <slug>
- *   PR #<n>: <rollup>, <mergeable|conflicts> — next: gh pr view <n>
+ *   PR #<n> (<owner/name>): <rollup>, <mergeable|conflicts> — next: gh pr view <n> -R <owner/name>
+ *
+ * The repository is carried with the number. A number alone means nothing to `gh` outside the repo
+ * that owns it: the probe used to run in whatever checkout the agent sat in and printed GitHub's
+ * GraphQL refusal in the pane at every start. The row `delegate finish` writes keeps its `repo`,
+ * and a space's `space.json` names the remote for a row that does not.
  *
  * The worker word is not guessed here. It is `bin/delegate status --json`'s own word, so the line
  * and `delegate list` can never disagree about the same worker (`bin/delegate` is the one place
@@ -135,19 +140,75 @@ export function statusWord(probe: Probe, slug: string, report: string): { word: 
 
 interface PrCandidate {
 	pr: number;
+	/** `owner/name` of the repository that owns the number: `gh -R` needs it, the cwd cannot say it. */
+	repo: string;
+}
+
+/**
+ * `owner/name` from a remote url or a bare slug — the shape `gh -R` takes, `""` when it cannot be
+ * one. A probe without a repo is a probe in the wrong repository: the number is global to GitHub
+ * only within a repo, so `gh pr view 262` in a checkout that does not own it answers with an error
+ * that lands in the pane.
+ */
+export function repoSlug(remote: unknown): string {
+	let url = typeof remote === "string" ? remote.trim() : "";
+	url = url.replace(/\/+$/, "").replace(/\.git$/i, "");
+	if (url.includes("://")) {
+		url = url.slice(url.indexOf("://") + 3);
+		const at = url.indexOf("@");
+		if (at >= 0) url = url.slice(at + 1);
+		const slash = url.indexOf("/");
+		url = slash >= 0 ? url.slice(slash + 1) : "";
+	} else if (url.includes("@")) {
+		url = url.slice(url.indexOf("@") + 1);
+		const colon = url.indexOf(":");
+		url = colon >= 0 ? url.slice(colon + 1) : "";
+	}
+	url = url.replace(/\/+$/, "");
+	const parts = url.split("/");
+	if (parts.length !== 2 || !parts[0] || !parts[1]) return "";
+	return url;
+}
+
+/** A decisions file and the space that owns it: the space's `space.json` names its remote. */
+export interface DecisionSource {
+	file: string;
+	space: string;
 }
 
 /** Every decisions file worth reading: the state's own, then one per space. */
-export function decisionFiles(state: string): string[] {
-	const files = [join(state, "decisions.jsonl")];
-	for (const space of spaceNames(state)) files.push(join(state, "spaces", space, "state", "decisions.jsonl"));
-	return files;
+export function decisionSources(state: string): DecisionSource[] {
+	const out: DecisionSource[] = [{ file: join(state, "decisions.jsonl"), space: "" }];
+	for (const space of spaceNames(state)) {
+		out.push({ file: join(state, "spaces", space, "state", "decisions.jsonl"), space });
+	}
+	return out;
 }
 
-/** Every pull request `delegate finish` recorded as published, smallest number first. */
+export function decisionFiles(state: string): string[] {
+	return decisionSources(state).map((source) => source.file);
+}
+
+/** The `owner/name` a space's record names, or `""` when the record has no remote. */
+function spaceRepo(state: string, space: string): string {
+	if (!space) return "";
+	try {
+		const record = JSON.parse(readText(join(state, "spaces", space, "space.json")));
+		return repoSlug(record?.remote);
+	} catch {
+		return "";
+	}
+}
+
+/**
+ * Every pull request `delegate finish` recorded as published, smallest number first, each with the
+ * repository that owns it. A row that names neither a repo nor a space with a remote is skipped: a
+ * guess here is the wrong-repo probe this file exists to stop, not a line.
+ */
 export function prCandidates(state: string): PrCandidate[] {
-	const seen = new Set<number>();
-	for (const file of decisionFiles(state)) {
+	const seen = new Map<string, PrCandidate>();
+	for (const { file, space } of decisionSources(state)) {
+		const fromSpace = spaceRepo(state, space);
 		for (const line of readText(file).split("\n")) {
 			let row: any;
 			try {
@@ -157,10 +218,12 @@ export function prCandidates(state: string): PrCandidate[] {
 			}
 			const pr = Number(row.pr);
 			if (!Number.isInteger(pr) || pr <= 0) continue;
-			seen.add(pr);
+			const repo = repoSlug(row.repo) || fromSpace;
+			if (!repo) continue;
+			seen.set(`${repo}#${pr}`, { pr, repo });
 		}
 	}
-	return [...seen].sort((a, b) => a - b).map((pr) => ({ pr }));
+	return [...seen.values()].sort((a, b) => a.pr - b.pr || a.repo.localeCompare(b.repo));
 }
 
 interface PrFact {
@@ -191,10 +254,15 @@ export function writeCache(state: string, cache: Record<string, PrFact>): void {
 	}
 }
 
-/** `gh pr view`'s answer, cached: a minute for an open pull request, a day once it is settled. */
-export function prFact(probe: Probe, pr: number, cache: Record<string, PrFact>): PrFact | undefined {
+/**
+ * `gh pr view`'s answer, cached under `<repo>#<pr>`: a minute for an open pull request, a day once
+ * it is settled. A cache written by the numeric key of an earlier version is not read — the number
+ * alone never said which repo answered it, so it was never known in the first place.
+ */
+export function prFact(probe: Probe, pr: number, repo: string, cache: Record<string, PrFact>): PrFact | undefined {
 	const now = probe.now?.() ?? Date.now();
-	const known = cache[String(pr)];
+	const key = `${repo}#${pr}`;
+	const known = cache[key];
 	if (known) {
 		const terminal = known.state === "MERGED" || known.state === "CLOSED";
 		const ttl = terminal ? TERMINAL_MS : FRESH_MS;
@@ -202,7 +270,9 @@ export function prFact(probe: Probe, pr: number, cache: Record<string, PrFact>):
 	}
 	let parsed: any;
 	try {
-		parsed = JSON.parse(probe.run("gh", ["pr", "view", String(pr), "--json", "number,state,mergeable,statusCheckRollup"]));
+		parsed = JSON.parse(
+			probe.run("gh", ["pr", "view", String(pr), "-R", repo, "--json", "number,state,mergeable,statusCheckRollup"]),
+		);
 	} catch {
 		return known;
 	}
@@ -212,7 +282,7 @@ export function prFact(probe: Probe, pr: number, cache: Record<string, PrFact>):
 		mergeable: String(parsed?.mergeable ?? ""),
 		rollup: rollupWord(parsed?.statusCheckRollup),
 	};
-	cache[String(pr)] = fact;
+	cache[key] = fact;
 	return fact;
 }
 
@@ -259,12 +329,14 @@ export function openLines(probe: Probe): string[] {
 	const candidates = prCandidates(probe.state);
 	const cache = readCache(probe.state);
 	let touched = false;
-	for (const { pr } of candidates) {
-		const fact = prFact(probe, pr, cache);
+	for (const { pr, repo } of candidates) {
+		const fact = prFact(probe, pr, repo, cache);
 		if (!fact) continue;
 		touched = true;
 		if (fact.state !== "MERGED" && fact.state !== "CLOSED") {
-			lines.push(`PR #${pr}: ${fact.rollup}, ${mergeableWord(fact.mergeable)} — next: gh pr view ${pr}`);
+			lines.push(
+				`PR #${pr} (${repo}): ${fact.rollup}, ${mergeableWord(fact.mergeable)} — next: gh pr view ${pr} -R ${repo}`,
+			);
 		}
 	}
 	if (touched) writeCache(probe.state, cache);
@@ -278,7 +350,11 @@ export function defaultProbe(): Probe {
 		state: join(root, "state"),
 		delegate: join(root, "bin", "delegate"),
 		run(cmd, args) {
+			// stderr is piped and dropped: a probe that fails has nothing to say in the pane. `gh`
+			// prints its GraphQL refusal for a number the cwd does not own, and execFileSync's
+			// default hands that text to the parent, at every agent start, in every space.
 			return execFileSync(cmd, args, {
+				stdio: ["ignore", "pipe", "pipe"],
 				encoding: "utf8",
 				timeout: 5000,
 			});

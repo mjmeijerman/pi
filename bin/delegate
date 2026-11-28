@@ -1781,6 +1781,33 @@ defaults_json() {
 	printf '{"defaults":[%s]}' "$out"
 }
 
+# repo_slug <remote-url> — `owner/name`, the shape `gh -R` takes, or nothing when the url is not
+# one repository. `delegate finish` writes it beside the PR number, so `open-work`'s probe asks the
+# repo that owns the number instead of whichever checkout the agent happens to sit in.
+repo_slug() {
+	local url=${1:-}
+	url=${url%/}
+	url=${url%.git}
+	case "$url" in
+	*://*)
+		url=${url#*://}
+		url=${url#*@}
+		url=${url#*/}
+		;;
+	*@*)
+		url=${url#*@}
+		url=${url#*:}
+		;;
+	esac
+	url=${url%/}
+	case "$url" in
+	*/*) [ "${url#*/}" != "*/*" ] && [ -n "${url%%/*}" ] && printf '%s' "$url" ;;
+	esac
+	# A url that is not owner/name is an empty answer, never a failed one: `set -e` callers
+	# assign this substitution, and "no repo" is an ordinary answer there.
+	return 0
+}
+
 # record_decision <command> <task> <decision> <reason> <overridden true|false> <slug|-> [jev] [extra-json]
 # `jev` is jev's own answer for that command; `overridden` is true only when <decision>
 # differs from it. See the header: the flag is per line, never per spawn.
@@ -4022,7 +4049,9 @@ cmd_finish() {
 	pr_sha=$(printf '%s' "$pr_line" | sed -nE 's/.* at ([0-9a-f]{7,40}).*/\1/p')
 	case $pr_n in '' | *[!0-9]*) pr_n="" ;; esac
 	if [ -n "$pr_n" ] && [ -n "$pr_sha" ]; then
-		record_decision publish "$slug" "$publish_word" "#$pr_n at $pr_sha" false "$slug" "" "{\"pr\":$pr_n,\"sha\":\"$pr_sha\"}"
+		local pr_repo
+		pr_repo=$(repo_slug "$(space_field "$SPACE" remote)")
+		record_decision publish "$slug" "$publish_word" "#$pr_n at $pr_sha" false "$slug" "" "{\"pr\":$pr_n,\"sha\":\"$pr_sha\"${pr_repo:+,\"repo\":\"$pr_repo\"}}"
 	fi
 
 	# --keep-open: publish and stop. A red check is fixed in the worker's own terminal with

@@ -13,6 +13,7 @@
  */
 import "./helpers/hooks.ts";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -33,6 +34,7 @@ const {
 	prCandidates,
 	prFact,
 	readCache,
+	repoSlug,
 	readText,
 	reportSize,
 	rollupWord,
@@ -40,6 +42,9 @@ const {
 	workersWithReports,
 	writeCache,
 } = mod;
+
+/** The repo the fixture's space records: the probe's `-R` and the cache key both carry it. */
+const REPO = "acme/demo";
 
 const dirs: string[] = [];
 function tmp(name: string): string {
@@ -103,6 +108,7 @@ function built(
 	const space = join(state, "spaces", "demo");
 	mkdirSync(join(space, "reports"), { recursive: true });
 	mkdirSync(join(space, "state"), { recursive: true });
+	write(join(space, "space.json"), `${JSON.stringify({ name: "demo", remote: "git@github.com:acme/demo.git" })}\n`);
 	const calls: string[][] = [];
 	const slug = options.slug ?? "w1";
 	const report = join(space, "reports", `${slug}.md`);
@@ -335,16 +341,20 @@ describe("open-work: which pull requests are open", () => {
 		write(
 			join(state, "decisions.jsonl"),
 			[
-				JSON.stringify({ pr: 100 }),
-				JSON.stringify({ pr: 9 }),
-				JSON.stringify({ pr: "42" }),
+				JSON.stringify({ pr: 100, repo: REPO }),
+				JSON.stringify({ pr: 9, repo: REPO }),
+				JSON.stringify({ pr: "42", repo: REPO }),
 				"",
 				"not json",
 				JSON.stringify({ no: "pr" }),
-				JSON.stringify({ pr: null }),
+				JSON.stringify({ pr: null, repo: REPO }),
 			].join("\n"),
 		);
-		assert.deepEqual(prCandidates(state), [{ pr: 9 }, { pr: 42 }, { pr: 100 }]);
+		assert.deepEqual(prCandidates(state), [
+			{ pr: 9, repo: REPO },
+			{ pr: 42, repo: REPO },
+			{ pr: 100, repo: REPO },
+		]);
 	});
 
 	test("a number that is not a whole positive count is no pull request", () => {
@@ -352,21 +362,62 @@ describe("open-work: which pull requests are open", () => {
 		write(
 			join(state, "decisions.jsonl"),
 			[
-				JSON.stringify({ pr: 0 }),
-				JSON.stringify({ pr: -1 }),
-				JSON.stringify({ pr: 1.5 }),
-				JSON.stringify({ pr: "abc" }),
-				JSON.stringify({ pr: 7 }),
+				JSON.stringify({ pr: 0, repo: REPO }),
+				JSON.stringify({ pr: -1, repo: REPO }),
+				JSON.stringify({ pr: 1.5, repo: REPO }),
+				JSON.stringify({ pr: "abc", repo: REPO }),
+				JSON.stringify({ pr: 7, repo: REPO }),
 			].join("\n"),
 		);
-		assert.deepEqual(prCandidates(state), [{ pr: 7 }]);
+		assert.deepEqual(prCandidates(state), [{ pr: 7, repo: REPO }]);
 	});
 
 	test("a space's decisions count too, and a missing file is no candidate", () => {
 		const state = join(tmp("space-candidates"), "state");
+		write(join(state, "spaces", "demo", "space.json"), `${JSON.stringify({ remote: "git@github.com:acme/demo.git" })}\n`);
 		write(join(state, "spaces", "demo", "state", "decisions.jsonl"), `${JSON.stringify({ pr: 5 })}\n`);
-		assert.deepEqual(prCandidates(state), [{ pr: 5 }]);
+		assert.deepEqual(prCandidates(state), [{ pr: 5, repo: REPO }]);
 		assert.deepEqual(prCandidates(join(state, "nowhere")), []);
+	});
+
+	test("a row's own repo is the one asked, as a slug or as a url", () => {
+		const state = join(tmp("row-repo"), "state");
+		write(
+			join(state, "decisions.jsonl"),
+			[
+				JSON.stringify({ pr: 1, repo: "other/one" }),
+				JSON.stringify({ pr: 2, repo: "https://github.com/other/two.git" }),
+				JSON.stringify({ pr: 3, repo: "ssh://git@github.com/other/three.git" }),
+			].join("\n"),
+		);
+		assert.deepEqual(prCandidates(state), [
+			{ pr: 1, repo: "other/one" },
+			{ pr: 2, repo: "other/two" },
+			{ pr: 3, repo: "other/three" },
+		]);
+	});
+
+	test("a row with no repo, in a space with no remote, is skipped rather than guessed", () => {
+		const state = join(tmp("no-repo"), "state");
+		write(join(state, "decisions.jsonl"), `${JSON.stringify({ pr: 262 })}\n`);
+		write(join(state, "spaces", "demo", "state", "decisions.jsonl"), `${JSON.stringify({ pr: 13 })}\n`);
+		write(join(state, "spaces", "demo", "space.json"), `${JSON.stringify({ name: "demo" })}\n`);
+		write(join(state, "spaces", "other", "state", "decisions.jsonl"), `${JSON.stringify({ pr: 14 })}\n`);
+		assert.deepEqual(prCandidates(state), []);
+	});
+
+	test("a repo slug is owner/name whatever form the remote is written in", () => {
+		assert.equal(repoSlug("git@github.com:acme/demo.git"), REPO);
+		assert.equal(repoSlug("https://github.com/acme/demo"), REPO);
+		assert.equal(repoSlug("https://github.com/acme/demo/"), REPO);
+		assert.equal(repoSlug("ssh://git@github.com/acme/demo.git"), REPO);
+		assert.equal(repoSlug("git://github.com/acme/demo"), REPO);
+		assert.equal(repoSlug("acme/demo"), REPO);
+		assert.equal(repoSlug(""), "");
+		assert.equal(repoSlug(undefined), "");
+		assert.equal(repoSlug("/home/mark/projects/demo"), "");
+		assert.equal(repoSlug("acme"), "");
+		assert.equal(repoSlug("acme/demo/deep"), "");
 	});
 });
 
@@ -413,20 +464,20 @@ describe("open-work: gh's answer, cached", () => {
 				return JSON.stringify(openPr());
 			},
 		};
-		const got = prFact(probe, 42, cache);
+		const got = prFact(probe, 42, REPO, cache);
 		assert.deepEqual(got, { checkedAt: 5000, state: "OPEN", mergeable: "MERGEABLE", rollup: "green" });
-		assert.deepEqual(calls, [["gh", "pr", "view", "42", "--json", "number,state,mergeable,statusCheckRollup"]]);
-		assert.deepEqual(cache["42"], got);
+		assert.deepEqual(calls, [["gh", "pr", "view", "42", "-R", REPO, "--json", "number,state,mergeable,statusCheckRollup"]]);
+		assert.deepEqual(cache[`${REPO}#42`], got);
 	});
 
 	test("an answer with no fields is an unknown fact, not a crash", () => {
 		const probe = { state: "/s", delegate: "/s/bin/delegate", now: () => 1, run: () => "{}" };
-		assert.deepEqual(prFact(probe, 42, {}), { checkedAt: 1, state: "", mergeable: "", rollup: "no checks" });
+		assert.deepEqual(prFact(probe, 42, REPO, {}), { checkedAt: 1, state: "", mergeable: "", rollup: "no checks" });
 	});
 
 	test("an answer that is not an object is an unknown fact too", () => {
 		const probe = { state: "/s", delegate: "/s/bin/delegate", now: () => 1, run: () => "null" };
-		assert.deepEqual(prFact(probe, 42, {}), { checkedAt: 1, state: "", mergeable: "", rollup: "no checks" });
+		assert.deepEqual(prFact(probe, 42, REPO, {}), { checkedAt: 1, state: "", mergeable: "", rollup: "no checks" });
 	});
 
 	test("a fresh cache is the answer, with no gh call at all", () => {
@@ -441,7 +492,7 @@ describe("open-work: gh's answer, cached", () => {
 			},
 		};
 		const known = fact({ checkedAt: 1 });
-		assert.deepEqual(prFact(probe, 42, { "42": known }), known);
+		assert.deepEqual(prFact(probe, 42, REPO, { [`${REPO}#42`]: known }), known);
 		assert.deepEqual(calls, []);
 	});
 
@@ -458,7 +509,7 @@ describe("open-work: gh's answer, cached", () => {
 					return JSON.stringify(openPr());
 				},
 			};
-			prFact(probe, 42, { "42": fresh });
+			prFact(probe, 42, REPO, { [`${REPO}#42`]: fresh });
 			return asked;
 		};
 		assert.equal(ask(1 + 59_999), 0);
@@ -479,7 +530,7 @@ describe("open-work: gh's answer, cached", () => {
 					return JSON.stringify(openPr());
 				},
 			};
-			prFact(probe, 42, { "42": fact({ checkedAt: 0, state }) });
+			prFact(probe, 42, REPO, { [`${REPO}#42`]: fact({ checkedAt: 0, state }) });
 			return asked;
 		};
 		assert.equal(ask(day - 1, "MERGED"), 0);
@@ -499,11 +550,11 @@ describe("open-work: gh's answer, cached", () => {
 				throw new Error("gh is not there");
 			},
 		};
-		assert.deepEqual(prFact(probe, 42, { "42": stale }), stale);
-		assert.equal(prFact(probe, 42, {}), undefined);
+		assert.deepEqual(prFact(probe, 42, REPO, { [`${REPO}#42`]: stale }), stale);
+		assert.equal(prFact(probe, 42, REPO, {}), undefined);
 		const nonsense = { ...probe, run: () => "not json" };
-		assert.deepEqual(prFact(nonsense, 42, { "42": stale }), stale);
-		assert.equal(prFact(nonsense, 42, {}), undefined);
+		assert.deepEqual(prFact(nonsense, 42, REPO, { [`${REPO}#42`]: stale }), stale);
+		assert.equal(prFact(nonsense, 42, REPO, {}), undefined);
 	});
 
 	test("with no clock handed in, the wall clock is the clock", () => {
@@ -517,7 +568,7 @@ describe("open-work: gh's answer, cached", () => {
 			},
 		};
 		const known = fact({ checkedAt: Date.now() - 1000 });
-		assert.deepEqual(prFact(probe, 42, { "42": known }), known);
+		assert.deepEqual(prFact(probe, 42, REPO, { [`${REPO}#42`]: known }), known);
 		assert.deepEqual(calls, []);
 	});
 });
@@ -629,11 +680,11 @@ describe("open-work: the lines", () => {
 			decisions: [{ timestamp: "2026-01-01T00:00:00.000Z", command: "publish", pr: 42, slug: "w1" }],
 			prs: { 42: openPr() },
 		});
-		assert.deepEqual(openLines(probe), ["PR #42: green, mergeable — next: gh pr view 42"]);
+		assert.deepEqual(openLines(probe), [`PR #42 (${REPO}): green, mergeable — next: gh pr view 42 -R ${REPO}`]);
 		assert.ok(calls.some((call) => call[0] === "gh"));
 		const cached = readCache(state);
-		assert.equal(cached["42"].state, "OPEN");
-		assert.equal(cached["42"].rollup, "green");
+		assert.equal(cached[`${REPO}#42`].state, "OPEN");
+		assert.equal(cached[`${REPO}#42`].rollup, "green");
 	});
 
 	test("a merged or a closed PR produces no line", () => {
@@ -659,7 +710,68 @@ describe("open-work: the lines", () => {
 		const lines = openLines(probe);
 		assert.equal(lines.length, 2);
 		assert.ok(lines[0].startsWith("worker w1: reported"), lines[0]);
-		assert.equal(lines[1], "PR #42: green, mergeable — next: gh pr view 42");
+		assert.equal(lines[1], `PR #42 (${REPO}): green, mergeable — next: gh pr view 42 -R ${REPO}`);
+	});
+
+	test("a row's own repo is the one asked, even when the space names another", () => {
+		const { probe, calls } = built({
+			worker: false,
+			decisions: [{ pr: 42, repo: "other/one" }],
+			prs: { 42: openPr() },
+		});
+		assert.deepEqual(openLines(probe), [
+			"PR #42 (other/one): green, mergeable — next: gh pr view 42 -R other/one",
+		]);
+		const asked = calls.filter((call) => call[0] === "gh");
+		assert.equal(asked.length, 1);
+		assert.deepEqual(asked[0].slice(1), [
+			"pr",
+			"view",
+			"42",
+			"-R",
+			"other/one",
+			"--json",
+			"number,state,mergeable,statusCheckRollup",
+		]);
+	});
+
+	test("a row with no repo anywhere is no line, and asks nothing", () => {
+		const root = tmp("no-repo-line");
+		const state = join(root, "state");
+		write(join(state, "decisions.jsonl"), `${JSON.stringify({ pr: 262 })}\n`);
+		const calls: string[][] = [];
+		const lines = openLines({
+			state,
+			delegate: join(root, "bin", "delegate"),
+			run: (cmd: string, args: string[]) => {
+				calls.push([cmd, ...args]);
+				throw new Error("nothing should be asked without a repo");
+			},
+		});
+		assert.deepEqual(lines, []);
+		assert.deepEqual(calls, []);
+	});
+
+	test("a probe whose stderr is loud prints nothing and answers nothing", () => {
+		// A child process, because the leak was in the child's stderr reaching the pane: the only
+		// way to see what a real `gh` does to this process is to run the probe in one.
+		const dir = tmp("loud-stderr");
+		const bin = join(dir, "bin");
+		script(
+			join(bin, "gh"),
+			"#!/usr/bin/env bash\nprintf 'GraphQL: Could not resolve to a PullRequest with the number of 262. (repository.pullRequest)\\n' >&2\nexit 1\n",
+		);
+		const module = new URL("../open-work.ts", import.meta.url).href;
+		const child = `const m = await import(${JSON.stringify(module)});` +
+			`const fact = m.prFact(m.defaultProbe(), 42, ${JSON.stringify(REPO)}, {});` +
+			`process.stdout.write(JSON.stringify({ fact: fact === undefined ? null : fact }));`;
+		const run = spawnSync(process.execPath, ["--input-type=module", "-e", child], {
+			env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_BOSS_ROOT: dir },
+			encoding: "utf8",
+		});
+		assert.equal(run.status, 0, run.stderr);
+		assert.equal(run.stderr, "", "a failing probe has nothing to say in the pane");
+		assert.deepEqual(JSON.parse(run.stdout), { fact: null });
 	});
 });
 
@@ -726,6 +838,7 @@ describe("open-work: the hook", () => {
 		const space = join(state, "spaces", "demo");
 		const report = write(join(space, "reports", "w1.md"), "# Report\n");
 		write(join(space, "delegations.json"), `${JSON.stringify({ w1: { slug: "w1", report } })}\n`);
+		write(join(space, "space.json"), `${JSON.stringify({ name: "demo", remote: "git@github.com:acme/demo.git" })}\n`);
 		write(join(space, "state", "decisions.jsonl"), `${JSON.stringify({ pr: 42, slug: "w1" })}\n`);
 		script(
 			join(root, "bin", "delegate"),
@@ -747,10 +860,10 @@ describe("open-work: the hook", () => {
 						"BASE",
 						"",
 						`worker w1: reported, report at ${report} — next: bin/delegate finish w1`,
-						"PR #42: green, mergeable — next: gh pr view 42",
+						`PR #42 (${REPO}): green, mergeable — next: gh pr view 42 -R ${REPO}`,
 					].join("\n"),
 				);
-				assert.equal(readCache(state)["42"].rollup, "green");
+				assert.equal(readCache(state)[`${REPO}#42`].rollup, "green");
 			});
 		} finally {
 			process.env.PATH = savedPath;
